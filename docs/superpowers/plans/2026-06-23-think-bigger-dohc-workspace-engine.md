@@ -104,7 +104,8 @@ Those are engine-room concepts.
 - Chats must feel fast and natural, not like a forum.
 - Chats must be called **Chats** in the UI, even if the internal model is
   thread/post-shaped.
-- Channels and DMs are required, not follow-up polish.
+- Channels and DMs are required for the eventual product, but Phase 0 ships only
+  the single linked-chat proof; PR 12/13 own the first channel and DM surfaces.
 - Agent messages in shared chats display as `<User Name>'s agent`.
 
 ### Robustness
@@ -324,6 +325,7 @@ Validation:
 - `policyValidated`: source-backed policy/config requests such as
   `.dohc/files.toml` and `.dohc/visibility.toml`; edits are writable requests,
   but the engine validates, normalizes, and may reject them before enforcement.
+  PR 04 owns parsing/enforcement for these policy inputs.
 - `internalOnly`: engine-owned status/cache/projection state that is never
   re-ingested as source.
 
@@ -335,6 +337,7 @@ Examples:
 - generated dashboard summary: `lossy` + `none` unless explicitly source-backed.
 - `.dohc/status.json`: `readOnly` + `internalOnly`.
 - `.dohc/files.toml`: `writable` + `policyValidated`.
+- `.dohc/visibility.toml`: `writable` + `policyValidated`.
 
 ### Effective Policy
 
@@ -1659,12 +1662,12 @@ default user behavior.
 
 ### PR 04 - Effective Policy And File Policy Resolver
 
-**Goal:** Implement `.dohc/files.toml` parsing and one effective policy
-resolver used by files, versions, search, and exports.
+**Goal:** Implement `.dohc/files.toml` and `.dohc/visibility.toml` parsing plus
+one effective policy resolver used by files, versions, search, and exports.
 
 **Scope:**
 
-- Add policy parser.
+- Add policy parsers for `.dohc/files.toml` and `.dohc/visibility.toml`.
 - Add defaults for source, apps, data, `node_modules`, `dist`, cache, scratch,
   and `.env`.
 - Resolve tracked/synced/materialized/encrypted/searchable/visibility/export

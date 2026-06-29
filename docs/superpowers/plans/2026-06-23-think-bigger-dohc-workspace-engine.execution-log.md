@@ -23,7 +23,7 @@ entry for quick orientation.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 6 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 5 issues; follow-up fixes
   are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -1860,6 +1860,26 @@ Ninety-ninth pass:
     records when exact reconstruction is not possible.
   - Marked chat thread/link/message/activity provenance actor fields as
     server-owned and immutable in the schema shapes.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundredth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Marked Channels/DMs as eventual product requirements while keeping Phase 0 to
+    the single linked-chat proof and assigning first channel/DM surfaces to PR
+    12/13.
+  - Assigned `.dohc/visibility.toml` parsing/enforcement to PR 04 alongside
+    `.dohc/files.toml`.
+  - Clarified reserved-namespace canonicalization so only trusted policy inputs
+    (`.dohc/files.toml`, `.dohc/visibility.toml`, and optional workspace-root
+    `.dohcignore`) bypass `.dohc/**` quarantine as source-backed requests.
+  - Split `WriteResult` rejected-before-acceptance and quarantined-after-
+    acceptance lifecycles into distinct `rejected` and `quarantined` variants.
+  - Made stale idempotent retries return one canonical terminal write response,
+    with disposition/expiration/lookup-only details moved to status queries.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

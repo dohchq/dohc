@@ -13,8 +13,9 @@ The user-facing promise is simple:
 > Use normal files. Humans and agents can edit them. Accepted writes are durably
 > recorded immediately. Writes that pass protection checks become canonical
 > immediately; writes that cannot yet become canonical return `durable-pending`,
-> and denied writes keep durable recovery/audit handles. dohc remembers what
-> happened, supports parallel versions, and helps reconcile conflicts.
+> and rejected/quarantined writes keep durable recovery/audit handles. dohc
+> remembers what happened, supports parallel versions, and helps reconcile
+> conflicts.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -103,6 +104,11 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_attribution'
   | 'quarantined_policy'
 
+type QuarantinedStatus = Exclude<
+  DeniedOrQuarantinedStatus,
+  'rejected_before_acceptance'
+>
+
 type PublicDeniedReasonCode =
   | 'not_authorized'
   | 'policy_denied'
@@ -122,7 +128,8 @@ type TerminalRetirementReason =
 
 type ExpiredRetryRecordKind =
   | 'accepted_holding_record'
-  | 'rejected_or_quarantined_record'
+  | 'rejected_record'
+  | 'quarantined_record'
 
 type WriteResult =
   | {
@@ -144,7 +151,7 @@ type WriteResult =
       status: 'pending_protection' | 'pending_canonicalization' | 'overdue_disposition'
     }
   | {
-      kind: 'denied'
+      kind: 'rejected'
       holdingRecordId: string
       workspaceId: string
       requestedVersionId?: string
@@ -152,7 +159,19 @@ type WriteResult =
       reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
-      status: DeniedOrQuarantinedStatus
+      status: 'rejected_before_acceptance'
+    }
+  | {
+      kind: 'quarantined'
+      holdingRecordId: string
+      workspaceId: string
+      requestedVersionId?: string
+      idempotencyKey: string
+      reasonCode: PublicDeniedReasonCode
+      acceptedAt: UnixMsDecimalString
+      quarantinedAt: UnixMsDecimalString
+      retentionUntil: UnixMsDecimalString
+      status: QuarantinedStatus
     }
   | {
       kind: 'terminal-retired'
@@ -193,9 +212,12 @@ Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
 stack details, policy rule names, secret/path internals, and operator notes stay
 server-side and appear only through separately authorized diagnostics.
 
-Denied or quarantined ingests must still be durable in a non-canonical holding
-area with enough metadata to retry or explain the decision after evaluators
-recover. The `denied` result is addressable by `holdingRecordId`; operators,
+Rejected and quarantined ingests must still be durable in a non-canonical
+holding area with enough metadata to retry or explain the decision after
+evaluators recover. `rejected` means the write failed before acceptance and
+stores `rejectedAt`; `quarantined` means the write was accepted into the holding
+area but could not become canonical and stores `acceptedAt` plus
+`quarantinedAt`. Both results are addressable by `holdingRecordId`; operators,
 status APIs, retry tooling, and audit/export jobs use that id to correlate the
 response with the retained rejected-before-acceptance or quarantined record.
 The holding area separates rejected-before-acceptance items from accepted
@@ -240,15 +262,21 @@ abuse controls, and user-facing explanation is retained. Workspace policy cannot
 extend or disable this terminal payload-retention rule.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
-`denied`, quarantine, conflict, or generic expiration.
+`rejected`, `quarantined`, conflict, or generic expiration.
 Retries using the same idempotency key and matching replay metadata before the
 record's retry horizon return the same addressable result for the same
-`holdingRecordId`: `durable-pending` before `replayUntil`, or `denied` before
-`retentionUntil` for rejected/quarantined records. After the relevant horizon,
-a retry with the same key returns an `idempotency-expired` result tied to the
-same `holdingRecordId`, returns the stable `terminal-retired` result, or resolves
-through the explicit operator disposition/expiration record; it must not
-silently create a second accepted holding record or an uncorrelated denial.
+`holdingRecordId`: `durable-pending` before `replayUntil`, `rejected` before
+the rejected record's `retentionUntil`, or `quarantined` before the quarantined
+record's `retentionUntil`. After that record's retry horizon, the write API
+returns exactly one canonical terminal response for that `holdingRecordId`:
+`idempotency-expired` with `recordKind: 'accepted_holding_record'`,
+`recordKind: 'rejected_record'`, or `recordKind: 'quarantined_record'`, unless
+the accepted holding record has already reached the terminal-retirement state,
+in which case the stable `terminal-retired` result is returned. Disposition,
+expiration, and lookup-only details beyond that canonical terminal response live
+in the status query path, not alternate write-retry responses. A stale retry
+must not silently create a second accepted holding record or an uncorrelated
+denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through
@@ -419,7 +447,7 @@ dohc should track two levels:
    - canonical-write-success boundary: an immediate-save success is acknowledged
      only after the canonical mutation is durable and visible through `read`.
      `watch` catches up asynchronously. A durability ack without canonical
-     visibility can return only `durable-pending`, `denied`,
+     visibility can return only `durable-pending`, `rejected`, `quarantined`,
      `idempotency-expired`, `terminal-retired`, or `conflict`, never
      `canonical`.
    - not necessarily the main visible timeline.
