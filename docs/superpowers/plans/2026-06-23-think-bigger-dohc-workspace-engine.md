@@ -410,6 +410,11 @@ re-ingest internal `.dohc/` projections as canonical user content.
 
 A Version is a live line of work.
 
+`WorkspaceVersion` is the canonical shared package contract name. Product copy
+and user-facing docs may say "Version", but exported engine contracts, events,
+schemas, and tests must use `WorkspaceVersion`; `Version` is shorthand, not a
+second type.
+
 Examples:
 
 - Main
@@ -1802,7 +1807,10 @@ encryption, redaction, and controlled materialization.
 - Redact/exclude from public export and unauthorized projections.
 - Prevent search/snippet leakage.
 - Allow authorized local materialization.
-- Add process env injection adapter if appropriate.
+- Support env injection only for dohc-managed trusted or sandboxed launch flows
+  that materialize secrets through the same authorized path, redact values from
+  logs/telemetry/errors, and never inject secret values into arbitrary existing
+  processes.
 
 **Tests:**
 
@@ -1953,7 +1961,10 @@ links, activity, read state, and reactions.
 - Add channel membership/visibility.
 - Add DMs and small group chat primitives.
 - Add message authorship with human/agent display.
-- Store chat links through stable target IDs plus optional `VersionRef`.
+- Store chat links through the canonical `ThreadLink` shape: stable link id,
+  source workspace/thread, target type, target workspace, stable target id,
+  optional `VersionRef`, display path/title captured at link time,
+  ACL/degraded-render state, and any validated share grant/visibility scope.
 - Model live chats as workspace objects, not as files that automatically fork
   with versions.
 

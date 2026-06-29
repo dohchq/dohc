@@ -22,7 +22,8 @@ append-only history.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** pending rerun after the latest follow-up fixes.
+- **PR00 CodeRabbit:** latest completed rerun reported 8 issues; follow-up fixes
+  are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
 - **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
@@ -1656,6 +1657,31 @@ Eighty-ninth pass:
     records whose payloads are retired by operator disposition or hard retention.
   - Changed `ChatThreadProjection` to extend `ChatThread` so channel and DM
     ownership discriminators remain available to projection consumers.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninetieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Changed canonical save acknowledgment to require durable canonical commit
+    plus read/watch visibility, with search indexing eventually consistent.
+  - Replaced public denied `reasonCode: string` with a safe closed enum and kept
+    richer diagnostics internal.
+  - Corrected live PR00 status to reflect the latest 8-issue CodeRabbit pass
+    and keep the rerun gate pending.
+  - Constrained secret env injection to dohc-managed trusted/sandboxed launch
+    flows with redaction and no arbitrary process injection.
+  - Declared `WorkspaceVersion` as the exported contract name and `Version` as
+    user-facing shorthand.
+  - Expanded PR 12 chat link storage to the canonical `ThreadLink` shape with
+    display snapshot and ACL/degraded-render state.
+  - Split `FilePolicy.pinned` from `materialized` so offline retention and
+    hydration state are separate.
+  - Replaced restore `pointInTime` write targets with deterministic
+    `checkpointId` targets; timestamp selection is only a server-side lookup
+    alias.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

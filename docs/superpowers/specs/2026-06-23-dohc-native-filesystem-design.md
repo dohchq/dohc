@@ -302,7 +302,7 @@ merge(workspaceId, sourceVersionId, targetVersionId, {
   precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
   idempotencyKey
 })
-restore(workspaceId, versionId, pointInTime, {
+restore(workspaceId, versionId, checkpointId, {
   precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
   idempotencyKey
 })
@@ -392,10 +392,13 @@ canonical mutation, but it must not be exposed as the API idempotency-key
 contract and must still preserve conflicts when the causal base no longer
 matches.
 
-`restore(workspaceId, versionId, pointInTime, ...)` is also write-producing, but
+`restore(workspaceId, versionId, checkpointId, ...)` is also write-producing, but
 it is never a destructive rollback. A successful restore records a new
 checkpoint in the target version whose content is derived from the selected
-earlier point, preserving intervening history for audit, compare, and recovery.
+earlier checkpoint, preserving intervening history for audit, compare, and
+recovery. Timestamp-based restore selection is a server-side lookup alias that
+must resolve to a deterministic `checkpointId` before the write-producing
+restore request is admitted.
 Restore must carry exactly one causal precondition for the target version. If
 the current version state no longer matches that guard, the API returns the
 same deterministic secret-safe conflict envelope as `write(...)`, preserving
@@ -430,9 +433,9 @@ never repaint another or regress current UI state.
 ## File state axes
 
 dohc must not collapse every file into a single
-tracked/versioned/synced/materialized state.
+tracked/versioned/synced/pinned/materialized state.
 
-At least five independent dimensions are needed:
+At least six independent dimensions are needed:
 
 1. **Tracked/captured**
    - Should changes be observed, captured, and made durable by the workspace
@@ -449,23 +452,27 @@ At least five independent dimensions are needed:
    - Should contents exist on local disk, hydrate on demand from `virtual`, or
      remain virtual?
 
-5. **Secret-backed/protected**
+5. **Pinned/offline-retained**
+   - Should dohc keep local bytes hydrated for offline availability when policy
+     allows, independent of whether the path is currently `local` or `virtual`?
+
+6. **Secret-backed/protected**
    - Are bytes stored or referenced as secret material that needs encrypted
      storage, redacted history/export/search, and explicit plaintext
      materialization permission for each human or agent?
 
 Examples:
 
-| Path | Tracked | Versioned | Synced | Materialized | Secret-backed |
-| --- | --- | --- | --- | --- | --- |
-| `docs/**` | yes | yes | yes | virtual or pinned | no |
-| `apps/**` | yes | yes | yes | virtual or pinned | no |
-| `data/raw/**` | yes | yes | yes | virtual | no |
-| `node_modules/**` | no | no | no | local | no |
-| `dist/**` | no | no | no | local | no |
-| `.cache/**` | no | no | no | local | no |
-| `scratch/**` | no | no | no | local | no |
-| `.env` | yes | yes | yes | local | yes |
+| Path | Tracked | Versioned | Synced | Materialized | Pinned | Secret-backed |
+| --- | --- | --- | --- | --- | --- | --- |
+| `docs/**` | yes | yes | yes | virtual | optional | no |
+| `apps/**` | yes | yes | yes | virtual | optional | no |
+| `data/raw/**` | yes | yes | yes | virtual | no | no |
+| `node_modules/**` | no | no | no | local | no | no |
+| `dist/**` | no | no | no | local | no | no |
+| `.cache/**` | no | no | no | local | no | no |
+| `scratch/**` | no | no | no | local | no | no |
+| `.env` | yes | yes | yes | local | no | yes |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
 output, and cache folders.
@@ -545,6 +552,7 @@ match = "node_modules/**"
 tracked = false
 versioned = false
 synced = false
+pinned = false
 materialized = "local"
 
 [[rule]]
@@ -552,6 +560,7 @@ match = "dist/**"
 tracked = false
 versioned = false
 synced = false
+pinned = false
 materialized = "local"
 
 [[rule]]
@@ -559,6 +568,7 @@ match = "docs/**"
 tracked = true
 versioned = true
 synced = true
+pinned = false
 materialized = "virtual"
 
 [[rule]]
@@ -571,6 +581,7 @@ searchable = false
 visibility = "private"
 public_export = "redact"
 agent_access = "explicit"
+pinned = false
 materialized = "local"
 
 [[rule]]
@@ -582,6 +593,7 @@ encrypted = true
 searchable = false
 visibility = "team"
 agent_access = "ask"
+pinned = false
 materialized = "local"
 ```
 
@@ -640,14 +652,20 @@ type FilePolicy = {
   tracked: boolean
   versioned: boolean
   synced: boolean
+  pinned: boolean
   encrypted: boolean
   searchable: boolean
   visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
-  materialized: 'local' | 'pinned' | 'virtual'
+  materialized: 'local' | 'virtual'
 }
 ```
+
+`materialized` describes hydration state only: whether bytes are present locally
+or represented virtually. `pinned` is the independent offline-retention request
+that asks dohc to keep local bytes hydrated when policy allows; pinning does not
+change tracking, versioning, searchability, export behavior, or visibility.
 
 The key rule:
 
@@ -896,7 +914,7 @@ Avoid naive folder sync:
 - no blind last-writer-wins.
 - no syncing `node_modules` by default.
 - no materializing everything by default.
-- no single state axis for tracked/versioned/synced/materialized.
+- no single state axis for tracked/versioned/synced/pinned/materialized.
 - no "conflicted copy from Bob's MacBook" as the primary conflict model.
 
 Avoid overcomplicated invisible magic:
@@ -915,8 +933,8 @@ The first proof should demonstrate the whole shape without solving every driver:
 2. A named version appears as a second folder or mount.
 3. Editing files in either folder saves immediately to that version.
 4. dohc records a durability log and coalesced meaningful history.
-5. `.dohc/files.toml` controls tracked/versioned/synced/materialized behavior
-   for a few path patterns.
+5. `.dohc/files.toml` controls tracked/versioned/synced/pinned/materialized
+   behavior for a few path patterns.
 6. `node_modules/**` and `dist/**` are local materialized but untracked,
    unversioned, and unsynced.
 7. A `.env` file can be tracked as secret-backed and private.

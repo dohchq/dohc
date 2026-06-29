@@ -79,9 +79,11 @@ through the same protection checks before a write can land. The write path is
 fail-closed: if any authorization, policy, visibility, protected-path,
 user-lock, version-access, or skill-turn evaluator is unavailable or
 indeterminate, the save is denied rather than applied.
-Canonical save success is acknowledged only after the mutation is promoted to
-canonical workspace state and is visible to normal `read`, `watch`, and `search`
-semantics for that version. If the durability path accepts a non-canonical
+Canonical save success is acknowledged only after the mutation is durably
+committed to canonical workspace state and is visible to normal `read` and
+`watch` semantics for that version. Search indexing is eventually consistent
+from canonical state and must not gate write acknowledgment. If the durability
+path accepts a non-canonical
 holding record, the response is a distinct durable-pending result, not a
 successful immediate save. UIs may show that pending record only in explicit
 ingest/recovery/status surfaces marked non-canonical. In this spec, "files save
@@ -97,6 +99,19 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_protection'
   | 'quarantined_attribution'
   | 'quarantined_policy'
+
+type PublicDeniedReasonCode =
+  | 'not_authorized'
+  | 'policy_denied'
+  | 'policy_indeterminate'
+  | 'protected_path'
+  | 'locked'
+  | 'version_access_denied'
+  | 'skill_turn_denied'
+  | 'invalid_request'
+  | 'quota_exceeded'
+  | 'rate_limited'
+  | 'replay_metadata_mismatch'
 
 type TerminalRetirementReason =
   | 'auto_retired_payload_retention_expired'
@@ -121,7 +136,7 @@ type WriteResult =
       workspaceId: string
       requestedVersionId?: string
       idempotencyKey: string
-      reasonCode: string
+      reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
       status: DeniedOrQuarantinedStatus
@@ -138,6 +153,10 @@ type WriteResult =
     }
   | { kind: 'conflict'; conflictId: string }
 ```
+
+Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
+stack details, policy rule names, secret/path internals, and operator notes stay
+server-side and appear only through separately authorized diagnostics.
 
 Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
@@ -474,7 +493,7 @@ merge(workspaceId, sourceVersionId, targetVersionId, {
   precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
   idempotencyKey
 })
-restore(workspaceId, versionId, pointInTime, {
+restore(workspaceId, versionId, checkpointId, {
   precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
   idempotencyKey
 })
@@ -534,7 +553,7 @@ API-originated write-producing operations must carry an idempotency key bound to
 the actor/session, workspace, version context, operation type, target, full
 operation operand tuple, and causal precondition set. The operand tuple includes
 materially distinguishing values such as source/destination paths,
-sourceVersionId, targetVersionId, versionA/versionB identifiers, pointInTime,
+sourceVersionId, targetVersionId, versionA/versionB identifiers, checkpointId,
 snapshot ids, merge inputs, and restore targets as applicable, so different
 `merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide under one
 key. Duplicate delivery with the same idempotency key must return the original
