@@ -477,7 +477,7 @@ file side rails, version activity, search, and external shared channels.
 
 A Channel is a place where chats gather. Channels can attach to workspace scope:
 folder, file, version, chat, share, agent run, or another stable
-`WorkspaceObject` type after that type is defined in the roadmap.
+`WorkspaceObject` type from the shared substrate/package contract.
 
 ### Shared Channel
 
@@ -999,7 +999,7 @@ history.
 
 **Scope:**
 
-- Minimal channel or workspace chat.
+- Minimal workspace-local chat thread.
 - One chat thread linked to a stable file object ID.
 - Message send.
 - Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts

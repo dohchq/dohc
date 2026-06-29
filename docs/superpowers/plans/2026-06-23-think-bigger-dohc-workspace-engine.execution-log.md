@@ -15,18 +15,19 @@ Source specs:
 
 ## Current PR Snapshot
 
-This block is a derived live snapshot for PR00 and the provisional Phase 0 lane
-stack. The authoritative details live in the latest owning PR00 pass entry in
-the append-only history below; this snapshot is updated only to summarize that
-entry for quick orientation.
+This block is a non-authoritative orientation snapshot for PR00 and the
+provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
+append-only history below is the source of truth if this summary drifts; this
+block is only a quick pointer into that latest entry.
 
-- **Last updated:** 2026-06-29 PR00 review loop.
+- **Last updated:** 2026-06-30 PR00 review loop after commit `935bbd6`.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 5 issues; follow-up fixes
-  are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `935bbd6` reported 5 issues;
+  hundred-first pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
-  guard.
+  guard are required before each push; latest evidence belongs in the newest
+  pass entry below.
 - **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
   CodeRabbit rerun must complete cleanly before completion or merge-readiness.
 - **P0D-P0G lane state:** current provisional stack after P0C/P0D/P0E/P0F,
@@ -1885,11 +1886,31 @@ Hundredth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Reframed Current PR Snapshot as a non-authoritative orientation summary and
+    pointed source-of-truth status to the newest owning PR00 pass entry.
+  - Updated the snapshot to identify the `935bbd6` five-issue review rerun.
+  - Changed Channel attachment wording so `WorkspaceObject` is treated as the
+    existing shared substrate/package contract, not a future roadmap-only type.
+  - Narrowed P0E to a workspace-local file-linked chat thread, leaving channel
+    and DM surfaces to PR 12/13.
+  - Made `ThreadMessage.parentMessageId` immutable after `message_created`, with
+    any future reparenting requiring a dedicated replayed activity.
+  - Added server-derived `authzScopeId` to mention notification activity and the
+    deterministic `notificationId` key so shared/redacted scopes cannot collide.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
-Mutable active blockers live only in Current PR Snapshot. This section is an
-append-only derived summary for historical unresolved-finding categories; there
-are no additional historical categories beyond the pass log above.
+Mutable active blockers live in the newest PR00 pass entry and are mirrored only
+for quick orientation in Current PR Snapshot. This section is an append-only
+derived summary for historical unresolved-finding categories; there are no
+additional historical categories beyond the pass log above.
 
 ### Subagent Reviews
 

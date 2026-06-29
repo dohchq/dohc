@@ -531,6 +531,11 @@ persistence unless the parent reference exists in the same workspace/thread, is
 not self-referential, and does not introduce a cycle. Rendering nested replies,
 indexing, notification fanout, and projection generation recheck the same
 invariant as downstream safeguards only.
+`parentMessageId` is immutable after `message_created`. Generic message update
+flows must reject any attempt to change it. If dohc later supports reparenting,
+that must be a dedicated `ThreadActivity` with replay/projection rules that
+consume the reparent event consistently with `message_created`; it cannot be a
+silent row mutation.
 New `ThreadMessage` bodies start at `bodyRevision: "1"`. Every successful edit
 must use a CAS-style update that verifies the current `bodyRevision` or
 equivalent message version, then advances `bodyRevision` by exactly one decimal
@@ -663,6 +668,7 @@ type MentionNotificationThreadActivity = ThreadActivityBase & {
   kind: 'mention_notification_enqueued' | 'mention_notification_resolved'
   messageId: string
   bodyRevision: UInt64DecimalString
+  authzScopeId: string
   mentionedActorIds: string[]
   notificationId: string
   notificationStatus?: 'queued' | 'sent' | 'suppressed' | 'resolved'
@@ -675,19 +681,24 @@ canonical ID match, then sort by bytewise ascending UTF-8 encoding. Enqueue,
 resolve, replay, export, and notification fanout paths all use that canonical
 array so duplicate mentions or runtime-specific ordering cannot create duplicate
 notifications or unstable history.
+`authzScopeId` is the exact server-issued authorization/redaction context for
+the mention notification projection. It must be derived server-side from the
+same grant/scope resolver used by shared chat and linked-work projections, and
+client-supplied scope ids are ignored or rejected before enqueue.
 `notificationId` is deterministic for a mention notification lifecycle:
-`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<sha256(canonicalMentionedActorIdsJson)>`.
+`mention:<workspaceId>:<threadId>:<authzScopeId>:<messageId>:<bodyRevision>:<sha256(canonicalMentionedActorIdsJson)>`.
 `canonicalMentionedActorIdsJson` is the UTF-8 JSON array of the canonical,
 deduplicated, bytewise-sorted actor ID strings with no extra whitespace.
 `bodyHash` is required audit evidence for the immutable persisted body revision,
 but it is not part of `notificationId` so redaction/sanitization views cannot
 change the notification identity.
-The enqueue path must upsert or no-op by that id, and resolve/replay/fanout must
-dedupe by the same `notificationId`. Repeated enqueue or resolve attempts for
-the same message revision and canonical mention set return the existing result
-or a deterministic no-op; they must not append duplicate activities, duplicate
-queue rows, unstable unread/mention badges, duplicate notifications, or duplicate
-export/history records.
+The enqueue path must upsert or no-op by that expanded id, and
+resolve/replay/fanout must dedupe by the same `notificationId`. Repeated
+enqueue or resolve attempts for the same authz scope, message revision, and
+canonical mention set return the existing result or a deterministic no-op; they
+must not append duplicate activities, duplicate queue rows, unstable
+unread/mention badges, duplicate notifications, or duplicate export/history
+records.
 
 type ThreadActivity =
   | MessageCreateThreadActivity
