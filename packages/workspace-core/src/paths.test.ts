@@ -66,6 +66,8 @@ describe("reserved paths", () => {
       ".Git/config",
       "pkg/node_modules/x/index.js",
       "pkg/NODE_MODULES/x/index.js",
+      ".dohc-write-123.tmp",
+      "notes/.dohc-write-456.tmp",
     ]) {
       const result = validateUserWritePath(candidate);
       expect(result.ok).toBe(false);

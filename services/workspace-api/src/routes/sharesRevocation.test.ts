@@ -472,11 +472,14 @@ describe("revokeShare admin disconnect", () => {
         if (normalized.startsWith("select")) {
           expect(text).toContain("retryAfter");
           expect(text).toContain("as due_revocation_disconnects");
-          expect(text).toContain("coalesce(payload->>'retryAfter', '') <=");
+          expect(text).toContain("payload->>'retryAfter' is null");
+          expect(text).toContain("payload->>'retryAfter' !~ $3");
           expect(text).toContain("due_revocation_disconnects.sort_at");
           expect(text).toContain("clock_timestamp()");
           expect(text).toContain("order by");
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
+          expect(params?.[2]).toEqual(expect.stringContaining("T"));
         }
         return { rows: [] };
       },
@@ -516,7 +519,8 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
           expect(text).toContain("limit $1");
           return { rows: [] };
         }
@@ -634,15 +638,16 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
+          expect(params?.[2]).toEqual(expect.stringContaining("Z$"));
           expect(text).toContain("share.revocation.disconnect_claimed");
           expect(text).toContain("claimExpiresAt");
           expect(text).toContain("as due_revocation_disconnects");
           expect(text).toContain("payload->>'claimExpiresAt' is not null");
           expect(text).toContain("payload->>'claimExpiresAt' is null");
-          expect(text).toContain(
-            "coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') <=",
-          );
+          expect(text).toContain("payload->>'claimExpiresAt' !~ $3");
+          expect(text).toContain("payload->>'claimedAt' !~ $3");
           expect(text).toContain("due_revocation_disconnects.sort_at");
           expect(text).toContain("clock_timestamp()");
           expect(text).toContain("order by");
@@ -735,8 +740,11 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
           expect(text).toContain("payload->>'claimExpiresAt' is null");
+          expect(text).toContain("payload->>'claimedAt' is null");
+          expect(text).toContain("payload->>'claimedAt' !~ $3");
           expect(text).toContain("clock_timestamp() - $2::integer * interval '1 second'");
           return { rows: [] };
         }

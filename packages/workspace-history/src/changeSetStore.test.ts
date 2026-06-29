@@ -1023,6 +1023,23 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
     await expect(store.list()).resolves.toHaveLength(1);
   });
 
+  it("reclaims a stale filesystem history lock with an oversized owner", async () => {
+    const token = "oversized-history-lock-owner";
+    const { lockDir, ownerDir, ownerPath } = historyLockPaths(token);
+    const staleDate = new Date(Date.now() - 60_000);
+    await mkdir(ownerDir, { recursive: true });
+    await writeFile(ownerPath, "x".repeat(5 * 1024), "utf8");
+    await utimes(ownerPath, staleDate, staleDate);
+    await utimes(ownerDir, staleDate, staleDate);
+    await utimes(lockDir, staleDate, staleDate);
+    const store = createChangeSetStore(root);
+
+    await store.record(userEdit(), { id: "oversized-owner-lock", recordedAtMs: 3000 });
+
+    await expect(store.list()).resolves.toHaveLength(1);
+    await expect(readdir(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("reclaims an impossible future-dated filesystem history lock before recording", async () => {
     const token = "future-history-lock";
     const futureAtMs = Date.now() + 60_000;

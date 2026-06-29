@@ -1,5 +1,5 @@
 import { deriveSyncStatus, type FileChange } from "@dohc/workspace-core";
-import type { HistoryRecord } from "@dohc/workspace-history";
+import type { ChangeSetStore, HistoryRecord } from "@dohc/workspace-history";
 import type {
   ChangeSetLineStats,
   ReadChangeSetResult,
@@ -38,6 +38,15 @@ interface PendingLocalOperation extends ActiveLocalOperation {
 const HISTORY_FILE_PREVIEW_LIMIT = 4;
 const HISTORY_BOUNDARY_PREVIEW_LIMIT = 3;
 const HISTORY_LIST_DIFF_CELL_LIMIT = 60_000;
+const desktopHistoryFallbackStores = new Map<string, ChangeSetStore>();
+
+function desktopHistoryFallbackStore(rootPath: string): ChangeSetStore {
+  const existing = desktopHistoryFallbackStores.get(rootPath);
+  if (existing) return existing;
+  const store = createChangeSetStore(rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+  desktopHistoryFallbackStores.set(rootPath, store);
+  return store;
+}
 
 function splitHistoryLines(text: string): string[] {
   const normalized = text.replace(/\r\n?/g, "\n");
@@ -144,7 +153,7 @@ function mergeHistoryRecords(
 
 function historyReadStores(rootPath: string) {
   const durable = createChangeSetStore(rootPath);
-  const fallback = createChangeSetStore(rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+  const fallback = desktopHistoryFallbackStore(rootPath);
   const durableRecordsOrEmpty = async (
     read: () => Promise<HistoryRecord[]>,
   ): Promise<HistoryRecord[]> => {

@@ -730,9 +730,12 @@ async function readHistoryLockOwner(ownerPath: string): Promise<HistoryLockOwner
   try {
     const openedInfo = await handle.stat();
     if (!openedInfo.isFile() || openedInfo.size > HISTORY_LOCK_OWNER_MAX_BYTES) return null;
-    const contents = await handle.readFile();
-    if (contents.byteLength > HISTORY_LOCK_OWNER_MAX_BYTES) return null;
-    return parseHistoryLockOwner(contents.toString("utf8"));
+    const contents = Buffer.allocUnsafe(HISTORY_LOCK_OWNER_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(contents, 0, contents.byteLength, 0);
+    if (bytesRead > HISTORY_LOCK_OWNER_MAX_BYTES) return null;
+    const finalInfo = await handle.stat();
+    if (!finalInfo.isFile() || finalInfo.size > HISTORY_LOCK_OWNER_MAX_BYTES) return null;
+    return parseHistoryLockOwner(contents.subarray(0, bytesRead).toString("utf8"));
   } finally {
     await handle.close();
   }

@@ -27,6 +27,8 @@ describe("scanWorkspaceFiles", () => {
     await writeFixture(".dohc/history.json", "internal\n");
     await writeFixture(".git/config", "internal\n");
     await writeFixture("node_modules/pkg/index.js", "internal\n");
+    await writeFixture(".dohc-write-123.tmp", "internal\n");
+    await writeFixture("notes/.dohc-write-456.tmp", "internal\n");
     await writeFixture("notes/.DOHC/hidden.md", "internal\n");
     await writeFixture("nested/.git/config");
     await writeFixture("nested/node_modules/pkg/index.js");

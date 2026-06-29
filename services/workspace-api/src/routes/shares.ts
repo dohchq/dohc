@@ -437,38 +437,58 @@ export async function retryPendingShareRevocationDisconnects(
        from workspace_events
        join (
          select id,
-                coalesce(payload->>'retryAfter', '') as sort_at,
+                case
+                  when payload->>'retryAfter' ~ $3 then payload->>'retryAfter'
+                  else ${POSTGRES_UTC_ISO_NOW_SQL}
+                end as sort_at,
                 created_at
          from workspace_events
          where kind = 'share.revocation.disconnect_pending'
-           and coalesce(payload->>'retryAfter', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}
+           and (
+             payload->>'retryAfter' is null
+             or payload->>'retryAfter' !~ $3
+             or payload->>'retryAfter' <= ${POSTGRES_UTC_ISO_NOW_SQL}
+           )
          union all
          select id,
-                coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') as sort_at,
+                case
+                  when payload->>'claimExpiresAt' ~ $3 then payload->>'claimExpiresAt'
+                  else ${POSTGRES_UTC_ISO_NOW_SQL}
+                end as sort_at,
                 created_at
          from workspace_events
          where kind = 'share.revocation.disconnect_claimed'
            and payload->>'claimExpiresAt' is not null
-           and coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}
+           and (
+             payload->>'claimExpiresAt' !~ $3
+             or payload->>'claimExpiresAt' <= ${POSTGRES_UTC_ISO_NOW_SQL}
+           )
          union all
          select id,
-                coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') as sort_at,
+                case
+                  when payload->>'claimedAt' ~ $3 then payload->>'claimedAt'
+                  else to_char(created_at at time zone 'UTC', '${POSTGRES_UTC_ISO_FORMAT}')
+                end as sort_at,
                 created_at
          from workspace_events
          where kind = 'share.revocation.disconnect_claimed'
            and payload->>'claimExpiresAt' is null
-           and coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') <=
-             to_char(
-               (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
-               '${POSTGRES_UTC_ISO_FORMAT}'
-             )
+           and (
+             payload->>'claimedAt' is null
+             or payload->>'claimedAt' !~ $3
+             or payload->>'claimedAt' <=
+               to_char(
+                 (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
+                 '${POSTGRES_UTC_ISO_FORMAT}'
+               )
+           )
        ) as due_revocation_disconnects
          on due_revocation_disconnects.id = workspace_events.id
        order by due_revocation_disconnects.sort_at asc,
                 due_revocation_disconnects.created_at asc
        limit $1
        for update of workspace_events skip locked`,
-      [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS],
+      [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS, POSTGRES_UTC_ISO_TEXT_RE],
     );
     attempted = rows.length;
     for (const row of rows) {

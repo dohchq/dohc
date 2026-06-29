@@ -58,7 +58,7 @@ approval.
 | P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | automated review rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest review attempt timed out after streaming 5 issues; all 5 streamed issues fixed locally and rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `8cf9bc5` raised 5 issues; all 5 fixed locally and rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -2982,6 +2982,20 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspa
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
 git diff --check
+# automated review follow-up fixes against 8cf9bc5 completed review pass
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-core test src/paths.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test src/watchEvents.test.ts src/scan.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test src/changeSetStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test src/tools.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop test src/workspaces/workspaceActivity.test.ts src/workspaces/workspaceUiState.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-core typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+git diff --check
 ```
 
 ### E2E / Visual / Manual QA
@@ -3007,24 +3021,41 @@ git diff --check
 
 ### automated review
 
-- Status: fix loop active; latest local fixes after the timed-out `e268a03`
-  review attempt are complete and rerun pending.
-- Findings: latest review attempt against commit `e268a03` timed out before a
-  `complete` event, but streamed 5 issues that are fixed locally here. Previous
-  completed passes raised 5 issues against commit `97529b0`, 8 issues against
-  commit `f156b22`, 6 issues against commit `a8ba2a3`, 9 issues against commit
-  `5d097ed`, 10 issues against commit `5805eae`, 9 issues against commit
-  `bfc0ccc`, 8 issues against commit `52e9a9c`, 7 issues against commit
-  `8fe4727`, 6 issues against commit `7bfd8e6`, 8 issues against commit
-  `db2c93e`, 10 issues against commit `fa05e4f`, 7 issues against commit
-  `d37c106`, 7 issues against commit `3b3b575`, 14 issues against commit
-  `db9d04a`, 10 issues against commit `d4d734a`, 8 issues against commit
-  `f57278b`, 12 issues against commit `16362a9`, 10 issues against commit
-  `4288332`, 12 issues against commit `36aa361`, 15 issues against commit
-  `4b91836`, 8 issues against commit `112a935`, 10 issues against commit
-  `dd77390`, 5 issues against commit `1c49720`, 10 issues against commit
-  `28e093d`, and 9 issues against commit `8e1fa68`.
-- Latest fixes after timed-out review attempt against commit `e268a03`:
+- Status: fix loop active; latest local fixes after the completed `8cf9bc5`
+  review pass are complete and rerun pending.
+- Findings: latest completed review against commit `8cf9bc5` raised 5 issues
+  that are fixed locally here. The immediately previous review attempt against
+  commit `e268a03` timed out before a `complete` event, but streamed 5 issues
+  that were fixed in commit `8cf9bc5`. Previous completed passes raised 5
+  issues against commit `97529b0`, 8 issues against commit `f156b22`, 6 issues
+  against commit `a8ba2a3`, 9 issues against commit `5d097ed`, 10 issues
+  against commit `5805eae`, 9 issues against commit `bfc0ccc`, 8 issues
+  against commit `52e9a9c`, 7 issues against commit `8fe4727`, 6 issues
+  against commit `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues
+  against commit `fa05e4f`, 7 issues against commit `d37c106`, 7 issues
+  against commit `3b3b575`, 14 issues against commit `db9d04a`, 10 issues
+  against commit `d4d734a`, 8 issues against commit `f57278b`, 12 issues
+  against commit `16362a9`, 10 issues against commit `4288332`, 12 issues
+  against commit `36aa361`, 15 issues against commit `4b91836`, 8 issues
+  against commit `112a935`, 10 issues against commit `dd77390`, 5 issues
+  against commit `1c49720`, 10 issues against commit `28e093d`, and 9 issues
+  against commit `8e1fa68`.
+- Latest fixes after completed review pass against commit `8cf9bc5`:
+  - Share revocation retry selection now validates UTC timestamp strings inside
+    each index-aligned branch, treats malformed/missing timestamps as due, and
+    keeps the regex parameterized.
+  - Desktop activity history reads reuse a single ephemeral fallback store per
+    root so watcher-written in-memory history remains visible to list/get calls.
+  - MCP visible-directory atomic staging files use the reserved `.dohc-write-*`
+    prefix, and the shared scanner/watcher ignore predicate now excludes that
+    prefix everywhere.
+  - MCP write/import failures after parent directory creation now report the
+    retained visible mutation instead of presenting the operation as fully
+    rolled back.
+  - History lock owner reads cap the file-handle read to
+    `HISTORY_LOCK_OWNER_MAX_BYTES + 1` and reject oversized owners before
+    parsing.
+- Previous pass fixes after timed-out review attempt against commit `e268a03`:
   - P0A ledger docs now consistently define the pre-mint claim key as a
     deterministic workspace/object identity fingerprint; UUIDs/sequences apply
     only to the minted durable `writeObservationId`.
@@ -4609,6 +4640,17 @@ git diff --check
     assertions.
   - Latest timed-out `e268a03` review follow-up typechecks passed for
     workspace-history, MCP, and workspace-api; `git diff --check` also passed.
+  - Latest completed `8cf9bc5` review follow-up focused reruns with Node
+    v24.18.0 and `TMPDIR=/tmp`: workspace-core `paths.test.ts` 44 tests in
+    22ms; workspace-fs `watchEvents.test.ts` and `scan.test.ts` 27 tests in
+    2.28s; workspace-history `changeSetStore.test.ts` 38 tests in 7.62s; MCP
+    `tools.test.ts` 50 tests in 4.67s; workspace-api
+    `sharesRevocation.test.ts` 18 tests in 21ms; desktop
+    `workspaceActivity.test.ts` and `workspaceUiState.test.ts` 13 tests in
+    1.72s.
+  - Latest completed `8cf9bc5` review follow-up typechecks passed for
+    workspace-core, workspace-fs, workspace-history, MCP, desktop, and
+    workspace-api; `git diff --check` also passed.
 - Machine/CI context: local Codex machine. Earlier compatibility reruns used
   downloaded Node v24.18.0 with Corepack; the latest follow-up reruns used the
   same local Node v24.18.0 toolchain with pnpm. Filesystem-heavy engine tests used

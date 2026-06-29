@@ -30,6 +30,8 @@ describe("shouldIgnoreWatchPath", () => {
   });
 
   it("ignores editor temp / swap / autosave files", () => {
+    expect(shouldIgnoreWatchPath(".dohc-write-123.tmp")).toBe(true);
+    expect(shouldIgnoreWatchPath("notes/.dohc-write-456.tmp")).toBe(true);
     expect(shouldIgnoreWatchPath("notes/draft.tmp")).toBe(true);
     expect(shouldIgnoreWatchPath("notes/draft.tmp.1234")).toBe(true);
     expect(shouldIgnoreWatchPath("notes/today.md.swp")).toBe(true);

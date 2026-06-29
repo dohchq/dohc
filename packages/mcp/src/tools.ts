@@ -840,13 +840,18 @@ export async function writeWorkspaceFile(
       ? Buffer.from(args.content, "base64")
       : Buffer.from(args.content, "utf8");
   const parentDir = dirname(resolved.absolute);
+  let visibleMutationStarted = false;
   try {
-    await mkdir(parentDir, { recursive: true });
+    const createdParent = await mkdir(parentDir, { recursive: true });
+    if (createdParent) visibleMutationStarted = true;
     await writeFileAtomicallyForTool(ctx, resolved.normalized, bytes);
+    visibleMutationStarted = true;
   } catch (error) {
     return {
       ok: false as const,
-      reason: failureReason(error, `failed to write: ${args.path}`),
+      reason: visibleMutationStarted
+        ? mutationRetainedReason(error, `failed to write: ${args.path}`)
+        : failureReason(error, `failed to write: ${args.path}`),
     };
   }
   let record: HistoryRecord;
@@ -2278,15 +2283,20 @@ export async function importData(
   });
   if (!result.ok) return { ok: false as const, reason: `${result.code}: ${result.message}` };
 
+  const parentDir = dirname(dbRel.absolute);
+  let visibleMutationStarted = false;
   try {
-    const parentDir = dirname(dbRel.absolute);
-    await mkdir(parentDir, { recursive: true });
+    const createdParent = await mkdir(parentDir, { recursive: true });
+    if (createdParent) visibleMutationStarted = true;
     const dbBytes = Buffer.from(result.bytesBase64, "base64");
     await writeFileAtomicallyForTool(ctx, dbRel.normalized, dbBytes, { overwrite: false });
+    visibleMutationStarted = true;
   } catch (error) {
     return {
       ok: false as const,
-      reason: failureReason(error, `failed to write import: ${dbRel.normalized}`),
+      reason: visibleMutationStarted
+        ? mutationRetainedReason(error, `failed to write import: ${dbRel.normalized}`)
+        : failureReason(error, `failed to write import: ${dbRel.normalized}`),
     };
   }
   let record: HistoryRecord;
