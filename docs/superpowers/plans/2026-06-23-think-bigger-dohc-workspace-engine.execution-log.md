@@ -1616,6 +1616,20 @@ Eighty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Eighty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added `holdingRecordId` and retry-horizon fields to denied/quarantined
+    `WriteResult` responses so operators can correlate retained non-canonical
+    records back to API results.
+  - Replaced ambiguous active chat link uniqueness with a normalized
+    `CanonicalThreadLinkKey` contract and reserved sentinels shared by link
+    creation, projections, search, and export.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live only in Current PR Snapshot. This section is an

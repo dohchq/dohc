@@ -90,6 +90,12 @@ Write results are explicit:
 ```ts
 type UnixMsDecimalString = string // canonical base-10 Unix epoch milliseconds
 
+type DeniedOrQuarantinedStatus =
+  | 'rejected_before_acceptance'
+  | 'quarantined_protection'
+  | 'quarantined_attribution'
+  | 'quarantined_policy'
+
 type WriteResult =
   | { kind: 'canonical'; versionId: string; historyMomentId: string; objectId: string }
   | {
@@ -103,14 +109,27 @@ type WriteResult =
       operatorDispositionDueAt: UnixMsDecimalString
       status: 'pending_protection' | 'pending_canonicalization' | 'overdue_disposition'
     }
-  | { kind: 'denied'; reasonCode: string }
+  | {
+      kind: 'denied'
+      holdingRecordId: string
+      workspaceId: string
+      requestedVersionId?: string
+      idempotencyKey: string
+      reasonCode: string
+      rejectedAt: UnixMsDecimalString
+      retentionUntil: UnixMsDecimalString
+      status: DeniedOrQuarantinedStatus
+    }
   | { kind: 'conflict'; conflictId: string }
 ```
 
 Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
-recover. The holding area separates rejected-before-acceptance items from
-accepted holding records. It must be abuse-resistant: enforce per-workspace and
+recover. The `denied` result is addressable by `holdingRecordId`; operators,
+status APIs, retry tooling, and audit/export jobs use that id to correlate the
+response with the retained rejected-before-acceptance or quarantined record.
+The holding area separates rejected-before-acceptance items from accepted
+holding records. It must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
 deterministic backpressure so ingest floods cannot exhaust storage or starve
 canonical durability paths. TTL eviction applies only to
@@ -138,11 +157,13 @@ compacted or moved to colder durable storage according to policy. Garbage
 collection may remove only derived retry/index metadata after the disposition
 deadline; the reconstructable payload remains until canonicalization succeeds or
 an explicit operator disposition record retires it.
-Retries using the same idempotency key and matching replay metadata before
-`replayUntil` return the same `durable-pending` result for the same
-`holdingRecordId`. After `replayUntil`, a retry with the same key fails closed
-with `idempotency_expired` or resolves through the explicit operator disposition
-record; it must not silently create a second accepted holding record.
+Retries using the same idempotency key and matching replay metadata before the
+record's retry horizon return the same addressable result for the same
+`holdingRecordId`: `durable-pending` before `replayUntil`, or `denied` before
+`retentionUntil` for rejected/quarantined records. After the relevant horizon,
+a retry with the same key fails closed with `idempotency_expired` or resolves
+through the explicit operator disposition/expiration record; it must not
+silently create a second accepted holding record or an uncorrelated denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

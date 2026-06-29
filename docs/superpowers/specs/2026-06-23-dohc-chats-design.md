@@ -339,6 +339,18 @@ type ActiveThreadLink = ThreadLink & {
   deletedAt?: never
   deletedById?: never
 }
+
+type CanonicalThreadLinkKey = {
+  workspaceId: string
+  threadId: string
+  scopeKind: 'internal' | 'shared'
+  targetWorkspaceId: string
+  targetType: ThreadLinkTargetType
+  targetId: string
+  versionKey: string
+  shareGrantKey: string
+  visibilityKey: string
+}
 ```
 
 `ThreadLink` records are the canonical source for linked work.
@@ -351,13 +363,26 @@ projections, search, and notifications from active canonical links only. If the
 derived list includes a tombstoned link, omits an active link, or otherwise
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
-Active link creation is idempotent by canonical uniqueness key:
-`(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType, targetId,
-targetVersionRef, shareGrantId, visibilityScope)`. A retry for the same key must
-upsert or no-op against the existing active `ThreadLink` and must not create a
-second active link or duplicate `link_added` fanout. `ChatThreadProjection.linkedWork`,
-projections, search, and export build from one active canonical link per
-uniqueness key.
+Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
+derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
+targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
+normalization:
+
+- `versionKey` is the stable serialized `VersionRef` for versioned targets; for
+  target types that forbid `targetVersionRef`, it is the reserved sentinel
+  `version:none`; for share targets without a version ref, it is the reserved
+  sentinel `version:share-current`.
+- `shareGrantKey` is `share:<shareGrantId>` for shared-scope links and the
+  reserved sentinel `share:none` for internal links.
+- `visibilityKey` is `visibility:<visibilityScope>` for shared-scope links and
+  the reserved sentinel `visibility:internal` for internal links.
+
+Reserved sentinels are not legal user/object identifiers. A retry for the same
+normalized key must upsert or no-op against the existing active `ThreadLink` and
+must not create a second active link or duplicate `link_added` fanout.
+`ChatThreadProjection.linkedWork`, projections, search, and export all build
+from one active canonical link per normalized uniqueness key and must use the
+same normalization helper as link creation.
 The uniqueness key applies only to active links where `deletedAt` is absent.
 Tombstoned links remain historical records and do not block a future relink with
 the same target tuple; relinking creates a new active `ThreadLink` and a new
@@ -365,8 +390,9 @@ the same target tuple; relinking creates a new active `ThreadLink` and a new
 Links are never hard-deleted in normal operation: removal sets `deletedAt` and
 `deletedById`, and link visibility reads only non-tombstoned records. A link is
 uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
-the target tuple `(targetWorkspaceId, targetType, targetId, targetVersionRef,
-shareGrantId, visibilityScope)` captured on the activity event.
+the normalized `CanonicalThreadLinkKey` plus raw target tuple
+`(targetWorkspaceId, targetType, targetId, targetVersionRef, shareGrantId,
+visibilityScope)` captured on the activity event.
 `ThreadLink` target fields, `shareGrantId`, and `visibilityScope` are immutable
 after creation. Changing a link means tombstoning the old link with
 `link_removed` activity and creating a new link with `link_added` activity; there
