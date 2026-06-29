@@ -85,6 +85,28 @@ successful immediate save. UIs may show that pending record only in explicit
 ingest/recovery/status surfaces marked non-canonical. In this spec, "files save
 immediately" means authorized writes that pass protection checks become
 canonical without an extra human apply/review step.
+Write results are explicit:
+
+```ts
+type UnixMsDecimalString = string // canonical base-10 Unix epoch milliseconds
+
+type WriteResult =
+  | { kind: 'canonical'; versionId: string; historyMomentId: string; objectId: string }
+  | {
+      kind: 'durable-pending'
+      holdingRecordId: string
+      workspaceId: string
+      versionId: string
+      idempotencyKey: string
+      acceptedAt: UnixMsDecimalString
+      replayUntil: UnixMsDecimalString
+      operatorDispositionDueAt: UnixMsDecimalString
+      status: 'pending_protection' | 'pending_canonicalization' | 'overdue_disposition'
+    }
+  | { kind: 'denied'; reasonCode: string }
+  | { kind: 'conflict'; conflictId: string }
+```
+
 Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
 recover. The holding area separates rejected-before-acceptance items from
@@ -98,10 +120,11 @@ recoverable with reconstructable payload and retry metadata until protection
 checks succeed and canonicalization completes, or until explicit operator
 disposition is recorded for a record that cannot safely become canonical. For
 accepted holding records, any TTL, retry-horizon, compaction, or colder-storage
-policy may throttle retries, compact metadata, or move bytes to colder durable
-storage, but it must preserve the reconstructable payload until canonicalization
-completes or explicit operator disposition is recorded; it is not an eviction or
-deletion policy for accepted payloads. If a rejected-before-acceptance item
+policy may throttle retries, compact derived retry/index metadata, or move
+accepted payload bytes to colder durable storage, but it must preserve the
+reconstructable payload bytes until canonicalization completes or explicit
+operator disposition is recorded; it is not an eviction or deletion policy for
+accepted payloads. If a rejected-before-acceptance item
 expires, or if an accepted record is retired through explicit disposition, the
 engine preserves durable rejection, disposition, or expiration evidence. Humans,
 agents, imports, and sync processes all get the same guarantee: an accepted
@@ -115,6 +138,11 @@ compacted or moved to colder durable storage according to policy. Garbage
 collection may remove only derived retry/index metadata after the disposition
 deadline; the reconstructable payload remains until canonicalization succeeds or
 an explicit operator disposition record retires it.
+Retries using the same idempotency key and matching replay metadata before
+`replayUntil` return the same `durable-pending` result for the same
+`holdingRecordId`. After `replayUntil`, a retry with the same key fails closed
+with `idempotency_expired` or resolves through the explicit operator disposition
+record; it must not silently create a second accepted holding record.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

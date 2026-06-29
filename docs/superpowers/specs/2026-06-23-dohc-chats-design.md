@@ -592,23 +592,12 @@ type ReactionThreadActivity = ThreadActivityBase & ReactionIdentity & {
 type LinkThreadActivity = ThreadActivityBase & {
   kind: 'link_added' | 'link_removed'
   linkId: string
-  linkTarget:
-    | {
-        targetType: 'share'
-        targetWorkspaceId: string
-        targetId: string
-        targetVersionRef?: VersionRef
-        shareGrantId: string
-        visibilityScope: string
-      }
-    | {
-        targetType: Exclude<ThreadLinkTargetType, 'share'>
-        targetWorkspaceId: string
-        targetId: string
-        targetVersionRef?: VersionRef
-        shareGrantId?: never
-        visibilityScope?: never
-      }
+  linkTarget: ThreadLinkScope & {
+    targetType: ThreadLinkTargetType
+    targetWorkspaceId: string
+    targetId: string
+    targetVersionRef?: VersionRef
+  }
 }
 
 type MentionNotificationThreadActivity = ThreadActivityBase & {

@@ -119,7 +119,9 @@ than skipped.
 - Target: every version must have clear ancestry/fork-point metadata.
 - Target: meaningful state must be recoverable.
 - Target: async workspace-scoped responses must be gated by the active
-  workspace/request token or abort signal before mutating UI state.
+  workspace/request token or abort signal before mutating any workspace-bound
+  state, including UI, cache, store, projection, atom, folder, entity, share, or
+  capture state.
 - Target: conflicts must preserve both sides.
 - Target: no silent last-writer-wins for tracked workspace content.
 - Target: no raw conflict markers as the primary UX.

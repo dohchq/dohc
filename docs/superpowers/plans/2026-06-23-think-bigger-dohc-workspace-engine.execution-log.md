@@ -356,7 +356,7 @@ NODE
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1595,6 +1595,22 @@ Eighty-fifth pass:
     before channel sends create `ThreadMessage` records.
   - Required `MentionNotificationThreadActivity.mentionedActorIds` to be
     deduplicated and bytewise sorted before storage.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eighty-sixth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Broadened async workspace-scoped response gating from UI state to every
+    workspace-bound side effect.
+  - Added explicit `WriteResult` variants, including `durable-pending`, and
+    replay rules for accepted holding records.
+  - Distinguished accepted payload bytes from derived retry/index metadata in
+    compaction and garbage-collection wording.
+  - Updated `LinkThreadActivity.linkTarget` to preserve `ThreadLinkScope` for all
+    target types.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
