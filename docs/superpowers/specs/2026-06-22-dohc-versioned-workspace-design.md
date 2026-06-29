@@ -82,12 +82,13 @@ recover. The holding area must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
 deterministic backpressure so ingest floods cannot exhaust storage or starve
 canonical durability paths. Eviction applies only to rejected-before-acceptance
-items or to already-durable holding records that reached a declared TTL/retention
-boundary; when an accepted holding record expires or is evicted, the engine
-preserves durable rejection/expiration evidence. Humans, agents, imports, and
-sync processes all get the same guarantee: an accepted change is not silently
-lost, but it also does not become canonical workspace state until protection
-checks pass.
+items or to already-durable holding records after a declared minimum retry
+horizon. That horizon must be at least as long as the maximum expected evaluator
+outage or retry window for that workspace and ingest class; when an accepted
+holding record expires or is evicted, the engine preserves durable
+rejection/expiration evidence. Humans, agents, imports, and sync processes all
+get the same guarantee: an accepted change is not silently lost, but it also does
+not become canonical workspace state until protection checks pass.
 This holding area follows the same secret-backed durability rules as canonical
 history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as
@@ -331,13 +332,13 @@ delete(workspaceId, versionId, path, {
 })
 rename(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
 move(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
@@ -345,7 +346,7 @@ replace(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   sourceObjectId,
   targetPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  destinationObjectId,
   idempotencyKey
 })
 list(workspaceId, versionId, path)
@@ -400,11 +401,11 @@ caller and resolution session.
 `rename(...)`, `move(...)`, `merge(...)`, and `restore(...)` are
 write-producing operations and must use the same workspace/version scoping,
 causal guard, idempotency, and conflict-response rules as `write(...)`.
-Delete, rename, and move require the source `targetObjectId` plus exactly one
-source freshness precondition. Rename/move with `destinationPrecondition:
-expectedAbsent` is create-at-destination only. Atomic overwrite uses
-`replace(...)`, which requires a source object id, a destination `targetObjectId`,
-one source precondition, one target precondition, and one idempotency key. This
+Delete requires the path's `targetObjectId`. Rename and move require the source
+`sourceObjectId` plus exactly one source freshness precondition. Rename/move with
+`destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic overwrite uses
+`replace(...)`, which requires `sourceObjectId`, `destinationObjectId`, one
+source precondition, one target precondition, and one idempotency key. This
 models temp-file-then-rename saves without an extra read/round trip and without
 allowing a path-only delete/recreate substitution.
 All client-originated write-producing operations, including filesystem-captured

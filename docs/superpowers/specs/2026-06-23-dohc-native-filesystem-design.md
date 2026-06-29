@@ -253,13 +253,13 @@ delete(workspaceId, versionId, path, {
 })
 rename(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
 move(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
@@ -267,7 +267,7 @@ replace(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   sourceObjectId,
   targetPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  destinationObjectId,
   idempotencyKey
 })
 list(workspaceId, versionId, path)
@@ -318,13 +318,14 @@ current/incoming/restored/secret-backed bytes are materialized only through the
 server-side authorization path for that caller and resolution session.
 
 `delete(...)`, `rename(...)`, and `move(...)` are write-producing filesystem
-mutations. They require the source `targetObjectId` plus exactly one source
-freshness precondition and an idempotency key. Rename/move with
+mutations. Delete requires the path's `targetObjectId`. Rename and move require
+the source `sourceObjectId` plus exactly one source freshness precondition and an
+idempotency key. Rename/move with
 `destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic
-overwrite uses `replace(...)`, which carries a source object id, destination
-`targetObjectId`, source freshness precondition, target freshness precondition,
-and idempotency key. That gives temp-file-then-rename saves a one-call atomic
-replace path without allowing a path-only overwrite.
+overwrite uses `replace(...)`, which carries `sourceObjectId`,
+`destinationObjectId`, source freshness precondition, target freshness
+precondition, and idempotency key. That gives temp-file-then-rename saves a
+one-call atomic replace path without allowing a path-only overwrite.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
 write-producing and must carry a causal precondition for the target version.

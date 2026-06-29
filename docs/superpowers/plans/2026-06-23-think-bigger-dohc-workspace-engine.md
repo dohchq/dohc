@@ -73,8 +73,7 @@ Keep the surface simple:
 - **Chats**: familiar communication surface, internally durable work threads.
 - **Channels**: places for people and chats.
 - **DMs**: fast direct or small-group conversation.
-- **Share**: controlled exposure of files, folders, versions, chats, apps, or
-  channels.
+- **Share**: controlled exposure of files, folders, versions, chats, or channels.
 
 Avoid exposing these as default UI language:
 
@@ -339,8 +338,7 @@ or external share exists through:
 
 ### Link Dereference
 
-Links between chats, files, versions, moments, apps, data, and agent runs must
-store:
+Links between chats, files, folders, versions, moments, and agent runs must store:
 
 - target type.
 - stable target ID.
@@ -441,7 +439,7 @@ file side rails, version activity, search, and external shared channels.
 ### Channel
 
 A Channel is a place where chats gather. Channels can attach to workspace scope:
-folder, project, version, app, client, or workspace object.
+folder, project, version, client, or another defined workspace object.
 
 ### Shared Channel
 
@@ -1968,7 +1966,7 @@ links, activity, read state, and reactions.
 **Scope:**
 
 - Add `ThreadLink` UI and APIs.
-- Link chats to files/folders/versions/moments/apps/data.
+- Link chats to files/folders/versions/moments and agent runs.
 - Show related chats in file side rail.
 - Show related chats in version/history views.
 - Add one-way Markdown/text projection for agent context.
@@ -2057,6 +2055,8 @@ collaboration.
 - followed chat notifications.
 - channel mute/unmute.
 - agent update notification controls.
+- reaction display, privacy, and notification behavior on top of the PR 12
+  reaction API.
 - quiet/digest settings if feasible.
 
 **Tests:**
@@ -2065,7 +2065,7 @@ collaboration.
 - DM notification.
 - muted channel suppresses notifications.
 - followed chat notification.
-- reaction add/remove.
+- reaction visibility does not leak hidden users.
 - presence does not leak hidden users.
 
 **E2E:**
@@ -2131,7 +2131,7 @@ dohc file/folder/version sharing.
 - External participant/workspace model.
 - Explicit cross-workspace share/federation objects.
 - Resource visibility preview.
-- Share selected files/folders/versions/apps/chats.
+- Share selected files/folders/versions/chats.
 - Deny unshared workspace reads.
 - External notification/search constraints.
 

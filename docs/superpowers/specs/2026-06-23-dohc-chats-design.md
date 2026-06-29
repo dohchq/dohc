@@ -330,8 +330,10 @@ type ThreadMessage = {
   authorId: string
   authorKind: 'human' | 'agent' | 'system'
   body: string
+  bodyRevision: UInt64DecimalString
   createdAt: UnixMsDecimalString
   editedAt?: UnixMsDecimalString
+  editedById?: string
   deletedAt?: UnixMsDecimalString
   deletedById?: string
   deleteReason?: string
@@ -371,6 +373,47 @@ body while preserving `deletedAt`, `tombstone`, deletion-placeholder rendering,
 and minimal audit metadata. Secret-backed references, encrypted payloads, or
 redacted forms replace plaintext wherever audit/history access would otherwise
 have retained the original body.
+
+Edits must append immutable activity before replacing the current message body.
+`ThreadMessage.body` is the latest renderable state, while
+`ThreadMessage.bodyRevision` identifies the current revision. The previous body,
+editor identity, and edit timestamp are preserved in append-only
+`ThreadActivity` records:
+
+```ts
+type ChatBodySnapshot =
+  | { kind: 'plaintext', body: string }
+  | { kind: 'redacted', reason: string }
+  | { kind: 'secretRef', secretObjectId: string, redactedPreview?: string }
+
+type ThreadActivity = {
+  id: string
+  workspaceId: string
+  threadId: string
+  messageId?: string
+  kind:
+    | 'message_created'
+    | 'message_edited'
+    | 'message_deleted'
+    | 'reaction_added'
+    | 'reaction_removed'
+    | 'link_added'
+    | 'link_removed'
+  actorId: string
+  actorKind: 'human' | 'agent' | 'system'
+  createdAt: UnixMsDecimalString
+  previousBody?: ChatBodySnapshot
+  previousBodyRevision?: UInt64DecimalString
+  nextBodyHash?: string
+}
+```
+
+For `message_edited`, `previousBody`, `previousBodyRevision`, `actorId`,
+`actorKind`, and `createdAt` are required. Authorized history and export paths
+reconstruct the revision trail from these events. Normal chat rendering, search,
+notifications, projections, and summaries use the current `ThreadMessage.body`
+unless policy explicitly materializes historical revisions. Legal erasure may
+replace `previousBody` with a redacted snapshot while retaining edit provenance.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
@@ -538,17 +581,19 @@ body into the canonical deterministic projection path
 
 ## Integration with files and versions
 
-Chats can link to:
+The first engine-backed chat links should target defined Phase 0 identities:
 
 - files.
 - folders.
 - versions.
 - history moments.
+- agent runs.
+- decisions/tasks if they already resolve to stable workspace objects.
+
+Later substrate identities can add links to:
+
 - apps/sites.
 - databases/rows.
-- agent runs.
-- decisions.
-- tasks.
 - shares/exports.
 
 The same chat can appear in multiple places:

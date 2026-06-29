@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 CodeRabbit follow-up fixes pending rerun; docs-only local-agent-CLI exception pending; P0A-P0G stack restacked through P0G
+Status: PR 00 latest CodeRabbit follow-up fixes pending rerun; docs-only local-agent-CLI exception pending; P0A-P0G stack restacked through P0G
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | restacked on P0D; not approved | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | restacked on P0E; not approved | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | restacked on P0F; local validation passed; not approved | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | pending rerun after follow-up fixes | docs sanity + brand guard | Latest local fixes address CodeRabbit findings; rerun pending. Docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | pending rerun after latest follow-up fixes | docs sanity + brand guard | Latest local fixes address the current CodeRabbit follow-up pass; rerun pending. Docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -272,8 +272,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass raised 9 issues; local fixes are
+- Status: latest follow-up fixes pending rerun.
+- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
   applied below and need a clean rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -986,6 +986,26 @@ Fifty-sixth pass:
     token at apply time.
   - Marked Phase 0 lane worktree/thread cells as provisional/TBD until lane PRs
     are actually opened and staffed.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Fifty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added a minimum retry/retention horizon for accepted quarantined records,
+    tied to the maximum expected evaluator outage or retry window.
+  - Normalized rename, move, and replace object-id names across the versioned
+    workspace and native filesystem specs with `sourceObjectId` and
+    `destinationObjectId` semantics.
+  - Removed app sharing from current shared-channel scope until app identity is
+    explicitly introduced by a later substrate milestone.
+  - Moved reaction persistence/API ownership to PR 12 and left PR 16 responsible
+    for reaction display, privacy, and notification behavior.
+  - Added append-only chat edit activity with previous body snapshots, editor
+    identity, edit timestamp, and secret-safe history materialization.
+  - Reframed app/site and database/row chat links as deferred substrate links.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
