@@ -304,7 +304,11 @@ they must not disagree about what happened.
 
 ### Projection Writeability
 
-Every projection must declare its write contract:
+Every projection must declare two independent contracts: whether edits can
+round-trip, and whether engine validation is required before those edits become
+canonical source.
+
+Writeability:
 
 - `canonical`: this projection is the canonical content surface.
 - `writable`: edits can be ingested back into the object.
@@ -312,14 +316,24 @@ Every projection must declare its write contract:
 - `lossy`: export is incomplete and cannot round-trip.
 - `redacted`: intentionally hides data by policy.
 
+Validation:
+
+- `none`: no ingest path exists.
+- `sourceValidated`: normal source-backed content validation.
+- `policyValidated`: source-backed policy/config requests such as
+  `.dohc/files.toml` and `.dohc/visibility.toml`; edits are writable requests,
+  but the engine validates, normalizes, and may reject them before enforcement.
+- `internalOnly`: engine-owned status/cache/projection state that is never
+  re-ingested as source.
+
 Examples:
 
-- normal source file projection: writable.
-- `.dohc/chats/v1-<digest>.md`: read-only by default.
-- public export of `.env`: redacted or excluded.
-- generated dashboard summary: lossy unless explicitly source-backed.
-- `.dohc/status.json`: read-only.
-- `.dohc/files.toml`: writable policy request, but engine-validated.
+- normal source file projection: `writable` + `sourceValidated`.
+- `.dohc/chats/v1-<digest>.md`: `readOnly` + `none` by default.
+- public export of `.env`: `redacted` + `none`, or excluded.
+- generated dashboard summary: `lossy` + `none` unless explicitly source-backed.
+- `.dohc/status.json`: `readOnly` + `internalOnly`.
+- `.dohc/files.toml`: `writable` + `policyValidated`.
 
 ### Effective Policy
 
@@ -352,7 +366,9 @@ or external share exists through:
 
 Links between chats, files, folders, versions, moments, and agent runs must store:
 
+- source/owning workspace ID.
 - target type.
+- target workspace ID.
 - stable target ID.
 - optional `VersionRef`.
 - display path/title at link time.
@@ -1492,14 +1508,15 @@ must use.
   `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  and `ConflictRecord`.
+  `ProjectionValidation`, and `ConflictRecord`.
 - Defer `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
   that consume them: chat contracts in PR 12, secret-reference contracts in PR
   08, and share/external-channel contracts in PR 18. Those PRs must extend the
   same shared package instead of defining local-only shapes.
-- Define link dereference shape: target type, stable target ID, optional
-  `VersionRef`, display path/title at link time, ACL degrade behavior.
+- Define link dereference shape: source/owning workspace ID, target type, target
+  workspace ID, stable target ID, optional `VersionRef`, display path/title at
+  link time, ACL degrade behavior.
 - Defer the canonical share/external-channel shape with stable share ID, grant
   ID, owning workspace, target resource identity, visibility scope, participant
   boundary, expiry/revocation state, and policy/export/search/notification fields
@@ -1507,6 +1524,8 @@ must use.
   validated shape instead of inventing local share models.
 - Define projection writeability values: `canonical`, `writable`, `readOnly`,
   `lossy`, `redacted`.
+- Define projection validation values: `none`, `sourceValidated`,
+  `policyValidated`, `internalOnly`.
 - Define one core effective policy input/output type for filesystem, search, and
   export substrate. Chat, notification, secret, and external-share policy
   extensions land with their consuming PRs and must compose with the core type.

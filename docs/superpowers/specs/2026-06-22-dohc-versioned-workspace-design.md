@@ -117,8 +117,18 @@ type TerminalRetirementReason =
   | 'auto_retired_payload_retention_expired'
   | 'operator_disposition_retired'
 
+type ExpiredRetryRecordKind =
+  | 'accepted_holding_record'
+  | 'rejected_or_quarantined_record'
+
 type WriteResult =
-  | { kind: 'canonical'; versionId: string; historyMomentId: string; objectId: string }
+  | {
+      kind: 'canonical'
+      workspaceId: string
+      versionId: string
+      historyMomentId: string
+      objectId: string
+    }
   | {
       kind: 'durable-pending'
       holdingRecordId: string
@@ -151,7 +161,16 @@ type WriteResult =
       reasonCode: TerminalRetirementReason
       retainedMetadata: 'minimal_audit_idempotency_and_explanation_only'
     }
-  | { kind: 'conflict'; conflictId: string }
+  | {
+      kind: 'idempotency-expired'
+      holdingRecordId: string
+      workspaceId: string
+      idempotencyKey: string
+      expiredAt: UnixMsDecimalString
+      recordKind: ExpiredRetryRecordKind
+      reasonCode: 'idempotency_expired'
+    }
+  | { kind: 'conflict'; workspaceId: string; conflictId: string }
 ```
 
 Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
@@ -209,10 +228,10 @@ Retries using the same idempotency key and matching replay metadata before the
 record's retry horizon return the same addressable result for the same
 `holdingRecordId`: `durable-pending` before `replayUntil`, or `denied` before
 `retentionUntil` for rejected/quarantined records. After the relevant horizon,
-a retry with the same key fails closed with `idempotency_expired`, returns the
-stable `terminal-retired` result, or resolves through the explicit operator
-disposition/expiration record; it must not silently create a second accepted
-holding record or an uncorrelated denial.
+a retry with the same key returns an `idempotency-expired` result tied to the
+same `holdingRecordId`, returns the stable `terminal-retired` result, or resolves
+through the explicit operator disposition/expiration record; it must not
+silently create a second accepted holding record or an uncorrelated denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

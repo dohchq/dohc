@@ -22,7 +22,7 @@ append-only history.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 8 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 4 issues; follow-up fixes
   are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -1682,6 +1682,23 @@ Ninetieth pass:
   - Replaced restore `pointInTime` write targets with deterministic
     `checkpointId` targets; timestamp selection is only a server-side lookup
     alias.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninety-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added `workspaceId` to canonical `WriteResult` success and conflict results
+    so all write outcomes are workspace-correlatable.
+  - Added a dedicated `idempotency-expired` `WriteResult` tied to the same
+    `holdingRecordId` used by pending/denied retry horizons.
+  - Split projection writeability from projection validation so writable
+    source-backed policy files can be engine-validated without becoming
+    canonical content projections.
+  - Added source/owning workspace ID and target workspace ID to the shared link
+    dereference contract and PR 01 contract list.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
