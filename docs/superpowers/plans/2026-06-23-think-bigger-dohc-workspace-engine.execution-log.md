@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `2dd14a5` reported 9 issues;
-  hundred-tenth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `4b97abd` reported 2 minor
+  issues; hundred-eleventh pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -285,13 +285,13 @@ expected=$(grep ' node-v24.18.0-linux-x64.tar.xz$' /tmp/dohc-node-v24.18.0-SHASU
 actual=$(sha256sum /tmp/dohc-node-v24.18.0-linux-x64.tar.xz | awk '{print $1}')
 test "$expected" = "$actual"
 printf '%s  %s\n' "$expected" "/tmp/dohc-node-v24.18.0-linux-x64.tar.xz"
-rm -rf /tmp/dohc-node-v24.18.0-linux-x64
-mkdir -p /tmp/dohc-node-v24.18.0-linux-x64
-tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0-linux-x64 --strip-components=1
-/tmp/dohc-node-v24.18.0-linux-x64/bin/node -v
-PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --version
-PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
-env "PATH=/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" node <<'NODE'
+rm -rf /tmp/dohc-node-v24.18.0
+mkdir -p /tmp/dohc-node-v24.18.0
+tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0 --strip-components=1
+/tmp/dohc-node-v24.18.0/bin/node -v
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --version
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" node <<'NODE'
 const fs = require('fs')
 const path = require('path')
 const files = [
@@ -336,7 +336,7 @@ NODE
 - Focused brand/no-legacy guard passed: `apps/web/src/__tests__/brandNoLegacy.test.ts`
   reported 1 file and 2 tests passed under Linux Node 24.18.0.
 - Node 24 environment: official Linux Node v24.18.0 tarball extracted to
-  `/tmp/dohc-node-v24.18.0-linux-x64/bin/node`.
+  `/tmp/dohc-node-v24.18.0/bin/node`.
 - pnpm entrypoint: Node v24.18.0 Corepack resolved repo package manager
   `pnpm@10.24.0`.
 - Earlier Node 18.19.1 run is retained only as exploratory output and is not
@@ -2079,6 +2079,24 @@ Hundred-tenth pass:
     primitive with distinct preferred use.
   - Defined canonical `messageId` form for read-cursor comparison and canonical
     inputs for chat body/tombstone hashes.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-eleventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest two-minor-issue rerun:
+  - Added fenced-code-aware link collection to
+    `scripts/check-think-bigger-doc-links.mjs` so example markdown no longer
+    creates false link/anchor failures.
+  - Normalized the recorded Node 24 extraction directory and validation PATH to
+    `/tmp/dohc-node-v24.18.0`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.

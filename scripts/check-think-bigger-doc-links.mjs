@@ -63,6 +63,43 @@ const collectAnchors = (markdown) => {
   return anchors
 }
 
+const collectLinks = (markdown) => {
+  const links = []
+  const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
+  let inFence = false
+  let fenceChar = null
+  let fenceLength = 0
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const fence = line.match(/^\s{0,3}(```+|~~~+)/)
+
+    if (fence) {
+      const marker = fence[1][0]
+      const markerLength = fence[1].length
+      if (!inFence) {
+        inFence = true
+        fenceChar = marker
+        fenceLength = markerLength
+      } else if (marker === fenceChar && markerLength >= fenceLength) {
+        inFence = false
+        fenceChar = null
+        fenceLength = 0
+      }
+      continue
+    }
+
+    if (inFence) {
+      continue
+    }
+
+    for (const match of line.matchAll(linkPattern)) {
+      links.push(match[1])
+    }
+  }
+
+  return links
+}
+
 const failures = []
 
 for (const file of files) {
@@ -72,11 +109,7 @@ for (const file of files) {
   }
 
   const text = fs.readFileSync(file, 'utf8')
-  const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
-
-  for (const match of text.matchAll(linkPattern)) {
-    const raw = match[1]
-
+  for (const raw of collectLinks(text)) {
     if (/^(https?:|mailto:|app:)/.test(raw)) {
       continue
     }
