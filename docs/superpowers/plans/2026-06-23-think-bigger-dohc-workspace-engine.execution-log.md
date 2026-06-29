@@ -1101,6 +1101,23 @@ Sixty-second pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Sixty-third pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Changed idempotency replay retention in the versioned workspace and native
+    filesystem specs from a fixed 24-hour floor to the documented maximum retry
+    horizon for each operation type and transport.
+  - Split `ThreadActivity` into message and link activity shapes so
+    message-scoped events and reaction events require `messageId`.
+  - Added an Accessibility Reviewer role for keyboard navigation, focus order,
+    ARIA semantics, contrast, screen reader behavior, and WCAG regressions.
+  - Replaced the later duplicate CodeRabbit guidance with a reference to the
+    canonical CodeRabbit Loop section.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before

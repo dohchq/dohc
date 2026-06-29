@@ -1125,6 +1125,9 @@ Recommended roles:
   external channels, and agent authorship.
 - **QA Reviewer**: checks test coverage, E2E, visual QA, performance budgets,
   and skipped tests.
+- **Accessibility Reviewer**: checks keyboard navigation, focus order, ARIA
+  semantics, contrast, screen reader behavior, and WCAG regressions on shipped
+  UI surfaces.
 - **Performance Reviewer**: checks startup, filesystem capture, indexing,
   search, chat/history virtualization, renderer jank, memory, and budget
   regressions.
@@ -2398,14 +2401,9 @@ Reproduce
   -> record in execution log
 ```
 
-### CodeRabbit Loop
+### CodeRabbit Loop Reference
 
-Use the canonical `CodeRabbit Loop` section under `Agent And Review Workflow`
-above. Do not move to the next PR with unresolved CodeRabbit findings unless
-the finding is a documented non-sensitive non-blocker and the user explicitly
-approves the override in the PR and execution log. Authorization, ownership,
-workspace isolation, secrets, privacy, data-loss, and permission-boundary
-findings remain non-overridable blockers.
+See [Agent And Review Workflow -> CodeRabbit Loop](#coderabbit-loop).
 
 ## Cross-System Acceptance Scenarios
 

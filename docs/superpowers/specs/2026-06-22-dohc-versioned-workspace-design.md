@@ -421,13 +421,13 @@ with the same idempotency key must return the original result or a deterministic
 equivalent and must not create additional canonical mutations, duplicate
 history events, duplicate projections, or repeated notification/search side
 effects.
-Idempotency records must be persisted for a documented minimum replay window of
-at least 24 hours after the operation reaches a terminal result. After that
-window, a retry with the same key must fail closed with an explicit
-`idempotency_expired` response or a deterministic conflict response; it must not
-silently apply as a new mutation. Implementations may garbage-collect expired
-key tombstones only after the documented maximum retry horizon has passed or the
-operation namespace is rotated.
+Idempotency records must be persisted through the documented maximum retry
+horizon for that operation type and transport after the operation reaches a
+terminal result. After that horizon, a retry with the same key must fail closed
+with an explicit `idempotency_expired` response or a deterministic conflict
+response; it must not silently apply as a new mutation. Implementations may
+garbage-collect expired key tombstones only after the same maximum retry horizon
+has passed or the operation namespace is rotated.
 
 ## Conflict behavior
 

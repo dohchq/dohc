@@ -424,13 +424,35 @@ type ChatBodySnapshot =
   | { kind: 'redacted', reason: string }
   | { kind: 'secretRef', secretObjectId: string, redactedPreview?: string }
 
-type ThreadActivity = {
+type ThreadActivityBase = {
   id: string
   workspaceId: string
   threadId: string
-  messageId?: string
-  linkId?: string
-  linkTarget?: {
+  actorId: string
+  actorKind: 'human' | 'agent' | 'system'
+  createdAt: UnixMsDecimalString
+}
+
+type MessageThreadActivity = ThreadActivityBase & {
+  messageId: string
+  kind:
+    | 'message_created'
+    | 'message_edited'
+    | 'message_deleted'
+    | 'reaction_added'
+    | 'reaction_removed'
+  previousBody?: ChatBodySnapshot
+  previousBodyRevision?: UInt64DecimalString
+  nextBodyHash?: string
+  reactionId?: string
+  reactionKey?: string
+  reactionActorId?: string
+}
+
+type LinkThreadActivity = ThreadActivityBase & {
+  kind: 'link_added' | 'link_removed'
+  linkId: string
+  linkTarget: {
     targetWorkspaceId: string
     targetType: string
     targetId: string
@@ -438,32 +460,19 @@ type ThreadActivity = {
     shareGrantId?: string
     visibilityScope?: string
   }
-  reactionId?: string
-  reactionKey?: string
-  reactionActorId?: string
-  kind:
-    | 'message_created'
-    | 'message_edited'
-    | 'message_deleted'
-    | 'reaction_added'
-    | 'reaction_removed'
-    | 'link_added'
-    | 'link_removed'
-  actorId: string
-  actorKind: 'human' | 'agent' | 'system'
-  createdAt: UnixMsDecimalString
-  previousBody?: ChatBodySnapshot
-  previousBodyRevision?: UInt64DecimalString
-  nextBodyHash?: string
 }
+
+type ThreadActivity = MessageThreadActivity | LinkThreadActivity
 ```
 
-For `message_edited`, `previousBody`, `previousBodyRevision`, `actorId`,
-`actorKind`, and `createdAt` are required. Authorized history and export paths
-reconstruct the revision trail from these events. Normal chat rendering, search,
-notifications, projections, and summaries use the current `ThreadMessage.body`
-unless policy explicitly materializes historical revisions. Legal erasure may
-replace `previousBody` with a redacted snapshot while retaining edit provenance.
+For `message_created`, `message_edited`, `message_deleted`, `reaction_added`,
+and `reaction_removed`, `messageId`, `actorId`, `actorKind`, and `createdAt` are
+required. For `message_edited`, `previousBody` and `previousBodyRevision` are
+also required. Authorized history and export paths reconstruct the revision trail
+from these events. Normal chat rendering, search, notifications, projections,
+and summaries use the current `ThreadMessage.body` unless policy explicitly
+materializes historical revisions. Legal erasure may replace `previousBody` with
+a redacted snapshot while retaining edit provenance.
 For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
 audit/replay can identify the exact affected link even after the derived
 `linkedWork` cache is rebuilt. For `reaction_added` and `reaction_removed`,
