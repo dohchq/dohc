@@ -25,18 +25,22 @@ const collectAnchors = (markdown) => {
   const seen = new Map()
   let inFence = false
   let fenceChar = null
+  let fenceLength = 0
 
   for (const line of markdown.split(/\r?\n/)) {
     const fence = line.match(/^\s{0,3}(```+|~~~+)/)
 
     if (fence) {
       const marker = fence[1][0]
+      const markerLength = fence[1].length
       if (!inFence) {
         inFence = true
         fenceChar = marker
-      } else if (marker === fenceChar) {
+        fenceLength = markerLength
+      } else if (marker === fenceChar && markerLength >= fenceLength) {
         inFence = false
         fenceChar = null
+        fenceLength = 0
       }
       continue
     }
@@ -68,13 +72,17 @@ for (const file of files) {
   for (const match of text.matchAll(linkPattern)) {
     const raw = match[1]
 
-    if (/^(https?:|mailto:|app:|#)/.test(raw)) {
+    if (/^(https?:|mailto:|app:)/.test(raw)) {
       continue
     }
 
-    const [targetRaw, anchorRaw] = raw.split('#')
+    const hashIndex = raw.indexOf('#')
+    const targetRaw = hashIndex === -1 ? raw : raw.slice(0, hashIndex)
+    const anchorRaw = hashIndex === -1 ? '' : raw.slice(hashIndex + 1)
     const targetPath = path.normalize(
-      path.resolve(path.dirname(file), decodeURIComponent(targetRaw || file)),
+      targetRaw === ''
+        ? path.resolve(file)
+        : path.resolve(path.dirname(file), decodeURIComponent(targetRaw)),
     )
 
     if (!fs.existsSync(targetPath)) {

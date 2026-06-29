@@ -117,16 +117,17 @@ state can only advance forward in the thread, never move backward. Chats, Inbox,
 file side rails, notification badges, and search result read/unread markers must
 all derive from this workspace-scoped state. Monotonicity is validated against
 the canonical per-thread ordering comparator:
-`(threadSequence, createdAt, messageId)`. Message IDs alone are not an ordering
-contract, and `lastReadAt` is not a valid advancement fallback. `ThreadReadState`
-is unique on `(workspaceId, threadId, actorId)` and writes are upserts, not
-inserts that can duplicate rows. Updating `lastReadCursor` must compare against
-the canonical comparator before advancing. For every read-state write, `actorId`
-must be derived from authenticated server/engine identity, never trusted from
-client payload fields; caller-supplied actor identity is ignored or rejected
-before message-existence or ordering checks run. The write must be atomic: use a
-conditional upsert, transactional compare-and-swap, or equivalent CAS semantics
-that advances `lastReadCursor` only when the incoming
+`(threadSequence, createdAt, messageId)`, where `messageId` compares by bytewise
+UTF-8 order after canonicalization. Message IDs alone are not an ordering
+contract, and `lastReadAt` is not a valid advancement fallback.
+`ThreadReadState` is unique on `(workspaceId, threadId, actorId)` and writes are
+upserts, not inserts that can duplicate rows. Updating `lastReadCursor` must
+compare against the canonical comparator before advancing. For every read-state
+write, `actorId` must be derived from authenticated server/engine identity,
+never trusted from client payload fields; caller-supplied actor identity is
+ignored or rejected before message-existence or ordering checks run. The write
+must be atomic: use a conditional upsert, transactional compare-and-swap, or
+equivalent CAS semantics that advances `lastReadCursor` only when the incoming
 `(threadSequence, createdAt, messageId)` tuple is greater than the stored tuple.
 Before CAS evaluation or any tuple-to-message existence lookup, the caller must
 be authorized for the target workspace/thread using server-derived identity:
@@ -913,26 +914,29 @@ type ChatProjectionKind =
 Writers and readers must not invent aliases, fallbacks, or implementation-local
 strings. New projection kinds require a documented compatibility rule; if the
 digest tuple changes incompatibly, use a new filename prefix such as `v2-`.
-The projection scope is `owner` for the workspace-private internal projection,
-or a grant-aware value such as `shareGrant:<grantId>:<authzScopeId>`, where
-`authzScopeId` is a server-issued opaque identifier for the exact authorization
-and redaction set used to materialize the projection. Compute the digest
-over a length-prefixed tuple with fields in this exact order: `workspaceId`,
-`threadId`, `projectionKind`, and `projectionScope`. Each field is first
-normalized to Unicode NFC, encoded as UTF-8 bytes, then framed as
+The projection scope is a canonical tagged tuple: `owner` for the
+workspace-private internal projection, or
+`shareGrant:<grantId>:<authzScopeId>` with both identifiers percent-encoded
+using the same canonical escaping rules on every runtime. `authzScopeId` is a
+server-issued opaque identifier for the exact authorization and redaction set
+used to materialize the projection. Compute the digest over a length-prefixed
+tuple with fields in this exact order: `workspaceId`, `threadId`,
+`projectionKind`, and `projectionScope`. Each field is first normalized to
+Unicode NFC, encoded as UTF-8 bytes, then framed as
 `uint32-be-byte-length || bytes`; the concatenated framed tuple is hashed with
 `sha256`. Then encode the digest as lowercase RFC 4648 base32 with no padding,
 and write `.dohc/chats/v1-<digest>.md`. The field order, length-prefix framing,
 Unicode normalization, UTF-8 encoding, hash, lowercase digest encoding,
-no-padding rule, grant-aware projection scope, and `v1-` prefix are the canonical
-contract and must not vary by implementation. The projection must store or
-otherwise verify the exact canonical thread id, workspace id, projection kind,
-projection scope, and derived filename in metadata before writing, and must
-reject ambiguous ids or any computed filename that already maps to a different
-canonical tuple. Before writing or reusing a shared projection, the implementation
-must verify the precise authorization/redaction context represented by
-`authzScopeId`; grant or redaction changes require a new scope id and therefore a
-new filename digest. Projection writers must reject path separators, relative
+no-padding rule, grant-aware projection scope, and `v1-` prefix are the
+canonical contract and must not vary by implementation. The projection must
+store or otherwise verify the exact canonical thread id, workspace id,
+projection kind, projection scope, and derived filename in metadata before
+writing, and must reject ambiguous ids or any computed filename that already
+maps to a different canonical tuple. Before writing or reusing a shared
+projection, the implementation must verify the precise authorization/redaction
+context represented by `authzScopeId`; grant or redaction changes require a new
+scope id and therefore a new filename digest. Projection writers must reject path
+separators, relative
 path segments, control characters, reserved names, and any other unsafe input
 before constructing the projection path, so a crafted thread id cannot traverse
 directories or overwrite another projection.

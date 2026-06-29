@@ -659,6 +659,13 @@ rules sort by explicit priority when present, then by canonical policy source
 ordinal, then by explicit rule index within that source, then by lexical rule id.
 Exact paths are more specific than globs; longer literal prefixes are more
 specific than shorter prefixes.
+The canonical policy source ordinal is a stable engine-assigned integer for the
+normalized policy source after imports and aliases are resolved. Built-in
+defaults, object hard constraints, version policy, `.dohc/files.toml`,
+`.dohc/visibility.toml`, and authorized user overrides each occupy reserved
+source-order bands; multiple files inside the same band are ordered by canonical
+workspace-relative path using bytewise UTF-8 order. The resolved ordinal is
+recorded with the normalized rule so equal-specificity conflicts are replayable.
 
 Internal policy keys are canonical camelCase. Human-authored policy files may
 use snake_case aliases, but parsers must normalize them into canonical camelCase
@@ -779,9 +786,11 @@ normal OS permissions once it exists. Process-level secret gating applies only
 to dohc-controlled execution paths, such as brokered API access, managed mounts,
 or injected runtime secrets, not arbitrary local processes.
 
-When launching a process or agent, dohc can also inject secrets as environment
-variables from the same broker. File materialization and process injection are
-two projections of the same secret-backed source.
+When launching a process or agent, dohc may inject only explicitly approved
+low-sensitivity secrets as environment variables from the same broker.
+Higher-sensitivity secrets must use brokered files, fds, or ephemeral mounts.
+File materialization and process injection are two projections of the same
+secret-backed source.
 
 ## Secret access by tools and agents
 
@@ -966,7 +975,8 @@ The first proof should demonstrate the whole shape without solving every driver:
 
 1. A workspace folder represents `Main`.
 2. A named version appears as a second folder or mount.
-3. Editing files in either folder saves immediately to that version.
+3. Editing files in either folder captures immediately for that version, then
+   promotes through quarantine/reconcile before canonical history updates.
 4. dohc records a durability log and coalesced meaningful history.
 5. `.dohc/files.toml` controls tracked/versioned/synced/pinned/materialized
    behavior for a few path patterns.

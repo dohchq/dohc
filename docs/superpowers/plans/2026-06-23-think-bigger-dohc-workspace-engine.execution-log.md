@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `8110518` reported 6 issues;
-  hundred-eighth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `ff29e88` reported 8 issues;
+  hundred-ninth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2032,6 +2032,28 @@ Hundred-eighth pass:
     canonical quarantine/reconcile/promote validation.
   - Made thread-link target resolution scope-aware by keying resolvers on
     `(scopeKind, ThreadLinkTargetType)` or the full canonical link tuple.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest eight-issue rerun:
+  - Updated Current PR Snapshot to mirror the `ff29e88` eight-issue rerun and
+    hundred-ninth pending-fix state.
+  - Updated the docs link checker to respect fenced-code delimiter length and to
+    validate same-document `#fragment` links.
+  - Added bytewise UTF-8 `messageId` comparison to the read-cursor comparator.
+  - Tightened chat projection scope into a canonical tagged tuple with fixed
+    percent-encoding before digest generation.
+  - Defined canonical policy source ordinal for equal-specificity policy
+    conflicts.
+  - Restricted environment-variable secret injection to explicitly approved
+    low-sensitivity secrets and preferred brokered files, fds, or ephemeral
+    mounts for higher-sensitivity secrets.
+  - Updated the native filesystem proof slice to describe immediate capture
+    followed by quarantine/reconcile promotion before canonical history updates.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
