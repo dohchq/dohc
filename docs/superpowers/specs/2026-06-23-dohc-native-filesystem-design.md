@@ -268,7 +268,7 @@ move(workspaceId, versionId, fromPath, toPath, {
 replace(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   sourceObjectId,
-  targetPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   destinationObjectId,
   idempotencyKey
 })
@@ -325,7 +325,7 @@ the source `sourceObjectId` plus exactly one source freshness precondition and a
 idempotency key. Rename/move with
 `destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic
 overwrite uses `replace(...)`, which carries `sourceObjectId`,
-`destinationObjectId`, source freshness precondition, target freshness
+`destinationObjectId`, source freshness precondition, destination freshness
 precondition, and idempotency key. That gives temp-file-then-rename saves a
 one-call atomic replace path without allowing a path-only overwrite.
 
@@ -428,7 +428,7 @@ Examples:
 | `dist/**` | no | no | no | local | no |
 | `.cache/**` | no | no | no | local | no |
 | `scratch/**` | optional | optional | no | local | no |
-| `.env` | yes | yes | yes | local by explicit plaintext permission | yes |
+| `.env` | yes | yes | yes | local | yes |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
 output, and cache folders.

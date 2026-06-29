@@ -384,7 +384,9 @@ and minimal audit metadata. Secret-backed references, encrypted payloads, or
 redacted forms replace plaintext wherever audit/history access would otherwise
 have retained the original body.
 
-Edits must append immutable activity before replacing the current message body.
+Edits must append immutable activity and replace the current message body in the
+same transaction or serialized unit of work, with the activity written first
+inside that atomic unit.
 `ThreadMessage.body` is the latest renderable state, while
 `ThreadMessage.bodyRevision` identifies the current revision. The previous body,
 editor identity, and edit timestamp are preserved in append-only
@@ -797,16 +799,19 @@ A shared channel can expose selected workspace resources:
 - selected files/folders.
 - selected atoms/documents.
 - selected versions.
-- selected apps/dashboards.
 - selected chat threads.
+
+Later app/dashboard sharing can be added after those identities are part of the
+sharing substrate.
 
 The channel should not grant broad workspace access. Shared channel access must
 compose with normal file/folder/version visibility.
-Every message, link, and projected reference inside a shared channel must be
-re-authorized against normal workspace policy before exposure. An external
-viewer can see only the chat content and work artifacts explicitly shared with
-them; non-shared files, atoms, versions, app views, agent runs, and links remain
-hidden even if they are mentioned inside an otherwise shared thread.
+Every message, link, projected reference, and free-text mention inside a shared
+channel must be re-authorized or redacted against normal workspace policy before
+rendering, search, projection, notification materialization, or export. An
+external viewer can see only the chat content and work artifacts explicitly
+shared with them; non-shared files, atoms, versions, app views, agent runs, and
+links remain hidden even if they are mentioned inside an otherwise shared thread.
 
 User-facing preview before sharing:
 

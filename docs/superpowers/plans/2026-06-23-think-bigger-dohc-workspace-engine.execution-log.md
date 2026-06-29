@@ -273,7 +273,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 5 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 8 issues; local fixes are
   applied below and need a clean rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -1033,6 +1033,30 @@ Fifty-ninth pass:
   - Standardized native filesystem materialization terminology on `virtual`.
   - Scoped idempotency keys to API-originated write mutations and separated
     mounted-folder/file-watch deduplication from API idempotency semantics.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Sixtieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Standardized `replace(...)` destination freshness guards on
+    `destinationPrecondition` in the versioned workspace and native filesystem
+    specs.
+  - Kept `.env` within the existing materialization enum by using `local` in the
+    file-state table and leaving plaintext permission to secret-backed rules.
+  - Made P0A a hard prerequisite for PR 01 and later roadmap contract or
+    implementation work until its decision note is approved.
+  - Narrowed PR 02 stable-ID and migration scope to file/doc/chat substrate,
+    deferring app/data object-ID migration.
+  - Replaced the Phase 0 remote/cloud compare test with a same-workspace
+    concurrent local change comparison.
+  - Required message edit activity and body replacement to occur in one atomic
+    transaction or serialized unit of work.
+  - Required shared-channel rendering, search, projection, notifications, and
+    export to re-authorize or redact free-text mentions of hidden workspace
+    objects.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

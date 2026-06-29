@@ -345,7 +345,7 @@ move(workspaceId, versionId, fromPath, toPath, {
 replace(workspaceId, versionId, fromPath, toPath, {
   sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   sourceObjectId,
-  targetPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   destinationObjectId,
   idempotencyKey
 })
@@ -408,7 +408,7 @@ Delete requires the path's `targetObjectId`. Rename and move require the source
 `sourceObjectId` plus exactly one source freshness precondition. Rename/move with
 `destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic overwrite uses
 `replace(...)`, which requires `sourceObjectId`, `destinationObjectId`, one
-source precondition, one target precondition, and one idempotency key. This
+source precondition, one destination precondition, and one idempotency key. This
 models temp-file-then-rename saves without an extra read/round trip and without
 allowing a path-only delete/recreate substitution.
 All client-originated write-producing operations, including filesystem-captured

@@ -782,6 +782,10 @@ execution log covering:
 ### Phase 0 PRs
 
 These PRs precede PR 01 in the expansion roadmap.
+Do not begin PR 01 or any later roadmap PR until Phase 0 passes, and do not
+begin contract or implementation work until P0A writes and gets approval for the
+current-system inventory, storage/filesystem decision note, and unresolved
+blockers in the execution log.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -805,6 +809,8 @@ These PRs precede PR 01 in the expansion roadmap.
 - execution log contains concrete current-to-target deltas.
 - Phase 0 implementation path is chosen.
 - unresolved decisions are explicit blockers, not implied.
+- PR 01 and later roadmap work remain blocked until the P0A decision note is
+  approved.
 
 #### PR P0R - Rust Workspace Kernel Spike
 
@@ -1487,9 +1493,11 @@ default user behavior.
 - Add history/moment projection tied to writes/imports/agent runs where safe.
 - Add actor-neutral provenance fields, with file-level attribution allowed to
   be device/session-level for raw local writes.
-- Add stable object ID registry for existing file/doc/app/chat-like state where
+- Add stable object ID registry for existing file/doc/chat-like state where
   applicable.
-- Add migration/backfill for existing workspaces.
+- Add migration/backfill for existing file/doc/chat substrate in current
+  workspaces; defer app/data object-ID migration to the subsystem or migration
+  milestone that introduces those identities.
 
 **Tests:**
 
@@ -1627,7 +1635,7 @@ event a visible history item.
 - edit while dohc is closed, then launch and reconcile.
 - missed watcher event recovered by audit.
 - rename/move preserves or reconnects stable object ID where supported.
-- local change and remote/cloud change compare against common base.
+- local change and same-workspace concurrent change compare against common base.
 - batch many writes into one moment.
 - ignored files do not enter tracked history.
 
