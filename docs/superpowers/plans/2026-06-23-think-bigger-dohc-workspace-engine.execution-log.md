@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** see the newest owning PR00 pass entry below for the
-  latest completed rerun issue count and pending rerun state.
+- **PR00 CodeRabbit:** latest completed rerun on `2eefeb9` reported 3 issues;
+  hundred-fourth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -1936,6 +1936,23 @@ Hundred-third pass:
   - Restored `.env` table values to the supported `FilePolicy` vocabulary while
     clarifying in prose that `synced: true` means encrypted/opaque secret sync
     and `materialized: local` does not imply default plaintext exposure.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fourth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Normalized `WriteResult` so `kind` is the public variant discriminator and
+    variant-specific substates use `pendingState`, `rejectionState`,
+    `quarantineState`, and `conflictState` instead of a second generic `status`
+    discriminator.
+  - Updated Current PR Snapshot to mirror the `2eefeb9` three-issue rerun and
+    hundred-fourth pending-fix state.
+  - Narrowed shared-channel redaction so unshared links are hidden, while
+    explicitly shared links and work references stay visible only while their
+    server-side grant remains valid for the viewer and redaction scope.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

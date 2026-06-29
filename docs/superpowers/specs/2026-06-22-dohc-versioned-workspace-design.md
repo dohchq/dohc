@@ -148,7 +148,7 @@ type WriteResult =
       acceptedAt: UnixMsDecimalString
       replayUntil: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
-      status: 'pending_protection' | 'pending_canonicalization' | 'overdue_disposition'
+      pendingState: 'pending_protection' | 'pending_canonicalization' | 'overdue_disposition'
     }
   | {
       kind: 'rejected'
@@ -159,7 +159,7 @@ type WriteResult =
       reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
-      status: 'rejected_before_acceptance'
+      rejectionState: 'rejected_before_acceptance'
     }
   | {
       kind: 'quarantined'
@@ -171,7 +171,7 @@ type WriteResult =
       acceptedAt: UnixMsDecimalString
       quarantinedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
-      status: QuarantinedStatus
+      quarantineState: QuarantinedStatus
     }
   | {
       kind: 'terminal-retired'
@@ -204,7 +204,7 @@ type WriteResult =
       incomingObjectId?: string
       currentContentHash?: string
       incomingContentHash?: string
-      status: 'unresolved' | 'manual_resolution_required'
+      conflictState: 'unresolved' | 'manual_resolution_required'
     }
 ```
 

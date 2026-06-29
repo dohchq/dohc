@@ -1173,7 +1173,9 @@ channel must be re-authorized or redacted against normal workspace policy before
 rendering, search, projection, notification materialization, or export. An
 external viewer can see only the chat content and work artifacts explicitly
 shared with them; non-shared files, atoms, versions, app views, agent runs, and
-links remain hidden even if they are mentioned inside an otherwise shared thread.
+unshared links remain hidden even if they are mentioned inside an otherwise
+shared thread. Explicitly shared links and work references remain visible only
+when their server-side grant is still valid for that viewer and redaction scope.
 
 User-facing preview before sharing:
 
