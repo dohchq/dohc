@@ -310,7 +310,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 1 issue; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1322,6 +1322,18 @@ Seventy-second pass:
   - Made `ThreadActivityBase.actorId` the authoritative reaction actor identity.
   - Renamed chat edit/delete actions to `edit_chat_message` and
     `delete_chat_message` for API consistency.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-third pass:
+
+- Fixed CodeRabbit follow-up finding from the latest rerun:
+  - Aligned the native filesystem write contract with the versioned-workspace API
+    by representing create-only writes as the mutually exclusive
+    `precondition: expectedAbsent` token, not as a boolean field beside other
+    preconditions.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

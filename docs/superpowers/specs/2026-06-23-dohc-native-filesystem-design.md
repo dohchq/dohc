@@ -311,8 +311,9 @@ closed before filesystem or storage access.
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
 version, etag, content hash, or an absence assertion for creates.
-Create and overwrite calls must be explicit: `expectedAbsent: true` means
-"create only if no object exists at this path" and must omit `targetObjectId`.
+Create and overwrite calls must be explicit: `precondition: expectedAbsent` is
+the create-only precondition token, means "create only if no object exists at
+this path", and must omit `targetObjectId`.
 Overwrite must provide `targetObjectId` for the intended existing object plus
 exactly one causal freshness precondition such as `expectedEtag`,
 `expectedContentHash`, or `expectedBaseVersion`. `targetObjectId` binds object
@@ -323,7 +324,9 @@ conflict response rather than applying the mutation. Exactly one precondition
 mode may be supplied per write. Supplying no causal precondition, omitting
 `targetObjectId` for overwrite, or combining incompatible guards such as
 `expectedAbsent` with `expectedEtag` fails closed with a validation/conflict
-response and does not mutate canonical content.
+response and does not mutate canonical content. `expectedAbsent` is represented
+only as that mutually exclusive precondition mode, not as a separate boolean
+field beside another precondition.
 
 Conflict responses are secret-safe envelopes by default: they return only
 opaque object/version handles, hashes, operation kinds, and minimal conflict
