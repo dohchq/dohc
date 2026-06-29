@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
   constants as fsConstants,
   createReadStream,
   createWriteStream,
@@ -8,8 +9,8 @@ import {
   type Dirent,
 } from "node:fs";
 import {
+  copyFile,
   lstat,
-  link,
   mkdir,
   open,
   readFile,
@@ -70,6 +71,11 @@ const FILE_MUTATION_LOCK_STALE_MS = 30_000;
 const FILE_MUTATION_LOCK_TIMEOUT_MS = 35_000;
 const OPEN_READ_NOFOLLOW_FLAGS =
   fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+const OPEN_EXCLUSIVE_WRITE_NOFOLLOW_FLAGS =
+  fsConstants.O_WRONLY |
+  fsConstants.O_CREAT |
+  fsConstants.O_EXCL |
+  (fsConstants.O_NOFOLLOW ?? 0);
 const OPEN_DIRECTORY_FLAGS =
   fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
 const PROC_SELF_FD_DIR = "/proc/self/fd";
@@ -105,6 +111,16 @@ export class VersionedFileWorkspaceError extends Error {
 
 function assertSupportedVersionedFileWorkspacePlatform(): void {
   if (process.platform !== "linux") {
+    throw new VersionedFileWorkspaceError(
+      "unsupported-filesystem",
+      "Versioned file workspace requires Linux descriptor-relative filesystem operations.",
+    );
+  }
+  try {
+    const procSelfFd = lstatSync(PROC_SELF_FD_DIR);
+    if (!procSelfFd.isDirectory()) throw new Error("not a directory");
+    accessSync(PROC_SELF_FD_DIR, fsConstants.R_OK | fsConstants.X_OK);
+  } catch {
     throw new VersionedFileWorkspaceError(
       "unsupported-filesystem",
       "Versioned file workspace requires Linux descriptor-relative filesystem operations.",
@@ -1585,13 +1601,72 @@ async function renameFromVerifiedParent(input: {
   }
 }
 
-async function linkIntoVerifiedParent(input: {
+async function writeFileExclusiveIntoVerifiedParent(input: {
   rootDir: string;
   workspacePath: string;
-  tmpPath: string;
   targetPath: string;
   parentDir: string;
   parentIdentity: DirectoryIdentity;
+  data: string | Uint8Array;
+  mode?: number;
+}): Promise<void> {
+  await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
+  await assertDirectoryIdentity(input.parentDir, input.parentIdentity, input.workspacePath);
+  const parentHandle = await openDirectoryHandleForMutation(
+    input.parentDir,
+    input.parentIdentity,
+    input.workspacePath,
+  );
+  let targetDescriptorPath: string | undefined;
+  let targetHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let createdTarget = false;
+  let committedTarget = false;
+  try {
+    await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
+    await assertDirectoryIdentity(input.parentDir, input.parentIdentity, input.workspacePath);
+    targetDescriptorPath = await pathInVerifiedOpenDirectory({
+      rootDir: input.rootDir,
+      directory: parentHandle,
+      targetPath: input.targetPath,
+      workspacePath: input.workspacePath,
+    });
+    targetHandle = await open(
+      targetDescriptorPath,
+      OPEN_EXCLUSIVE_WRITE_NOFOLLOW_FLAGS,
+      (input.mode ?? 0o666) | 0o600,
+    );
+    createdTarget = true;
+    if (typeof input.data === "string") {
+      await targetHandle.writeFile(input.data, "utf8");
+    } else {
+      await targetHandle.writeFile(input.data);
+    }
+    if (input.mode !== undefined) await targetHandle.chmod(input.mode);
+    await targetHandle.sync();
+    committedTarget = true;
+    await syncDirectoryHandleBestEffort(parentHandle);
+  } catch (error) {
+    await targetHandle?.close().catch(() => undefined);
+    targetHandle = undefined;
+    if (createdTarget && !committedTarget && targetDescriptorPath) {
+      await rm(targetDescriptorPath, { force: true }).catch(() => undefined);
+      await syncDirectoryHandleBestEffort(parentHandle).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await targetHandle?.close();
+    await parentHandle?.close();
+  }
+}
+
+async function copyFileExclusiveIntoVerifiedParent(input: {
+  rootDir: string;
+  workspacePath: string;
+  sourcePath: string;
+  targetPath: string;
+  parentDir: string;
+  parentIdentity: DirectoryIdentity;
+  mode?: number;
 }): Promise<void> {
   await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
   await assertDirectoryIdentity(input.parentDir, input.parentIdentity, input.workspacePath);
@@ -1603,15 +1678,14 @@ async function linkIntoVerifiedParent(input: {
   try {
     await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
     await assertDirectoryIdentity(input.parentDir, input.parentIdentity, input.workspacePath);
-    await link(
-      input.tmpPath,
-      await pathInVerifiedOpenDirectory({
-        rootDir: input.rootDir,
-        directory: parentHandle,
-        targetPath: input.targetPath,
-        workspacePath: input.workspacePath,
-      }),
-    );
+    const targetDescriptorPath = await pathInVerifiedOpenDirectory({
+      rootDir: input.rootDir,
+      directory: parentHandle,
+      targetPath: input.targetPath,
+      workspacePath: input.workspacePath,
+    });
+    await copyFile(input.sourcePath, targetDescriptorPath, fsConstants.COPYFILE_EXCL);
+    await syncFileDurably(targetDescriptorPath, input.mode);
     await syncDirectoryHandleBestEffort(parentHandle);
   } finally {
     await parentHandle?.close();
@@ -1804,14 +1878,17 @@ async function restorePreservedLivePreimage(input: {
   preserved: PreservedLivePreimage;
 }): Promise<void> {
   if (!input.preserved.preservedPath) return;
-  await renameIntoVerifiedParent({
+  await copyFileExclusiveIntoVerifiedParent({
     rootDir: input.rootDir,
     workspacePath: input.workspacePath,
-    tmpPath: input.preserved.preservedPath,
+    sourcePath: input.preserved.preservedPath,
     targetPath: input.targetPath,
     parentDir: input.preserved.parentDir,
     parentIdentity: input.preserved.parentIdentity,
+    ...(input.preserved.mode !== undefined ? { mode: input.preserved.mode } : {}),
   });
+  await rm(input.preserved.preservedPath, { force: true }).catch(() => undefined);
+  await syncParentDirectoryBestEffort(input.preserved.preservedPath).catch(() => undefined);
 }
 
 async function discardPreservedLivePreimage(input: {
@@ -1918,36 +1995,26 @@ async function writeFileAtomicAfterPreservingPreimage(input: {
     expected: input.expected,
     operation: input.operation,
   });
-  const tmp = join(input.tmpDir, `write-${process.pid}-${randomUUID()}.tmp`);
-  let published = false;
   try {
-    await writeFileDurably(tmp, input.data, preserved.mode ?? 0o666, preserved.mode);
-    await syncParentDirectoryBestEffort(tmp);
-    await linkIntoVerifiedParent({
+    await writeFileExclusiveIntoVerifiedParent({
       rootDir: input.rootDir,
       workspacePath: input.workspacePath,
-      tmpPath: tmp,
       targetPath: input.path,
       parentDir: preserved.parentDir,
       parentIdentity: preserved.parentIdentity,
+      data: input.data,
+      ...(preserved.mode !== undefined ? { mode: preserved.mode } : {}),
     });
-    published = true;
-    await rm(tmp, { force: true }).catch(() => undefined);
     await discardPreservedLivePreimage({ preserved });
   } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined);
-    if (!published) {
-      await restorePreservedLivePreimage({
-        rootDir: input.rootDir,
-        workspacePath: input.workspacePath,
-        targetPath: input.path,
-        preserved,
-      }).catch((restoreError) => {
-        attachRollbackError(error, restoreError);
-      });
-    } else {
-      await discardPreservedLivePreimage({ preserved });
-    }
+    await restorePreservedLivePreimage({
+      rootDir: input.rootDir,
+      workspacePath: input.workspacePath,
+      targetPath: input.path,
+      preserved,
+    }).catch((restoreError) => {
+      attachRollbackError(error, restoreError);
+    });
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw staleLiveFileChanged(input.workspacePath, input.operation);
     }
@@ -3173,7 +3240,9 @@ async function rollbackPendingFileMutation(input: {
     return;
   }
 
-  if (phaseHasCompletedDiskMutation(journal.phase) || journal.phase === "disk-mutating") {
+  if (journal.phase === "disk-mutating") {
+    await restoreBackupForJournal(rootDir, journal, fence);
+  } else if (phaseHasCompletedDiskMutation(journal.phase)) {
     if (!(await diskPostimageStillMatches(rootDir, journal))) {
       await failPendingMutationRecoveryConflict(rootDir, journal, fence);
     }
@@ -3415,7 +3484,11 @@ function createVersionedFileWorkspaceWithHooks(
   const canonicalRoot = canonicalWorkspaceRoot(inputRootDir);
   const rootDir = canonicalRoot.rootDir;
   const rootIdentity = canonicalRoot.identity;
-  const changeAuthor = parseChangeAuthor(author);
+  let changeAuthor: ChangeAuthor | undefined;
+  const configuredChangeAuthor = (): ChangeAuthor => {
+    changeAuthor ??= parseChangeAuthor(author);
+    return changeAuthor;
+  };
   const versionIdFactory = createId as VersionedTextStoreOptions["createId"] | undefined;
   const versions = createVersionedTextStore(rootDir, {
     ...(nowMs ? { nowMs } : {}),
@@ -3507,6 +3580,7 @@ function createVersionedFileWorkspaceWithHooks(
     fence: MutationFence,
     preimage?: DiskPreimageCapture,
   ): Promise<VersionedFileWriteResult> {
+    const authorForChange = configuredChangeAuthor();
     await recoverPendingMutationsForWorkspace(fence);
     assertWritableTextSize(path, input.text);
     const absolute = await resolveContainedWorkspacePath(rootDir, path);
@@ -3520,7 +3594,7 @@ function createVersionedFileWorkspaceWithHooks(
     const after = snapshotForText(input.text);
     const historyId = nextHistoryId();
     const changeSet = createTextFileChangeSet({
-      author: changeAuthor,
+      author: authorForChange,
       summary: input.summary ?? defaultSummary(path, input.provenance),
       ...(input.provenance ? { provenance: input.provenance } : {}),
       path,
@@ -3680,6 +3754,7 @@ function createVersionedFileWorkspaceWithHooks(
     fence: MutationFence,
     preimage?: DiskPreimageCapture,
   ): Promise<VersionedFileDeleteResult> {
+    const authorForChange = configuredChangeAuthor();
     await recoverPendingMutationsForWorkspace(fence);
     const absolute = await resolveContainedWorkspacePath(rootDir, path);
     const tmpDir = await ensureInternalTempDir(rootDir);
@@ -3695,7 +3770,7 @@ function createVersionedFileWorkspaceWithHooks(
     const after: FileChangeSnapshot | null = null;
     const historyId = nextHistoryId();
     const changeSet = createTextFileChangeSet({
-      author: changeAuthor,
+      author: authorForChange,
       summary: input.summary ?? defaultDeleteSummary(path, input.provenance),
       ...(input.provenance ? { provenance: input.provenance } : {}),
       path,

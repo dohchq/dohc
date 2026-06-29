@@ -99,7 +99,8 @@ let descriptorRelativeFdDirCache:
   | undefined;
 
 function historyLockAgeMs(timestampMs: number, nowMs = Date.now()): number {
-  if (!Number.isFinite(timestampMs) || timestampMs > nowMs) return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(timestampMs)) return Number.POSITIVE_INFINITY;
+  if (timestampMs > nowMs) return 0;
   return nowMs - timestampMs;
 }
 
@@ -188,6 +189,13 @@ function assertSafeHistoryId(id: string): string {
     throw new Error(`Invalid history record id: ${id}`);
   }
   return id;
+}
+
+function assertSafeRecordedAtMs(recordedAtMs: number): number {
+  if (!Number.isSafeInteger(recordedAtMs) || recordedAtMs < 0) {
+    throw new Error(`Invalid history record timestamp: ${recordedAtMs}`);
+  }
+  return recordedAtMs;
 }
 
 function assertSafeHistoryNamespace(namespace: string): string {
@@ -1020,6 +1028,7 @@ function historyRecordFromChangeSet(
   opts: { id: string; recordedAtMs: number },
 ): HistoryRecord {
   assertSafeHistoryId(opts.id);
+  assertSafeRecordedAtMs(opts.recordedAtMs);
   return {
     id: opts.id,
     recordedAtMs: opts.recordedAtMs,

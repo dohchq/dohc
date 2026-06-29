@@ -393,16 +393,19 @@ describe("versioned file workspace", () => {
   });
 
   itAnchoredFilesystem("rejects invalid configured authors before journaling", async () => {
-    expect(() =>
-      createTestableVersionedFileWorkspace(
-        {
-          rootDir: root,
-          workspaceId: "workspace-a",
-          author: { kind: "local", label: " " } as never,
-        },
-        {},
-      ),
-    ).toThrow(/non-empty/i);
+    const ws = createTestableVersionedFileWorkspace(
+      {
+        rootDir: root,
+        workspaceId: "workspace-a",
+        author: { kind: "local", label: " " } as never,
+      },
+      {},
+    );
+
+    await expect(
+      ws.writeTextFile({ path: "notes/invalid-author.md", text: "nope\n" }),
+    ).rejects.toThrow(/non-empty/i);
+    await expect(ws.history.list()).resolves.toEqual([]);
   });
 
   itAnchoredFilesystem("rejects invalid workspace ids before storage setup", async () => {
@@ -1223,7 +1226,10 @@ describe("versioned file workspace", () => {
     await expect(readFile(join(root, "scripts/run.sh"), "utf8")).resolves.toBe(
       "#!/bin/sh\necho new\n",
     );
-    expect((await stat(join(root, "scripts/run.sh"))).mode & 0o777).toBe(originalMode);
+    const replaced = await stat(join(root, "scripts/run.sh"));
+    expect(replaced.mode & 0o777).toBe(originalMode);
+    expect(replaced.nlink).toBe(1);
+    expect(await readInternalTempEntries()).toEqual([]);
   });
 
   itAnchoredFilesystem("rejects existing non-regular text targets before atomic replace", async () => {
@@ -1441,6 +1447,44 @@ describe("versioned file workspace", () => {
       }),
     ).resolves.toMatchObject({ text: "Crashed\n" });
     await expect(readFile(backupPath, "utf8")).resolves.toBe("Original\n");
+  });
+
+  itAnchoredFilesystem("rolls back an incomplete disk-mutating journal from its backup", async () => {
+    const counters = createWorkspaceTestCounters();
+    const ws = workspace(counters);
+    const written = await ws.writeTextFile({
+      path: "notes/today.md",
+      text: "Original\n",
+    });
+    await writeFile(join(root, "notes/today.md"), "Partial crash\n", "utf8");
+    const backupPath = join(root, ".dohc", "tmp", "backup-disk-mutating-crash.bak");
+    await mkdir(dirname(backupPath), { recursive: true });
+    await writeFile(backupPath, "Original\n", "utf8");
+    await writePendingMutationJournalForTest({
+      id: "pending_00000000-0000-4000-8000-000000000018",
+      versionId: written.versionId,
+      path: "notes/today.md",
+      phase: "disk-mutating",
+      backupPath,
+      beforeText: "Original\n",
+      afterText: "Crashed\n",
+      historyId: "history_disk_mutating_crash",
+    });
+
+    const restarted = workspace(counters);
+
+    await expect(restarted.readTextFile({ path: "notes/today.md" })).resolves.toBe(
+      "Original\n",
+    );
+    await expect(
+      restarted.versions.readTextFile({
+        versionId: written.versionId,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Original\n" });
+    await expectHistoryIds(restarted, [written.history.id]);
+    expect(await readPendingMutationEntries()).toEqual([]);
+    await expect(readFile(backupPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   itAnchoredFilesystem("recovers a pending write journal with an empty text preimage", async () => {

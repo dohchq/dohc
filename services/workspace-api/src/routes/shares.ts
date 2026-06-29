@@ -630,8 +630,8 @@ function nullableNumericStat(value: string | number | null | undefined): number 
 async function cleanupStaleShareRevocationDisconnectEvents(pool: pg.Pool): Promise<void> {
   await pool.query(
     `delete from workspace_events
-      where ctid in (
-        select ctid
+      where id in (
+        select id
         from workspace_events
         where kind = 'share.revocation.disconnect_completed'
           and nullif(payload->>'completedAt', '') is not null

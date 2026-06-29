@@ -341,7 +341,8 @@ describe("revokeShare admin disconnect", () => {
 
     expect(queries).toHaveLength(1);
     expect(queries[0]?.text).toContain("delete from workspace_events");
-    expect(queries[0]?.text).toContain("where ctid in");
+    expect(queries[0]?.text).toContain("where id in");
+    expect(queries[0]?.text).toContain("select id");
     expect(queries[0]?.text).toContain("limit $2");
     expect(queries[0]?.text).toContain("~ $3");
     expect(queries[0]?.text).toContain("$4");

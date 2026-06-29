@@ -58,7 +58,7 @@ approval.
 | P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | automated review rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 8 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 9 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -2881,6 +2881,17 @@ PATH=/tmp/dohc-node-v24.18.0/bin:$PATH TMPDIR=/tmp pnpm --filter @dohc/workspace
 PATH=/tmp/dohc-node-v24.18.0/bin:$PATH TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
 PATH=/tmp/dohc-node-v24.18.0/bin:$PATH TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
 git diff --check
+# automated review follow-up fixes against bfc0ccc
+# First parallel focused-test launch used an unquoted PATH assignment and failed before tests because the inherited PATH contains a Windows path segment with a space.
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test src/changeSetStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/versionedFileWorkspace.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test src/tools.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts # first run exposed expected ctid->id assertion update
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
 ```
 
 ### E2E / Visual / Manual QA
@@ -2906,20 +2917,42 @@ git diff --check
 
 ### automated review
 
-- Status: fix loop active; latest local fixes against `52e9a9c` complete and
+- Status: fix loop active; latest local fixes against `bfc0ccc` complete and
   rerun pending.
-- Findings: latest completed pass raised 8 issues against commit `52e9a9c`.
-  Previous completed passes raised 7 issues against commit `8fe4727`, 6 issues
-  against commit `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues
-  against commit `fa05e4f`, 7 issues against commit `d37c106`, 7 issues against
-  commit `3b3b575`, 14 issues against commit `db9d04a`, 10 issues against
-  commit `d4d734a`, 8 issues against commit `f57278b`, 12 issues against commit
-  `16362a9`, 10 issues against commit `4288332`, 12 issues against commit
-  `36aa361`, 15 issues against commit `4b91836`, 8 issues against commit
-  `112a935`, 10 issues against commit `dd77390`, 5 issues against commit
-  `1c49720`, 10 issues against commit `28e093d`, and 9 issues against commit
-  `8e1fa68`.
+- Findings: latest completed pass raised 9 issues against commit `bfc0ccc`.
+  Previous completed passes raised 8 issues against commit `52e9a9c`, 7 issues
+  against commit `8fe4727`, 6 issues against commit `7bfd8e6`, 8 issues against
+  commit `db2c93e`, 10 issues against commit `fa05e4f`, 7 issues against commit
+  `d37c106`, 7 issues against commit `3b3b575`, 14 issues against commit
+  `db9d04a`, 10 issues against commit `d4d734a`, 8 issues against commit
+  `f57278b`, 12 issues against commit `16362a9`, 10 issues against commit
+  `4288332`, 12 issues against commit `36aa361`, 15 issues against commit
+  `4b91836`, 8 issues against commit `112a935`, 10 issues against commit
+  `dd77390`, 5 issues against commit `1c49720`, 10 issues against commit
+  `28e093d`, and 9 issues against commit `8e1fa68`.
 - Latest fixes:
+  - Versioned file workspace validates configured authors at first durable
+    mutation, before journaling, rather than requiring construction to throw.
+  - History lock age handling treats future timestamps as fresh locks, while
+    invalid timestamps remain stale/reclaimable.
+  - History records reject non-safe or negative `recordedAtMs` values before
+    they can become filenames or index entries.
+  - Incomplete `disk-mutating` journals now roll back from their verified backup
+    without requiring the crashed postimage to be present.
+  - Versioned file workspace construction now fails closed when `/proc/self/fd`
+    is missing or inaccessible, even on Linux.
+  - MCP durable-history tests that depend on recordable writes are gated on
+    durable history support.
+  - Share revocation completed-event cleanup deletes by stable event `id`
+    instead of `ctid`.
+  - Preserved live preimages are restored with no-clobber semantics and are not
+    renamed over a recreated target.
+  - Versioned file publish no longer creates a hard-link temp path, so a crash
+    after publish cannot leave the live file with an extra link count.
+  - Focused tests now cover disk-mutating rollback, invalid-author mutation
+    rejection, safe history timestamps, future-dated lock waiting, stable-id
+    cleanup SQL, and no extra hard link after overwrite.
+- Previous pass fixes against commit `52e9a9c`:
   - Removed Node/Linux-only versioned-file-workspace value exports from the root
     package barrel and exposed the runtime file workspace through an explicit
     subpath export.
@@ -2939,8 +2972,9 @@ git diff --check
 - Previous pass fixes against commit `8fe4727`:
   - P0R benchmark docs now state that the recorded Rust/TypeScript numbers are
     comparable only under the captured Node v24.18.0/Corepack toolchain.
-  - Future-dated filesystem history lock timestamps are treated as invalid/stale
-    while live owner PIDs still prevent unsafe reclaim.
+  - Future-dated filesystem history lock timestamps were temporarily treated as
+    invalid/stale while live owner PIDs still prevented unsafe reclaim; the
+    later `bfc0ccc` follow-up corrected future timestamps to remain fresh.
   - Persisted versioned-text snapshots and moments again enforce the versioned
     text size cap as well as UTF-8 round-trip safety.
   - MCP `create_site` reports retained visible mutations after any file publish,
@@ -3299,13 +3333,14 @@ git diff --check
   - Added hash-addressed internal history blobs for oversized text snapshots and
     used them to restore large text writes/deletes when inline snapshot text is
     intentionally unavailable.
-  - Bounded completed share-revocation cleanup deletes with a limited `ctid`
-    subselect and added an active backlog partial index for pending/claimed
-    revocation scans.
+  - Bounded completed share-revocation cleanup deletes and added an active
+    backlog partial index for pending/claimed revocation scans; the later
+    `bfc0ccc` follow-up switched the bounded cleanup selector from `ctid` to
+    stable event `id`.
   - Changed pending file-mutation recovery to sweep the root journal directory
     and dispatch each journal to its owning workspace history namespace.
-  - Validated configured workspace authors at creation so malformed author
-    shapes cannot enter ChangeSets or pending journals.
+  - Validated configured workspace authors before durable mutation so malformed
+    author shapes cannot enter ChangeSets or pending journals.
 - Previous pass fixes against commit `193fa89`:
   - Made store-lock reclaimer owner metadata best-effort for lease inspection so
     malformed or unreadable `.reclaimer/owner.json` is treated as no parsed
@@ -4286,6 +4321,15 @@ git diff --check
   not match the active workspace.
 - File workspace creation is explicitly Linux-only until the Rust kernel lane
   provides portable descriptor-relative mutation support.
+- File workspace creation now also verifies that `/proc/self/fd` exists and is
+  accessible before enabling anchored descriptor-relative mutation.
+- File write publish now creates the target with exclusive no-follow open under
+  a verified parent fd instead of linking a temp file into place; completed
+  writes do not leave an extra hard link to the live file.
+- Preserved live preimage restore copies back only when the target path is still
+  absent, so a concurrently recreated file is not clobbered during rollback.
+- Incomplete `disk-mutating` recovery rolls back from the verified preimage
+  backup without requiring a completed postimage.
 - History index reads validate `index.json` containment, not only the parent
   history directory.
 - Scan no longer treats `.git`, `node_modules`, nested `.dohc`, or SQLite
@@ -4313,6 +4357,14 @@ git diff --check
     workspace-contracts, and desktop typechecks: passed locally.
   - workspace-postgres typecheck: passed locally after share-revocation retry
     index updates.
+  - Latest `bfc0ccc` follow-up focused reruns with Node v24.18.0 and
+    `TMPDIR=/tmp`: workspace-history `changeSetStore.test.ts` 35 tests in
+    12.22s; workspace-engine `versionedFileWorkspace.test.ts` 78 tests in
+    34.31s; MCP `tools.test.ts` 48 tests in 6.97s; workspace-api
+    `sharesRevocation.test.ts` 18 tests in 0.573s after updating the expected
+    cleanup query from `ctid` to stable `id`.
+  - Latest `bfc0ccc` follow-up typechecks passed for workspace-engine,
+    workspace-history, workspace-api, and MCP.
 - Machine/CI context: local Codex machine. Earlier compatibility reruns used
   downloaded Node v24.18.0 with Corepack; the latest follow-up reruns used the
   repository pnpm toolchain under Node v18.19.1 / pnpm 10.24.0, which emits the

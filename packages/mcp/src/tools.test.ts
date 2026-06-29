@@ -15,7 +15,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { addFileChanges, createChangeSet, createLocalChangeAuthor } from "@dohc/workspace-core";
-import { createChangeSetStore } from "@dohc/workspace-history";
+import {
+  createChangeSetStore,
+  isDurableChangeSetRecordingSupported,
+} from "@dohc/workspace-history";
 import type { FetchLike } from "@dohc/workspace-sync";
 import {
   createWorkspaceDirectory,
@@ -84,6 +87,8 @@ async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promi
     }
   }
 }
+
+const itDurableHistory = isDurableChangeSetRecordingSupported() ? it : it.skip;
 
 // The traversal vectors EVERY path-taking tool must refuse: parent escape,
 // percent-encoded escape (single and double), an absolute path, and the
@@ -872,7 +877,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("preserves file modes and refuses symlink targets on workspace writes", async () => {
+  itDurableHistory("preserves file modes and refuses symlink targets on workspace writes", async () => {
     await withWorkspace(async (ctx) => {
       const modePath = join(ctx.root, "scripts/run.sh");
       await mkdir(dirname(modePath), { recursive: true });
@@ -975,7 +980,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("retains write/create/import mutations if the history record cannot be written", async () => {
+  itDurableHistory("retains write/create/import mutations if the history record cannot be written", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
       await writeFile(join(ctx.root, "existing.txt"), "before\n");
@@ -1034,7 +1039,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("does not report retained mutations when the visible write phase fails", async () => {
+  itDurableHistory("does not report retained mutations when the visible write phase fails", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "blocked-parent"), "not a directory\n");
       await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");

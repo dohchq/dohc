@@ -129,6 +129,21 @@ describeAnchoredHistory("changeSetStore persistence", () => {
     await expect(store.get("../escape")).rejects.toThrow(/invalid history record id/i);
   });
 
+  it("rejects unsafe record timestamps before they can become filenames", async () => {
+    const store = createChangeSetStore(root);
+    for (const [index, recordedAtMs] of [
+      -1,
+      1.5,
+      Number.POSITIVE_INFINITY,
+      Number.NaN,
+    ].entries()) {
+      await expect(
+        store.record(userEdit(), { id: `bad-time-${index}`, recordedAtMs }),
+      ).rejects.toThrow(/invalid history record timestamp/i);
+    }
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
   it("rejects reserved history namespace path segments", async () => {
     expect(() => createChangeSetStore(root, { namespace: "" })).toThrow(
       /invalid history namespace/i,
@@ -919,7 +934,7 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
     await expect(store.list()).resolves.toHaveLength(1);
   });
 
-  it("treats future-dated filesystem history locks as stale before recording", async () => {
+  it("does not reclaim a future-dated filesystem history lock before recording", async () => {
     const historyDir = join(root, ".dohc", "history");
     const lockDir = join(historyDir, "index.json.lock");
     const token = "future-history-lock";
@@ -938,8 +953,24 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
       "utf8",
     );
     const store = createChangeSetStore(root);
+    let settled = false;
+    let pending: Promise<void> | undefined;
+    try {
+      pending = store
+        .record(userEdit(), { id: "future-lock", recordedAtMs: 3000 })
+        .then(() => {
+          settled = true;
+        });
 
-    await store.record(userEdit(), { id: "future-lock", recordedAtMs: 3000 });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      await expect(readdir(lockDir)).resolves.toContain(token);
+      expect(settled).toBe(false);
+      await rm(lockDir, { recursive: true, force: true });
+      await pending;
+    } finally {
+      await rm(lockDir, { recursive: true, force: true });
+      await pending?.catch(() => undefined);
+    }
 
     await expect(store.list()).resolves.toHaveLength(1);
   });
