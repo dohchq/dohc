@@ -58,7 +58,8 @@ Each version behaves like a live file workspace:
 - files save immediately.
 - history is automatic.
 - humans and agents follow the same write rules.
-- if an actor has write permission, the actor can edit.
+- if the server-derived actor identity has workspace/version/path authority and
+  every protection gate passes, the actor can edit.
 - dohc records who or what changed the workspace.
 - dohc can restore earlier states.
 
@@ -310,10 +311,11 @@ Normal filesystem saves are translated into the same write contract as
 materialized, the engine records exactly one causal token for that path, such
 as the last seen base version, etag, content hash, or absence assertion. When
 the file is saved or captured, the filesystem path must submit exactly one valid
-causal precondition with the incoming bytes. Missing preconditions, multiple
-incompatible guards, or stale tokens fail closed and return the same
-deterministic current-vs-incoming conflict behavior as the API write flow
-instead of blindly overwriting canonical state.
+causal precondition with the incoming bytes. Missing preconditions or multiple
+incompatible guards are malformed request/protocol errors and fail closed before
+the conflict path. A well-formed but stale causal token is a real write conflict
+and returns the same deterministic current-vs-incoming conflict behavior as the
+API write flow instead of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
@@ -391,7 +393,8 @@ not a freshness guard by itself. If the precondition or target object does not
 match the current workspace/version/path state, the engine returns a
 deterministic secret-safe conflict envelope instead of mutating canonical state.
 Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
-providing multiple incompatible preconditions fails closed.
+providing multiple incompatible preconditions is a validation/protocol error that
+fails closed before conflict materialization.
 
 Conflict envelopes return only opaque object/version handles, hashes, operation
 kinds, and minimal conflict status by default. Policy decisions, explanatory

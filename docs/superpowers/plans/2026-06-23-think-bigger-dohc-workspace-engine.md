@@ -2268,7 +2268,8 @@ substrate without data loss.
 
 **Scope:**
 
-- Migrate current chat threads if any.
+- Migrate current chat threads if any, including messages, read state,
+  membership/visibility, links, and shared-channel metadata.
 - Migrate atoms/docs into Main version.
 - Migrate apps/sites/data into file policy defaults.
 - Preserve existing shares.
@@ -2281,6 +2282,7 @@ substrate without data loss.
 - migration idempotency.
 - migration rollback.
 - legacy share compatibility.
+- legacy chat membership/link/read-state compatibility.
 - legacy agent run/history compatibility.
 
 **E2E:**

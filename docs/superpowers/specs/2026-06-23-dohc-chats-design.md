@@ -253,6 +253,22 @@ type DmChatThread = ChatThreadBase & {
 }
 
 type ChatThread = ChannelChatThread | DmChatThread
+
+type ThreadLink = {
+  id: string
+  workspaceId: string
+  threadId: string
+  targetType: string
+  targetWorkspaceId: string
+  targetId: string
+  targetVersionRef?: VersionRef
+  shareGrantId?: string
+  visibilityScope?: string
+  createdById: string
+  createdAt: UnixMsDecimalString
+  deletedAt?: UnixMsDecimalString
+  deletedById?: string
+}
 ```
 
 `ThreadLink` records are the canonical source for linked work.
@@ -264,6 +280,11 @@ or serialized unit of work, then rebuild/invalidate `ChatThread.linkedWork`,
 projections, search, and notifications from canonical links. If the derived list
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
+Links are never hard-deleted in normal operation: removal sets `deletedAt` and
+`deletedById`, and link visibility reads only non-tombstoned records. A link is
+uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
+the target tuple `(targetWorkspaceId, targetType, targetId, targetVersionRef,
+shareGrantId, visibilityScope)` captured on the activity event.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same
@@ -403,6 +424,18 @@ type ThreadActivity = {
   workspaceId: string
   threadId: string
   messageId?: string
+  linkId?: string
+  linkTarget?: {
+    targetWorkspaceId: string
+    targetType: string
+    targetId: string
+    targetVersionRef?: VersionRef
+    shareGrantId?: string
+    visibilityScope?: string
+  }
+  reactionId?: string
+  reactionKey?: string
+  reactionActorId?: string
   kind:
     | 'message_created'
     | 'message_edited'
@@ -426,6 +459,12 @@ reconstruct the revision trail from these events. Normal chat rendering, search,
 notifications, projections, and summaries use the current `ThreadMessage.body`
 unless policy explicitly materializes historical revisions. Legal erasure may
 replace `previousBody` with a redacted snapshot while retaining edit provenance.
+For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
+audit/replay can identify the exact affected link even after the derived
+`linkedWork` cache is rebuilt. For `reaction_added` and `reaction_removed`,
+events must carry either a stable `reactionId` or the deterministic reaction
+tuple `(messageId, reactionActorId, reactionKey)` so add/remove replay affects
+one exact reaction.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
@@ -525,18 +564,21 @@ filesystem model. It is not a source-backed policy file, not an allowlisted
 user-content path, and is not re-ingested as canonical user content.
 The displayed `v1-<digest>.md` filename is the canonical deterministic
 projection path shape; the raw thread id must not be used as a projection
-filename. Projection writers must map the canonical thread id to a
-deterministic filename using one fixed algorithm across all runtimes: compute
-`sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind)`, where
-each field is first normalized to Unicode NFC and encoded as UTF-8 bytes. Then
-encode the digest as lowercase RFC 4648 base32 with no padding, and write
-`.dohc/chats/v1-<digest>.md`. The input framing, Unicode normalization,
-UTF-8 encoding, hash, lowercase digest encoding, no-padding rule, and `v1-`
-prefix are the canonical contract and must not vary by implementation. The
-projection must store or otherwise verify
-the exact canonical thread id, workspace id, projection kind, and derived
-filename in metadata before writing, and must reject ambiguous ids or any
-computed filename that already maps to a different canonical tuple. Projection
+filename. Projection writers must map the canonical thread id and visibility
+scope to a deterministic filename using one fixed algorithm across all runtimes.
+The projection scope is `owner` for the workspace-private internal projection,
+or a grant-aware value such as `shareGrant:<grantId>:<visibilityScopeHash>` for
+shared-channel/export materializations. Compute
+`sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind + "\0" +
+projectionScope)`, where each field is first normalized to Unicode NFC and
+encoded as UTF-8 bytes. Then encode the digest as lowercase RFC 4648 base32 with
+no padding, and write `.dohc/chats/v1-<digest>.md`. The input framing, Unicode
+normalization, UTF-8 encoding, hash, lowercase digest encoding, no-padding rule,
+grant-aware projection scope, and `v1-` prefix are the canonical contract and
+must not vary by implementation. The projection must store or otherwise verify
+the exact canonical thread id, workspace id, projection kind, projection scope,
+and derived filename in metadata before writing, and must reject ambiguous ids or
+any computed filename that already maps to a different canonical tuple. Projection
 writers must reject path separators, relative path segments, control characters,
 reserved names, and any other unsafe input before constructing the projection
 path, so a crafted thread id cannot traverse directories or overwrite another
