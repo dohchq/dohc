@@ -273,7 +273,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 5 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
   applied below and need a clean rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -1076,6 +1076,26 @@ Sixty-first pass:
     projection scope in the digest input.
   - Broadened PR 21 chat migration scope to preserve read state,
     membership/visibility, links, and shared-channel metadata.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Sixty-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Rewrote the content-driver checklist with concise direct labels.
+  - Required `ThreadLink` create/update paths to validate cross-workspace grants,
+    target identity, and visibility scope against trusted server-side grant state
+    before persistence.
+  - Extended server/engine-derived chat authorization to edits, deletes,
+    reactions, read-state updates, worker mutations, notifications, summaries,
+    and projections.
+  - Limited channel attachment examples to currently defined stable workspace
+    object types, with future object types allowed only after they are defined in
+    the roadmap.
+  - Normalized remaining shared-channel and side-rail examples to file, folder,
+    and version resources so current examples use defined identities.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

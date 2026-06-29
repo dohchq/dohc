@@ -468,13 +468,13 @@ The principle:
 
 Every content driver should be evaluated against this contract:
 
-1. Can it take an immutable snapshot or hash-committed state?
-2. Can it identify the base/fork point between versions?
-3. Can it diff two states?
-4. Can it merge from a common base, or honestly produce a conflict?
-5. Can it project to files, UI, search, API, or export?
-6. Can writable projections be ingested safely?
-7. Can it recover or restore to a known-good state?
+1. Take an immutable snapshot or hash-committed state.
+2. Identify the base/fork point between versions.
+3. Diff two states.
+4. Merge from a common base, or honestly produce a conflict.
+5. Project to files, UI, search, API, or export.
+6. Ingest writable projections safely.
+7. Recover or restore to a known-good state.
 
 If a driver cannot satisfy part of the contract, dohc must degrade honestly:
 

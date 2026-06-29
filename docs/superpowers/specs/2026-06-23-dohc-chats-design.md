@@ -59,6 +59,11 @@ other service-owned materialized chat context for that exception so stale shared
 data does not remain exposed after access changes. Thread activity records are
 append-only events keyed by `(workspaceId, threadId, activityId)` or an
 equivalent workspace/thread scoped sequence.
+`ThreadLink` create/update paths must validate the target workspace/resource
+identity, share/grant id, and visibility scope against trusted server-side grant
+state before any link or activity record is persisted. Client-provided grant
+fields are hints only; missing, expired, revoked, forged, mismatched, or
+ambiguous grants fail closed before persistence.
 
 The UI can say chat. The system should not inherit a stream-first data model.
 
@@ -184,11 +189,11 @@ Example:
 #finance
   linked to:
   - data/finance/**
-  - apps/finance-dashboard/
+  - reports/finance-dashboard.md
   - docs/budget-notes.md
 ```
 
-This lets dohc show relevant chats from the file, folder, app, or version being
+This lets dohc show relevant chats from the file, folder, or version being
 viewed.
 
 ## DMs and small group chats
@@ -524,6 +529,12 @@ enforce workspace scope on every entity and result:
 - `read_chat`
 - `create_chat`
 - `reply_to_chat`
+- `edit_message`
+- `delete_message`
+- `add_reaction`
+- `remove_reaction`
+- `mark_thread_read`
+- `update_read_state`
 - `link_chat_to_work`
 - `summarize_chat`
 
@@ -531,9 +542,10 @@ Callers must not be able to assert user/workspace identity, widen chat
 visibility, or link a chat to work they cannot access. Agent messages use the
 same authorization model as human messages; the display label is different, not
 the authority model.
-Chat writes and links must also respect user locks, folder/atom/file sharing
-boundaries, protected work, and skill-turn/review gates before persisting
-messages, links, notifications, or projections.
+All chat API and worker mutation paths, including edits, deletes, reactions,
+read-state updates, links, notifications, summaries, and projections, must also
+respect user locks, folder/atom/file sharing boundaries, protected work, and
+skill-turn/review gates before persisting or materializing derived state.
 
 Renderer surfaces that load channels, chats, linked work, summaries, search
 results, or side-rail state asynchronously must guard responses with a
@@ -715,8 +727,9 @@ outside the canonical `ChatThread -> ThreadMessage` model.
 
 ## Side rail integration
 
-When viewing a file, folder, app, data source, or version, dohc should show
-related chats.
+When viewing a file, folder, or version, dohc should show related chats. Later
+workspace object types can opt into the same side rail after their stable
+identity and ACL contracts exist.
 
 Example:
 
@@ -863,7 +876,7 @@ Share #client-acme with Acme?
 They will see:
 - #client-acme chats
 - docs/acme/proposal.md
-- apps/client-dashboard/
+- docs/acme/dashboard.md
 
 They will not see:
 - private notes

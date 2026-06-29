@@ -439,7 +439,8 @@ file side rails, version activity, search, and external shared channels.
 ### Channel
 
 A Channel is a place where chats gather. Channels can attach to workspace scope:
-folder, project, version, client, or another defined workspace object.
+folder, file, version, chat, share, agent run, or another stable
+`WorkspaceObject` type after that type is defined in the roadmap.
 
 ### Shared Channel
 
@@ -2465,7 +2466,7 @@ These are the product-level scenarios the full initiative must eventually pass.
 ### Scenario G - External Shared Channel
 
 1. User creates `#client-acme`.
-2. User shares selected file and dashboard.
+2. User shares selected files and a version.
 3. External participant can chat and view selected resources.
 4. External participant cannot search/read private notes or secret-backed files.
 5. Revoking share removes access.
