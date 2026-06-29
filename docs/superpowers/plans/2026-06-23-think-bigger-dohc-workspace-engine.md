@@ -1379,12 +1379,20 @@ and hoping to optimize later.
 - conflict compare for two 250KB text files: under 1s.
 - switching workspaces cancels/guards stale work without blocking interaction.
 
-Record measured values in the execution log. If CI cannot meet local budgets,
-record environment and assert regression thresholds.
+Before these numeric targets become release gates, the PR must record a stable
+machine/CI profile, baseline measurements, fixture shape, cold/warm state, and
+acceptable tolerance/variance. Until that baseline exists for the relevant
+profile, the targets are design budgets and regression signals rather than
+machine-independent release gates. Once a baseline is declared, future PRs must
+compare against the same profile or explicitly record why a new profile is being
+introduced. If CI cannot meet local budgets, record environment and assert
+regression thresholds against the CI baseline.
 
 Instrumentation requirements:
 
 - Add timing spans or metrics before optimizing by guesswork.
+- Record the baseline commit/profile, measured baseline values, and tolerance
+  before treating a budget as a pass/fail gate.
 - Record cold vs warm measurements separately.
 - Record workspace size, file count, changed file count, chat/message count,
   machine/CI context, and whether content was local, lazy, or remote.

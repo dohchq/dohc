@@ -190,6 +190,10 @@ Date completed:
 ### Performance Notes
 
 - Budget areas touched:
+- Baseline profile:
+- Baseline commit/fixture:
+- Baseline values:
+- Accepted tolerance/variance:
 - Metrics:
 - Cold/warm distinction:
 - Workspace/file/chat sizes:
@@ -310,7 +314,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 7 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1357,6 +1361,23 @@ Seventy-fourth pass:
     quarantine-or-engine-specific recovery.
   - Added canonical decimal-string validation rules for chat sequence and
     timestamp fields.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-fifth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added performance baseline requirements before numeric budgets can act as
+    release gates, including machine/CI profile, baseline values, fixtures, and
+    accepted tolerance.
+  - Added execution-log fields for baseline profile, baseline commit/fixture,
+    baseline values, and accepted variance.
+  - Extended shared-channel grant reauthorization to replay and history
+    reconstruction consumers.
+  - Required message edits to verify the current `bodyRevision` or equivalent
+    message version inside the same atomic edit unit.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

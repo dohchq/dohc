@@ -51,9 +51,10 @@ workspace-scoped source and target objects and reject cross-workspace links by
 default. Cross-workspace `ThreadLink` records are permitted only as explicit
 shared-channel exceptions: the link must carry the owning `workspaceId`, target
 workspace/resource identity, share/grant id, and visibility scope, and every
-read, projection, search result, notification, and export must re-authorize that
-grant. Missing, expired, revoked, or ambiguous shared-channel grants fail
-closed. Grant revoke/expiry also triggers cleanup of server-held derived
+read path, projection, search result, notification, export, replay job, history
+reconstruction, or other reconstruction consumer must re-authorize that grant.
+Missing, expired, revoked, or ambiguous shared-channel grants fail closed for
+all of those paths. Grant revoke/expiry also triggers cleanup of server-held derived
 projections, search snippets, notification caches, export staging artifacts, and
 other service-owned materialized chat context for that exception so stale shared
 data does not remain exposed after access changes. Thread activity records are
@@ -461,7 +462,10 @@ have retained the original body.
 
 Edits must append immutable activity and replace the current message body in the
 same transaction or serialized unit of work, with the activity written first
-inside that atomic unit. The matching `ThreadActivity` and updated
+inside that atomic unit. The write must verify the current
+`ThreadMessage.bodyRevision` or equivalent message version before commit, so
+concurrent edits fail closed or retry instead of overwriting each other or
+duplicating revision history. The matching `ThreadActivity` and updated
 `ThreadMessage.body`/`ThreadMessage.bodyRevision` become visible together at
 commit; if the commit fails, neither the activity nor the body change becomes
 visible. Implementations may stage the activity internally before commit, but
