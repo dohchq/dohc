@@ -417,7 +417,12 @@ have retained the original body.
 
 Edits must append immutable activity and replace the current message body in the
 same transaction or serialized unit of work, with the activity written first
-inside that atomic unit.
+inside that atomic unit. The matching `ThreadActivity` and updated
+`ThreadMessage.body`/`ThreadMessage.bodyRevision` become visible together at
+commit; if the commit fails, neither the activity nor the body change becomes
+visible. Implementations may stage the activity internally before commit, but
+must not expose a revision-history event without the corresponding current body
+state.
 `ThreadMessage.body` is the latest renderable state, while
 `ThreadMessage.bodyRevision` identifies the current revision. The previous body,
 editor identity, and edit timestamp are preserved in append-only
