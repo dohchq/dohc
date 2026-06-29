@@ -1004,8 +1004,9 @@ history.
 - One chat thread linked to a stable file object ID.
 - Message send.
 - Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
-  defined in the shared substrate package as the first cut of the final
-  contracts; PR 12 extends them for channels, DMs, and full chat schema.
+  seeded in the shared substrate package scaffold. PR 01 formalizes the shared
+  contract boundary for these shapes before PR 12 extends them for channels,
+  DMs, and full chat schema.
   These provisional shapes must remain forward-compatible with PR 12, or PR 12
   must include a migration/backfill step that preserves existing chat data.
   P0E must freeze this provisional schema as a versioned shared-substrate
@@ -1529,6 +1530,8 @@ must use.
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
   `ProjectionValidation`, and `ConflictRecord`.
+- Formalize the shared substrate boundary for the P0E-seeded `ChatThread`,
+  `ThreadMessage`, and `ThreadLink` scaffold before PR 12/18 consume it.
 - Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
   that consume them: P0E may introduce minimal provisional chat/link contracts

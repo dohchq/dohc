@@ -113,6 +113,7 @@ type PublicDeniedReasonCode =
   | 'not_authorized'
   | 'policy_denied'
   | 'policy_indeterminate'
+  | 'gate_indeterminate'
   | 'protected_path'
   | 'locked'
   | 'version_access_denied'
@@ -120,6 +121,7 @@ type PublicDeniedReasonCode =
   | 'invalid_request'
   | 'quota_exceeded'
   | 'rate_limited'
+  | 'service_unavailable'
   | 'replay_metadata_mismatch'
 
 type TerminalRetirementReason =

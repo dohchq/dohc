@@ -66,6 +66,11 @@ const collectAnchors = (markdown) => {
 const failures = []
 
 for (const file of files) {
+  if (!fs.existsSync(file)) {
+    failures.push(`missing source file ${file}`)
+    continue
+  }
+
   const text = fs.readFileSync(file, 'utf8')
   const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
 
@@ -79,10 +84,18 @@ for (const file of files) {
     const hashIndex = raw.indexOf('#')
     const targetRaw = hashIndex === -1 ? raw : raw.slice(0, hashIndex)
     const anchorRaw = hashIndex === -1 ? '' : raw.slice(hashIndex + 1)
+    let decodedTarget
+    try {
+      decodedTarget = targetRaw === '' ? '' : decodeURIComponent(targetRaw)
+    } catch {
+      failures.push(`${file}: invalid link target ${raw}`)
+      continue
+    }
+
     const targetPath = path.normalize(
-      targetRaw === ''
+      decodedTarget === ''
         ? path.resolve(file)
-        : path.resolve(path.dirname(file), decodeURIComponent(targetRaw)),
+        : path.resolve(path.dirname(file), decodedTarget),
     )
 
     if (!fs.existsSync(targetPath)) {

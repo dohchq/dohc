@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `ff29e88` reported 8 issues;
-  hundred-ninth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `2dd14a5` reported 9 issues;
+  hundred-tenth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -270,6 +270,9 @@ gh --version
 gh auth status
 rg -n "Execution Topology|worktree|implementation thread|one implementation PR|Rust Kernel Spike|Phase 0 branch/worktree/chat ownership" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
 git diff --cached --check
+# Historical ordering note: the validation commands later in this block were run
+# before the push/PR creation actions below; this initial setup list is grouped
+# by discovery/setup flow, not strict gate order.
 git push -u origin codex/think-bigger-00-readiness-scaffold
 gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "Add dohc Think Bigger workspace engine plan"
 coderabbit review --agent -t committed -c AGENTS.md
@@ -2054,6 +2057,33 @@ Hundred-ninth pass:
     mounts for higher-sensitivity secrets.
   - Updated the native filesystem proof slice to describe immediate capture
     followed by quarantine/reconcile promotion before canonical history updates.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-tenth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest nine-issue rerun:
+  - Made the docs link checker accumulate missing source files and invalid
+    percent-encoded link targets as validation failures instead of throwing.
+  - Added retryable `gate_indeterminate` and `service_unavailable` denial reason
+    codes for transient evaluator/gate failures.
+  - Clarified historical command ordering so validation evidence precedes push
+    and PR creation in the PR00 command list.
+  - Clarified that P0E seeds provisional chat/link scaffolding while PR 01
+    formalizes the shared contract boundary before PR 12/18 consume it.
+  - Added client-visible `durable-pending` semantics for accepted local capture
+    that has not yet promoted to canonical history.
+  - Clarified `rename` versus `move` as names over the same atomic path-change
+    primitive with distinct preferred use.
+  - Defined canonical `messageId` form for read-cursor comparison and canonical
+    inputs for chat body/tombstone hashes.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

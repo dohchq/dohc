@@ -118,8 +118,11 @@ file side rails, notification badges, and search result read/unread markers must
 all derive from this workspace-scoped state. Monotonicity is validated against
 the canonical per-thread ordering comparator:
 `(threadSequence, createdAt, messageId)`, where `messageId` compares by bytewise
-UTF-8 order after canonicalization. Message IDs alone are not an ordering
-contract, and `lastReadAt` is not a valid advancement fallback.
+UTF-8 order after canonicalization. The canonical `messageId` form is the exact
+persisted message ID string normalized to Unicode NFC, encoded as UTF-8 bytes,
+with non-canonical encodings rejected at API/storage boundaries. Message IDs
+alone are not an ordering contract, and `lastReadAt` is not a valid advancement
+fallback.
 `ThreadReadState` is unique on `(workspaceId, threadId, actorId)` and writes are
 upserts, not inserts that can duplicate rows. Updating `lastReadCursor` must
 compare against the canonical comparator before advancing. For every read-state
@@ -661,6 +664,17 @@ type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
   deleteReason?: string
   tombstoneHash?: string
 }
+
+`nextBodyHash`, `bodyHash`, and `tombstoneHash` are lowercase hex SHA-256 over a
+canonical JSON payload with sorted object keys, no insignificant whitespace, and
+all strings normalized to Unicode NFC before UTF-8 encoding. `nextBodyHash`
+hashes `["chat-body:v1", workspaceId, threadId, messageId, bodyRevision,
+nextBodySnapshot]`, where `nextBodySnapshot` is the canonical current
+`ChatBodySnapshot` after create/edit. `bodyHash` uses the same `chat-body:v1`
+payload for the referenced persisted body revision. `tombstoneHash` hashes
+`["chat-tombstone:v1", workspaceId, threadId, messageId, previousBodyRevision,
+previousBody, deleteReasonOrNull]`, where `previousBody` is the canonical
+`ChatBodySnapshot` preserved by the delete activity.
 
 type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }

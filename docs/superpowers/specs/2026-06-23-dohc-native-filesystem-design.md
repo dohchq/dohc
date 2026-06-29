@@ -42,6 +42,11 @@ workspace, version, policy, and conflict rules. For allowed canonical writes
 there is still no user-visible commit step, apply step, or special agent
 protocol.
 
+When local capture is accepted but canonical promotion is still pending, callers
+must receive the shared `WriteResult.kind: 'durable-pending'` shape with a
+`holdingRecordId`, not a successful canonical write. Rejection, quarantine, and
+accepted-pending states are distinct client-visible outcomes.
+
 ## Filesystem shape
 
 A dohc workspace should have a normal, obvious folder shape:
@@ -314,6 +319,13 @@ restore(workspaceId, versionId, checkpointId, {
   idempotencyKey
 })
 ```
+
+`rename` and `move` use the same atomic path-change primitive and validation
+rules. `rename` is the preferred API name when the parent path is unchanged and
+only the basename changes; `move` is the preferred API name when the parent path
+changes. Both require source identity, destination absence, causal
+preconditions, and idempotency, and neither may degrade into delete-plus-create
+semantics.
 
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
