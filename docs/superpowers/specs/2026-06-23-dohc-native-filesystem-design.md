@@ -488,7 +488,7 @@ Examples:
 | `dist/**` | no | no | no | local | no | no |
 | `.cache/**` | no | no | no | local | no | no |
 | `scratch/**` | no | no | no | local | no | no |
-| `.env` | yes | yes | encrypted/opaque only | protected/ephemeral | no | yes |
+| `.env` | yes | yes | yes | local | no | yes |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
 output, and cache folders.
@@ -498,8 +498,10 @@ specific actor can hydrate or read local plaintext for a protected path such as
 
 Secret-backed paths are never ordinary synced text. For `.env`, `synced` means
 encrypted/opaque sync of secret references, encrypted blobs, hashes, and redacted
-status, not plaintext replication or server-side plaintext hydration. Historical
-state, exports, search results, conflict envelopes, projections, and
+status, not plaintext replication or server-side plaintext hydration. Its
+`local` materialization state means policy-controlled local projection, not
+default plaintext exposure. Historical state, exports, search results, conflict
+envelopes, projections, and
 agent-readable views store opaque handles, hashes, and redacted status by
 default. Plaintext hydration requires explicit server-side materialization
 permission and must be recorded separately from normal materialization so `.env`

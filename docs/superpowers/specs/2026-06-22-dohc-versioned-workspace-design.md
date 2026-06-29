@@ -154,7 +154,7 @@ type WriteResult =
       kind: 'rejected'
       holdingRecordId: string
       workspaceId: string
-      requestedVersionId?: string
+      versionId: string
       idempotencyKey: string
       reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
@@ -165,7 +165,7 @@ type WriteResult =
       kind: 'quarantined'
       holdingRecordId: string
       workspaceId: string
-      requestedVersionId?: string
+      versionId: string
       idempotencyKey: string
       reasonCode: PublicDeniedReasonCode
       acceptedAt: UnixMsDecimalString
@@ -217,9 +217,11 @@ holding area with enough metadata to retry or explain the decision after
 evaluators recover. `rejected` means the write failed before acceptance and
 stores `rejectedAt`; `quarantined` means the write was accepted into the holding
 area but could not become canonical and stores `acceptedAt` plus
-`quarantinedAt`. Both results are addressable by `holdingRecordId`; operators,
-status APIs, retry tooling, and audit/export jobs use that id to correlate the
-response with the retained rejected-before-acceptance or quarantined record.
+`quarantinedAt`. Both results carry the required `versionId` for the requested
+or accepted version bound to the holding record. Both results are addressable by
+`holdingRecordId`; operators, status APIs, retry tooling, and audit/export jobs
+use that id to correlate the response with the retained
+rejected-before-acceptance or quarantined record.
 The holding area separates rejected-before-acceptance items from accepted
 holding records. It must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and

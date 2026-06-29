@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `9997a28` reported 5 issues;
-  hundred-second pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** see the newest owning PR00 pass entry below for the
+  latest completed rerun issue count and pending rerun state.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -1921,6 +1921,21 @@ Hundred-second pass:
   - Made mention `notificationId` canonical across runtimes with percent-encoded
     components, literal separators, canonical `bodyRevision`, canonical mention
     actor JSON, and lowercase hex SHA-256 hashing.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-third pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Made `rejected` and `quarantined` `WriteResult` variants use required
+    `versionId`, matching the replay/status contract for holding records.
+  - Removed hardcoded commit/issue state from Current PR Snapshot so CodeRabbit
+    status derives from the newest owning PR00 pass entry.
+  - Restored `.env` table values to the supported `FilePolicy` vocabulary while
+    clarifying in prose that `synced: true` means encrypted/opaque secret sync
+    and `materialized: local` does not imply default plaintext exposure.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
