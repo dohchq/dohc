@@ -2429,7 +2429,13 @@ turning dohc Cloud into the source of truth.
 - Define local-engine to cloud replication protocol.
 - Define machine-to-machine state replication through dohc Cloud.
 - Preserve stable object IDs, workspace versions, history moments, policy,
-  conflict records, chat activity, and projection invalidation across replicas.
+  conflict records, share grants/revocations, membership/visibility,
+  read-state/unread cursors, chat activity, and projection invalidation across
+  replicas.
+- Replay replicated engine state through server-authenticated workspace scope;
+  if membership, visibility, grants, read cursors, or notifications cannot be
+  reconstructed exactly from the local-engine to cloud replication protocol,
+  they must replicate as first-class machine-to-machine state records.
 - Queue local writes while offline and replay them with causal/idempotency
   guards on rejoin.
 - Reconcile divergent offline edits with the same conflict-preservation model as

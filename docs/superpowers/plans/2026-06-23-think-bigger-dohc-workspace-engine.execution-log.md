@@ -24,7 +24,7 @@ entry for quick orientation.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
 - **PR00 CodeRabbit:** latest completed rerun reported 6 issues; follow-up fixes
-  are pending rerun.
+  are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
 - **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
@@ -82,7 +82,7 @@ worktree, and planned validation shape.
 | P0E | Minimal Chat Linked To File | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0F | Search And Policy Smoke | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR workstream | workspace-engine + history + typechecks + local agent smoke | Provisional lane. |
-| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | /home/ice/dev/dohc | main orchestration workstream | docs link/anchor check + brand guard | Scaffold lane. |
+| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | current PR00 checkout | main orchestration workstream | docs link/anchor check + brand guard | Scaffold lane. |
 | 01 | Workspace Engine Contracts And Substrate | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 02 | Version Registry And Typed Event Skeleton | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 03 | Snapshot And Restore Foundation | TBD | TBD | TBD | TBD | Roadmap lane. |
@@ -1837,6 +1837,29 @@ Ninety-eighth pass:
     `Projection`, `WorkspaceEvent`, `DurabilityEvent`, `FilePolicy`, and
     effective policy terms.
   - Added `ThreadReadState` shape, cursor, and API scope to PR 12.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninety-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Normalized the PR00 lane inventory worktree cell to the portable
+    `current PR00 checkout` label.
+  - Updated the Current PR Snapshot to describe the active six-issue rerun fix
+    state before the next review.
+  - Clarified native filesystem bound sessions so the server derives principal
+    and workspace/version binding from opaque session material; clients only
+    send the token and explicit operation identifiers.
+  - Clarified secret-backed file projection so plaintext is safe by default only
+    through protected/ephemeral mounts, brokered APIs, or dohc-controlled
+    execution paths; normal local plaintext materialization is opt-in exposure.
+  - Expanded PR 21R replication scope to include share grants/revocations,
+    membership/visibility, read-state/unread cursors, and first-class replicated
+    records when exact reconstruction is not possible.
+  - Marked chat thread/link/message/activity provenance actor fields as
+    server-owned and immutable in the schema shapes.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

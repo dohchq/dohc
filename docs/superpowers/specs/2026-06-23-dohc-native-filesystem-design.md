@@ -311,14 +311,17 @@ restore(workspaceId, versionId, checkpointId, {
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
 examples below use explicit `workspaceId` and required version identifiers. A
-validated bound session may be an authentication shortcut, but it is a separate
-request wrapper that resolves or injects the same explicit workspace/version
-context server-side before dispatch; it must not create a second ambiguous call
-shape. Each operation supplies the version identifiers it actually needs:
-single-version operations such as read/write/list/stat/search/watch/snapshot/restore
-bind one version, while diff and merge bind the required source/target or
-versionA/versionB pair inside that same workspace. Cross-workspace path or
-version references fail closed before filesystem or storage access.
+validated bound session is represented to clients only as opaque session
+material. The server resolves the principal plus workspace/version binding from
+that session material and then dispatches the same explicit workspace/version
+operation shape; browser/client callers never supply trusted identity or
+auth-context fields. Each operation still supplies the version identifiers it
+actually needs: single-version operations such as
+read/write/list/stat/search/watch/snapshot/restore bind one version, while diff
+and merge bind the required source/target or versionA/versionB pair inside that
+same workspace. Server-side session binding must match those explicit
+identifiers or fail closed before filesystem or storage access. Cross-workspace
+path or version references fail closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
@@ -740,11 +743,15 @@ Implementation can use:
 - self-hosted secret storage.
 - encrypted blob storage with per-actor/workspace keys.
 
-The file projection may materialize plaintext only for an authorized workspace,
-version, and user/device. Process-level secret gating applies only to
-dohc-controlled execution paths, such as brokered API access, managed mounts,
-or injected runtime secrets, not arbitrary local processes that can read a
-materialized plaintext file via OS permissions.
+The default safe file projection for secret-backed bytes is a protected or
+ephemeral mount, brokered API read, or dohc-controlled execution path. Normal
+local-folder materialization of plaintext is an explicit opt-in exposure policy,
+not the default safe model. A materialized plaintext projection may exist only
+for an authorized workspace, version, and user/device, and it must be labeled as
+local OS-readable exposure because arbitrary local processes can read it through
+normal OS permissions once it exists. Process-level secret gating applies only
+to dohc-controlled execution paths, such as brokered API access, managed mounts,
+or injected runtime secrets, not arbitrary local processes.
 
 When launching a process or agent, dohc can also inject secrets as environment
 variables from the same broker. File materialization and process injection are

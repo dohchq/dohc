@@ -261,7 +261,7 @@ type ChatThreadBase = {
   workspaceId: string
   title?: string
   status: 'open' | 'closed' | 'decided' | 'archived'
-  createdBy: string
+  readonly createdBy: string // server-owned immutable creator label
   createdAt: UnixMsDecimalString
   lastActivityAt: UnixMsDecimalString // server-managed from canonical activity writes
   pinned: boolean
@@ -304,7 +304,7 @@ type ThreadLinkBase = ThreadLinkScope & {
   threadId: string
   targetWorkspaceId: string
   targetId: string
-  createdById: string
+  readonly createdById: string // server-owned immutable creator actor id
   createdAt: UnixMsDecimalString
   deletedAt?: UnixMsDecimalString
   deletedById?: string
@@ -425,6 +425,12 @@ Thread create/update paths must ignore or reject client-provided
 `lastActivityAt`. The server updates `ChatThreadBase.lastActivityAt` only from
 canonical `ThreadActivity` writes, using the same ordering source that drives
 thread activity feeds and read-state updates.
+Chat provenance fields are server-owned and immutable. `createdBy`,
+`createdById`, `authorId`, and `actorId` are derived from authenticated
+server/engine identity at write time, never accepted from browser/client
+payloads, and cannot be changed by edit, replay, import, or projection paths
+except through an explicit trusted migration that preserves original provenance
+evidence.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same
@@ -501,7 +507,7 @@ type ThreadMessage = {
   threadId: string
   threadSequence: UInt64DecimalString
   parentMessageId?: string
-  authorId: string
+  readonly authorId: string // server-owned immutable author actor id
   authorKind: 'human' | 'agent' | 'system'
   body: string
   bodyRevision: UInt64DecimalString
@@ -596,7 +602,7 @@ type ThreadActivityBase = {
   id: string
   workspaceId: string
   threadId: string
-  actorId: string
+  readonly actorId: string // server-owned immutable activity actor id
   actorKind: 'human' | 'agent' | 'system'
   createdAt: UnixMsDecimalString
 }
