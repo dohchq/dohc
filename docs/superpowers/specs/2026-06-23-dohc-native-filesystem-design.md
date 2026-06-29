@@ -514,9 +514,9 @@ small explicit allowlist of source-backed policy files such as
 `.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary workspace-root
 `.dohcignore` may participate in normal tracking, and even those files are
 interpreted as policy inputs, not arbitrary captured content. All other
-`.dohc/**` paths are reserved, non-user-content inputs that must be quarantined,
-ignored, or handled through engine-specific recovery rather than captured as
-ordinary files.
+`.dohc/**` paths are reserved, non-user-content inputs that must be quarantined
+with an explainable record or handled through engine-specific recovery rather
+than captured as ordinary files or silently skipped.
 
 Example:
 

@@ -169,11 +169,11 @@ than skipped.
 - Secret values must not enter durable chats, summaries, agent replies,
   projections, notifications, search snippets, or logs unless explicitly
   declassified or redacted.
-- This guarantee applies to dohc-controlled surfaces. If an authorized user,
-  agent, or tool reads plaintext and writes it into an external process log,
-  shell transcript, third-party provider, or non-dohc file, that is outside
-  dohc's automatic containment and must be handled through process sandboxing,
-  agent policy, and user-visible warnings.
+- This guarantee applies to dohc-controlled surfaces. If plaintext would leave
+  those surfaces, the default is block or redact unless an explicit
+  declassification step and sandboxed transport are in place. External process
+  logs, shell transcripts, third-party providers, and non-dohc files are never
+  trusted sinks by default.
 - Policy files are source-backed, but enforcement is engine-backed.
 - External/shared channels never grant broad workspace access by accident.
 - Search, notifications, side rails, activity feeds, and export metadata are
@@ -270,7 +270,8 @@ contracts are mounted into the product surface:
 - databases.
 - rows where row-level links are needed.
 - secrets.
-- projections.
+- higher-level derived projections that are not part of the core `Projection`
+  contract.
 
 Paths are aliases, not identity. Links, history, search, shares, and chats must
 resolve through stable IDs so renames, moves, version forks, restores, and
@@ -504,8 +505,9 @@ better answer.
    - The user sees normal files, but the durable source of truth is the local
      dohc engine: object IDs, versions, history, conflicts, policy, and
      projections.
-   - dohc Cloud syncs and coordinates engine state. It is not just a database
-     that replaces the user's files.
+   - dohc Cloud syncs and replicates engine state. It never becomes
+     authoritative over local writes, object identity, version membership,
+     history, conflicts, policy, or projections.
 
 2. **Filesystem surface:** watcher-backed folder for Phase 0, managed
    filesystem projection long-term.
@@ -1470,7 +1472,9 @@ must use.
   `lossy`, `redacted`.
 - Define one effective policy input/output type for filesystem, chats, search,
   notifications, export, and external shares.
-- Add zod/valibot-style runtime validation if repo convention supports it.
+- Add mandatory zod/valibot-style runtime validation for all shared boundary
+  types carrying workspace, version, and policy data across filesystem, chats,
+  search, notifications, export, and external shares.
 - Add fixtures for personal, team, external shared, and agent-authored cases.
 
 **Tests:**

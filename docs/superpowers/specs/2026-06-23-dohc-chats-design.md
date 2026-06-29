@@ -86,6 +86,17 @@ type ThreadReadState = {
 }
 ```
 
+Canonical decimal strings must use ASCII base-10 digits only. Writers and readers
+must reject signs, decimal points, separators, whitespace, locale/non-ASCII
+digits, empty strings, leading zeros except the literal `0`, and values outside
+the declared range. `UInt64DecimalString` is `0` through
+`18446744073709551615`. `UnixMsDecimalString` is non-negative Unix epoch
+milliseconds through `8640000000000000` unless a narrower shared-schema range is
+declared. All boundary readers must parse, range-check, and reserialize to the
+canonical form before storing, comparing, indexing, or projecting
+`threadSequence`, `createdAt`, `editedAt`, `deletedAt`, `lastActivityAt`,
+`updatedAt`, or read-state cursor fields.
+
 `threadSequence`, `createdAt`, `editedAt`, `deletedAt`, `lastActivityAt`, and
 `updatedAt` use these canonical decimal-string encodings at storage, API,
 projection, and worker boundaries. Implementations compare them as integer

@@ -437,9 +437,13 @@ canonical mutations, duplicate history events, duplicate projections, or repeate
 notification/search side effects. Idempotency records must be persisted through
 the documented maximum retry horizon for that operation type and transport after
 the operation reaches a terminal result. The idempotency record/tombstone must be
-committed atomically with the canonical mutation, or before the mutation is
-acknowledged, so a lost response cannot replay as a fresh mutation. After the
-retry horizon, an API retry with the same key must fail closed with an explicit
+committed in the same transactional boundary as the canonical mutation. If an
+implementation cannot share a transaction boundary, it must provide an equivalent
+write-ahead guarantee: reserve the idempotency key durably before applying the
+mutation, make recovery complete either the original mutation or tombstone the
+reserved key deterministically, and never acknowledge success until the
+idempotency result and canonical mutation are durable together. After the retry
+horizon, an API retry with the same key must fail closed with an explicit
 `idempotency_expired` response or a deterministic conflict response; it must not
 silently apply as a new mutation. Implementations may garbage-collect expired key
 tombstones only after the same maximum retry horizon has passed or the operation

@@ -310,7 +310,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 1 issue; local fixes are
+- Current findings: latest CodeRabbit pass reported 7 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1334,6 +1334,29 @@ Seventy-third pass:
     by representing create-only writes as the mutually exclusive
     `precondition: expectedAbsent` token, not as a boolean field beside other
     preconditions.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-fourth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Made secret egress fail closed outside dohc-controlled surfaces unless an
+    explicit declassification step and sandboxed transport are in place.
+  - Rephrased deferred projection backlog language so the core `Projection`
+    contract remains part of the substrate.
+  - Clarified that dohc Cloud syncs and replicates engine state but never becomes
+    authoritative over local writes, identity, versions, history, conflicts,
+    policy, or projections.
+  - Made runtime validation mandatory for shared boundary types carrying
+    workspace, version, and policy data.
+  - Tightened API idempotency so records commit in the same transaction as the
+    canonical mutation, or through an explicit write-ahead equivalent.
+  - Changed non-allowlisted `.dohc/**` handling from ignore-or-recover to
+    quarantine-or-engine-specific recovery.
+  - Added canonical decimal-string validation rules for chat sequence and
+    timestamp fields.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
