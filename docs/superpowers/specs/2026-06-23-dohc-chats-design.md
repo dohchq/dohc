@@ -660,9 +660,12 @@ resolve, replay, export, and notification fanout paths all use that canonical
 array so duplicate mentions or runtime-specific ordering cannot create duplicate
 notifications or unstable history.
 `notificationId` is deterministic for a mention notification lifecycle:
-`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<bodyHash>:<sha256(canonicalMentionedActorIdsJson)>`.
+`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<sha256(canonicalMentionedActorIdsJson)>`.
 `canonicalMentionedActorIdsJson` is the UTF-8 JSON array of the canonical,
 deduplicated, bytewise-sorted actor ID strings with no extra whitespace.
+`bodyHash` is required audit evidence for the immutable persisted body revision,
+but it is not part of `notificationId` so redaction/sanitization views cannot
+change the notification identity.
 The enqueue path must upsert or no-op by that id, and resolve/replay/fanout must
 dedupe by the same `notificationId`. Repeated enqueue or resolve attempts for
 the same message revision and canonical mention set return the existing result
@@ -841,9 +844,9 @@ Writers and readers must not invent aliases, fallbacks, or implementation-local
 strings. New projection kinds require a documented compatibility rule; if the
 digest tuple changes incompatibly, use a new filename prefix such as `v2-`.
 The projection scope is `owner` for the workspace-private internal projection,
-or a grant-aware value such as `shareGrant:<grantId>:<projectionScopeId>`, where
-`projectionScopeId` is a server-issued opaque identifier with one canonical
-serialization for shared-channel/export materializations. Compute the digest
+or a grant-aware value such as `shareGrant:<grantId>:<authzScopeId>`, where
+`authzScopeId` is a server-issued opaque identifier for the exact authorization
+and redaction set used to materialize the projection. Compute the digest
 over a length-prefixed tuple with fields in this exact order: `workspaceId`,
 `threadId`, `projectionKind`, and `projectionScope`. Each field is first
 normalized to Unicode NFC, encoded as UTF-8 bytes, then framed as
@@ -856,11 +859,13 @@ contract and must not vary by implementation. The projection must store or
 otherwise verify the exact canonical thread id, workspace id, projection kind,
 projection scope, and derived filename in metadata before writing, and must
 reject ambiguous ids or any computed filename that already maps to a different
-canonical tuple. Projection
-writers must reject path separators, relative path segments, control characters,
-reserved names, and any other unsafe input before constructing the projection
-path, so a crafted thread id cannot traverse directories or overwrite another
-projection.
+canonical tuple. Before writing or reusing a shared projection, the implementation
+must verify the precise authorization/redaction context represented by
+`authzScopeId`; grant or redaction changes require a new scope id and therefore a
+new filename digest. Projection writers must reject path separators, relative
+path segments, control characters, reserved names, and any other unsafe input
+before constructing the projection path, so a crafted thread id cannot traverse
+directories or overwrite another projection.
 At write time, the projection writer must resolve and verify that the final
 target remains under the workspace `.dohc/chats/` root, refuse to follow
 symlinks for parent or target path components, and open/create the target with

@@ -264,7 +264,6 @@ proof-arc identities required for the file/version/chat loop:
 - messages.
 - agent runs.
 - shares.
-- secret references, with secret-backed file materialization deferred to PR 08.
 
 Deferred substrate identities stay in the expansion backlog until their
 contracts are mounted into the product surface:
@@ -272,8 +271,8 @@ contracts are mounted into the product surface:
 - apps.
 - databases.
 - rows where row-level links are needed.
-- secret-backed file drivers and secret value materialization beyond stable
-  secret references.
+- secret references, secret-backed file drivers, and secret value materialization
+  deferred to PR 08.
 - higher-level derived projections that are not part of the core `Projection`
   contract.
 
@@ -1082,8 +1081,9 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 
 - external/shared channels.
 - lazy hydration at scale.
-- full virtual filesystem/FUSE/ProjFS implementation unless chosen by the
-  interposition spike as the smallest viable path.
+- full virtual filesystem/FUSE/ProjFS implementation; Phase 0 remains
+  watcher-backed over normal folders, and VFS/FUSE/ProjFS work can only begin
+  after the proof arc explicitly revises the roadmap.
 - user-authored `.dohc/files.toml` policy DSL beyond minimal hardcoded/default
   policy.
 - encrypted synced secret-backed `.env` with full broker/declassification flow.

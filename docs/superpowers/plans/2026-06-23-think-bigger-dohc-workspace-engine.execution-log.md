@@ -15,14 +15,15 @@ Source specs:
 
 ## Current PR Snapshot
 
-This block is the canonical live status for PR00 and the provisional Phase 0
-lane stack. The PR status table is lane inventory, and the pass log below is
-append-only history.
+This block is a derived live snapshot for PR00 and the provisional Phase 0 lane
+stack. The authoritative details live in the latest owning PR00 pass entry in
+the append-only history below; this snapshot is updated only to summarize that
+entry for quick orientation.
 
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 6 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 7 issues; follow-up fixes
   are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -1782,6 +1783,29 @@ Ninety-fifth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Ninety-sixth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Routed conflict/visibility-boundary writes in the actor-neutral checklist to
+    conflict preservation/reconciliation or review/share flows rather than the
+    immediate canonical save path.
+  - Reconciled Phase 0 filesystem interposition wording with the deferred VFS/FUSE
+    list so watcher-backed normal folders are the only Phase 0 gate path.
+  - Moved `SecretReference` out of the Phase 0 proof-arc identity list and kept
+    it deferred to PR 08 with secret-backed file drivers/materialization.
+  - Labeled Current PR Snapshot as a derived summary of the latest owning pass
+    entry rather than an independent source of truth.
+  - Removed `bodyHash` from mention `notificationId` composition while keeping it
+    required audit evidence for the immutable persisted body revision.
+  - Tightened shared chat projection scope to use exact server-issued
+    `authzScopeId` authorization/redaction context.
+  - Expanded the workspace-scope checklist to list concrete persisted chat
+    primitives: thread, message, link, read state, notification, and activity.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live only in Current PR Snapshot. This section is an
@@ -1849,9 +1873,10 @@ Gate evidence:
 - [ ] File/API writes save immediately and produce recoverable history.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
-- [ ] Every atom, folder, entity, file, version, chat, share, capture, event,
-      search result, projection, holding record, durability-log entry, and
-      idempotency tombstone is workspace-scoped.
+- [ ] Every atom, folder, entity, file, version, chat, thread, message, link,
+      read state, notification, activity, share, capture, event, search result,
+      projection, holding record, durability-log entry, and idempotency tombstone
+      is workspace-scoped.
 - [ ] Agent writes respect user locks, protected paths, atom/folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.
