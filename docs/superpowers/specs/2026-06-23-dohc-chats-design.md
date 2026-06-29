@@ -465,7 +465,7 @@ type MessageDeleteThreadActivity = ThreadActivityBase & {
   messageId: string
   kind: 'message_deleted'
   previousBody: ChatBodySnapshot
-  previousBodyRevision?: UInt64DecimalString
+  previousBodyRevision: UInt64DecimalString
   deleteReason?: string
   tombstoneHash?: string
 }
@@ -503,10 +503,12 @@ type ThreadActivity =
 For `message_created`, `message_edited`, `message_deleted`, `reaction_added`,
 and `reaction_removed`, `messageId`, `actorId`, `actorKind`, and `createdAt` are
 required. For `message_edited`, `previousBody` and `previousBodyRevision` are
-also required. For `message_deleted`, `previousBody` is required and must preserve
-the deleted body as plaintext, redacted, or secret-backed snapshot according to
-policy; `previousBodyRevision` is required when the deleted message had a known
-body revision. Reaction events must satisfy exactly one identity mode: either a
+also required. For in-system `message_deleted` events, `previousBody` and
+`previousBodyRevision` are required and must preserve the deleted body as
+plaintext, redacted, or secret-backed snapshot according to policy. Legacy import
+flows that cannot recover a prior body revision must use an explicit legacy
+fallback event outside the normal in-system delete contract. Reaction events
+must satisfy exactly one identity mode: either a
 stable `reactionId`, or the complete deterministic tuple `(messageId,
 reactionActorId, reactionKey)`. Authorized history and export paths reconstruct
 the revision trail from these events. Normal chat rendering, search,

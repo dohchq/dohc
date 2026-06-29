@@ -61,46 +61,46 @@ non-critical documentation-only exceptions may be overridden by explicit user
 approval, and never for authorization, ownership, workspace-scope,
 secret-handling, data-loss, or review-gate blockers.
 
-## PR Status Table
+## PR Lane Inventory
 
 P0A-P0G branches are provisional throughput work started after user approval for
-unattended Phase 0 execution on 2026-06-24. The current live state is recorded in
-Current PR Snapshot above. Do not open or merge them until PR00 clears and each
-lane gets its own PR, tests, and CodeRabbit approval.
+unattended Phase 0 execution on 2026-06-24. Current live state is recorded only
+in Current PR Snapshot above. This table records static lane ownership, branch,
+worktree, and planned validation shape.
 
-| PR ID | Title | Status | Branch | Worktree | Implementation Thread | PR Link | CodeRabbit | Tests | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR thread | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | Blocked on PR00 docs-only exception approval, lane PR, and final approval. |
-| P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR thread | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and CodeRabbit. |
-| P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and CodeRabbit. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR thread | not opened | blocked on CodeRabbit service hang after latest pushed fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `a935e96` raised 17 issues; valid fixes are pushed in `1f39e60`. Three reruns after that hung before findings/completion. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
-| P0D | Compare, Clean Merge, Conflict Preservation | see Current PR Snapshot | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR thread | not opened | see Current PR Snapshot | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and CodeRabbit. |
-| P0E | Minimal Chat Linked To File | see Current PR Snapshot | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | not opened | see Current PR Snapshot | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and CodeRabbit. |
-| P0F | Search And Policy Smoke | see Current PR Snapshot | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | not opened | see Current PR Snapshot | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and CodeRabbit. |
-| P0G | Proof Arc QA And CodeRabbit Hardening | see Current PR Snapshot | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | not opened | see Current PR Snapshot | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | see Current PR Snapshot | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | see Current PR Snapshot | docs sanity + brand guard | Docs-only local-agent-CLI exception pending; see Current PR Snapshot for live review state. |
-| 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 04 | Effective Policy And File Policy Resolver | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 05 | Native Filesystem Capture MVP | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 06 | Version Folders Or Mounts MVP | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 07 | Compare And Merge For Text/File Driver | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 08 | Secret-Backed Files | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 09 | Lazy Hydration And Pinning | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 10 | Workspace Status And Diagnostics | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 11 | Search Foundation Across Versions And Files | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 12 | Chats Schema And Channel/DM Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 13 | Chats UI: Fast Channels, DMs, Composer | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 14 | Chats Linked To Files, Versions, And History | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 15 | Agent Chat Participation Tools | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 16 | Presence, Reactions, And Notification Core | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 17 | Search Across Chats, Files, Versions, And Agents | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 18 | External And Shared Channels | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 19 | Versioned Workspace UX Integration | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 20 | Agent End-To-End Work Loop | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 21 | Migration And Backwards Compatibility | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 22 | Full QA Hardening And Release Readiness | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
+| PR ID | Title | Branch | Worktree | Implementation Thread | Planned Tests | Static Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR thread | docs + focused package tests | Provisional lane. |
+| P0R | Rust Workspace Kernel Spike | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR thread | cargo test + perf | Provisional lane. |
+| P0B | Minimal Versioned Text Store | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR thread | workspace-engine + typecheck | Provisional lane. |
+| P0C | File/API Write Capture And History | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR thread | workspace-engine/history/mcp/desktop + feasible matrix | Provisional lane. |
+| P0D | Compare, Clean Merge, Conflict Preservation | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR thread | workspace-engine + workspace-history + typecheck | Provisional lane. |
+| P0E | Minimal Chat Linked To File | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | workspace-engine + typecheck | Provisional lane. |
+| P0F | Search And Policy Smoke | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | workspace-engine + typecheck | Provisional lane. |
+| P0G | Proof Arc QA And CodeRabbit Hardening | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | workspace-engine + history + typechecks + local agent smoke | Provisional lane. |
+| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | docs sanity + brand guard | Scaffold lane. |
+| 01 | Workspace Engine Contracts And Substrate | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 02 | Version Registry And Typed Event Skeleton | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 03 | Snapshot And Restore Foundation | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 04 | Effective Policy And File Policy Resolver | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 05 | Native Filesystem Capture MVP | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 06 | Version Folders Or Mounts MVP | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 07 | Compare And Merge For Text/File Driver | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 08 | Secret-Backed Files | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 09 | Lazy Hydration And Pinning | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 10 | Workspace Status And Diagnostics | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 11 | Search Foundation Across Versions And Files | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 12 | Chats Schema And Channel/DM Foundation | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 13 | Chats UI: Fast Channels, DMs, Composer | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 14 | Chats Linked To Files, Versions, And History | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 15 | Agent Chat Participation Tools | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 16 | Presence, Reactions, And Notification Core | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 17 | Search Across Chats, Files, Versions, And Agents | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 18 | External And Shared Channels | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 19 | Versioned Workspace UX Integration | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 20 | Agent End-To-End Work Loop | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 21 | Migration And Backwards Compatibility | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 22 | Full QA Hardening And Release Readiness | TBD | TBD | TBD | TBD | Roadmap lane. |
 
 ## Entry Template
 
@@ -140,6 +140,13 @@ Date completed:
 - ...
 
 ### Local Agent CLI QA
+
+#### Pre-Edit Checks
+
+- Root `AGENTS.md` reviewed:
+- `apps/app/AGENTS.md` reviewed when working in `apps/app`:
+- `apps/app/convex/_generated/ai/guidelines.md` reviewed when touching Convex:
+- Other required instructions reviewed:
 
 - `DOHC_TEST_AGENT_CLI`:
 - Codex result:
@@ -290,7 +297,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 8 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1209,6 +1216,25 @@ Sixty-seventh pass:
   - Added deletion body snapshots to `message_deleted` activity.
   - Defined the v1 `ChatProjectionKind` enum and compatibility rule for future
     projection kinds.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Sixty-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Kept accepted holding records recoverable until canonicalization succeeds or
+    an explicit operator-approved escalation path resolves them.
+  - Required API idempotency records/tombstones to commit atomically with the
+    canonical mutation, or before acknowledgement.
+  - Reframed robustness bullets as target invariants pending Phase 0 baseline and
+    filesystem-interposition decisions.
+  - Made `message_deleted.previousBodyRevision` mandatory for normal in-system
+    delete activity and documented legacy import fallback separately.
+  - Consolidated live PR status into Current PR Snapshot and converted the table
+    into static lane inventory.
+  - Added reusable pre-edit check fields to the local-agent QA template.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

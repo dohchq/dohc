@@ -83,13 +83,13 @@ recover. The holding area must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
 deterministic backpressure so ingest floods cannot exhaust storage or starve
 canonical durability paths. Eviction applies only to rejected-before-acceptance
-items or to already-durable holding records after a declared minimum retry
-horizon. That horizon must be at least as long as the maximum expected evaluator
-outage or retry window for that workspace and ingest class; when an accepted
-holding record expires or is evicted, the engine preserves durable
-rejection/expiration evidence. Humans, agents, imports, and sync processes all
-get the same guarantee: an accepted change is not silently lost, but it also does
-not become canonical workspace state until protection checks pass.
+items. Accepted holding records must remain recoverable until protection checks
+succeed and canonicalization completes, or until an explicit operator-approved
+escalation path resolves the record. If a record is eventually retired through
+that documented escalation path, the engine preserves durable rejection or
+expiration evidence. Humans, agents, imports, and sync processes all get the same
+guarantee: an accepted change is not silently lost, but it also does not become
+canonical workspace state until protection checks pass.
 This holding area follows the same secret-backed durability rules as canonical
 history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as
@@ -425,11 +425,14 @@ original result or a deterministic equivalent and must not create additional
 canonical mutations, duplicate history events, duplicate projections, or repeated
 notification/search side effects. Idempotency records must be persisted through
 the documented maximum retry horizon for that operation type and transport after
-the operation reaches a terminal result. After that horizon, an API retry with
-the same key must fail closed with an explicit `idempotency_expired` response or
-a deterministic conflict response; it must not silently apply as a new mutation.
-Implementations may garbage-collect expired key tombstones only after the same
-maximum retry horizon has passed or the operation namespace is rotated.
+the operation reaches a terminal result. The idempotency record/tombstone must be
+committed atomically with the canonical mutation, or before the mutation is
+acknowledged, so a lost response cannot replay as a fresh mutation. After the
+retry horizon, an API retry with the same key must fail closed with an explicit
+`idempotency_expired` response or a deterministic conflict response; it must not
+silently apply as a new mutation. Implementations may garbage-collect expired key
+tombstones only after the same maximum retry horizon has passed or the operation
+namespace is rotated.
 
 Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
 Those paths use an engine-generated capture token and engine-side deduplication
