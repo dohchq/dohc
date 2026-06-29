@@ -277,6 +277,15 @@ Examples:
 Files remain a first-class affordance. The engine gives them stronger history,
 visibility, recovery, and merge behavior.
 
+For rich documents, the projection contract must be explicit. If a Markdown
+document is backed by a canonical Y.Doc, `docs/plan.md` is a Markdown projection
+and `atoms.body` is a derived cache. Saving that file must either translate the
+edit back through a Y.Doc transaction with the same causal precondition rules as
+API writes, or reject/preserve the edit as a conflict if the driver cannot
+round-trip it safely. The engine regenerates Markdown/`atoms.body` from the
+canonical Y.Doc after a successful commit; direct file edits must not create a
+second authoritative body that can diverge from Y.Doc state.
+
 Projection safety is mandatory. Any HTML/renderable projection, including HTML
 atoms and app/site previews, must be sanitized and sandboxed before display.
 Content drivers must declare projection safety behavior as part of their
@@ -332,6 +341,13 @@ move(workspaceId, versionId, fromPath, toPath, {
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
+replace(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourceObjectId,
+  targetPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  idempotencyKey
+})
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
@@ -373,11 +389,11 @@ deterministic secret-safe conflict envelope instead of mutating canonical state.
 Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
 providing multiple incompatible preconditions fails closed.
 
-Conflict envelopes return opaque object/version handles, hashes, policy
-decisions, redacted previews, and explainable metadata by default. They do not
-echo full current, incoming, restored, or secret-backed bytes unless the
-server-side authorization path explicitly grants secret materialization for
-that caller and resolution session.
+Conflict envelopes return only opaque object/version handles, hashes, operation
+kinds, and minimal conflict status by default. Policy decisions, explanatory
+metadata, redacted previews, and full current/incoming/restored/secret-backed
+bytes are materialized only through the server-side authorization path for that
+caller and resolution session.
 
 `read(...)`, `list(...)`, `stat(...)`, `search(...)`, `watch(...)`,
 `snapshot(...)`, and `diff(...)` are read-only scoped views. `delete(...)`,
@@ -385,10 +401,12 @@ that caller and resolution session.
 write-producing operations and must use the same workspace/version scoping,
 causal guard, idempotency, and conflict-response rules as `write(...)`.
 Delete, rename, and move require the source `targetObjectId` plus exactly one
-source freshness precondition. Rename/move destination overwrite is not
-implicit: the first contract supports only `destinationPrecondition:
-expectedAbsent`; replace-style behavior must be modeled as a separate
-write-producing operation with explicit source and destination object ids.
+source freshness precondition. Rename/move with `destinationPrecondition:
+expectedAbsent` is create-at-destination only. Atomic overwrite uses
+`replace(...)`, which requires a source object id, a destination `targetObjectId`,
+one source precondition, one target precondition, and one idempotency key. This
+models temp-file-then-rename saves without an extra read/round trip and without
+allowing a path-only delete/recreate substitution.
 All client-originated write-producing operations, including filesystem-captured
 saves, must carry an idempotency key bound to the actor/session, workspace,
 version, operation type, target, and causal precondition. Duplicate delivery
@@ -483,8 +501,8 @@ Possible visibility states:
 - embargoed.
 - redacted.
 
-This is how dohc supports the Theo-inspired principle that open work does not
-need to expose 100% of all work 100% of the time.
+This is how dohc supports open work without requiring 100% of all work to be
+visible 100% of the time.
 
 ## Secrets
 

@@ -263,6 +263,13 @@ move(workspaceId, versionId, fromPath, toPath, {
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
+replace(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourceObjectId,
+  targetPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  idempotencyKey
+})
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
@@ -304,18 +311,20 @@ mode may be supplied per write. Supplying no causal precondition, omitting
 `expectedAbsent` with `expectedEtag` fails closed with a validation/conflict
 response and does not mutate canonical content.
 
-Conflict responses are secret-safe envelopes by default: they return opaque
-object/version handles, hashes, policy decisions, redacted previews, and
-explainable metadata. They do not echo full current, incoming, restored, or
-secret-backed bytes unless the server-side authorization path explicitly grants
-secret materialization for that caller and resolution session.
+Conflict responses are secret-safe envelopes by default: they return only
+opaque object/version handles, hashes, operation kinds, and minimal conflict
+status. Policy decisions, explanatory metadata, redacted previews, and full
+current/incoming/restored/secret-backed bytes are materialized only through the
+server-side authorization path for that caller and resolution session.
 
 `delete(...)`, `rename(...)`, and `move(...)` are write-producing filesystem
 mutations. They require the source `targetObjectId` plus exactly one source
-freshness precondition and an idempotency key. Rename/move destination overwrite
-is not implicit: the first contract supports only `destinationPrecondition:
-expectedAbsent`; replace-style behavior must be modeled as an explicit
-write-producing operation with source and destination object ids.
+freshness precondition and an idempotency key. Rename/move with
+`destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic
+overwrite uses `replace(...)`, which carries a source object id, destination
+`targetObjectId`, source freshness precondition, target freshness precondition,
+and idempotency key. That gives temp-file-then-rename saves a one-call atomic
+replace path without allowing a path-only overwrite.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
 write-producing and must carry a causal precondition for the target version.
@@ -375,7 +384,7 @@ state.
 dohc must not collapse every file into a single
 tracked/versioned/synced/materialized state.
 
-At least four independent axes are needed:
+At least five independent dimensions are needed:
 
 1. **Tracked/captured**
    - Should changes be observed, captured, and made durable by the workspace
@@ -391,24 +400,36 @@ At least four independent axes are needed:
 4. **Materialized locally**
    - Should contents exist on local disk, hydrate lazily, or remain virtual?
 
+5. **Secret-backed/protected**
+   - Are bytes stored or referenced as secret material that needs encrypted
+     storage, redacted history/export/search, and explicit plaintext
+     materialization permission for each human or agent?
+
 Examples:
 
-| Path | Tracked | Versioned | Synced | Materialized |
-| --- | --- | --- | --- | --- |
-| `docs/**` | yes | yes | yes | lazy or pinned |
-| `apps/**` | yes | yes | yes | lazy or pinned |
-| `data/raw/**` | yes | yes | yes | lazy |
-| `node_modules/**` | no | no | no | local |
-| `dist/**` | no | no | no | local |
-| `.cache/**` | no | no | no | local |
-| `scratch/**` | optional | optional | no | local |
-| `.env` | yes | yes | yes | local |
+| Path | Tracked | Versioned | Synced | Materialized | Secret-backed |
+| --- | --- | --- | --- | --- | --- |
+| `docs/**` | yes | yes | yes | lazy or pinned | no |
+| `apps/**` | yes | yes | yes | lazy or pinned | no |
+| `data/raw/**` | yes | yes | yes | lazy | no |
+| `node_modules/**` | no | no | no | local | no |
+| `dist/**` | no | no | no | local | no |
+| `.cache/**` | no | no | no | local | no |
+| `scratch/**` | optional | optional | no | local | no |
+| `.env` | yes | yes | yes | local by explicit plaintext permission | yes |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
 output, and cache folders.
 Materialization describes storage shape only; authorization decides whether a
 specific actor can hydrate or read local plaintext for a protected path such as
 `.env`.
+
+Secret-backed paths are never ordinary synced text. Their historical state,
+exports, search results, conflict envelopes, projections, and agent-readable
+views store opaque handles, hashes, and redacted status by default. Plaintext
+hydration requires explicit server-side materialization permission and must be
+recorded separately from normal materialization so `.env` does not become a
+plain history blob or search document.
 
 `tracked` and `versioned` are related but not identical. `versioned = true`
 implies `tracked = true`; `tracked = false` implies `versioned = false`.

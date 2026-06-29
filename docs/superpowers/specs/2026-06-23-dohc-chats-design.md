@@ -443,8 +443,10 @@ messages, links, notifications, or projections.
 
 Renderer surfaces that load channels, chats, linked work, summaries, search
 results, or side-rail state asynchronously must guard responses with a
-workspace/request token, abort signal, or equivalent. A slow response for
-workspace A must never repaint workspace B after a workspace switch.
+workspace/request token and verify that token again at apply time before
+mutating UI state. Abort signals are supplemental cancellation, not the only
+guard. A slow response for workspace A must be ignored rather than repainting
+workspace B after a workspace switch.
 
 This does not violate the dohc file philosophy. Chats are social actions, not
 plain file writes. Posting a message triggers activity, mentions, read state,

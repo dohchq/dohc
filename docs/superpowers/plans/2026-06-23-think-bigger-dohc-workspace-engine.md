@@ -244,7 +244,8 @@ Policy
   effective access/materialization/export/search behavior
 ```
 
-Everything meaningful gets a stable ID:
+Everything meaningful eventually gets a stable ID, but Phase 0 starts with the
+proof-arc identities required for the file/version/chat loop:
 
 - files.
 - folders.
@@ -253,11 +254,15 @@ Everything meaningful gets a stable ID:
 - chats.
 - channels.
 - messages.
+- agent runs.
+- shares.
+
+Deferred substrate identities stay in the expansion backlog until their
+contracts are mounted into the product surface:
+
 - apps.
 - databases.
 - rows where row-level links are needed.
-- agent runs.
-- shares.
 - secrets.
 - projections.
 
