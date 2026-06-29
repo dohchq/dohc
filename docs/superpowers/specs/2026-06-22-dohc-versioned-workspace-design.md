@@ -572,19 +572,22 @@ source precondition, one destination precondition, and one idempotency key. This
 models temp-file-then-rename saves without an extra read/round trip and without
 allowing a path-only delete/recreate substitution.
 API-originated write-producing operations must carry an idempotency key bound to
-the actor/session, workspace, version context, operation type, target, full
-operation operand tuple, and causal precondition set. The operand tuple includes
-materially distinguishing values such as source/destination paths,
-sourceVersionId, targetVersionId, versionA/versionB identifiers, checkpointId,
-snapshot ids, merge inputs, and restore targets as applicable, so different
-`merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide under one
-key. Duplicate delivery with the same idempotency key must return the original
-result or a deterministic equivalent and must not create additional canonical
-mutations, duplicate history events, duplicate projections, or repeated
-notification/search side effects. Idempotency records must be persisted through
-the documented maximum retry horizon for that operation type and transport after
-the operation reaches a terminal result. The idempotency record/tombstone must be
-committed in the same transactional boundary as the canonical mutation. If an
+the actor/session, workspace, version context, operation type, target, write
+payload digest or canonical operation payload fingerprint, full operation
+operand tuple, and causal precondition set. Payload changes must produce a
+different idempotency identity even when the target and precondition are
+unchanged. The operand tuple includes materially distinguishing values such as
+source/destination paths, sourceVersionId, targetVersionId, versionA/versionB
+identifiers, checkpointId, snapshot ids, merge inputs, and restore targets as
+applicable, so different `merge(...)`, `replace(...)`, or `restore(...)`
+requests cannot collide under one key. Duplicate delivery with the same
+idempotency key must return the original result or a deterministic equivalent
+and must not create additional canonical mutations, duplicate history events,
+duplicate projections, or repeated notification/search side effects.
+Idempotency records must be persisted through the documented maximum retry
+horizon for that operation type and transport after the operation reaches a
+terminal result. The idempotency record/tombstone must be committed in the same
+transactional boundary as the canonical mutation. If an
 implementation cannot share a transaction boundary, it must provide an equivalent
 write-ahead guarantee: reserve the idempotency key durably before applying the
 mutation, make recovery complete either the original mutation or tombstone the

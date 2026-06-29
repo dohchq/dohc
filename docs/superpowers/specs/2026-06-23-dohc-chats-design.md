@@ -970,13 +970,14 @@ Pinned
 ```
 
 The channel may support lightweight stream messages, but durable chats should be
-the object that survives and resurfaces. A channel send always maps to a
-`ThreadMessage` inside exactly one `ChatThread` identified by
-`(workspaceId, channelId)`. Resolving or creating that channel-backed
-`ChatThread` must be an atomic get-or-create operation before the
-`ThreadMessage` is written, so concurrent sends cannot create multiple durable
-threads for the same channel. There is no separate durable `ChannelMessage`
-entity outside the canonical `ChatThread -> ThreadMessage` model.
+the object that survives and resurfaces. A channel send maps to a
+`ThreadMessage` inside exactly one `ChatThread` for that conversation.
+`channelId` is a container/context identifier, not the durable thread identity.
+Resolving or creating the channel-backed `ChatThread` must be an atomic
+get-or-create operation before the `ThreadMessage` is written, so concurrent
+sends cannot create duplicate threads for the same conversation. There is no
+separate durable `ChannelMessage` entity outside the canonical
+`ChatThread -> ThreadMessage` model.
 
 ## Side rail integration
 

@@ -1983,7 +1983,7 @@ links, activity, read state, and reactions.
 - Store chat links through the canonical `ThreadLink` shape: stable link id,
   source workspace/thread, target type, target workspace, stable target id,
   optional `VersionRef`, display path/title captured at link time,
-  ACL/degraded-render state, and any validated share grant/visibility scope.
+  ACL/degraded-render state.
 - Model live chats as workspace objects, not as files that automatically fork
   with versions.
 

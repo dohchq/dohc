@@ -22,7 +22,7 @@ append-only history.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 4 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 5 issues; follow-up fixes
   are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -255,7 +255,8 @@ Date completed:
 
 ### Tests Added Or Updated
 
-- No code tests. Planning/docs-only scaffold.
+- No new code tests were added. Planning/docs-only scaffold validation runs are
+  recorded below.
 
 ### Commands Run
 
@@ -1716,6 +1717,24 @@ Ninety-second pass:
     verify or repair.
   - Kept the Current PR Snapshot aligned with the latest 4-issue rerun while
     follow-up fixes await the next CodeRabbit pass.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninety-third pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Bound API idempotency identities in both versioned-workspace and native
+    filesystem specs to write payload digests or canonical operation payload
+    fingerprints.
+  - Trimmed PR 12 `ThreadLink` scope back to non-share chat link fields; share
+    grant and visibility-scope fields remain deferred to PR 18.
+  - Clarified channel-backed sends so `channelId` is context/container identity,
+    while `ChatThread` remains the durable conversation identity.
+  - Changed the PR00 execution-log "Tests Added Or Updated" note to say no new
+    code tests were added while preserving validation evidence below.
+  - Updated Current PR Snapshot to reflect the latest 5-issue CodeRabbit rerun.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
