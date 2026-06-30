@@ -127,9 +127,10 @@ durability path accepts a non-canonical
 successful immediate save and not a canonical write that is merely waiting for
 read visibility. The only `durable-pending` response is the non-canonical
 `WriteResult` arm carrying `holdingRecordId`, `acceptedAt`, `replayUntil`,
-`operatorDispositionDueAt`, `pendingState`, and the same idempotency/replay
-metadata used to resume or retire that holding record. UIs may show that pending
-record only in explicit ingest/recovery/status surfaces marked non-canonical.
+`operatorDispositionDueAt`, `retentionUntil`, `pendingState`, and the same
+idempotency/replay metadata used to resume or retire that holding record. UIs may
+show that pending record only in explicit ingest/recovery/status surfaces marked
+non-canonical.
 In this spec, "files save immediately" means authorized writes that pass
 protection checks become canonical without an extra human apply/review step.
 Write results are explicit:
@@ -244,6 +245,7 @@ type WriteResult =
       acceptedAt: UnixMsDecimalString
       replayUntil: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
+      retentionUntil: UnixMsDecimalString
       pendingState:
         | 'pending_protection'
         | 'pending_review'
@@ -840,16 +842,17 @@ Normal filesystem saves are translated into the same semantic write contract as
 external editor or agent to synthesize a client precondition. When a file is read
 or materialized, or when a new local path is first created/imported, the engine
 records exactly one authoritative engine-owned capture/replay token for that
-path. That token is the per-path causal guard submitted by normal filesystem
-saves, such as a base-version token, etag, absence assertion, watcher sequence
-token, or session capture id. Broader multi-factor deduplication fingerprints may
-include content hashes, payload digests, or operation fingerprints, but they are
-not the authoritative per-path capture/replay token and cannot substitute for it.
+`(workspaceId, versionId, path)` tuple. That token is the workspace/version/path
+causal guard submitted by normal filesystem saves, such as a base-version token,
+etag, absence assertion, watcher sequence token, or session capture id. Broader
+multi-factor deduplication fingerprints may include content hashes, payload
+digests, or operation fingerprints, but they are not the authoritative
+workspace/version/path capture/replay token and cannot substitute for it.
 First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
-a path with no prior object, not a missing token. When the file is saved or
-captured, the filesystem path submits that engine-owned token with the incoming
-bytes. Missing, ambiguous, malformed, or wrongly scoped engine capture tokens
-fail closed through the existing
+a path with no prior object in that workspace/version, not a missing token. When
+the file is saved or captured, the filesystem path submits that engine-owned
+token with the incoming bytes. Missing, ambiguous, malformed, or mismatched
+workspace/version/path capture tokens fail closed through the existing
 `retryable-failure` result when capture infrastructure cannot currently prove
 commit state, or through `PublicValidationErrorCode` value
 `capture_token_invalid` before any holding record, quarantine record, or

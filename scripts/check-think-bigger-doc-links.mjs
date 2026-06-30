@@ -40,7 +40,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Think Bigger documentation and tooling|Think Bigger dohc documentation and link-check tooling|Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Design specs for versioning, chats, and filesystem|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger documentation suite|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Think Bigger planning and design documentation|Think Bigger documentation and tooling|Think Bigger dohc documentation and link-check tooling|Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Design specs for versioning, chats, and filesystem|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger documentation suite|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
