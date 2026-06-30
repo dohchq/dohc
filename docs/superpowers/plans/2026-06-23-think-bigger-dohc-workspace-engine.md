@@ -878,13 +878,16 @@ blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
 After P0A and P0R, Phase 0 must land a small provisional shared-substrate
-baseline before P0B, P0D, or P0E branch into implementation. That baseline owns
-the early `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
-`ConflictRecord`, `ThreadLink`, and file/chat link shapes for Phase 0 lanes
-only. It must be versioned, tested, and owned in one place; P0B/P0D/P0E must not
-invent parallel shapes. PR 01 remains the final schema source and must either
-adopt the provisional shapes unchanged or migrate/backfill them through an
-explicit schema-version boundary after P0G.
+baseline before P0B, P0D, or P0E branch into implementation. The named
+provisional source of truth is `Phase0SharedSubstrateBaseline` in the shared
+substrate package scaffold. It owns the early `WorkspaceObject`,
+`WorkspaceVersion`, `VersionRef`, stable object ID, `ConflictRecord`,
+`ThreadLink`, and file/chat link shapes for Phase 0 lanes only. It must be
+versioned, tested, and owned in one place; P0B/P0D/P0E must import, reuse, or
+schema-versionedly extend these symbols rather than invent parallel shapes. PR
+01 remains the final schema source and must either adopt the provisional shapes
+unchanged or migrate/backfill them through an explicit schema-version boundary
+after P0G.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1023,8 +1026,9 @@ history.
 - Clean merge from named version into Main.
 - Preserve base/current/incoming on conflict.
 - Minimal conflict UI or API.
-- Minimal provisional `ConflictRecord` contract in the shared substrate scaffold,
-  aligned with PR 01's future formal `ConflictRecord` boundary:
+- Reuse and, if needed, schema-versionedly extend the provisional
+  `ConflictRecord` contract from `Phase0SharedSubstrateBaseline`, aligned with
+  PR 01's future formal `ConflictRecord` boundary:
   `id`, `workspaceId`, `targetVersionId`, `sourceVersionId`, `objectId`,
   `pathAtConflict`, `driver`, `base`, `current`, `incoming`, `createdAt`,
   `resolvedAt?`, `resolutionHistoryMomentId?`, and
@@ -1060,13 +1064,13 @@ history.
 - Minimal workspace-local chat thread.
 - One chat thread linked to a stable file object ID.
 - Message send.
-- Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
-  seeded in the shared substrate package scaffold. P0E owns freezing and
-  versioning these shapes as the single provisional chat contract before PR 12
-  extends them for channels, DMs, and full chat schema.
+- Reuse and, if needed, schema-versionedly extend the provisional `ChatThread`,
+  `ThreadMessage`, and `ThreadLink` contracts from
+  `Phase0SharedSubstrateBaseline` before PR 12 extends them for channels, DMs,
+  and full chat schema.
   These provisional shapes must remain forward-compatible with PR 12, or PR 12
   must include a migration/backfill step that preserves existing chat data.
-  PR 01 consumes this frozen P0E contract as part of the shared substrate and
+  PR 01 consumes this Phase 0 baseline contract as part of the shared substrate and
   must not introduce parallel chat shapes; temporary fields must either carry a
   schema version or have an explicit migration/backfill boundary.
 - Read-only text projection for agent context.
@@ -1620,13 +1624,13 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
   and `ProjectionValidation`.
-- Formalize and extend the carried-forward `ConflictRecord` contract from P0D,
-  preserving the `ConflictRecord` symbol and the
+- Formalize and extend the carried-forward `ConflictRecord` contract from
+  `Phase0SharedSubstrateBaseline`, preserving the `ConflictRecord` symbol and the
   `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
   migration/backfill boundary supersedes it.
-- Consume the P0E-frozen `ChatThread`, `ThreadMessage`, and `ThreadLink`
-  scaffold as the single provisional chat substrate; PR 01 must not introduce a
-  parallel chat schema.
+- Consume the `Phase0SharedSubstrateBaseline` `ChatThread`, `ThreadMessage`, and
+  `ThreadLink` scaffold as the single provisional chat substrate; PR 01 must not
+  introduce a parallel chat schema.
 - Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
   that consume them: P0E may introduce minimal provisional chat/link contracts

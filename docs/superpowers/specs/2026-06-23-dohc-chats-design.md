@@ -71,7 +71,7 @@ activity records are append-only events keyed by
 `(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
 sequence. `activityId` is server-assigned and unique within the
 `(workspaceId, threadId)` scope; clients cannot supply or override it, and replay
-or dedupe logic must treat the server-issued activity id/sequence as the only
+or dedupe logic must treat the server-issued `activityId`/sequence as the only
 authoritative activity identity.
 `ThreadLink` create/update paths must validate the target workspace/resource
 identity, share/grant id, and visibility scope against trusted server-side grant
@@ -249,17 +249,20 @@ declare function canonicalizeDmParticipantIds(input: {
 ```
 
 `canonicalizeDmParticipantIds` receives the authenticated server-derived actor
-separately from the client-supplied participant list. The server actor is merged
-into the set before uniqueness-key generation, persistence, authorization, or
-fanout; client-supplied actor IDs are ignored or rejected as authority, so the
-creator cannot omit or spoof themself.
+separately from the client-supplied participant list. The server first strips
+any `serverActorId` self-entry from `requestedParticipantIds`; self entries from
+the client are ignored for authority and do not count as duplicate participants.
+The server actor is then merged into the set before uniqueness-key generation,
+persistence, authorization, or fanout, so the creator cannot omit or spoof
+themself.
 After canonicalization, `dmParticipantIds` must contain 2-16 unique participants.
-Raw duplicates are rejected before uniqueness-key generation or persistence;
-implementations must not silently dedupe duplicate participants. Oversized
-canonical participant lists fail closed before persistence. Larger conversations
-should use channels or shared channels. Every service that builds the canonical
-participant set uses this same `canonicalizeDmParticipantIds` validation path
-before uniqueness-key generation or persistence.
+Raw duplicates among non-self requested participants are rejected before
+uniqueness-key generation or persistence; implementations must not silently
+dedupe duplicate other participants. Oversized canonical participant lists fail
+closed before persistence. Larger conversations should use channels or shared
+channels. Every service that builds the canonical participant set uses this same
+`canonicalizeDmParticipantIds` validation path before uniqueness-key generation
+or persistence.
 
 DMs should still be source-aware when needed:
 
@@ -720,7 +723,7 @@ type ChatBodySnapshot =
   | { kind: 'secretRef', secretObjectId: string, redactedPreview?: string }
 
 type ThreadActivityBase = {
-  readonly id: string // server-assigned unique activity id within workspace/thread
+  readonly activityId: string // server-assigned unique activity id within workspace/thread
   workspaceId: string
   threadId: string
   readonly actorId: string // server-owned immutable activity actor id

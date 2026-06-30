@@ -15,18 +15,12 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **PR00 source of truth:** see the newest owning PR00 pass entry below for
-  CodeRabbit status, test evidence, open overrides, and completion state.
-- **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised workflow drift, checker list-code, snapshot, bridge-gate, schema-owner,
-  and status taxonomy findings that are addressed in the newest pass; a
-  committed rerun is still required.
-- **Test evidence:** the newest pass records `git diff --check`, both Think
-  Bigger docs link-check invocations, and the brand guard test passing.
-- **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
-  remains pending human approval.
-- **Completion state:** not complete or merge-ready until CodeRabbit is clean and
-  the docs-only local-agent-CLI exception is approved.
+- **Owning PR00 pass:** the newest PR00 pass entry below is the source of truth
+  for live CodeRabbit status, test evidence, open overrides, and completion
+  state.
+- **Snapshot drift rule:** do not duplicate mutable status in this block. Update
+  only the newest owning PR00 pass entry when review status, validation evidence,
+  overrides, or completion state changes.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
@@ -3141,6 +3135,34 @@ Hundred-fifty-fourth pass:
   - Clarified that the Phase 0 shared-substrate baseline is provisional and
     Phase 0-owned, while PR 01 remains the final schema source with an explicit
     migration/backfill boundary.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-fifth pass:
+
+- Fixed CodeRabbit's five follow-up findings:
+  - Named `Phase0SharedSubstrateBaseline` as the single provisional Phase 0
+    source of truth for shared substrate shapes, and pointed P0D, P0E, and PR 01
+    to that owner.
+  - Made Think Bigger cohort metadata discovery tolerate the current cohort name
+    and a `dohc`-prefixed variant while retaining manifest validation.
+  - Replaced the mutable Current PR Snapshot status bullets with a pointer to
+    the newest owning PR00 pass entry.
+  - Standardized chat activity identity on `activityId` in both append-only log
+    prose and `ThreadActivityBase`.
+  - Clarified DM participant canonicalization so client-supplied self entries
+    are stripped before duplicate checks, while duplicate non-self participants
+    still fail closed.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

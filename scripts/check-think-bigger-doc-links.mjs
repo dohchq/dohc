@@ -24,7 +24,7 @@ const discoverThinkBiggerDocs = () => {
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
     const header = raw.split(/\r?\n/).slice(0, 12).join('\n')
-    return /^Cohort:\s*Think Bigger Workspace Engine$/m.test(header)
+    return /^Cohort:\s*(?:dohc\s+)?Think Bigger Workspace Engine$/im.test(header)
   }
   const discoveryRoots = [
     {
