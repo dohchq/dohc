@@ -889,8 +889,10 @@ substrate package scaffold. It owns temporary Phase 0 fixture symbols for
 `ConflictRecord`, `ThreadLink`, and file/chat link shapes only until PR 01 lands.
 It must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F,
 and P0G must not start implementation branches until this baseline is finalized,
-and must import or reuse these provisional symbols rather than invent parallel
-shapes.
+and must import these provisional symbols from the baseline package rather than
+invent parallel shapes, ad hoc copies, or local lookalike types. After PR 01
+lands, new code must consume the PR 01-owned contracts and
+`Phase0SharedSubstrateBaseline` becomes historical-only.
 PR 01 is the single canonical schema owner for core workspace substrate:
 `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, and
 `ConflictRecord`. For chat/link work, PR 01 carries only a versioned provisional

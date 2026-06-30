@@ -165,14 +165,17 @@ allowlisted policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and
 optional workspace-root `.dohcignore`; all other `.dohc/**` content and
 unmanaged `.versions/**` fail closed into rejection, quarantine, or manual
 resolution. Safe rename proposal remains available only for non-engine user
-content that collides with a reserved namespace. Symlinks, hardlinks, junctions,
-bind mounts, aliases, or any equivalent filesystem indirection that resolves
-outside the active workspace, crosses into another workspace, or enters a
-disallowed reserved namespace must be rejected or quarantined before capture or
-API dispatch. If the engine cannot prove the resolved target and file
-identity are inside the active workspace boundary, it fails closed. This path
-boundary applies to every API path operation and file capture that may back an
-atom, folder, entity, share, or capture record.
+content that collides with a reserved namespace. Hardlinks are prohibited in
+writable or materialized workspace projections, including same-workspace
+hardlinks, because multiple paths sharing one inode break the path-centric object
+identity model; capture/API paths reject or quarantine them before treating the
+path as workspace content. Symlinks, junctions, bind mounts, aliases, or any
+equivalent filesystem indirection that resolves outside the active workspace,
+crosses into another workspace, or enters a disallowed reserved namespace must be
+rejected or quarantined before capture or API dispatch. If the engine cannot
+prove the resolved target and file identity are inside the active workspace
+boundary, it fails closed. This path boundary applies to every API path operation
+and file capture that may back an atom, folder, entity, share, or capture record.
 Canonicalization must also be TOCTOU-safe: after a path is resolved, subsequent
 stat/read/write/capture work must use the same verified descriptor, handle,
 inode/file-id binding, or equivalent identity-bound mechanism. The engine must
