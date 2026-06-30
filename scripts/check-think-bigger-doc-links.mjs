@@ -20,14 +20,10 @@ if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((fil
 }
 
 const discoverThinkBiggerDocs = () => {
-  const planDir = 'docs/superpowers/plans'
-  const specDir = 'docs/superpowers/specs'
   const repoRelativePath = (...segments) => path.posix.join(...segments)
-  const specNameFragments = [
-    'dohc-versioned-workspace-design',
-    'dohc-chats-design',
-    'dohc-native-filesystem-design',
-  ]
+  const expectedDocSet = new Set(expectedThinkBiggerDocs)
+  const expectedDocDirs = [...new Set(expectedThinkBiggerDocs.map((file) => path.posix.dirname(file)))]
+  const expectedDocBasenames = expectedThinkBiggerDocs.map((file) => path.posix.basename(file))
   const safeReadDir = (dir) => {
     try {
       return fs.readdirSync(path.resolve(repoRoot, dir))
@@ -35,14 +31,22 @@ const discoverThinkBiggerDocs = () => {
       return []
     }
   }
-  const planDocs = safeReadDir(planDir)
-    .filter((name) => name.includes('think-bigger-dohc-workspace-engine') && name.endsWith('.md'))
-    .map((name) => repoRelativePath(planDir, name))
-  const specDocs = safeReadDir(specDir)
-    .filter((name) => name.endsWith('.md') && specNameFragments.some((fragment) => name.includes(fragment)))
-    .map((name) => repoRelativePath(specDir, name))
 
-  return [...planDocs, ...specDocs].sort()
+  const isThinkBiggerRelatedDoc = (file) => {
+    if (expectedDocSet.has(file) || path.posix.basename(file).includes('think-bigger')) {
+      return true
+    }
+
+    const raw = fs.readFileSync(path.resolve(repoRoot, file), 'utf8')
+    return /think bigger/i.test(raw) || expectedDocBasenames.some((basename) => raw.includes(basename))
+  }
+
+  return expectedDocDirs
+    .flatMap((dir) => safeReadDir(dir)
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => repoRelativePath(dir, name)))
+    .filter(isThinkBiggerRelatedDoc)
+    .sort()
 }
 
 const discoveredThinkBiggerDocs = discoverThinkBiggerDocs()

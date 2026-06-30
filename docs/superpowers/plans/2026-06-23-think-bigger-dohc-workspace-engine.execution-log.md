@@ -60,7 +60,7 @@ worktree, and planned validation shape.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR workstream | docs + focused package tests | Provisional lane. |
+| P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR workstream | docs + minimal storage/filesystem smoke + focused package tests | Provisional lane. |
 | P0R | Rust Workspace Kernel Spike | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR workstream | cargo test + perf | Provisional lane. |
 | P0B | Minimal Versioned Text Store | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0C | File/API Write Capture And History | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR workstream | workspace-engine/history/mcp/desktop + feasible matrix | Provisional lane. |
@@ -2863,6 +2863,29 @@ Hundred-forty-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-fifth pass:
+
+- Fixed CodeRabbit's three low-severity follow-up findings:
+  - Removed the hardcoded Think Bigger spec-name fragment list from the docs link
+    checker and derived candidates from the manifest's directories plus
+    manifest/content relationship checks.
+  - Updated the P0A inventory row to match the broader minimal
+    storage/filesystem smoke and focused-package validation shape.
+  - Reworded the Phase 0 proof gate so File/API writes durably capture
+    immediately, while canonical promotion remains validation-gated.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an
@@ -2928,7 +2951,8 @@ Gate evidence:
 - [ ] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded.
 - [ ] Rust bridge/packaging/CI recommendation is recorded.
 - [ ] Main plus one named version works for one text/file driver.
-- [ ] File/API writes save immediately and produce recoverable history.
+- [ ] File/API writes durably capture immediately and produce recoverable
+      history, with canonical promotion gated by validation.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
 - [ ] Every atom, folder, entity, file, version, chat, thread, message, link,
