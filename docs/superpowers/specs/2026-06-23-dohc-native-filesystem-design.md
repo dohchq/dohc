@@ -129,7 +129,7 @@ import, attach, sync, and raw filesystem scan is defined by this table:
 | Candidate | Import / Attach / Sync / Raw Scan Action |
 | --- | --- |
 | Allowlisted policy inputs: `.dohc/files.toml`, `.dohc/visibility.toml`, optional workspace-root `.dohcignore` | Parse as engine policy input outside the ordinary captured-content pipeline. |
-| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Exclude from import, attach, sync, and raw scan quarantine; never re-ingest as user content. |
+| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Silently skip from import, attach, sync, and raw scan user-content flows; never re-ingest as user content. |
 | Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never propose ordinary user-content safe rename. |
 | Managed `~/dohc/<workspace>/.versions/<version>/` bound to a known workspace/version by the engine | Allow only through the engine workspace/version mount resolver, not generic tree walkers. |
 | Unmanaged or out-of-contract `.versions/**` or aliases of `.versions` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never silently promote into a named version. |
@@ -521,17 +521,19 @@ the create-only precondition token, means "create only if no object exists at
 this path", and must omit `targetObjectId`.
 Overwrite must provide `targetObjectId` for the intended existing object plus
 exactly one causal freshness precondition such as `expectedEtag`,
-`expectedContentHash`, or `expectedBaseVersion`. `targetObjectId` binds object
-identity so delete/recreate substitution cannot satisfy a path-only overwrite,
-but it is not a freshness guard by itself. If the precondition or target object
-does not match the current workspace/version/path state, the API returns a
-conflict response rather than applying the mutation. Exactly one precondition
-mode may be supplied per write. Supplying no causal precondition, omitting
-`targetObjectId` for overwrite, or combining incompatible guards such as
-`expectedAbsent` with `expectedEtag` fails closed with a validation/conflict
-response and does not mutate canonical content. `expectedAbsent` is represented
-only as that mutually exclusive precondition mode, not as a separate boolean
-field beside another precondition.
+`expectedContentHash` (non-secret only), or `expectedBaseVersion`.
+Secret-backed operands must never use `expectedContentHash`; they must use
+`expectedBaseVersion` or `expectedEtag`. `targetObjectId` binds object identity
+so delete/recreate substitution cannot satisfy a path-only overwrite, but it is
+not a freshness guard by itself. If the precondition or target object does not
+match the current workspace/version/path state, the API returns a conflict
+response rather than applying the mutation. Exactly one precondition mode may be
+supplied per write. Supplying no causal precondition, omitting `targetObjectId`
+for overwrite, or combining incompatible guards such as `expectedAbsent` with
+`expectedEtag` fails closed with a validation/conflict response and does not
+mutate canonical content. `expectedAbsent` is represented only as that mutually
+exclusive precondition mode, not as a separate boolean field beside another
+precondition.
 
 Conflict responses are secret-safe envelopes by default: they return only
 opaque object/version handles, keyed commitments, operation kinds, and minimal

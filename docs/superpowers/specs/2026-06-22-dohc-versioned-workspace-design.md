@@ -1029,7 +1029,7 @@ dohc should not block normal edits by default.
 If changes collide, dohc should preserve both states and surface the conflict
 only when needed.
 
-For collaborative documents, this can feel like Google Docs:
+For collaborative documents, this can feel like a real-time collaborative editor:
 
 - live edits merge in the document.
 - history records who changed what.

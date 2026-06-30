@@ -1642,22 +1642,12 @@ Foundation alpha and the relevant surface proof are complete.
 - Add the checked-in Think Bigger docs manifest consumed by
   [the Think Bigger docs manifest](./2026-06-23-think-bigger-docs.manifest.json).
 - Add [the Think Bigger docs workflow](../../../.github/workflows/think-bigger-docs.yml)
-  so CI runs the manifest-backed checker for pull requests and pushes to `main`
-  when `docs/superpowers/**`, [the checker](../../../scripts/check-think-bigger-doc-links.mjs),
-  `package.json`, `pnpm-lock.yaml`, or the workflow changes. The same workflow
-  also runs on `workflow_dispatch` and a scheduled drift check so the checked-in
-  manifest is compared against
-  repository inventory even when no path-filtered pull request or push touched
-  the docs cohort. The workflow path filters only trigger pull-request and push
-  jobs; the enforcement point is the checker, which compares the checked-in
-  manifest against repository inventory and link/anchor resolution whenever the
-  job runs. Renamed or moved Think Bigger docs under `docs/superpowers/**`,
-  manifest drift, checker changes, workflow changes, scheduled drift checks, and
-  manual drift checks are covered by those entry points. Linked targets outside
-  the workflow path filters are validated when the job is triggered by a covered,
-  scheduled, or manual run, but their unrelated standalone moves do not trigger
-  pull-request/push runs. The filters keep unrelated app-only PRs out of the docs
-  job.
+  so CI runs the manifest-backed checker on every pull request targeting `main`
+  and every push to `main`. The same workflow also runs on `workflow_dispatch`
+  and a scheduled drift check. The enforcement point is the checker, not path
+  filters: it compares the checked-in manifest against repository inventory and
+  link/anchor resolution whenever the job runs, and it must fail PRs whenever
+  docs manifest, link, anchor, or discovered-doc drift is detected.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
@@ -1667,16 +1657,13 @@ Foundation alpha and the relevant surface proof are complete.
 - docs CI/workflow must run the checker against every Think Bigger
   plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
   the source of truth. [The workflow](../../../.github/workflows/think-bigger-docs.yml)
-  uses path filters only to trigger the job for `docs/superpowers/**`,
-  [the checker](../../../scripts/check-think-bigger-doc-links.mjs),
-  `package.json`, `pnpm-lock.yaml`, and the workflow file itself on pull requests
-  and pushes; `workflow_dispatch` and the scheduled drift check must run the same
-  checker without relying on path filters. The checker is the fail-closed
-  enforcement mechanism: it must compare the manifest with repository inventory,
-  validate links/anchors, and fail when covered doc renames, execution-log edits,
-  manifest changes, dependency manifest/lockfile changes, workflow changes,
-  checker changes, linked-target drift visible during a covered/manual/scheduled
-  run, or discovered-doc drift make the manifest and repository disagree.
+  must be an always-on required PR validation, not a path-filtered optional docs
+  job. `workflow_dispatch` and the scheduled drift check run the same checker for
+  non-PR drift visibility. The checker is the fail-closed enforcement mechanism:
+  it must compare the manifest with repository inventory, validate links/anchors,
+  and fail when doc renames, execution-log edits, manifest changes, dependency
+  manifest/lockfile changes, workflow changes, checker changes, linked-target
+  drift, or discovered-doc drift make the manifest and repository disagree.
 
 **CodeRabbit focus:**
 

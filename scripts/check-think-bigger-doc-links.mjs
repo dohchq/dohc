@@ -40,7 +40,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Architecture Specifications|Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -318,7 +318,7 @@ const collectLinks = (markdown) => {
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
-  const autolinkPattern = /<((?:https?:|mailto:|app:)[^<>\s]*)>/g
+  const autolinkPattern = /<([A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>/g
   const bracketIndexTokenPattern = /^(?:[A-Za-z_$][A-Za-z0-9_$]*|\d+)$/
   const looksLikeBracketIndexing = (prose, match) => {
     const index = match.index ?? -1
@@ -400,6 +400,10 @@ const assertCheckerFixtures = () => {
   const schemeAutolink = collectLinks('<app://workspace/thread>')
   if (!schemeAutolink.links.some((link) => link.target === 'app://workspace/thread')) {
     throw new Error('app autolink fixture should still collect supported URI schemes')
+  }
+  const disallowedAutolink = collectLinks('<ftp://example.com/file>')
+  if (!disallowedAutolink.links.some((link) => link.target === 'ftp://example.com/file')) {
+    throw new Error('disallowed URI scheme fixture should still reach validation')
   }
 
   const commented = collectLinks('<!-- [hidden](./missing.md) -->\nVisible')

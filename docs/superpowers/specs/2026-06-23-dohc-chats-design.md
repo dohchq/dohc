@@ -1265,7 +1265,7 @@ linked:
 ## Messages
 
 <User Name>:
-Can we make conflict handling feel more like Google Docs?
+Can we make conflict handling feel more like a collaborative doc editor?
 
 <User Name>'s agent:
 I checked the filesystem spec and found one risk...
