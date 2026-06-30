@@ -493,7 +493,7 @@ Tombstone garbage collection is not enough by itself: after a namespace is
 rotated or tombstones are compacted, the engine must retain a reject-only
 namespace-version marker, retired-key range, or equivalent durable fence for the
 expired workspace/version/operation namespace. Late retries under that retired
-namespace must resolve to `idempotency_expired` or a deterministic conflict
+namespace must resolve to `idempotency-expired` or a deterministic conflict
 instead of being treated as fresh writes; new writes must use a non-retired
 operation namespace.
 Retry-horizon values come from the same Phase 0 decision note and PR 01 shared

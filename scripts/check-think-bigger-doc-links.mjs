@@ -23,15 +23,17 @@ const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
+  const thinkBiggerCohortPattern =
+    /^Cohort:\s*(?:dohc Workspace Engine documentation and CI infrastructure|(?:dohc\s+)?Think Bigger Workspace Engine)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
     const header = raw.split(/\r?\n/).slice(0, 12).join('\n')
-    return /^Cohort:\s*(?:dohc\s+)?Think Bigger Workspace Engine$/im.test(header)
+    return thinkBiggerCohortPattern.test(header)
   }
   const discoveryRoots = [
     {
       dir: 'docs/superpowers/plans',
-      include: (name) => /^2026-06-23-think-bigger-.*\.md$/.test(name),
+      include: (name) => /^\d{4}-\d{2}-\d{2}-think-bigger-.*\.md$/.test(name),
     },
     {
       dir: 'docs/superpowers/specs',

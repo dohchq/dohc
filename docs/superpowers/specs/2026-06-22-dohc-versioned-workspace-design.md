@@ -216,7 +216,6 @@ type WriteResult =
       commitState:
         | 'no_canonical_commit_recorded'
         | 'commit_state_unknown_retry_required'
-        | 'canonical_commit_recorded'
     }
   | {
       kind: 'rejected'
@@ -778,12 +777,14 @@ restore(workspaceId, versionId, checkpointId, {
 })
 ```
 
-API writes require exactly one client-supplied causal precondition in the
-`precondition`, `sourcePrecondition`, or `destinationPrecondition` field that
-applies to the operation. Missing preconditions or multiple incompatible API
-guards are malformed request/protocol errors and fail closed before the conflict
-path. Filesystem capture uses the engine-owned capture/replay token described
-above instead; native local edits are not malformed merely because no
+Single-operand API writes require exactly one client-supplied causal
+precondition; multi-operand API writes such as `replace(...)` and `merge(...)`
+must provide one precondition per guarded operand in the `precondition`,
+`sourcePrecondition`, or `destinationPrecondition` field that applies to that
+operand. Missing preconditions or multiple incompatible guards for the same
+operand are malformed request/protocol errors and fail closed before the
+conflict path. Filesystem capture uses the engine-owned capture/replay token
+described above instead; native local edits are not malformed merely because no
 client-supplied precondition exists.
 
 `rename(...)` is the same-directory basename-change operation: `fromPath` and

@@ -17,15 +17,13 @@ Source specs:
 
 - **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
   live CodeRabbit status, test evidence, open overrides, and completion state.
-- **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised six findings that are addressed in the newest pass; a committed rerun
-  is still required.
-- **Test evidence:** the newest pass records `git diff --check`, both Think
-  Bigger docs link-check invocations, and the brand guard test passing.
+- **CodeRabbit status:** see the newest PR00 pass entry below.
+- **Test evidence:** derive from the latest validation block.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
   remains pending human approval.
-- **Completion state:** not complete or merge-ready until CodeRabbit is clean and
-  the docs-only local-agent-CLI exception is approved.
+- **Completion state:** derive from the latest PR00 pass entry; not complete or
+  merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
+  exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
@@ -3359,6 +3357,35 @@ Hundred-sixty-second pass:
   - Made cross-mount `rename(...)` and `move(...)` fail closed without copy/delete
     fallback.
   - Added `Override approval reference` to the execution-log CodeRabbit template.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixty-third pass:
+
+- Fixed CodeRabbit's eight follow-up findings:
+  - Clarified one API precondition per guarded operand for multi-operand writes.
+  - Removed the impossible `canonical_commit_recorded` retryable commit state.
+  - Generalized Think Bigger docs discovery to future dated plan filenames and
+    the current shared cohort label.
+  - Normalized retired-namespace retry wording to `idempotency-expired`.
+  - Changed the Current PR Snapshot to derive mutable fields from the newest pass
+    entry instead of embedding a stale finding count.
+  - Made Phase 0 chat-schema ownership and the Phase 0 -> PR 01 -> PR 12
+    migration handoff explicit.
+  - Converted PR00 artifact references to Markdown links so the docs checker
+    validates them.
+  - Scoped mention notification resolve dedupe by lifecycle event rather than
+    suppressing resolve by the enqueue aggregate `notificationId`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

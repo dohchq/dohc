@@ -889,6 +889,13 @@ must import, reuse, or schema-versionedly extend these symbols rather than
 invent parallel shapes. PR 01 remains the final schema source and must either
 adopt the provisional shapes unchanged or migrate/backfill them through an
 explicit schema-version boundary after P0G.
+For chat specifically, `Phase0SharedSubstrateBaseline` owns only the provisional
+`ChatThread`, `ThreadMessage`, and `ThreadLink` symbols needed by P0E and the
+proof arc. PR 01 consumes those exact symbols as carried-forward substrate
+inputs, not a second chat schema. PR 12 then schema-versionedly extends or
+migrates the same symbols for channels, DMs, and full chat behavior. The
+migration direction is one-way: Phase 0 -> PR 01 -> PR 12, with explicit
+backfill if a later phase changes field shape.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1578,17 +1585,18 @@ Foundation alpha and the relevant surface proof are complete.
 
 - Add this mega plan.
 - Add execution-log template and checklist section in
-  `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`;
+  [the Think Bigger execution log](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md);
   that file is the only PR00 status tracker for progress, blockers, and
   evidence.
 - Add the checked-in Think Bigger docs manifest consumed by
-  `scripts/check-think-bigger-doc-links.mjs`.
-- Add `.github/workflows/think-bigger-docs.yml` so CI runs the manifest-backed
-  checker for pull requests and pushes to `main` when `docs/superpowers/**`,
-  the checker, or the workflow changes. This path-filtered model covers Think
-  Bigger plan/spec/execution-log edits, manifest updates, superpowers doc
-  renames, and linked target moves under the superpowers docs tree while keeping
-  unrelated app-only PRs out of the docs job.
+  [the Think Bigger docs manifest](./2026-06-23-think-bigger-docs.manifest.json).
+- Add [the Think Bigger docs workflow](../../../.github/workflows/think-bigger-docs.yml)
+  so CI runs the manifest-backed checker for pull requests and pushes to `main`
+  when `docs/superpowers/**`, [the checker](../../../scripts/check-think-bigger-doc-links.mjs),
+  or the workflow changes. This path-filtered model covers Think Bigger
+  plan/spec/execution-log edits, manifest updates, superpowers doc renames, and
+  linked target moves under the superpowers docs tree while keeping unrelated
+  app-only PRs out of the docs job.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
@@ -1597,12 +1605,13 @@ Foundation alpha and the relevant surface proof are complete.
   `node scripts/check-think-bigger-doc-links.mjs`.
 - docs CI/workflow must run the checker against every Think Bigger
   plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
-  the source of truth. The workflow uses path filters for `docs/superpowers/**`,
-  `scripts/check-think-bigger-doc-links.mjs`, and the workflow file itself, so
-  linked target moves under superpowers docs, doc renames, execution-log edits,
-  manifest changes, workflow changes, and checker changes cannot bypass anchor
-  validation. The checker must compare the manifest with repository inventory
-  and fail closed when they diverge.
+  the source of truth. [The workflow](../../../.github/workflows/think-bigger-docs.yml)
+  uses path filters for `docs/superpowers/**`,
+  [the checker](../../../scripts/check-think-bigger-doc-links.mjs), and the
+  workflow file itself, so linked target moves under superpowers docs, doc
+  renames, execution-log edits, manifest changes, workflow changes, and checker
+  changes cannot bypass anchor validation. The checker must compare the manifest
+  with repository inventory and fail closed when they diverge.
 
 **CodeRabbit focus:**
 

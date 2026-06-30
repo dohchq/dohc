@@ -883,13 +883,17 @@ JSON bytes and is always 64 ASCII hex characters.
 `bodyHash` is required audit evidence for the immutable persisted body revision,
 but it is not part of `notificationId` so redaction/sanitization views cannot
 change the notification identity.
-The enqueue path must upsert or no-op by that expanded id, and
-resolve/replay/fanout must dedupe by the exact same canonical `notificationId`
-string. Repeated enqueue or resolve attempts for the same message revision and
-canonical mention set return the existing result or a
-deterministic no-op; they must not append duplicate activities, duplicate queue
-rows, unstable unread/mention badges, duplicate notifications, or duplicate
-export/history records.
+The enqueue path must upsert or no-op by that expanded `notificationId` for the
+notification aggregate. Resolve uses the same `notificationId` to find/update
+aggregate queue state, but activity dedupe is scoped to the lifecycle event:
+`(notificationId, kind)` plus the mutation idempotency identity, or the
+server-assigned `activityId`. A `mention_notification_resolved` write must not
+be suppressed by an existing `mention_notification_enqueued` activity with the
+same `notificationId`; it appends its own resolved activity once and then
+retries return that resolved result or a deterministic no-op. Repeated enqueue or
+resolve attempts for the same message revision and canonical mention set must
+not append duplicate activities, duplicate queue rows, unstable unread/mention
+badges, duplicate notifications, or duplicate export/history records.
 
 type ThreadActivity =
   | MessageCreateThreadActivity
