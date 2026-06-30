@@ -105,8 +105,8 @@ canonical without an extra human apply/review step.
 Write results are explicit:
 
 ```ts
-type UnixMsDecimalString = string // canonical base-10 Unix epoch milliseconds
-type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
+type UnixMsDecimalString = string & { readonly __brand: 'UnixMsDecimalString' }
+type UInt64DecimalString = string & { readonly __brand: 'UInt64DecimalString' }
 
 type DeniedOrQuarantinedStatus =
   | 'rejected_before_acceptance'
@@ -145,6 +145,8 @@ type PublicDeniedReasonCode =
 // post-acceptance authorization failures.
 
 type PublicValidationErrorCode =
+  // missing_precondition: required guard omitted
+  // incompatible_precondition: multiple aliases supplied for one guard
   | 'invalid_request'
   | 'malformed_request'
   | 'missing_precondition'

@@ -262,22 +262,22 @@ Phase 0 should use a normal folder plus reconciliation:
    - Store `workspaceId`, source mount binding, and either a canonical path for
      ordinary entries or an opaque/redacted path token for protected,
      secret-backed, or engine-managed entries. File identity where available,
-     size, mtime, content hash, and version/base metadata are stored with that
-     redacted form; the real protected path remains only inside the authorization
-     envelope.
+     size, mtime, content hash, immutable `versionId`, and version/base metadata
+     are stored with that redacted form; the real protected path remains only
+     inside the authorization envelope.
 
 2. **While dohc is running**
    - Use OS file watching for create/modify/delete/rename events.
    - Debounce noisy save sequences.
    - Stat and hash changed candidates.
    - Append captured tracked changes to the durability log with `workspaceId`,
-     source mount binding, version/base metadata, capture token, and
-     actor/device/session provenance. Ordinary paths may include the canonical
-     path. Protected or secret-backed paths must use an opaque/redacted path token
-     or keyed commitment in the durability log; the real path remains only inside
-     the authorization envelope. Secret-backed writes are included only as
-     encrypted references/envelopes or broker metadata, never plaintext secret
-     content.
+     immutable `versionId`, source mount binding, version/base metadata, capture
+     token, and actor/device/session provenance. Ordinary paths may include the
+     canonical path. Protected or secret-backed paths must use an opaque/redacted
+     path token or keyed commitment in the durability log; the real path remains
+     only inside the authorization envelope. Secret-backed writes are included
+     only as encrypted references/envelopes or broker metadata, never plaintext
+     secret content.
    - Coalesce them into meaningful history moments.
 
 3. **When dohc starts after being closed**
@@ -286,12 +286,15 @@ Phase 0 should use a normal folder plus reconciliation:
    - Compare against the last known index.
    - Hash only files whose metadata or identity changed, plus suspicious cases.
    - Detect creates, edits, deletes, and likely renames/moves.
-   - Promote a captured result only when the persisted `workspaceId` and source
-     mount binding match the workspace and mount being reconciled.
-   - Record each result as a local/device/session change in the version bound to
-     the edited path or mount at capture time, or deterministically inferred
-     from persisted mount metadata during restart reconciliation.
-   - If workspace binding, mount binding, or version binding is ambiguous,
+   - Promote a captured result only when the persisted `workspaceId`, immutable
+     `versionId`, and source mount binding match the workspace, version, and
+     mount being reconciled.
+   - Record each result only in the immutable version captured at write time;
+     restart reconciliation may use persisted mount metadata to verify that
+     `versionId` binding, never to infer a different version after mount rename
+     or remap.
+   - If workspace binding, mount binding, or immutable version binding is
+     ambiguous or cannot be proven from the captured record,
      quarantine and require explicit user resolution; never fall back to the
      current active workspace or version.
 

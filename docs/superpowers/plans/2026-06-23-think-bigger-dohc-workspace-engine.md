@@ -883,13 +883,21 @@ blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
 After P0A and P0R, Phase 0 must land a small provisional shared-substrate
-baseline before any later Phase 0 lane branches into implementation. The named
-provisional source of truth is `Phase0SharedSubstrateBaseline` in the shared
-substrate package scaffold. It must be versioned, tested, and owned in one
-place; P0B, P0C, P0D, P0E, P0F, and P0G must import these provisional symbols
-from the baseline package rather than invent parallel shapes, ad hoc copies, or
-local lookalike types. After PR 01 lands, new code must consume the PR 01-owned
-contracts and `Phase0SharedSubstrateBaseline` becomes historical-only.
+baseline before any later Phase 0 lane branches into implementation. This is a
+dedicated **P0S - Shared Substrate Freeze** gate owned by the main orchestration
+thread plus the schema-baseline lane. The named provisional source of truth is
+`Phase0SharedSubstrateBaseline` in the shared substrate package scaffold. It
+must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and
+P0G must import these provisional symbols from the baseline package rather than
+invent parallel shapes, ad hoc copies, or local lookalike types or depend on
+PR 01-owned contracts too early. P0S acceptance requires the baseline package to
+export the provisional `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`,
+stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
+`ConflictRecord`, `ChatThread`, `ThreadMessage`, `ThreadLink`,
+`ThreadReadState`, and `AgentRun`/agent-run surrogate symbols listed in the
+matrix below, with tests proving consumers import those symbols. After PR 01
+lands, new code must consume the PR 01-owned contracts and
+`Phase0SharedSubstrateBaseline` becomes historical-only.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 

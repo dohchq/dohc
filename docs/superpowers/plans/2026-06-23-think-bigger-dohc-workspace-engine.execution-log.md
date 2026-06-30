@@ -251,8 +251,13 @@ Date completed:
 
 ### Tests Added Or Updated
 
-- No new code tests were added. Planning/docs-only scaffold validation runs are
-  recorded below.
+- Added executable docs-checker coverage through in-script fixtures for HTML
+  comment stripping, nested image links, generic code-span heading anchors,
+  bracket-index notation, missing reference links, and blockquote fenced-code
+  parsing.
+- Added the Think Bigger docs workflow so CI runs the manifest/link/anchor
+  checker when covered docs, the checker, or the workflow change.
+- Planning/docs-only validation runs are recorded below.
 
 ### Commands Run
 
@@ -4273,6 +4278,42 @@ Hundred-ninety-second pass:
   - Clarified that named-version compare shows file/data differences plus
     version-linked chat projections, while Chats remain live workspace objects
     and are not restored or compared as versioned chat history.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-ninety-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Branded `UnixMsDecimalString` and `UInt64DecimalString` in the versioned
+    workspace spec so canonical decimal strings are machine-checkable.
+  - Added precondition validation-code comments for omitted guards and multiple
+    aliases for one guard.
+  - Added the explicit P0S shared-substrate freeze gate, owner, acceptance
+    symbols, and consumer-import requirement before P0B-P0G proceed.
+  - Required durability capture/restart reconciliation to persist and match an
+    immutable `versionId`, never infer version binding from remapped mounts.
+  - Updated execution-log testing notes for checker fixtures and workflow
+    coverage.
+  - Added `threadSequence` and `bodyRevision` to `MessageCreateThreadActivity`
+    plus replay/export guidance for deterministic ordering and body identity.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

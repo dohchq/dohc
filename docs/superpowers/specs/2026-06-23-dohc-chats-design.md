@@ -745,7 +745,10 @@ Message creation is also atomic: the initial `ThreadMessage` row and its
 serialized unit of work and become visible together. The activity is the
 canonical creation event for replay, projections, exports, and audit; the
 message row must not become visible without it, and a creation activity must not
-be exposed without the corresponding row.
+be exposed without the corresponding row. `MessageCreateThreadActivity` stores
+the created row's canonical `threadSequence` and initial `bodyRevision` so
+replay/export consumers can reconstruct deterministic ordering and body identity
+without inferring them from timestamps.
 
 `ThreadMessage.body` is untrusted user/agent input. Rendering must escape plain
 text by default or sanitize through an allowlisted formatting subset before
@@ -829,6 +832,8 @@ type ThreadActivityBase = {
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
   kind: 'message_created'
+  threadSequence: UInt64DecimalString
+  bodyRevision: UInt64DecimalString
   bodyHash: string
   nextBodyHash: string
 }
