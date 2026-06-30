@@ -4,9 +4,19 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - 'docs/superpowers/**'
+      - 'scripts/check-think-bigger-doc-links.mjs'
+      - 'package.json'
+      - '.github/workflows/think-bigger-docs.yml'
   push:
     branches:
       - main
+    paths:
+      - 'docs/superpowers/**'
+      - 'scripts/check-think-bigger-doc-links.mjs'
+      - 'package.json'
+      - '.github/workflows/think-bigger-docs.yml'
   workflow_dispatch:
   schedule:
     - cron: '17 5 * * 1'
@@ -29,16 +39,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.24.0 --activate
-
       - name: Setup Node
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.14.1
           cache: pnpm
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts

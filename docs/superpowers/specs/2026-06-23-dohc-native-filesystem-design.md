@@ -112,9 +112,12 @@ Named versions can appear as their own folders or mounts:
 These `.versions/<version>/` roots are valid managed version locations only
 when the engine creates or resolves them as named-version mounts for the active
 workspace. They are not ordinary user-created folders. Generic materialized
-workspace tree walkers skip `.versions/**` by default; only the engine's
-workspace/version mount resolver may enter a managed `.versions/<version>/`
-root, and only with an explicit workspace/version binding.
+workspace tree walkers skip `.versions/**` by default. Reconciliation must first
+enumerate all engine-bound `.versions/<version>/` mounts for the active
+workspace, then only the engine's workspace/version mount resolver may enter
+each managed root, and only with an explicit workspace/version binding. Ordinary
+user-created `.versions` folders or aliases are not active named-version mounts
+and stay excluded from generic traversal and canonical promotion.
 
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.
@@ -249,13 +252,15 @@ posting a chat message.
 Managed mounts and dohc-controlled agent launches must bind the capture session
 to an active server/engine-derived principal before writes can promote to
 version history. Ordinary local editor and shell writes use the same
-server-derived principal resolution path, such as OS session binding or an
-explicit attach token, before promotion can leave quarantine. Capture-time policy
-checks use that principal plus workspace scope, user locks, folder/atom access,
-sharing boundaries, protected paths, and skill-turn gates. If a raw OS write
-arrives without a resolvable active principal, dohc may record device/session
-provenance in the local durability log, but promotion to canonical history stays
-quarantined until a valid principal and policy decision are established.
+server-derived principal resolution path; OS session binding and explicit attach
+tokens are inputs to that derivation, never independent promotion authority.
+Before quarantine can be lifted, the capture/promotion policy path must perform
+explicit server/engine validation and the same policy checks for workspace scope,
+user locks, folder/atom access, sharing boundaries, protected paths, and
+skill-turn gates. If a raw OS write arrives without a resolvable active
+principal, dohc may record device/session provenance in the local durability log,
+but promotion to canonical history stays quarantined until a valid principal and
+policy decision are established.
 
 ## Local capture and reconciliation
 

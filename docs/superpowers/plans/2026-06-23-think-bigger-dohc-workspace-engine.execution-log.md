@@ -4883,6 +4883,41 @@ Two-hundred-ninth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-tenth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Added path filters to the Think Bigger docs workflow for docs, checker,
+    package manifest, and workflow changes while leaving scheduled runs intact.
+  - Moved setup-node before Corepack/pnpm activation so pnpm is prepared under
+    the selected Node 24.14.1 runtime.
+  - Required reconciliation to enumerate active engine-bound `.versions/<version>/`
+    mounts for the current workspace before entering them through the resolver.
+  - Clarified that OS session binding is only an input to server/engine principal
+    derivation and cannot lift quarantine without explicit validation and policy
+    checks.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and
