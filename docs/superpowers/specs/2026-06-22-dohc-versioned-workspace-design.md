@@ -14,11 +14,19 @@ The user-facing promise is simple:
 > Use normal files. Humans and agents can edit them. Writes have two explicit
 > phases: durable recording and canonical acceptance. Writes that pass protection
 > checks become canonical immediately; writes that are durably recorded but cannot
-> yet become canonical return `durable-pending`; evaluator outages or
-> indeterminate evaluator results return `retryable-failure` without pretending
-> the write was durably accepted; and rejected/quarantined writes keep durable
-> recovery/audit handles. dohc remembers what happened, supports parallel
-> versions, and helps reconcile conflicts.
+> yet become canonical return a `durable-pending holding record`; evaluator
+> outages or indeterminate evaluator results before a durable result can be
+> proven return `retryable-failure` without pretending the write was durably
+> accepted; and rejected/quarantined writes keep durable recovery/audit handles.
+> dohc remembers what happened, supports parallel versions, and helps reconcile
+> conflicts.
+
+Canonical lifecycle term: **`durable-pending holding record`**. This is the
+single prose term for an accepted, non-canonical write held for replay,
+canonicalization, or operator disposition. `WriteResult.kind: 'durable-pending'`,
+`recordKind: 'accepted_holding_record'`, and `pendingState:
+'pending_canonicalization' | 'overdue_disposition'` are wire/schema values for
+that same lifecycle concept, not separate lifecycle names.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -100,8 +108,8 @@ Normative gate/retry matrix:
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before durable acceptance | `rejected` or validation error | `rejected_before_acceptance`; no canonical commit. |
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
-| Acknowledgement or evaluator state is unknown after the mutation may have committed | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
-| Accepted but not yet canonicalized | `durable-pending` | Non-canonical holding record with `holdingRecordId` and replay metadata. |
+| Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
+| Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
 | Preserved base/current/incoming divergence exists | `conflict` | Conflict record; no silent last-writer-wins. |
 
 Write, replay, conflict, and proof-slice sections in this spec use this matrix
@@ -111,7 +119,7 @@ committed to canonical workspace state and is visible to normal `read` semantics
 for that version. `watch` propagation and search indexing are eventually
 consistent from canonical state and must not gate write acknowledgment. If the
 durability path accepts a non-canonical
-holding record, the response is a distinct durable-pending result, not a
+`durable-pending holding record`, the response is a distinct durable-pending result, not a
 successful immediate save and not a canonical write that is merely waiting for
 read visibility. The only `durable-pending` response is the non-canonical
 `WriteResult` arm carrying `holdingRecordId`, `acceptedAt`, `replayUntil`,
@@ -458,12 +466,12 @@ evidence without that explicit disposition record.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.
-Holding-record retries apply only when a real `holdingRecordId` exists. Retries
+Durable-pending holding-record retries apply only when a real `holdingRecordId` exists. Retries
 using the same idempotency key, `holdingRecordId`, and matching replay metadata
 derive the response from the holding record's current durable state, not only
-from the original `replayUntil` window. If the accepted record has promoted,
+from the original `replayUntil` window. If the durable-pending holding record has promoted,
 retry returns the canonical result or deterministic equivalent. If it is still
-accepted but not promoted, retry returns `durable-pending` while the
+not promoted, retry returns `durable-pending` while the
 idempotency/retry horizon allows key reuse. If it has become `rejected`,
 `quarantined`, or `terminal-retired`, retry returns that current state while the
 corresponding retention or retirement metadata is still addressable. Only after

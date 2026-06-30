@@ -3643,7 +3643,7 @@ Hundred-seventy-second pass:
 
 Hundred-seventy-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3671,7 +3671,7 @@ Hundred-seventy-third pass:
 
 Hundred-seventy-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3710,7 +3710,7 @@ Hundred-seventy-fourth pass:
 
 Hundred-seventy-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3741,7 +3741,7 @@ Hundred-seventy-fifth pass:
 
 Hundred-seventy-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3770,7 +3770,7 @@ Hundred-seventy-sixth pass:
 
 Hundred-seventy-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3802,7 +3802,7 @@ Hundred-seventy-seventh pass:
 
 Hundred-seventy-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3833,7 +3833,7 @@ Hundred-seventy-eighth pass:
 
 Hundred-seventy-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one follow-up finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3859,7 +3859,7 @@ Hundred-seventy-ninth pass:
 
 Hundred-eightieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3893,7 +3893,7 @@ Hundred-eightieth pass:
 
 Hundred-eighty-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3927,7 +3927,7 @@ Hundred-eighty-first pass:
 
 Hundred-eighty-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3960,7 +3960,7 @@ Hundred-eighty-second pass:
 
 Hundred-eighty-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -3995,7 +3995,7 @@ Hundred-eighty-third pass:
 
 Hundred-eighty-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one remaining cross-device/cross-projection filesystem
     mutation finding fixed; committed review rerun is required after this pass
     is pushed.
@@ -4030,7 +4030,7 @@ Hundred-eighty-fourth pass:
 
 Hundred-eighty-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4065,7 +4065,7 @@ Hundred-eighty-fifth pass:
 
 Hundred-eighty-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4101,7 +4101,7 @@ Hundred-eighty-sixth pass:
 
 Hundred-eighty-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4136,7 +4136,7 @@ Hundred-eighty-seventh pass:
 
 Hundred-eighty-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4173,7 +4173,7 @@ Hundred-eighty-eighth pass:
 
 Hundred-eighty-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4210,7 +4210,7 @@ Hundred-eighty-ninth pass:
 
 Hundred-ninetieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4241,7 +4241,7 @@ Hundred-ninetieth pass:
 
 Hundred-ninety-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun
     is required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4282,7 +4282,7 @@ Hundred-ninety-first pass:
 
 Hundred-ninety-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one follow-up finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4309,7 +4309,7 @@ Hundred-ninety-second pass:
 
 Hundred-ninety-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4345,7 +4345,7 @@ Hundred-ninety-third pass:
 
 Hundred-ninety-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4378,7 +4378,7 @@ Hundred-ninety-fourth pass:
 
 Hundred-ninety-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below.
@@ -4412,7 +4412,7 @@ Hundred-ninety-fifth pass:
 
 Hundred-ninety-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4446,7 +4446,7 @@ Hundred-ninety-sixth pass:
 
 Hundred-ninety-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4476,7 +4476,7 @@ Hundred-ninety-seventh pass:
 
 Hundred-ninety-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one minor and two trivial follow-up findings fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4506,7 +4506,7 @@ Hundred-ninety-eighth pass:
 
 Hundred-ninety-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4544,7 +4544,7 @@ Hundred-ninety-ninth pass:
 
 Two-hundredth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4583,7 +4583,7 @@ Two-hundredth pass:
 
 Two-hundred-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings handled; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4621,7 +4621,7 @@ Two-hundred-first pass:
 
 Two-hundred-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4650,7 +4650,7 @@ Two-hundred-second pass:
 
 Two-hundred-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4681,7 +4681,7 @@ Two-hundred-third pass:
 
 Two-hundred-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4717,7 +4717,7 @@ Two-hundred-fourth pass:
 
 Two-hundred-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set.
@@ -4751,7 +4751,7 @@ Two-hundred-fifth pass:
 
 Two-hundred-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4787,7 +4787,7 @@ Two-hundred-sixth pass:
 
 Two-hundred-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4823,7 +4823,7 @@ Two-hundred-seventh pass:
 
 Two-hundred-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4857,7 +4857,7 @@ Two-hundred-eighth pass:
 
 Two-hundred-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one follow-up finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4885,7 +4885,7 @@ Two-hundred-ninth pass:
 
 Two-hundred-tenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4920,7 +4920,7 @@ Two-hundred-tenth pass:
 
 Two-hundred-eleventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings handled; committed review rerun
     is required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4958,7 +4958,7 @@ Two-hundred-eleventh pass:
 
 Two-hundred-twelfth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: eight follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -4999,7 +4999,7 @@ Two-hundred-twelfth pass:
 
 Two-hundred-thirteenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5033,7 +5033,7 @@ Two-hundred-thirteenth pass:
 
 Two-hundred-fourteenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5071,7 +5071,7 @@ Two-hundred-fourteenth pass:
 
 Two-hundred-fifteenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5087,6 +5087,41 @@ Two-hundred-fifteenth pass:
     Schema Promotion Checkpoint definition.
   - Expanded the native filesystem status checklist to include `rejected`,
     `retryable-failure`, and `terminal-retired`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixteenth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Renamed archived pass status labels from `Live PR00 status` to
+    `Historical PR00 status`.
+  - Made P0S a checkpoint entry in the Phase 0 Proof Arc, not a PR lane.
+  - Normalized accepted non-canonical write prose around the canonical
+    `durable-pending holding record` term.
+  - Clarified `durable-pending` and `retryable-failure` as mutually exclusive
+    outcomes in the gate/retry matrix.
+  - Converted `ChannelLinkedTargetRef` to a `scopeKind` discriminated union so
+    shared targets require `shareGrantId` and `visibilityScope`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -5146,11 +5181,11 @@ findings` entries above.
 
 ### Phase 0 Proof Arc
 
-PRs:
+PRs and checkpoint:
 
 - P0A
 - P0R
-- P0S
+- P0S - PR01 Schema Promotion Checkpoint, not a standalone lane
 - P0B
 - P0C
 - P0D

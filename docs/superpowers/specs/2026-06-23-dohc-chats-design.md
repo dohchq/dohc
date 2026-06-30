@@ -229,15 +229,29 @@ First-class channel contract:
 ```ts
 type ChannelVisibility = 'workspace' | 'private' | 'shared'
 
-type ChannelLinkedTargetRef = {
+type InternalChannelLinkedTargetRef = {
   targetWorkspaceId: string
   targetType: ThreadLinkTargetType
   targetId: string
   targetVersionRef?: VersionRef
-  scopeKind: 'internal' | 'shared'
-  shareGrantId?: string
-  visibilityScope?: string
+  scopeKind: 'internal'
+  shareGrantId?: never
+  visibilityScope?: never
 }
+
+type SharedChannelLinkedTargetRef = {
+  targetWorkspaceId: string
+  targetType: ThreadLinkTargetType
+  targetId: string
+  targetVersionRef?: VersionRef
+  scopeKind: 'shared'
+  shareGrantId: string
+  visibilityScope: string
+}
+
+type ChannelLinkedTargetRef =
+  | InternalChannelLinkedTargetRef
+  | SharedChannelLinkedTargetRef
 
 type Channel = {
   channelId: string
