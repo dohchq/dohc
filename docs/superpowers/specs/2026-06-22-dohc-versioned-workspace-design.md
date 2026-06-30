@@ -119,14 +119,14 @@ type PublicDeniedReasonCode =
   | 'version_access_denied'
   | 'skill_turn_denied'
   | 'invalid_request'
-  | 'quota_exceeded'
-  | 'rate_limited'
   | 'replay_metadata_mismatch'
 
 type RetryableWriteFailureCode =
   | 'service_unavailable'
   | 'evaluator_unavailable'
   | 'evaluator_indeterminate'
+  | 'quota_exceeded'
+  | 'rate_limited'
 
 type TerminalRetirementReason =
   | 'auto_retired_payload_retention_expired'
@@ -301,20 +301,22 @@ extend or disable this terminal payload-retention rule.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.
-Retries using the same idempotency key and matching replay metadata before the
-record's retry horizon return the same addressable result for the same
-`holdingRecordId`: `durable-pending` before `replayUntil`, `rejected` before
-the rejected record's `retentionUntil`, or `quarantined` before the quarantined
-record's `retentionUntil`. After that record's retry horizon, the write API
-returns exactly one canonical terminal response for that `holdingRecordId`:
-`idempotency-expired` with `recordKind: 'accepted_holding_record'`,
-`recordKind: 'rejected_record'`, or `recordKind: 'quarantined_record'`, unless
-the accepted holding record has already reached the terminal-retirement state,
-in which case the stable `terminal-retired` result is returned. Disposition,
-expiration, and lookup-only details beyond that canonical terminal response live
-in the status query path, not alternate write-retry responses. A stale retry
-must not silently create a second accepted holding record or an uncorrelated
-denial.
+Retries using the same idempotency key, `holdingRecordId`, and matching replay
+metadata derive the response from the record's current durable state, not only
+from the original `replayUntil` window. If the accepted record has promoted,
+retry returns the canonical result or deterministic equivalent. If it is still
+accepted but not promoted, retry returns `durable-pending` while the
+idempotency/retry horizon allows key reuse. If it has become `rejected`,
+`quarantined`, or `terminal-retired`, retry returns that current state while the
+corresponding retention or retirement metadata is still addressable. Only after
+the record's retry horizon or retained idempotency metadata expires does the
+write API return the canonical `idempotency-expired` response for that
+`holdingRecordId`, with `recordKind: 'accepted_holding_record'`,
+`recordKind: 'rejected_record'`, or `recordKind: 'quarantined_record'`.
+Disposition, expiration, and lookup-only details beyond that canonical terminal
+response live in the status query path, not alternate write-retry responses. A
+stale retry must not silently create a second accepted holding record or an
+uncorrelated denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

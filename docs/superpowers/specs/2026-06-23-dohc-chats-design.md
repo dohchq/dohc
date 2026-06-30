@@ -101,11 +101,11 @@ must reject signs, decimal points, separators, whitespace, locale/non-ASCII
 digits, empty strings, leading zeros except the literal `0`, and values outside
 the declared range. `UInt64DecimalString` is `0` through
 `18446744073709551615`. `UnixMsDecimalString` is non-negative Unix epoch
-milliseconds through `8640000000000000` unless a narrower shared-schema range is
-required by the implementation. `ThreadReadState.updatedAt`,
+milliseconds through `8640000000000000`. Platform-specific timestamp bounds
+belong in translation layers, not the shared schema. `ThreadReadState.updatedAt`,
 `ThreadMessage.createdAt`, `ThreadMessage.editedAt`, and
-`ThreadActivityBase.createdAt` are pinned to server time and must not be accepted
-from client payloads. All boundary readers must parse, range-check, and
+`ThreadActivityBase.createdAt` are pinned to server time and must not be
+accepted from client payloads. All boundary readers must parse, range-check, and
 reserialize to the canonical form before storing, comparing, indexing, or
 projecting `threadSequence`, `bodyRevision`, `createdAt`, `editedAt`,
 `deletedAt`, `lastActivityAt`, `updatedAt`, or read-state cursor fields.

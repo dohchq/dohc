@@ -695,19 +695,29 @@ ambiguous input.
 Example internal shape:
 
 ```ts
-type FilePolicy = {
+type FilePolicyBase = {
   tracked: boolean
   versioned: boolean
   synced: boolean
   pinned: boolean
-  encrypted: boolean
   searchable: boolean
   visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
   materialized: 'local' | 'virtual'
-  secretProjection?: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
 }
+
+type NonSecretFilePolicy = FilePolicyBase & {
+  encrypted: false
+  secretProjection?: never
+}
+
+type SecretBackedFilePolicy = FilePolicyBase & {
+  encrypted: true
+  secretProjection: 'opaque' | 'protectedLocal' | 'plaintextLocal'
+}
+
+type FilePolicy = NonSecretFilePolicy | SecretBackedFilePolicy
 ```
 
 `materialized` describes hydration state only: whether bytes are present locally
@@ -718,6 +728,9 @@ change tracking, versioning, searchability, export behavior, or visibility.
 storage hydration: `opaque` means handles/redacted status only,
 `protectedLocal` means brokered or policy-controlled local projection, and
 `plaintextLocal` means ordinary OS-readable plaintext after an explicit grant.
+Policy validation and builders must emit `SecretBackedFilePolicy` for protected
+secret paths; such entries cannot omit `secretProjection` or use a non-secret
+placeholder value.
 Status APIs, UI serialization, and agent-readable views must emit both
 `materialized` and `secretProjection` so protected secret material is never
 confused with normal local plaintext.
