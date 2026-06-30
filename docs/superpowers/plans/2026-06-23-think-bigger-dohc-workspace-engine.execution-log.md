@@ -58,17 +58,17 @@ secret-handling, data-loss, or review-gate blockers.
 
 ## PR Lane Inventory
 
-P0A-P0G branches plus the P0R spike and P0S shared-substrate checkpoint are
-provisional throughput work started after user approval for unattended Phase 0
-execution on 2026-06-24. Current live state is recorded only in the canonical
-live-status block in the latest PR00 pass below. This table records static lane
-ownership, branch, worktree, and planned validation shape.
+P0A-P0G branches plus the P0R spike are provisional throughput work started
+after user approval for unattended Phase 0 execution on 2026-06-24. Current live
+state is recorded only in the canonical live-status block in the latest PR00
+pass below. This table records static lane ownership, branch, worktree, and
+planned validation shape. P0S is a consolidated PR01 Schema Promotion Checkpoint,
+not a standalone lane row.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR workstream | docs + minimal storage/filesystem smoke + focused package tests | Provisional lane. |
 | P0R | Rust Workspace Kernel Spike | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR workstream | cargo test + perf | Provisional lane. |
-| P0S | Shared Substrate Freeze | TBD / PR01 schema promotion checkpoint | TBD | main orchestration + schema-baseline lane | shared substrate tests + consumer import checks | Live checkpoint before P0B-P0G; consolidated under PR01 Schema Promotion Checkpoint. |
 | P0B | Minimal Versioned Text Store | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0C | File/API Write Capture And History | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR workstream | workspace-engine/history/mcp/desktop + feasible matrix | Provisional lane. |
 | P0D | Compare, Clean Merge, Conflict Preservation | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR workstream | workspace-engine + workspace-history + typecheck | Provisional lane. |
@@ -5017,6 +5017,44 @@ Two-hundred-thirteenth pass:
   - Added secret-safe output rules for `watch`, `snapshot`, and `diff`.
   - Reserved `conflict` for true base/current/incoming divergence in replace
     fallback handling.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fourteenth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Added the `Think Bigger documentation and tooling` cohort alias to docs
+    discovery.
+  - Rejected root-relative Markdown links instead of resolving them as
+    repo-relative paths.
+  - Moved the execution log out of the mega plan Source Specs list into the
+    audit/history artifact bucket.
+  - Removed P0S from the PR lane inventory and documented it as a PR01 checkpoint
+    rather than a standalone lane row.
+  - Added `ThreadReadState` and `AgentRun` to PR01 shared-schema handoff scope.
+  - Added a normative gate/retry matrix to the versioned workspace spec.
+  - Added cross-workspace/shared-scope metadata and re-authorization rules to
+    `ChannelLinkedTargetRef`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

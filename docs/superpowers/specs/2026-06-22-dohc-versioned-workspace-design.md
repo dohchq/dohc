@@ -92,6 +92,20 @@ proved no canonical mutation was applied. `retryable-failure.commitState:
 'commit_state_unknown_retry_required'` means the mutation may already be
 canonical but acknowledgement failed or cannot be proven; callers must retry with
 the same idempotency key instead of issuing a fresh write.
+
+Normative gate/retry matrix:
+
+| Gate outcome | Public result | Commit state / record |
+| --- | --- | --- |
+| Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before durable acceptance | `rejected` or validation error | `rejected_before_acceptance`; no canonical commit. |
+| Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. |
+| Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
+| Acknowledgement or evaluator state is unknown after the mutation may have committed | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
+| Accepted but not yet canonicalized | `durable-pending` | Non-canonical holding record with `holdingRecordId` and replay metadata. |
+| Preserved base/current/incoming divergence exists | `conflict` | Conflict record; no silent last-writer-wins. |
+
+Write, replay, conflict, and proof-slice sections in this spec use this matrix
+as the source of truth for gate, retry, and `WriteResult` semantics.
 Canonical save success is acknowledged only after the mutation is durably
 committed to canonical workspace state and is visible to normal `read` semantics
 for that version. `watch` propagation and search indexing are eventually

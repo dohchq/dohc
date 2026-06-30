@@ -230,9 +230,13 @@ First-class channel contract:
 type ChannelVisibility = 'workspace' | 'private' | 'shared'
 
 type ChannelLinkedTargetRef = {
+  targetWorkspaceId: string
   targetType: ThreadLinkTargetType
   targetId: string
   targetVersionRef?: VersionRef
+  scopeKind: 'internal' | 'shared'
+  shareGrantId?: string
+  visibilityScope?: string
 }
 
 type Channel = {
@@ -252,9 +256,16 @@ type Channel = {
 
 `linkedTargets` is a server-normalized set, not caller-order-sensitive input.
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
-tuple used by `ThreadLink` creation, rejects unsupported or unauthorized
-targets, deduplicates exact duplicates, and persists the set sorted by
-canonical target serialization. General channel context, ACL expansion, side-rail
+tuple used by `ThreadLink` creation, including `targetWorkspaceId`,
+`scopeKind`, `shareGrantId`, and `visibilityScope` where applicable. For
+`scopeKind: 'internal'`, `targetWorkspaceId` must equal the channel
+`workspaceId` and shared metadata must be absent. For `scopeKind: 'shared'`, the
+target must carry a server-derived share grant and visibility scope, and every
+read, projection, notification, search, export, replay, and linked-work
+side-rail path must re-authorize that grant before exposing the linked target.
+The server rejects unsupported, unauthorized, expired, revoked, or ambiguous
+targets, deduplicates exact duplicates, and persists the set sorted by canonical
+target serialization. General channel context, ACL expansion, side-rail
 projection, search, and export use that normalized set. Array order and
 duplicates must never participate in channel identity, thread identity, or
 conversation-id derivation.

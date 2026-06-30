@@ -34,9 +34,12 @@ This mega plan collates and orchestrates:
 - [dohc Versioned Workspace Design](../specs/2026-06-22-dohc-versioned-workspace-design.md)
 - [dohc Native Filesystem Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
 - [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
-- [Think Bigger dohc Workspace Engine Execution Log](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md)
 
 Those files are the conceptual inputs. This file is the execution plan.
+
+Audit/history artifact:
+
+- [Think Bigger dohc Workspace Engine Execution Log](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md)
 
 ## North Star
 
@@ -1701,11 +1704,16 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  and `ProjectionValidation`.
+  `ProjectionValidation`, `ThreadReadState`, and `AgentRun`.
 - Formalize and extend the carried-forward `ConflictRecord` contract from
   `Phase0SharedSubstrateBaseline`, preserving the `ConflictRecord` symbol and the
   `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
   migration/backfill boundary supersedes it.
+- Consume the Phase 0 `ThreadReadState` bridge contract from
+  `Phase0SharedSubstrateBaseline`, preserving monotonic cursor semantics and
+  server-owned revision tokens until PR 12 owns the final read-state schema.
+- Define the `AgentRun` identity contract and migration/backfill semantics here
+  so PR 01 is the single canonical owner for agent-run identity.
 - Consume the `Phase0SharedSubstrateBaseline` `ChatThread`, `ThreadMessage`, and
   `ThreadLink` scaffold exactly as assigned in the Phase 0 / PR 01 / PR 12
   Schema Ownership Matrix; PR 01 must not introduce a parallel chat schema or
@@ -1738,9 +1746,9 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   consumers are generated or conformance-tested consumers of that contract, so
   every path validates identical workspace/version/policy boundaries without
   making one runtime the authority for the others. `WorkspaceObject`,
-  `WorkspaceVersion`, `WorkspaceEvent`, `Projection`, and every other shared
-  boundary type above must be generated from, or conformance-checked against,
-  that single source of truth.
+  `WorkspaceVersion`, `WorkspaceEvent`, `Projection`, `ThreadReadState`,
+  `AgentRun`, and every other shared boundary type above must be generated from,
+  or conformance-checked against, that single source of truth.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

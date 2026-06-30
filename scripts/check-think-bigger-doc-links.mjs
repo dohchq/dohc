@@ -40,7 +40,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Design specs for versioning, chats, and filesystem|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger documentation suite|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Think Bigger documentation and tooling|Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Design specs for versioning, chats, and filesystem|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger documentation suite|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -552,12 +552,15 @@ for (const file of files) {
       continue
     }
 
+    if (decodedTarget.startsWith('/')) {
+      failures.push(`${location}: root-relative link targets are not supported ${raw}`)
+      continue
+    }
+
     const targetPath = path.normalize(
       decodedTarget === ''
         ? path.resolve(filePath)
-        : decodedTarget.startsWith('/')
-          ? path.resolve(repoRoot, decodedTarget.slice(1))
-          : path.resolve(path.dirname(filePath), decodedTarget),
+        : path.resolve(path.dirname(filePath), decodedTarget),
     )
     let canonicalTargetPath
     try {
