@@ -435,16 +435,18 @@ filesystems, volumes, or mount projections, `replace(...)` uses an
 engine-atomic cross-projection replace fallback: verify `sourceObjectId`,
 `destinationObjectId`, the source freshness precondition, the destination
 freshness precondition, workspace/version binding, and idempotency; durably
-ingest the source bytes or content reference; update `destinationObjectId` with
-the new content; retire or quarantine the temp source binding; append one
-replace history moment; and persist the idempotency result in the same durable
-boundary. The destination object identity is preserved for temp-file saves, and
-the source object remains provenance for the incoming bytes. If source bytes
-cannot be read durably, either freshness precondition fails, or either identity
-cannot be proven, the fallback does not apply and the operation resolves through
-the same deterministic validation, conflict, `rejected`, `quarantined`, or
-`retryable-failure` path as other write-producing mutations. Manual follow-up is
-operator workflow metadata, not a `WriteResult.kind`.
+ingest the source bytes or content reference, update `destinationObjectId`,
+retire or quarantine the temp source binding, append one replace history moment,
+and persist the idempotency result in a single atomic durable commit that either
+applies all sub-steps or none. The destination object identity is preserved for
+temp-file saves, and the source object remains provenance for the incoming
+bytes. If source bytes cannot be read durably, either freshness precondition
+fails, either identity cannot be proven, or any fallback sub-step cannot commit
+inside that durable boundary, the fallback aborts with no externally visible
+partial state and the operation resolves through the same deterministic
+validation, conflict, `rejected`, `quarantined`, or `retryable-failure` path as
+other write-producing mutations. Manual follow-up is operator workflow metadata,
+not a `WriteResult.kind`.
 
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
@@ -531,9 +533,10 @@ response instead of applying stale output.
 
 API-originated write-producing operations must carry an idempotency key bound to
 the actor/session, workspace, version, operation type, target, write payload
-digest or canonical operation payload fingerprint, full operation operand tuple,
-and causal precondition. Payload or operand changes must produce a different
-idempotency identity even when the path and precondition are unchanged. Duplicate
+digest or canonical operation payload fingerprint, full operation operand tuple
+after workspace path canonicalization and equivalence normalization, and causal
+precondition. Payload or operand changes must produce a different idempotency
+identity even when the path and precondition are unchanged. Duplicate
 delivery with the same idempotency key returns the original result or a
 deterministic equivalent without creating extra canonical mutations, history
 entries, projections, notifications, or search-index side effects. Idempotency

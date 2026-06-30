@@ -576,14 +576,16 @@ It should ask only:
 
 1. What server/engine-derived actor is performing the write?
 2. Does this actor have permission to write this workspace/version/path/object?
-3. Is the path/object protected by a user lock, policy boundary, or visibility
+3. Does version-access policy allow the write?
+4. Are provenance, attribution, and proof requirements satisfied?
+5. Is the path/object protected by a user lock, policy boundary, or visibility
    boundary?
-4. Is the write allowed by the active skill-turn gate, when the actor is an
+6. Is the write allowed by the active skill-turn gate, when the actor is an
    agent/tool/action running inside a delegated turn?
-5. Does policy require mandatory review before this write can become canonical?
-6. Can the change be recorded durably?
-7. Can the system preserve recovery and honest provenance?
-8. Does the change create a conflict or cross a visibility boundary?
+7. Does policy require mandatory review before this write can become canonical?
+8. Can the change be recorded durably?
+9. Can the system preserve recovery and honest provenance?
+10. Does the change create a conflict or cross a visibility boundary?
 
 If the actor can write, all required policy/review gates pass, and the change
 does not create a conflict or cross a visibility boundary, the change saves

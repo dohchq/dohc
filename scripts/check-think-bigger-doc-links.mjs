@@ -178,7 +178,8 @@ function* contentLines(markdown) {
 
   for (const rawLine of markdown.split(/\r?\n/)) {
     const line = inFence ? rawLine : stripHtmlComments(rawLine)
-    const rawFence = line.match(/^([ \t]*)(```+|~~~+)(.*)$/)
+    const fenceLine = line.replace(/^(?:[ \t]*>[ \t]?)+/, '')
+    const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
     const leadingIndent = indentationWidth(line)
@@ -382,6 +383,11 @@ const assertCheckerFixtures = () => {
   }
   if (!collectAnchors('## `WriteResult<T>`').has('writeresultt')) {
     throw new Error('generic code-span heading fixture should preserve type text in anchors')
+  }
+
+  const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
+  if (quotedFence.links.length > 0 || quotedFence.unresolvedReferences.length > 0) {
+    throw new Error('blockquote fenced-code fixture should not produce links')
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')

@@ -897,6 +897,7 @@ contracts and `Phase0SharedSubstrateBaseline` becomes historical-only.
 | --- | --- | --- | --- |
 | `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
 | `ChatThread`, `ThreadMessage`, chat `ThreadLink` | Provisional fixture owner until PR 01 lands. | Versioned bridge only so file/history/search proof code can compile; not final owner. | Single final owner; adopts or migrates/backfills the Phase 0/PR 01 bridge, then owns channels, DMs, linked-work behavior, and full chat storage. |
+| `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | Provisional fixture owner only when needed for Phase 0 chat bridge tests; must use monotonic cursor semantics and server-owned revision tokens. | Versioned bridge only; may rebuild or invalidate provisional read-state projections, but does not own final cursor semantics. | Single final owner; owns cursor semantics, server-owned revision/CAS token behavior, migration/backfill, projection rebuild/invalidation, and compatibility for legacy read-state rows. |
 | `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
 
 The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
@@ -2159,8 +2160,10 @@ links, activity, read state, and reactions.
   source workspace/thread, target type, target workspace, stable target id,
   optional `VersionRef`, display path/title captured at link time,
   ACL/degraded-render state.
-- Own the final `ChatThread`, `ThreadMessage`, and chat `ThreadLink` schema as
-  assigned in the Phase 0 / PR 01 / PR 12 Schema Ownership Matrix.
+- Own the final `ChatThread`, `ThreadMessage`, chat `ThreadLink`, and
+  `ThreadReadState` schemas as assigned in the Phase 0 / PR 01 / PR 12 Schema
+  Ownership Matrix, including read-state migration/backfill and projection
+  rebuild/invalidation.
 - Model live chats as workspace objects, not as files that automatically fork
   with versions.
 
