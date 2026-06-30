@@ -902,6 +902,10 @@ The named handoff is the **PR01 Schema Promotion Checkpoint**: the execution log
 must record the commit/PR where PR 01 adopts or migrates each provisional
 symbol, and downstream code must stop importing `Phase0SharedSubstrateBaseline`
 for those symbols after that checkpoint.
+PR 01 must add a mechanical lint/test gate for this checkpoint: after each
+symbol is adopted or migrated, the check scans downstream code for imports of
+`Phase0SharedSubstrateBaseline` for that symbol and fails until consumers import
+the PR 01-owned contract instead.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 

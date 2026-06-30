@@ -67,18 +67,23 @@ versioned-workspace `WriteResult.kind` enum:
   indeterminate, and the same operation should retry with its original
   idempotency identity.
 - `terminal-retired`: a previously retained holding or idempotency record is no
-  longer actionable but still has minimal audit/idempotency metadata.
+  longer actionable but still has minimal audit/idempotency metadata; this is a
+  lifecycle/retention state for records the engine can still identify.
 - `idempotency-expired`: the retry horizon has passed, so the old key cannot be
-  silently treated as a new write.
+  silently treated as a new write; this is a retry-horizon outcome for late
+  retries after the retained idempotency metadata is no longer actionable.
 
 Native capture maps outcomes through that enum only: accepted-but-not-promoted
 writes return `durable-pending`; policy denials return `rejected`; suspicious,
 reserved, malformed-after-capture, or indeterminate local filesystem material
 returns `quarantined`; transient capture/promote outages return
 `retryable-failure`; conflict preservation returns `conflict`; successful
-promotion returns `canonical`; and retention expiry returns `terminal-retired`
-or `idempotency-expired` depending on whether minimal retry metadata is still
-inside the configured horizon.
+promotion returns `canonical`; holding-retention expiry returns
+`terminal-retired`; and `idempotency-expired` is reserved for retries that arrive
+after the configured retry horizon has elapsed. Capture, retry, and status paths
+must use that boundary consistently: lifecycle/retention transitions are
+`terminal-retired`, while late retry attempts after the retry horizon are
+`idempotency-expired`.
 
 ## Filesystem shape
 
@@ -409,6 +414,12 @@ restore(workspaceId, versionId, checkpointId, {
 })
 ```
 
+In every API shape above, `expectedContentHash` is accepted only for
+non-secret-backed object operands. Secret-backed overwrite, delete,
+rename/move source, and replace source/destination operands must use another
+permitted freshness guard such as `expectedBaseVersion` or `expectedEtag`;
+plaintext or redacted secret hash equality is not a valid precondition.
+
 `rename` and `move` use the same atomic path-change primitive and validation
 rules. `rename` is the preferred API name when the parent path is unchanged and
 only the basename changes; `move` is the preferred API name when the parent path
@@ -462,7 +473,10 @@ deterministic validation, conflict, `rejected`, `quarantined`, or
 `retryable-failure` path as other write-producing mutations. If post-publish
 projection cleanup fails, the engine records repair/quarantine follow-up without
 exposing partial canonical state. Manual follow-up is operator workflow metadata,
-not a `WriteResult.kind`.
+not a `WriteResult.kind`. For secret-backed inputs, staged bytes, rollback
+artifacts, quarantine records, and cleanup/repair records must stay encrypted or
+redacted; plaintext `.env` bytes or other secret values must never be written
+into staging, rollback, quarantine, or cleanup artifacts.
 
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire

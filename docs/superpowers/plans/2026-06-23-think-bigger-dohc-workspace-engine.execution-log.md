@@ -4507,12 +4507,51 @@ Hundred-ninety-ninth pass:
   - Reworded cross-projection rename/move/replace as staged canonical mutations
     with compensating projection cleanup instead of distributed atomic file
     transactions.
-  - Extended shared-channel grant revocation to derived durable outbox/ledger,
-    fanout/replay, audit/history/export emission, and notification materialized
-    context.
+  - Extended shared-channel grant revocation to derived fanout/replay
+    materializations, immutable outbox/ledger revalidation,
+    audit/history/export emission, and notification materialized context.
   - Extended shared-channel redaction to presence, typing indicators, and
     read/seen state before rendering, search, projection, notifications, or
     export.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Two-hundredth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Restricted `expectedContentHash` to non-secret-backed object operands and
+    required secret-backed writes/deletes/renames/replaces to use non-hash
+    freshness guards.
+  - Added query stripping for local link target resolution while preserving
+    fragments, plus fixture coverage.
+  - Narrowed markdown autolink collection to supported URI schemes only.
+  - Clarified shared-channel revocation so durable outbox/ledger rows remain
+    immutable and are revalidated at replay/consumption time instead of
+    invalidated as derived caches.
+  - Split native capture `terminal-retired` lifecycle status from
+    `idempotency-expired` retry-horizon outcomes.
+  - Required cross-projection replace staging, rollback, quarantine, and cleanup
+    artifacts to keep secret-backed inputs encrypted or redacted.
+  - Added a PR 01 mechanical lint/test gate for the
+    `Phase0SharedSubstrateBaseline` cutoff after the Schema Promotion Checkpoint.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

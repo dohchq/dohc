@@ -132,6 +132,16 @@ const slug = (heading, slugger = new GithubSlugger()) => slugger.slug(
   decodeHtmlEntities(visibleHeadingText(heading)).trim(),
 )
 
+const splitLocalTarget = (raw) => {
+  const hashIndex = raw.indexOf('#')
+  const targetWithQueryRaw = hashIndex === -1 ? raw : raw.slice(0, hashIndex)
+  const queryIndex = targetWithQueryRaw.indexOf('?')
+  return {
+    targetRaw: queryIndex === -1 ? targetWithQueryRaw : targetWithQueryRaw.slice(0, queryIndex),
+    anchorRaw: hashIndex === -1 ? '' : raw.slice(hashIndex + 1),
+  }
+}
+
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
 
 function* contentLines(markdown) {
@@ -299,7 +309,7 @@ const collectLinks = (markdown) => {
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
-  const autolinkPattern = /<((?:https?:|mailto:|app:|\.{1,2}\/|\/|[A-Za-z0-9_.-]+\/)[^<>\s]*)>/g
+  const autolinkPattern = /<((?:https?:|mailto:|app:)[^<>\s]*)>/g
   const bracketIndexTokenPattern = /^(?:[A-Za-z_$][A-Za-z0-9_$]*|\d+)$/
   const looksLikeBracketIndexing = (prose, match) => {
     const index = match.index ?? -1
@@ -369,6 +379,20 @@ const collectLinks = (markdown) => {
 }
 
 const assertCheckerFixtures = () => {
+  const splitQueryTarget = splitLocalTarget('./diagram.svg?raw=1#overview')
+  if (splitQueryTarget.targetRaw !== './diagram.svg' || splitQueryTarget.anchorRaw !== 'overview') {
+    throw new Error('local query fixture should strip query strings while preserving anchors')
+  }
+
+  const relativeAutolink = collectLinks('<./foo.md> and <foo/bar>')
+  if (relativeAutolink.links.length > 0) {
+    throw new Error('relative angle-bracket paths should not be treated as autolinks')
+  }
+  const schemeAutolink = collectLinks('<app://workspace/thread>')
+  if (!schemeAutolink.links.includes('app://workspace/thread')) {
+    throw new Error('app autolink fixture should still collect supported URI schemes')
+  }
+
   const commented = collectLinks('<!-- [hidden](./missing.md) -->\nVisible')
   if (commented.links.length > 0) {
     throw new Error('HTML comment fixture should not produce links')
@@ -484,9 +508,7 @@ for (const file of files) {
       continue
     }
 
-    const hashIndex = raw.indexOf('#')
-    const targetRaw = hashIndex === -1 ? raw : raw.slice(0, hashIndex)
-    const anchorRaw = hashIndex === -1 ? '' : raw.slice(hashIndex + 1)
+    const { targetRaw, anchorRaw } = splitLocalTarget(raw)
     let decodedTarget
     let decodedAnchor
     try {

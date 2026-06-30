@@ -64,12 +64,13 @@ activity fanout, projection, search, notification, export, or replay.
 Missing, expired, revoked, or ambiguous shared-channel grants fail closed for
 all of those paths. Grant revoke/expiry invalidates server-held derived
 projections, search snippets, notification caches, export staging artifacts,
-queued fanout/replay entries, durable outbox/ledger entries, and other
-service-owned materialized chat context for that exception so stale shared data
-does not remain exposed after access changes. Durable audit/history/export
-records stay intact as records of fact, but any emission, replay,
-materialization, export bundle, or notification derived from them must revalidate
-the current grant and redaction scope before leaving the service boundary. Thread
+non-ledger queued fanout/replay materializations, and other service-owned
+derived chat context for that exception so stale shared data does not remain
+exposed after access changes. Durable outbox/ledger rows and
+audit/history/export records stay immutable as records of fact, but any
+emission, replay, consumption, materialization, export bundle, or notification
+derived from them must revalidate the current grant and redaction scope before
+leaving the service boundary. Thread
 activity records are append-only events keyed by
 `(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
 sequence. `activityId` is server-assigned and unique within the

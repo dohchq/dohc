@@ -859,7 +859,7 @@ can be combined:
 | Normalized guard | Accepted API fields | Applies to | Meaning |
 | --- | --- | --- | --- |
 | `path_absence` | `expectedAbsent` | `write(...)` create, `rename(...)` / `move(...)` destination | The target path has no object in the bound workspace/version. |
-| `object_freshness` | `expectedBaseVersion`, `expectedEtag`, `expectedContentHash` | `write(...)` overwrite, `delete(...)`, `rename(...)` / `move(...)` source, `replace(...)` source and destination | The named object/path is still at the caller's observed revision/content state in `versionId`. |
+| `object_freshness` | `expectedBaseVersion`, `expectedEtag`, `expectedContentHash` (non-secret-backed objects only) | `write(...)` overwrite, `delete(...)`, `rename(...)` / `move(...)` source, `replace(...)` source and destination | The named object/path is still at the caller's observed revision/content state in `versionId`. |
 | `source_version_freshness` | `expectedSourceSnapshot`, `expectedSourceVersionEtag` | `merge(...)` source version | The source version being merged is still the observed source snapshot/etag. |
 | `target_version_freshness` | `expectedTargetSnapshot`, `expectedTargetVersionEtag` | `merge(...)` target version | The target version receiving the merge is still the observed target snapshot/etag. |
 | `restore_version_freshness` | `expectedCurrentCheckpoint`, `expectedVersionEtag`, `expectedSnapshotId` | `restore(...)` target version | The version being restored is still at the observed checkpoint, etag, or snapshot. |
@@ -869,6 +869,11 @@ class. Supplying two aliases for the same guard, omitting the required guard, or
 treating aliases such as `expectedBaseVersion` and `expectedEtag` as independent
 freshness checks is a malformed request/protocol error before conflict
 materialization.
+`expectedContentHash` is never accepted for secret-backed objects or redacted
+secret hash handles. Secret-backed overwrite, delete, rename/move source, and
+replace source/destination operands must use another permitted freshness guard,
+such as `expectedBaseVersion` or `expectedEtag`; if no non-hash guard is
+available, the request fails closed before conflict materialization.
 
 Single-operand API writes require exactly one client-supplied causal
 precondition; multi-operand API writes such as `replace(...)` and `merge(...)`
@@ -909,11 +914,12 @@ API writes are never unconditional overwrites. Create and overwrite modes are
 explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.
 Overwrite must include `targetObjectId` plus exactly one causal freshness
 precondition, such as `expectedBaseVersion`, `expectedEtag`, or
-`expectedContentHash`. `targetObjectId` binds the intended object identity so a
-delete/recreate substitution cannot satisfy a path-only overwrite, but it is
-not a freshness guard by itself. If the precondition or target object does not
-match the current workspace/version/path state, the engine returns a
-deterministic secret-safe conflict envelope instead of mutating canonical state.
+`expectedContentHash` for non-secret-backed objects only. `targetObjectId` binds
+the intended object identity so a delete/recreate substitution cannot satisfy a
+path-only overwrite, but it is not a freshness guard by itself. If the
+precondition or target object does not match the current workspace/version/path
+state, the engine returns a deterministic secret-safe conflict envelope instead
+of mutating canonical state.
 Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
 providing multiple incompatible preconditions is a validation/protocol error that
 fails closed before conflict materialization.
