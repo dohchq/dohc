@@ -249,12 +249,12 @@ declare function canonicalizeDmParticipantIds(input: {
 ```
 
 `canonicalizeDmParticipantIds` receives the authenticated server-derived actor
-separately from the client-supplied participant list. The server first strips
-any `serverActorId` self-entry from `requestedParticipantIds`; self entries from
-the client are ignored for authority and do not count as duplicate participants.
-The server actor is then merged into the set before uniqueness-key generation,
-persistence, authorization, or fanout, so the creator cannot omit or spoof
-themself.
+separately from the client-supplied participant list. The server first strips all
+`serverActorId` self entries from `requestedParticipantIds`; any number of
+client-supplied self entries are ignored for authority and do not count as
+duplicate participants. The server actor is then merged into the set before
+uniqueness-key generation, persistence, authorization, or fanout, so the creator
+cannot omit or spoof themself.
 After canonicalization, `dmParticipantIds` must contain 2-16 unique participants.
 Raw duplicates among non-self requested participants are rejected before
 uniqueness-key generation or persistence; implementations must not silently

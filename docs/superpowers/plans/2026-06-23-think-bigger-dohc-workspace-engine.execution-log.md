@@ -18,8 +18,8 @@ Source specs:
 - **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
   live CodeRabbit status, test evidence, open overrides, and completion state.
 - **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised seven findings that are addressed in the newest pass; a committed
-  rerun is still required.
+  raised four findings that are addressed in the newest pass; a committed rerun
+  is still required.
 - **Test evidence:** the newest pass records `git diff --check`, both Think
   Bigger docs link-check invocations, and the brand guard test passing.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
@@ -3256,6 +3256,30 @@ Hundred-fifty-eighth pass:
     newest pass entries as the audit trail.
   - Split the original command evidence block into Setup, Initial Validation,
     Remote PR/review, and Node 24 validation subsections.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-ninth pass:
+
+- Fixed CodeRabbit's four follow-up findings:
+  - Added provenance, attribution, and proof to holding-area replay
+    revalidation and durable outcome classification.
+  - Updated the Current PR Snapshot to the latest four-finding review batch.
+  - Strengthened `Phase0SharedSubstrateBaseline` gating so P0B-P0G cannot start
+    implementation branches until the provisional baseline is finalized.
+  - Made DM duplicate handling explicit: all client-supplied self entries are
+    stripped before duplicate checks, while duplicates among non-self requested
+    participants fail closed.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

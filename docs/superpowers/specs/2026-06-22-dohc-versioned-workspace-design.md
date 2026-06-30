@@ -442,8 +442,9 @@ Replay from the holding area must be causal and fail-closed. Retry metadata must
 include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
 or equivalent CAS token captured with the original ingest. At apply time, the
 engine revalidates workspace scope plus server-derived authorization, policy,
-visibility, protected-path, lock, version-access, and skill-turn checks. The
-retry outcome matrix is deterministic for the same replay metadata:
+visibility, protected-path, lock, version-access, skill-turn, provenance,
+attribution, and proof checks. The retry outcome matrix is deterministic for the
+same replay metadata:
 
 - If the captured causal base still matches and apply-time policy revalidation
   passes, the record may become canonical.
@@ -457,9 +458,10 @@ retry outcome matrix is deterministic for the same replay metadata:
   already-persisted accepted records with syntactically valid replay metadata but
   unresolved server-side provenance or binding evidence can stay quarantined or
   manual-only while resolution proceeds.
-- If server-derived authorization, provenance, permission, visibility,
-  protected-path, lock, version-access, or skill-turn checks fail after replay,
-  the record resolves to the corresponding durable denial/quarantine state.
+- If server-derived authorization, permission, visibility, protected-path, lock,
+  version-access, skill-turn, provenance, attribution, or proof checks fail after
+  replay, the record resolves to the corresponding durable denial/quarantine
+  state.
   Visibility-boundary failures use `visibility_denied` externally and
   `quarantined_visibility` internally; they must not be collapsed into
   `policy_denied` or `not_authorized`.

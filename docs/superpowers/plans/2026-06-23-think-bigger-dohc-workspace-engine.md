@@ -884,6 +884,7 @@ substrate package scaffold. It owns the early `WorkspaceObject`,
 `WorkspaceVersion`, `VersionRef`, stable object ID, `ConflictRecord`,
 `ThreadLink`, and file/chat link shapes for Phase 0 lanes only. It must be
 versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and P0G
+must not start implementation branches until this baseline is finalized, and
 must import, reuse, or schema-versionedly extend these symbols rather than
 invent parallel shapes. PR 01 remains the final schema source and must either
 adopt the provisional shapes unchanged or migrate/backfill them through an
