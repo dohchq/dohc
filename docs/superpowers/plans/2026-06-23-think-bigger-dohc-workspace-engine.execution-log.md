@@ -172,6 +172,10 @@ Date completed:
 - Overrides:
 - Override approval reference:
 
+### Unresolved Findings
+
+- ...
+
 ### Live Blockers And Overrides
 
 - Current unresolved blockers:
@@ -4837,6 +4841,34 @@ Two-hundred-eighth pass:
   - Normalized chat channel `linkedTargets` as a sorted/deduped canonical set
     and made `linked_work` channel conversations use exactly one canonical
     target discriminator.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: one follow-up finding fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's follow-up finding:
+  - Restored the explicit `### Unresolved Findings` slot in the reusable
+    execution-log template between CodeRabbit evidence and live blockers.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
