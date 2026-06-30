@@ -1206,40 +1206,44 @@ conflict artifact.
 
 "Feels like a normal folder" must not mean invisible magic.
 
-The system should expose:
+Every status projection must expose:
 
-- what is local vs remote.
-- what is pinned vs virtual.
-- what is tracked vs ignored.
-- what is synced vs local-only.
-- what is conflicted.
-- what is secret-backed.
-- what is excluded/redacted on export.
-- what is captured but still `durable-pending`, `rejected`, `quarantined`,
-  `retryable-failure`, `terminal-retired`, or otherwise not canonical version
-  history.
+- materialization state: local vs remote, pinned vs virtual, and hydrated vs
+  placeholder when the path is lazily materialized.
+- file-policy state: tracked vs ignored, versioned vs unversioned, and synced vs
+  local-only.
+- write state from the durable subset of `WriteResult.kind`: `canonical`,
+  `durable-pending`, `conflict`, `quarantined`, `rejected`,
+  `retryable-failure`, or `terminal-retired`.
+- secret state: secret-backed vs non-secret, whether plaintext is materialized
+  for this actor/session, and whether the path is excluded or redacted on
+  export.
+- conflict state: whether the visible path has a preserved conflict record, plus
+  the conflict projection location when policy permits.
 
-Possible surfaces:
+Required surfaces:
 
 - dohc UI badges.
 - `dohc status`.
-- file attributes/xattrs where available.
 - `.dohc/status.json`.
 - API status calls.
+
+Optional platform surfaces such as file attributes/xattrs may mirror this state
+where available, but they are not the source of truth.
 
 Hidden mechanics are okay. Hidden safety-relevant state is not.
 Status projections must use the same write-state terminology as the API
 contract. If a save is captured locally but not yet canonical, `dohc status`, UI
-badges, `.dohc/status.json`, and API status calls must show whether it is
-`durable-pending`, `conflict`, `quarantined`, `rejected`,
-`retryable-failure`, or `terminal-retired`, and must include the relevant
-`holdingRecordId`, `conflictReplayToken`, or idempotency correlation when policy
-permits. A status projection must report `canonical` once the same write has
-promoted into history. `idempotency-expired` is not a persisted workspace status
-or badge state; it appears only as an operation result for late retries and
-retry-flow APIs after the retry horizon has elapsed. Status projections must not
-invent names outside the durable subset of the shared `WriteResult.kind`
-vocabulary.
+badges, `.dohc/status.json`, and API status calls must show the materialization
+state, file-policy state, write state, secret state, export state, and conflict
+state above in one coherent record. They must include the relevant
+`holdingRecordId`, `conflictReplayToken`, idempotency correlation, and conflict
+projection path when policy permits. A status projection must report `canonical`
+once the same write has promoted into history. `idempotency-expired` is not a
+persisted workspace status or badge state; it appears only as an operation result
+for late retries and retry-flow APIs after the retry horizon has elapsed. Status
+projections must not invent names outside the durable subset of the shared
+`WriteResult.kind` vocabulary.
 `.dohc/status.json` is an engine status projection, not user content; it follows
 the `.dohc/**` internal-state boundary and must not be re-ingested as a normal
 workspace file.
@@ -1326,15 +1330,17 @@ The first proof should demonstrate the whole shape without solving every driver:
    behavior for a few path patterns.
 6. `node_modules/**` and `dist/**` are local materialized but untracked,
    unversioned, and unsynced.
-7. `.env` path patterns get exclusion/redaction smoke coverage through
-   `.dohc/files.toml` policy, without requiring tracked-as-secret-backed/private
-   `.env` behavior in the first proof slice.
-8. One non-`.env` secret-backed fixture proves durable capture, redacted status,
-   conflict projection through `.dohc/conflicts/`, and export behavior without
-   plaintext leakage.
-9. Unauthorized export redacts or excludes `.env`.
-10. A simple conflict preserves both sides and exposes `.dohc/conflicts/`.
-11. An API can read/write the same version without relying on a real filesystem.
+7. A `.env` path pattern can be tracked as secret-backed/private through
+   `.dohc/files.toml`: read/write captures durably, status shows
+   secret-backed plus redacted/export-excluded state, conflicts project through
+   `.dohc/conflicts/` without plaintext leakage, and unauthorized export redacts
+   or excludes the `.env` file.
+8. One non-`.env` secret-backed fixture proves the same durable capture,
+   redacted status, conflict projection, and export behavior without relying on
+   `.env`-specific policy.
+9. A simple non-secret conflict preserves both sides and exposes
+   `.dohc/conflicts/`.
+10. An API can read/write the same version without relying on a real filesystem.
 
 If this works, dohc has the beginning of a filesystem that feels normal to
 humans and agents while being much safer and more powerful than normal folders,

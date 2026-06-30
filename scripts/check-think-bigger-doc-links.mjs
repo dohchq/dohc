@@ -196,8 +196,9 @@ function* contentLines(markdown) {
   for (const rawLine of markdown.split(/\r?\n/)) {
     lineIndex += 1
     const rawVisibleLine = inFence ? rawLine : stripHtmlComments(rawLine)
-    const line = inFence ? rawVisibleLine : rawVisibleLine.replace(/^(?:[ \t]*>[ \t]?)+/, '')
-    const fenceLine = rawVisibleLine.replace(/^(?:[ \t]*>[ \t]?)+/, '')
+    const stripBlockquoteMarkers = (value) => value.replace(/^(?: {0,3}>[ \t]?)+/, '')
+    const line = inFence ? rawVisibleLine : stripBlockquoteMarkers(rawVisibleLine)
+    const fenceLine = stripBlockquoteMarkers(rawVisibleLine)
     const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
@@ -444,6 +445,10 @@ const assertCheckerFixtures = () => {
   const quotedIndentedCode = collectLinks('>     [hidden](./missing.md)')
   if (quotedIndentedCode.links.length > 0 || quotedIndentedCode.unresolvedReferences.length > 0) {
     throw new Error('blockquote indented-code fixture should not produce links')
+  }
+  const indentedBlockquoteMarkerCode = collectLinks('    > [hidden](./missing.md)')
+  if (indentedBlockquoteMarkerCode.links.length > 0 || indentedBlockquoteMarkerCode.unresolvedReferences.length > 0) {
+    throw new Error('indented code starting with a blockquote marker should not produce links')
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')

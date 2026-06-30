@@ -892,15 +892,16 @@ blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
 After P0A and P0R, Phase 0 must enter one canonical ownership handoff: the
-**PR01 Schema Promotion Checkpoint**. Its pre-PR01 freeze step is
-**P0S - Shared Substrate Freeze**, owned by the main orchestration thread plus
-the schema-baseline lane. The named provisional source of truth for that single
-handoff is `Phase0SharedSubstrateBaseline` in the shared substrate package
-scaffold. It must be versioned, tested, and owned in one place; P0B, P0C, P0D,
-P0E, P0F, and P0G must import these provisional symbols from the baseline
-package rather than invent parallel shapes, ad hoc copies, or local lookalike
-types or depend on PR 01-owned contracts too early. P0S acceptance requires the
-baseline package to export the provisional `WorkspaceObject`,
+**PR01 Schema Promotion Checkpoint**. The short alias `P0S` may be used only for
+the pre-PR01 freeze work inside that same checkpoint; it is not a separate
+ownership step, lane, or source of truth. The main orchestration thread plus the
+schema-baseline lane own this checkpoint. The named provisional source of truth
+is `Phase0SharedSubstrateBaseline` in the shared substrate package scaffold. It
+must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and
+P0G must import these provisional symbols from the baseline package rather than
+invent parallel shapes, ad hoc copies, or local lookalike types or depend on
+PR 01-owned contracts too early. PR01 Schema Promotion Checkpoint acceptance
+requires the baseline package to export the provisional `WorkspaceObject`,
 `WorkspaceVersion`, `VersionRef`,
 stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
 `ConflictRecord`, `ChatThread`, `ThreadMessage`, `ThreadLink`,
@@ -908,10 +909,10 @@ stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
 matrix below, with tests proving consumers import those symbols. After PR 01
 lands, new code must consume the PR 01-owned contracts and
 `Phase0SharedSubstrateBaseline` becomes historical-only.
-The PR 01 step of the same **PR01 Schema Promotion Checkpoint** must record in
-the execution log the commit/PR where PR 01 adopts or migrates each provisional
-symbol, and downstream code must stop importing `Phase0SharedSubstrateBaseline`
-for those symbols after that checkpoint.
+The PR 01 completion step of the **PR01 Schema Promotion Checkpoint** must
+record in the execution log the commit/PR where PR 01 adopts or migrates each
+provisional symbol, and downstream code must stop importing
+`Phase0SharedSubstrateBaseline` for those symbols after that checkpoint.
 PR 01 must add a mechanical lint/test gate for this checkpoint: after each
 symbol is adopted or migrated, the check scans downstream code for imports of
 `Phase0SharedSubstrateBaseline` for that symbol and fails until consumers import

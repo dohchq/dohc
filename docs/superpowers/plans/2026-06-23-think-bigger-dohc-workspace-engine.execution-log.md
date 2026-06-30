@@ -5236,6 +5236,42 @@ Two-hundred-nineteenth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-twentieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Unified the schema-promotion section around the single
+    **PR01 Schema Promotion Checkpoint** name, keeping `P0S` only as a brief
+    alias for the pre-PR01 freeze work inside that checkpoint.
+  - Updated the Markdown checker so blockquote marker stripping applies only to
+    actual quoted prose and not indented code that starts with `>`.
+  - Required filesystem status surfaces to report materialization,
+    file-policy, write-state, secret/export, and conflict axes using
+    `WriteResult.kind` terminology.
+  - Added an explicit `.env` secret-backed read/write/status/conflict/export
+    proof slice.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and
