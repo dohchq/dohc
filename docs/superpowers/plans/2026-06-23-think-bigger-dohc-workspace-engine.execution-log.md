@@ -2429,6 +2429,24 @@ Hundred-twenty-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-twenty-fifth pass:
+
+- Fixed CodeRabbit follow-up finding from the latest one-issue rerun:
+  - Made docs-link duplicate heading anchors unique against final emitted anchor
+    values, so literal suffixed headings cannot collide with generated duplicate
+    anchors.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry and are mirrored only

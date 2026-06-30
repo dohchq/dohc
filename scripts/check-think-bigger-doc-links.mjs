@@ -81,9 +81,14 @@ const collectAnchors = (markdown) => {
     }
 
     const base = slug(heading[1].replace(/[ \t]+#+[ \t]*$/, ''))
-    const count = seen.get(base) ?? 0
+    let count = seen.get(base) ?? 0
+    let candidate = count === 0 ? base : `${base}-${count}`
+    while (anchors.has(candidate)) {
+      count += 1
+      candidate = `${base}-${count}`
+    }
     seen.set(base, count + 1)
-    anchors.add(count === 0 ? base : `${base}-${count}`)
+    anchors.add(candidate)
   }
 
   return anchors
