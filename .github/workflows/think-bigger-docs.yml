@@ -52,7 +52,7 @@ jobs:
           corepack prepare pnpm@10.24.0 --activate
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Check Think Bigger docs
         run: node scripts/check-think-bigger-doc-links.mjs

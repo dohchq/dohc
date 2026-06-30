@@ -7,6 +7,11 @@ import GithubSlugger from 'github-slugger'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const canonicalRepoRoot = fs.realpathSync(repoRoot)
+const escapesRepoRoot = (relativePath) => (
+  relativePath === '..'
+  || relativePath.startsWith(`..${path.sep}`)
+  || path.isAbsolute(relativePath)
+)
 const manifestPath = path.resolve(
   repoRoot,
   'docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json',
@@ -42,7 +47,7 @@ const discoverThinkBiggerDocs = () => {
     try {
       canonicalCandidatePath = fs.realpathSync(candidatePath)
       const relativeCandidate = path.relative(canonicalRepoRoot, canonicalCandidatePath)
-      if (relativeCandidate.startsWith('..') || path.isAbsolute(relativeCandidate)) {
+      if (escapesRepoRoot(relativeCandidate)) {
         return false
       }
       if (!fs.statSync(canonicalCandidatePath).isFile()) {
@@ -187,7 +192,9 @@ function* contentLines(markdown) {
     return visible
   }
 
+  let lineIndex = 0
   for (const rawLine of markdown.split(/\r?\n/)) {
+    lineIndex += 1
     const rawVisibleLine = inFence ? rawLine : stripHtmlComments(rawLine)
     const line = inFence ? rawVisibleLine : rawVisibleLine.replace(/^(?:[ \t]*>[ \t]?)+/, '')
     const fenceLine = rawVisibleLine.replace(/^(?:[ \t]*>[ \t]?)+/, '')
@@ -256,7 +263,7 @@ function* contentLines(markdown) {
       } else if (line.trim() !== '' && activeListIndent !== null && leadingIndent < activeListIndent) {
         activeListIndent = null
       }
-      yield line
+      yield { text: line, lineNumber: lineIndex }
     }
   }
 }
@@ -269,7 +276,7 @@ const collectAnchors = (markdown) => {
   }
   let previousLine = null
 
-  for (const line of contentLines(markdown)) {
+  for (const { text: line } of contentLines(markdown)) {
     const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*$/)
     if (heading) {
       addAnchor(heading[1])
@@ -294,6 +301,9 @@ const collectLinks = (markdown) => {
   const links = []
   const unresolvedReferences = []
   const lines = [...contentLines(markdown)]
+  const addLink = (target, lineNumber) => {
+    links.push({ target, lineNumber })
+  }
   const referenceDefinitions = new Map()
   const normalizeLabel = (label) => label.trim().replace(/\s+/g, ' ').toLowerCase()
   const isFootnoteLabel = (label) => label.trim().startsWith('^')
@@ -320,7 +330,7 @@ const collectLinks = (markdown) => {
     return bothIndexTokens && (bothNumeric || /[A-Za-z0-9_$)\]]/.test(before))
   }
 
-  for (const line of lines) {
+  for (const { text: line, lineNumber } of lines) {
     const prose = stripCodeSpans(line)
     const definition = prose.match(referenceDefinitionPattern)
     if (definition) {
@@ -329,19 +339,19 @@ const collectLinks = (markdown) => {
       }
       const destination = normalizeDestination(definition[2])
       referenceDefinitions.set(normalizeLabel(definition[1]), destination)
-      links.push(destination)
+      addLink(destination, lineNumber)
     }
   }
 
-  for (const line of lines) {
+  for (const { text: line, lineNumber } of lines) {
     let prose = stripCodeSpans(line)
     for (const match of prose.matchAll(nestedImageLinkPattern)) {
-      links.push(normalizeDestination(match[1]))
-      links.push(normalizeDestination(match[2]))
+      addLink(normalizeDestination(match[1]), lineNumber)
+      addLink(normalizeDestination(match[2]), lineNumber)
     }
     prose = prose.replace(nestedImageLinkPattern, '')
     for (const match of prose.matchAll(linkPattern)) {
-      links.push(normalizeDestination(match[1]))
+      addLink(normalizeDestination(match[1]), lineNumber)
     }
     for (const match of prose.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
@@ -350,7 +360,7 @@ const collectLinks = (markdown) => {
       }
       const destination = referenceDefinitions.get(label)
       if (destination) {
-        links.push(destination)
+        addLink(destination, lineNumber)
       } else if (looksLikeBracketIndexing(prose, match)) {
         continue
       } else {
@@ -363,18 +373,18 @@ const collectLinks = (markdown) => {
       }
       const destination = referenceDefinitions.get(normalizeLabel(match[1]))
       if (destination) {
-        links.push(destination)
+        addLink(destination, lineNumber)
       }
     }
     for (const match of prose.matchAll(autolinkPattern)) {
       if (/^<\/?[A-Za-z][A-Za-z0-9-]*\s*\/?>$/.test(match[0])) {
         continue
       }
-      links.push(match[1])
+      addLink(match[1], lineNumber)
     }
   }
 
-  return { links: [...new Set(links)], unresolvedReferences }
+  return { links, unresolvedReferences }
 }
 
 const assertCheckerFixtures = () => {
@@ -388,7 +398,7 @@ const assertCheckerFixtures = () => {
     throw new Error('relative angle-bracket paths should not be treated as autolinks')
   }
   const schemeAutolink = collectLinks('<app://workspace/thread>')
-  if (!schemeAutolink.links.includes('app://workspace/thread')) {
+  if (!schemeAutolink.links.some((link) => link.target === 'app://workspace/thread')) {
     throw new Error('app autolink fixture should still collect supported URI schemes')
   }
 
@@ -415,7 +425,7 @@ const assertCheckerFixtures = () => {
     throw new Error('blockquote fenced-code fixture should not produce links')
   }
   const quotedProse = collectLinks('> [visible](./visible.md)')
-  if (!quotedProse.links.includes('./visible.md') || quotedProse.unresolvedReferences.length > 0) {
+  if (!quotedProse.links.some((link) => link.target === './visible.md') || quotedProse.unresolvedReferences.length > 0) {
     throw new Error('blockquote prose fixture should produce visible links')
   }
   if (!collectAnchors('> ## Visible').has('visible')) {
@@ -427,7 +437,7 @@ const assertCheckerFixtures = () => {
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')
-  if (!nested.links.includes('./inner.png') || !nested.links.includes('./outer.md')) {
+  if (!nested.links.some((link) => link.target === './inner.png') || !nested.links.some((link) => link.target === './outer.md')) {
     throw new Error('nested image link fixture should include inner and outer destinations')
   }
 
@@ -473,7 +483,7 @@ for (const file of files) {
   }
 
   const relativeFile = path.relative(canonicalRepoRoot, canonicalFilePath)
-  if (relativeFile.startsWith('..') || path.isAbsolute(relativeFile)) {
+  if (escapesRepoRoot(relativeFile)) {
     failures.push(`source file escapes repository root ${file}`)
     continue
   }
@@ -494,19 +504,21 @@ for (const file of files) {
   const text = fs.readFileSync(canonicalFilePath, 'utf8')
   anchorCache.set(canonicalFilePath, collectAnchors(text))
   const { links, unresolvedReferences } = collectLinks(text)
+  const formatLocation = (lineNumber) => `${file}:${lineNumber}`
   for (const raw of unresolvedReferences) {
     failures.push(`${file}: unresolved reference link ${raw}`)
   }
-  for (const raw of links) {
+  for (const { target: raw, lineNumber } of links) {
+    const location = formatLocation(lineNumber)
     if (raw === '') {
-      failures.push(`${file}: empty link target`)
+      failures.push(`${location}: empty link target`)
       continue
     }
 
     const scheme = raw.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase()
     if (scheme) {
       if (!['http', 'https', 'mailto', 'app'].includes(scheme)) {
-        failures.push(`${file}: disallowed link scheme ${raw}`)
+        failures.push(`${location}: disallowed link scheme ${raw}`)
       }
       continue
     }
@@ -518,7 +530,7 @@ for (const file of files) {
       decodedTarget = targetRaw === '' ? '' : decodeURIComponent(targetRaw)
       decodedAnchor = anchorRaw === '' ? '' : decodeURIComponent(anchorRaw)
     } catch {
-      failures.push(`${file}: invalid link target ${raw}`)
+      failures.push(`${location}: invalid link target ${raw}`)
       continue
     }
 
@@ -533,13 +545,13 @@ for (const file of files) {
     try {
       canonicalTargetPath = fs.realpathSync(targetPath)
     } catch {
-      failures.push(`${file}: missing link target ${raw}`)
+      failures.push(`${location}: missing link target ${raw}`)
       continue
     }
 
     const relativeTarget = path.relative(canonicalRepoRoot, canonicalTargetPath)
-    if (relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) {
-      failures.push(`${file}: link target escapes repository root ${raw}`)
+    if (escapesRepoRoot(relativeTarget)) {
+      failures.push(`${location}: link target escapes repository root ${raw}`)
       continue
     }
 
@@ -547,12 +559,12 @@ for (const file of files) {
     try {
       targetStat = fs.statSync(canonicalTargetPath)
     } catch {
-      failures.push(`${file}: missing link target ${raw}`)
+      failures.push(`${location}: missing link target ${raw}`)
       continue
     }
 
     if (!targetStat.isFile()) {
-      failures.push(`${file}: link target is not a file ${raw}`)
+      failures.push(`${location}: link target is not a file ${raw}`)
       continue
     }
 
@@ -561,7 +573,7 @@ for (const file of files) {
     }
 
     if (!anchorsFor(canonicalTargetPath).has(decodedAnchor)) {
-      failures.push(`${file}: missing anchor ${raw}`)
+      failures.push(`${location}: missing anchor ${raw}`)
     }
   }
 }

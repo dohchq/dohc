@@ -1194,11 +1194,14 @@ Status projections must use the same write-state terminology as the API
 contract. If a save is captured locally but not yet canonical, `dohc status`, UI
 badges, `.dohc/status.json`, and API status calls must show whether it is
 `durable-pending`, `conflict`, `quarantined`, `rejected`,
-`retryable-failure`, `terminal-retired`, or `idempotency-expired`, and must
-include the relevant `holdingRecordId`, `conflictReplayToken`, or idempotency
-correlation when policy permits. A status projection must report `canonical`
-once the same write has promoted into history; it must not invent status names
-outside the shared `WriteResult.kind` vocabulary.
+`retryable-failure`, or `terminal-retired`, and must include the relevant
+`holdingRecordId`, `conflictReplayToken`, or idempotency correlation when policy
+permits. A status projection must report `canonical` once the same write has
+promoted into history. `idempotency-expired` is not a persisted workspace status
+or badge state; it appears only as an operation result for late retries and
+retry-flow APIs after the retry horizon has elapsed. Status projections must not
+invent names outside the durable subset of the shared `WriteResult.kind`
+vocabulary.
 `.dohc/status.json` is an engine status projection, not user content; it follows
 the `.dohc/**` internal-state boundary and must not be re-ingested as a normal
 workspace file.
