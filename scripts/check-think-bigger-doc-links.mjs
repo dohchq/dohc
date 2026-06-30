@@ -117,16 +117,17 @@ function* contentLines(markdown) {
 
   for (const line of markdown.split(/\r?\n/)) {
     const fence = line.match(/^\s{0,3}(```+|~~~+)(.*)$/)
-    const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])\s+/)
+    const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
     const leadingIndent = indentationWidth(line)
+    const listContentIndent = listItem ? indentationWidth(listItem[0]) : null
     const listCodeBlock = activeListIndent !== null
       && line.trim() !== ''
       && leadingIndent >= activeListIndent + 4
       && !indentedListItem
     const listContinuation = activeListIndent !== null
       && line.trim() !== ''
-      && leadingIndent > activeListIndent
+      && leadingIndent >= activeListIndent
       && !listCodeBlock
     const indentedCode = (/^(?: {4}|\t)/.test(line) && !indentedListItem && !listContinuation)
       || listCodeBlock
@@ -167,8 +168,8 @@ function* contentLines(markdown) {
 
     if (!inFence) {
       if (indentedListItem) {
-        activeListIndent = indentationWidth(listItem[1])
-      } else if (line.trim() !== '' && activeListIndent !== null && leadingIndent <= activeListIndent) {
+        activeListIndent = listContentIndent
+      } else if (line.trim() !== '' && activeListIndent !== null && leadingIndent < activeListIndent) {
         activeListIndent = null
       }
       yield line

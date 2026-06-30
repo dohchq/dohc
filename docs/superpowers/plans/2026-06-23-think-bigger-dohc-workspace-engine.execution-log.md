@@ -248,6 +248,9 @@ Date completed:
 - docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 - docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md
 - docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+- docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json
+- scripts/check-think-bigger-doc-links.mjs
+- .github/workflows/think-bigger-docs.yml
 
 ### Tests Added Or Updated
 
@@ -3386,6 +3389,34 @@ Hundred-sixty-third pass:
     validates them.
   - Scoped mention notification resolve dedupe by lifecycle event rather than
     suppressing resolve by the enqueue aggregate `notificationId`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixty-fourth pass:
+
+- Fixed CodeRabbit's six follow-up findings:
+  - Added first-save bootstrap semantics for engine-owned filesystem
+    capture/replay tokens.
+  - Centralized Phase 0 substrate ownership in `Phase0SharedSubstrateBaseline`
+    and made P0D/P0E/PR01 consume it instead of redefining symbols.
+  - Expanded the PR00 Files Changed inventory to include the manifest, checker,
+    and workflow.
+  - Clarified PR 01's canonical core IDL authority versus the provisional chat
+    overlay.
+  - Updated docs checker list parsing to track the actual content column after
+    list markers.
+  - Made chat-link cycle checks traverse only active links where `deletedAt` is
+    absent.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

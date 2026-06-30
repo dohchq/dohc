@@ -896,6 +896,10 @@ inputs, not a second chat schema. PR 12 then schema-versionedly extends or
 migrates the same symbols for channels, DMs, and full chat behavior. The
 migration direction is one-way: Phase 0 -> PR 01 -> PR 12, with explicit
 backfill if a later phase changes field shape.
+Later PR entries may state acceptance criteria or migration notes for those
+symbols, but they are not ownership sources. `Phase0SharedSubstrateBaseline` is
+the only Phase 0 definition site for `WorkspaceObject`, `WorkspaceVersion`,
+`VersionRef`, `ConflictRecord`, `ThreadLink`, `ChatThread`, and `ThreadMessage`.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1034,9 +1038,9 @@ history.
 - Clean merge from named version into Main.
 - Preserve base/current/incoming on conflict.
 - Minimal conflict UI or API.
-- Reuse and, if needed, schema-versionedly extend the provisional
-  `ConflictRecord` contract from `Phase0SharedSubstrateBaseline`, aligned with
-  PR 01's future formal `ConflictRecord` boundary:
+- Use the provisional `ConflictRecord` contract from
+  `Phase0SharedSubstrateBaseline`; the field list below is an acceptance
+  checklist for that baseline, not a second ownership source:
   `id`, `workspaceId`, `targetVersionId`, `sourceVersionId`, `objectId`,
   `pathAtConflict`, `driver`, `base`, `current`, `incoming`, `createdAt`,
   `resolvedAt?`, `resolutionHistoryMomentId?`, and
@@ -1072,10 +1076,10 @@ history.
 - Minimal workspace-local chat thread.
 - One chat thread linked to a stable file object ID.
 - Message send.
-- Reuse and, if needed, schema-versionedly extend the provisional `ChatThread`,
-  `ThreadMessage`, and `ThreadLink` contracts from
-  `Phase0SharedSubstrateBaseline` before PR 12 extends them for channels, DMs,
-  and full chat schema.
+- Use the provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
+  from `Phase0SharedSubstrateBaseline`; P0E may add acceptance notes but must not
+  define a second chat/link ownership source before PR 12 extends those symbols
+  for channels, DMs, and full chat schema.
   These provisional shapes must remain forward-compatible with PR 12, or PR 12
   must include a migration/backfill step that preserves existing chat data.
   PR 01 consumes this Phase 0 baseline contract as part of the shared substrate and
@@ -1633,7 +1637,8 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 **Scope:**
 
 - Add or extend shared package for workspace engine contracts.
-- Define only the core workspace/version/event/projection substrate here:
+- Define the canonical IDL/source for the core workspace/version/event/projection
+  substrate here:
   `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
@@ -1643,8 +1648,9 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
   migration/backfill boundary supersedes it.
 - Consume the `Phase0SharedSubstrateBaseline` `ChatThread`, `ThreadMessage`, and
-  `ThreadLink` scaffold as the single provisional chat substrate; PR 01 must not
-  introduce a parallel chat schema.
+  `ThreadLink` scaffold as a versioned provisional overlay in the same shared
+  package; PR 01 must not introduce a parallel chat schema or claim final chat
+  ownership.
 - Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
   that consume them: P0E may introduce minimal provisional chat/link contracts

@@ -494,6 +494,9 @@ uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
 the normalized `CanonicalThreadLinkKey` plus raw target tuple
 `(targetWorkspaceId, targetType, targetId, targetVersionRef, shareGrantId,
 visibilityScope)` captured on the activity event.
+Cycle checks traverse only active `ThreadLink` records in the current projection
+where `deletedAt` is absent. Tombstoned historical links are retained for audit
+and replay but do not participate in cycle detection or block a future relink.
 `ThreadLink` target fields, `shareGrantId`, and `visibilityScope` are immutable
 after creation. Changing a link means tombstoning the old link with
 `link_removed` activity and creating a new link with `link_added` activity; there

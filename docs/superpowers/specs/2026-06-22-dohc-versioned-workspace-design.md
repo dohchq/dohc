@@ -717,14 +717,17 @@ save
 Normal filesystem saves are translated into the same semantic write contract as
 `write(workspaceId, versionId, path, bytes, ...)`, but they do not require an
 external editor or agent to synthesize a client precondition. When a file is read
-or materialized, the engine records exactly one engine-owned capture/replay token
-for that path, such as the last seen base version, etag, content hash, absence
-assertion, watcher sequence, or session capture id. When the file is saved or
-captured, the filesystem path submits that engine-owned token with the incoming
-bytes. Missing or ambiguous engine capture tokens fail closed through quarantine
-or retryable capture failure; a well-formed but stale capture token is a real
-write conflict and returns the same deterministic current-vs-incoming conflict
-behavior as the API write flow instead of blindly overwriting canonical state.
+or materialized, or when a new local path is first created/imported, the engine
+records exactly one engine-owned capture/replay token for that path, such as the
+last seen base version, etag, content hash, absence assertion, watcher sequence,
+or session capture id. First-write bootstrap uses an engine-owned
+`expectedAbsent`-equivalent token for a path with no prior object, not a missing
+token. When the file is saved or captured, the filesystem path submits that
+engine-owned token with the incoming bytes. Missing or ambiguous engine capture
+tokens fail closed through quarantine or retryable capture failure; a well-formed
+but stale capture token is a real write conflict and returns the same
+deterministic current-vs-incoming conflict behavior as the API write flow instead
+of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
