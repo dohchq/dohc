@@ -15,16 +15,16 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Authoritative live status:** `Hundred-sixty-ninth pass` below owns live
+- **Authoritative live status:** `Hundred-seventieth pass` below owns live
   CodeRabbit status, test evidence, open overrides, and completion state for
   PR00.
-- **Snapshot role:** this block is derived from `Hundred-sixty-ninth pass` and
+- **Snapshot role:** this block is derived from `Hundred-seventieth pass` and
   does not own mutable review state.
-- **CodeRabbit status:** derive from `Hundred-sixty-ninth pass`.
-- **Test evidence:** derive from the `Hundred-sixty-ninth pass` validation block.
+- **CodeRabbit status:** derive from `Hundred-seventieth pass`.
+- **Test evidence:** derive from the `Hundred-seventieth pass` validation block.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
   remains pending human approval.
-- **Completion state:** derive from `Hundred-sixty-ninth pass`; not complete or
+- **Completion state:** derive from `Hundred-seventieth pass`; not complete or
   merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
   exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
@@ -3528,6 +3528,33 @@ Hundred-sixty-ninth pass:
     previous body hash rather than re-reading erased body payloads.
   - Aligned reaction API idempotency and lookup with stable reaction identity,
     without coupling add/remove behavior to message or reaction-set revisions.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventieth pass:
+
+- Fixed CodeRabbit's five follow-up findings:
+  - Added explicit `quarantined_authorization` durable state mapping for
+    replayed or post-acceptance `not_authorized` failures.
+  - Made docs-link fence detection list-indent aware so fenced code blocks nested
+    under list items are ignored consistently.
+  - Scoped filesystem `contentHash` metadata to non-secret or explicitly
+    materialized entries, with secret-backed paths returning no hash or an opaque
+    authorized hash handle.
+  - Split chat link create/export version refs by target kind so versioned links
+    require the identifiers needed for their target.
+  - Defined the canonical `reactionKey` form used by reaction idempotency,
+    replay, export, and import.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

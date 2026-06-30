@@ -413,12 +413,15 @@ This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
 examples below use explicit `workspaceId` and required version identifiers. A
 `read(...)` or `stat(...)` response includes the stable `objectId`, current
-`etag`, `contentHash`, and `versionId` needed by mutation preconditions.
-`list(...)` entries include the same stable `objectId` and freshness metadata
-for each returned child. Callers obtain `sourceObjectId`, `targetObjectId`, and
-`destinationObjectId` through `stat(...)`, `read(...)`, or paginated `list(...)`
-before invoking `write(...)`, `delete(...)`, `rename(...)`, `move(...)`, or
-`replace(...)`. `list(...)` and `search(...)` return bounded pages with an
+`etag`, and `versionId` needed by mutation preconditions. `contentHash` is
+returned only for non-secret entries or entries explicitly materialized for that
+caller; secret-backed paths omit it or return an opaque authorized hash handle
+unless the caller has materialization permission. `list(...)` entries include
+the same stable `objectId` and freshness metadata for each returned child.
+Callers obtain `sourceObjectId`, `targetObjectId`, and `destinationObjectId`
+through `stat(...)`, `read(...)`, or paginated `list(...)` before invoking
+`write(...)`, `delete(...)`, `rename(...)`, `move(...)`, or `replace(...)`.
+`list(...)` and `search(...)` return bounded pages with an
 opaque `nextPageToken`; `pageSize` is capped by the server, an absent
 `pageToken` starts a new query, and a returned `nextPageToken` resumes the exact
 authorized workspace/version/query snapshot or fails closed if that snapshot is

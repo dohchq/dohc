@@ -108,6 +108,7 @@ type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
 
 type DeniedOrQuarantinedStatus =
   | 'rejected_before_acceptance'
+  | 'quarantined_authorization'
   | 'quarantined_protection'
   | 'quarantined_attribution'
   | 'quarantined_policy'
@@ -134,6 +135,10 @@ type PublicDeniedReasonCode =
   | 'provenance_denied'
   | 'attribution_denied'
   | 'proof_denied'
+
+// `not_authorized` maps to `rejected_before_acceptance` before durable
+// acceptance, and to `quarantined_authorization` for replayed or
+// post-acceptance authorization failures.
 
 type PublicValidationErrorCode =
   | 'invalid_request'
@@ -474,6 +479,8 @@ same replay metadata:
   version-access, skill-turn, provenance, attribution, or proof checks fail after
   replay, the record resolves to the corresponding durable denial/quarantine
   state.
+  Authorization and permission failures use `not_authorized` externally and
+  `quarantined_authorization` internally.
   Visibility-boundary failures use `visibility_denied` externally and
   `quarantined_visibility` internally; they must not be collapsed into
   `policy_denied` or `not_authorized`.

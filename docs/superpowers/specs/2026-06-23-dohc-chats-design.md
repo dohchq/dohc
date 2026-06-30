@@ -338,22 +338,62 @@ type ThreadLinkScope =
   | { scopeKind: 'internal'; shareGrantId?: never; visibilityScope?: never }
   | { scopeKind: 'shared'; shareGrantId: string; visibilityScope: string }
 
-type ThreadLinkCreateRequest = {
+type ThreadLinkCreateRequestBase = {
   threadId: string
   targetWorkspaceId: string
-  targetType: ThreadLinkTargetType
   targetId: string
-  targetVersionRef?: VersionRef
   requestedScopeKind: 'internal' | 'shared'
   shareGrantId?: never
   visibilityScope?: never
 }
 
-type VersionRef = {
+type ObjectTargetVersionRef = {
+  versionRefKind: 'object_version'
+  versionId: string
+  versionEtag: string
+  historyMomentId?: never
+}
+
+type WorkspaceVersionTargetRef = {
+  versionRefKind: 'workspace_version'
   versionId: string
   versionEtag?: string
-  historyMomentId?: string
+  historyMomentId?: never
 }
+
+type HistoryMomentTargetVersionRef = {
+  versionRefKind: 'history_moment'
+  versionId: string
+  versionEtag?: string
+  historyMomentId: string
+}
+
+type VersionRef =
+  | ObjectTargetVersionRef
+  | WorkspaceVersionTargetRef
+  | HistoryMomentTargetVersionRef
+
+type ThreadLinkCreateRequest =
+  | (ThreadLinkCreateRequestBase & {
+      targetType: 'atom' | 'file' | 'folder'
+      targetVersionRef: ObjectTargetVersionRef
+    })
+  | (ThreadLinkCreateRequestBase & {
+      targetType: 'version'
+      targetVersionRef: WorkspaceVersionTargetRef
+    })
+  | (ThreadLinkCreateRequestBase & {
+      targetType: 'history_moment'
+      targetVersionRef: HistoryMomentTargetVersionRef
+    })
+  | (ThreadLinkCreateRequestBase & {
+      targetType: 'agent_run' | 'chat_thread'
+      targetVersionRef?: never
+    })
+  | (ThreadLinkCreateRequestBase & {
+      targetType: 'share' | 'decision' | 'task'
+      targetVersionRef?: VersionRef
+    })
 
 type ThreadLinkBase = ThreadLinkScope & {
   id: string
@@ -367,10 +407,19 @@ type ThreadLinkBase = ThreadLinkScope & {
   readonly deletedById?: string // server-owned immutable remover actor id
 }
 
-type VersionedObjectThreadLink = ThreadLinkBase & {
-  targetType: 'atom' | 'file' | 'folder' | 'version' | 'history_moment'
-  targetVersionRef: VersionRef
-}
+type VersionedObjectThreadLink =
+  | (ThreadLinkBase & {
+      targetType: 'atom' | 'file' | 'folder'
+      targetVersionRef: ObjectTargetVersionRef
+    })
+  | (ThreadLinkBase & {
+      targetType: 'version'
+      targetVersionRef: WorkspaceVersionTargetRef
+    })
+  | (ThreadLinkBase & {
+      targetType: 'history_moment'
+      targetVersionRef: HistoryMomentTargetVersionRef
+    })
 
 type AgentRunThreadLink = ThreadLinkBase & {
   targetType: 'agent_run'
@@ -473,8 +522,8 @@ normalization:
   ["targetVersionRef", versionRefTupleOrNull], ["shareGrantId", valueOrNull],
   ["visibilityScope", valueOrNull]]`.
 - Serialize that tuple with canonical JSON: UTF-8, no insignificant whitespace,
-  object keys inside nested `VersionRef` tuples sorted bytewise, and numbers
-  represented only as canonical decimal strings.
+  nested `VersionRef` tuples encoded in the fixed field order defined below, and
+  numbers represented only as canonical decimal strings.
 - The stored key is `thread-link:v1:<lowercase-sha256-hex>` over those exact
   bytes.
 
@@ -840,6 +889,13 @@ type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }
   | { reactionId?: never; reactionKey: string; reactionActorId?: never }
 
+`reactionKey` is a canonical, case-sensitive Unicode scalar string after NFC
+normalization with leading/trailing ASCII whitespace rejected before persistence.
+Allowed keys are either a single Unicode emoji grapheme cluster or a namespaced
+custom key matching `custom:[a-z0-9][a-z0-9_.-]{0,63}`. Producers, replay,
+export, and import readers must validate and store exactly that canonical form;
+they must not case-fold, alias, trim, or locale-normalize reaction keys.
+
 type ReactionThreadActivity = ThreadActivityBase & ReactionIdentity & {
   messageId: string
   kind: 'reaction_added' | 'reaction_removed'
@@ -858,11 +914,11 @@ type LinkThreadActivity = ThreadActivityBase & {
 
 `LinkThreadActivity.linkTarget.targetVersionRef` uses the same canonical
 `VersionRef | null` representation as `CanonicalThreadLinkKeyParts`: object key
-order is `versionId`, `versionEtag`, then `historyMomentId`; optional absent
-fields are omitted inside the object, and missing version refs are serialized as
-`null`, never omitted. Link activity writers, replay, export, and projection
-rebuilds must read and write that canonical form so the activity payload and
-canonical link key produce the same normalized target tuple.
+order is `versionRefKind`, `versionId`, `versionEtag`, then `historyMomentId`;
+optional absent fields are omitted inside the object, and missing version refs
+are serialized as `null`, never omitted. Link activity writers, replay, export,
+and projection rebuilds must read and write that canonical form so the activity
+payload and canonical link key produce the same normalized target tuple.
 
 type MentionNotificationThreadActivity = ThreadActivityBase & {
   kind: 'mention_notification_enqueued' | 'mention_notification_resolved'
@@ -960,6 +1016,9 @@ messageId, actorId, reactionKey)` as one idempotent key. Repeated `reaction_adde
 `reaction_removed` writes for the same key must return the existing result or a
 deterministic no-op and must not create duplicate activity, reactions,
 notifications, export entries, or replay effects.
+The tuple uses the canonical `reactionKey` form defined above; non-canonical
+reaction keys are rejected before idempotency reservation so different runtimes
+cannot dedupe the same visible reaction differently.
 Authorized history and export paths reconstruct the revision trail from these
 events. Normal chat rendering, search, notifications, projections, and summaries
 use the current `ThreadMessage.body` unless policy explicitly materializes

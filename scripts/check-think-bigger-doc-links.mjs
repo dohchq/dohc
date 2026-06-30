@@ -122,11 +122,20 @@ function* contentLines(markdown) {
   let activeListIndent = null
 
   for (const line of markdown.split(/\r?\n/)) {
-    const fence = line.match(/^\s{0,3}(```+|~~~+)(.*)$/)
+    const rawFence = line.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
     const leadingIndent = indentationWidth(line)
     const listContentIndent = listItem ? indentationWidth(listItem[0]) : null
+    const fenceIndent = rawFence ? indentationWidth(rawFence[1]) : null
+    const fence = rawFence && (
+      fenceIndent <= 3
+      || (
+        activeListIndent !== null
+        && fenceIndent >= activeListIndent
+        && fenceIndent <= activeListIndent + 3
+      )
+    )
     const listCodeBlock = activeListIndent !== null
       && line.trim() !== ''
       && leadingIndent >= activeListIndent + 4
@@ -139,8 +148,8 @@ function* contentLines(markdown) {
       || listCodeBlock
 
     if (fence && !inFence) {
-      const marker = fence[1][0]
-      const markerLength = fence[1].length
+      const marker = rawFence[2][0]
+      const markerLength = rawFence[2].length
       inFence = true
       fenceChar = marker
       fenceLength = markerLength
@@ -148,9 +157,9 @@ function* contentLines(markdown) {
     }
 
     if (fence && inFence) {
-      const marker = fence[1][0]
-      const markerLength = fence[1].length
-      const trailing = fence[2]
+      const marker = rawFence[2][0]
+      const markerLength = rawFence[2].length
+      const trailing = rawFence[3]
       if (marker === fenceChar && markerLength >= fenceLength && trailing.trim() === '') {
         inFence = false
         fenceChar = null
