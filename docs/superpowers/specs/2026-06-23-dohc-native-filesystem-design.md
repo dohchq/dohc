@@ -133,18 +133,19 @@ import, attach, sync, and raw filesystem scan is defined by this table:
 Only ordinary user content outside engine-managed namespaces may be proposed for
 a deterministic collision-proof safe rename before the workspace is activated.
 `.dohc/**` and `.versions/**` collisions remain quarantine-only or
-manual-resolution-only. For
-secret-backed or secret-eligible inputs, quarantine records and safe-rename
-proposals must redact sensitive basenames, raw hashes, and path details, using
-opaque placeholders or keyed commitments instead. Safe rename proposals must
-never overwrite existing user content; destination names are derived from a
-stable sanitized basename plus a workspace-scoped content/id hash for ordinary
-inputs, or from non-sensitive opaque identifiers for secret-backed inputs, then
-reserved atomically at activation time with create-if-absent, `O_EXCL`, or an
-equivalent exclusive reservation primitive. A non-atomic check-then-create flow
-is not allowed. Activation may proceed only if the reservation succeeds;
-reservation failure is a fail-closed collision that stays in quarantine or
-manual resolution.
+manual-resolution-only. Secret-backed or secret-eligible inputs never receive
+deterministic safe rename proposals from raw scan/import/attach flows; they stay
+in quarantine records or manual resolution unless a separate explicit
+authorization flow emits a fully opaque replacement label. Quarantine records for
+secret-backed or secret-eligible inputs must redact sensitive basenames, raw
+hashes, and path details, using opaque placeholders or keyed commitments instead.
+Safe rename proposals must never overwrite existing user content; destination
+names are derived only from a stable sanitized basename plus a workspace-scoped
+content/id hash for ordinary non-secret inputs, then reserved atomically at
+activation time with create-if-absent, `O_EXCL`, or an equivalent exclusive
+reservation primitive. A non-atomic check-then-create flow is not allowed.
+Activation may proceed only if the reservation succeeds; reservation failure is
+a fail-closed collision that stays in quarantine or manual resolution.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions/**` content is never silently promoted into a named
 version.

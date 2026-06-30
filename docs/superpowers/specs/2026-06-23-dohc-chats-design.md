@@ -560,11 +560,15 @@ it must use an active-link reservation row keyed by
 serialized unit of work as the `ThreadLink` mutation. Tombstoning a link must
 release or supersede that active reservation in the same transaction that sets
 `deletedAt`, while preserving the historical tombstone record. A uniqueness
-conflict is resolved by reading the existing active `ThreadLink`, returning the
-idempotent result, and skipping duplicate activity/fanout.
-A retry for the same normalized key must upsert or no-op against the existing
-active `ThreadLink` and must not create a second active link or duplicate
-`link_added` fanout.
+conflict is resolved only after re-running the same workspace, thread
+membership, target visibility, share-grant, and link-policy authorization checks
+used by link creation. If those checks still pass, the engine may read the
+existing active `ThreadLink`, return the idempotent result, and skip duplicate
+activity/fanout. If any check fails, the retry fails closed as an authorization
+or visibility denial without revealing whether an active link still exists.
+A retry for the same normalized key must re-run those checks before any
+read/upsert/no-op against the existing active `ThreadLink`, and must not create
+a second active link or duplicate `link_added` fanout.
 `ChatThreadProjection.linkedWork`, projections, search, and export all build
 from one active canonical link per normalized uniqueness key and must use the
 same `canonicalThreadLinkKey(parts)` helper as link creation and `ThreadLink`
