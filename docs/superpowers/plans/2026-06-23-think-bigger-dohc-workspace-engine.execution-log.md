@@ -2834,6 +2834,35 @@ Hundred-forty-third pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-fourth pass:
+
+- Fixed CodeRabbit's seven follow-up findings from the workflow/spec rerun:
+  - Widened the Think Bigger docs workflow path filters to directory-level
+    plan/spec doc matches while keeping workflow, manifest, and checker triggers.
+  - Added visibility to the versioned workspace durable denial/quarantine
+    classification text.
+  - Made PR 01 carry forward and extend P0D's `ConflictRecord` contract instead
+    of defining an unrelated new conflict type.
+  - Clarified chat lifecycle `bodyHash` semantics for create/edit resulting body
+    revisions versus delete preserved previous-body and tombstone verification.
+  - Required one workspace-wide path-equivalence profile for native filesystem
+    canonicalization and reserved-namespace checks.
+  - Classified editor temp-file-then-rename saves as overwrite-renames that map
+    to `replace(...)` rather than plain `rename(...)` or `move(...)`.
+  - Updated the PR00 plan text to name directory-level workflow coverage.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

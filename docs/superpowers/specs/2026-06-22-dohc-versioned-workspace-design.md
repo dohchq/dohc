@@ -289,9 +289,10 @@ shapes, and replay metadata mismatches return non-persistent
 `PublicValidationErrorCode` responses before holding-area persistence. They do
 not become `rejected` or `quarantined` `WriteResult` values, do not allocate
 holding records, and do not consume denied/quarantined-write quota. Only
-server-side authorization, policy, protection, lock, version-access, skill-turn,
-provenance, attribution, and proof failures can enter the durable
-denial/quarantine flow.
+server-side authorization, policy, visibility, protection, lock, version-access,
+skill-turn, provenance, attribution, and proof failures can enter the durable
+denial/quarantine flow. Visibility failures use `visibility_denied` externally
+and `quarantined_visibility` when accepted into holding storage.
 Transient infrastructure outages are not public denial reasons and must not be
 represented as terminal `rejected` or `quarantined` outcomes. They return the
 distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a

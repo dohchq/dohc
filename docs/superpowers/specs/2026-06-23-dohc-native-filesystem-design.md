@@ -117,10 +117,16 @@ sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and
 before any storage access. Canonicalization first normalizes separators,
 collapses repeated separators, resolves `.` segments, rejects unresolved `..`
 traversal, rejects platform device/UNC/root-escape forms outside the workspace
-contract, then normalizes path segments to Unicode NFC and applies the
-platform/case-folding policy, workspace-boundary resolution, and
-reserved-namespace checks so composed and decomposed names match the same
-`.dohc/**` and `.versions/**` rules. After canonicalization, reserved namespace
+contract, then normalizes path segments to Unicode NFC and applies one
+workspace-wide path-equivalence profile for all mounts, scans, API calls, sync
+clients, and imports. That profile must define case sensitivity/folding and
+Unicode equivalence once for the workspace; mounts or filesystems that cannot
+enforce the profile are rejected, quarantined, or attached read-only until a
+compatible projection is available. Workspace-boundary resolution and
+reserved-namespace checks use that same workspace-level identity rule, so
+composed/decomposed or case variants cannot resolve differently on different
+clients or bypass the same `.dohc/**` and `.versions/**` rules. After
+canonicalization, reserved namespace
 handling is defined only by the reserved-namespace collision contract above: the
 allowlisted policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and
 optional workspace-root `.dohcignore`; all other `.dohc/**` content and
@@ -353,6 +359,13 @@ only the basename changes; `move` is the preferred API name when the parent path
 changes. Both require source identity, destination absence, causal
 preconditions, and idempotency, and neither may degrade into delete-plus-create
 semantics.
+If the destination already exists, the operation is an overwrite-rename and must
+map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart
+reconciliation must classify common editor temp-file-then-rename saves this way:
+the temp source provides `sourceObjectId`, the existing destination provides
+`destinationObjectId`, and both sides carry freshness preconditions. If the
+destination identity cannot be proven, the capture resolves to conflict,
+quarantine, or manual reconciliation instead of applying a path-only overwrite.
 
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire

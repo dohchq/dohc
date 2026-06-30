@@ -763,6 +763,11 @@ persisted resulting body revision and must match `nextBodyHash`; for delete,
 `bodyHash` is the previous persisted body revision preserved by the delete
 activity. Replay, export, mention fanout, and history rebuilds must verify this
 hash before deriving notifications or visible projections.
+`MentionNotificationThreadActivity.bodyHash` always verifies the persisted body
+revision that produced the mention notification. Create/edit mention fanout uses
+the resulting body revision after the create/edit; delete or tombstone replay
+uses the delete-specific preserved previous body hash plus `tombstoneHash` and
+must not reinterpret the deletion placeholder as a new resulting message body.
 
 type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }

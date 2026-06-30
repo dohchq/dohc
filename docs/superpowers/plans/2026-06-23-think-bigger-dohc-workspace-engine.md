@@ -1539,7 +1539,9 @@ Foundation alpha and the relevant surface proof are complete.
 - Add the checked-in Think Bigger docs manifest consumed by
   `scripts/check-think-bigger-doc-links.mjs`.
 - Add `.github/workflows/think-bigger-docs.yml` so CI runs the manifest-backed
-  checker on Think Bigger doc, manifest, workflow, and checker changes.
+  checker on Think Bigger plan/spec docs, manifest, workflow, and checker
+  changes, using directory-level doc path filters so new docs trigger the
+  fail-closed manifest/inventory check.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
@@ -1576,7 +1578,11 @@ must use.
   `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  `ProjectionValidation`, and `ConflictRecord`.
+  and `ProjectionValidation`.
+- Formalize and extend the carried-forward `ConflictRecord` contract from P0D,
+  preserving the `ConflictRecord` symbol and the
+  `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
+  migration/backfill boundary supersedes it.
 - Consume the P0E-frozen `ChatThread`, `ThreadMessage`, and `ThreadLink`
   scaffold as the single provisional chat substrate; PR 01 must not introduce a
   parallel chat schema.
