@@ -102,18 +102,14 @@ the declared range. `UInt64DecimalString` is `0` through
 milliseconds through `8640000000000000` unless a narrower shared-schema range is
 required by the implementation. `ThreadReadState.updatedAt`,
 `ThreadMessage.createdAt`, `ThreadMessage.editedAt`, and
-`ThreadActivityBase.createdAt` are pinned to server time and must not be
-accepted from client payloads.
-declared. All boundary readers must parse, range-check, and reserialize to the
-canonical form before storing, comparing, indexing, or projecting
-`threadSequence`, `bodyRevision`, `createdAt`, `editedAt`, `deletedAt`,
-`lastActivityAt`, `updatedAt`, or read-state cursor fields.
-
-`threadSequence`, `bodyRevision`, `createdAt`, `editedAt`, `deletedAt`,
-`lastActivityAt`, and `updatedAt` use these canonical decimal-string encodings at
-storage, API, projection, and worker boundaries. Implementations compare them as
-integer values using a 64-bit/BigInt-safe path, never as floating-point
-JavaScript numbers and never with locale string collation.
+`ThreadActivityBase.createdAt` are pinned to server time and must not be accepted
+from client payloads. All boundary readers must parse, range-check, and
+reserialize to the canonical form before storing, comparing, indexing, or
+projecting `threadSequence`, `bodyRevision`, `createdAt`, `editedAt`,
+`deletedAt`, `lastActivityAt`, `updatedAt`, or read-state cursor fields.
+Implementations compare them as integer values using a 64-bit/BigInt-safe path,
+never as floating-point JavaScript numbers and never with locale string
+collation.
 
 The canonical read cursor is sequence-based, not timestamp-based. No row means
 nothing in the thread has been read by that actor. Updates are monotonic: read

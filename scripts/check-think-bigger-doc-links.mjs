@@ -2,7 +2,9 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const files = [
   'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
   'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
@@ -103,12 +105,14 @@ const collectLinks = (markdown) => {
 const failures = []
 
 for (const file of files) {
-  if (!fs.existsSync(file)) {
+  const filePath = path.resolve(repoRoot, file)
+
+  if (!fs.existsSync(filePath)) {
     failures.push(`missing source file ${file}`)
     continue
   }
 
-  const text = fs.readFileSync(file, 'utf8')
+  const text = fs.readFileSync(filePath, 'utf8')
   for (const raw of collectLinks(text)) {
     if (/^(https?:|mailto:|app:)/.test(raw)) {
       continue
@@ -129,8 +133,8 @@ for (const file of files) {
 
     const targetPath = path.normalize(
       decodedTarget === ''
-        ? path.resolve(file)
-        : path.resolve(path.dirname(file), decodedTarget),
+        ? path.resolve(filePath)
+        : path.resolve(path.dirname(filePath), decodedTarget),
     )
 
     let targetStat

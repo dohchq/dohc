@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-twelfth pass below.
+- **Last updated:** current through the Hundred-thirteenth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `84a6bda` reported 7 issues;
-  hundred-twelfth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `adb3a68` reported 3 issues;
+  hundred-thirteenth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2123,6 +2123,27 @@ Hundred-twelfth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirteenth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Resolved the docs link checker from the script's repo root instead of the
+    caller's current working directory.
+  - Rewrote chat decimal-string canonicalization into a continuous
+    parse/range-check/reserialize-before-use boundary requirement.
+  - Required repeated idempotency keys to resolve to the original operation and
+    reject changed payloads, operand tuples, or causal preconditions.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`, confirming repo-root-stable path resolution.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Overrides:
