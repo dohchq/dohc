@@ -312,7 +312,7 @@ const collectLinks = (markdown) => {
       ? destination.slice(1, -1)
       : destination
   )
-  const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, '')
+  const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
   const nestedImageLinkPattern = /\[!\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
@@ -464,6 +464,10 @@ const assertCheckerFixtures = () => {
   const referenceTargetCount = referenceLinks.links.filter((link) => link.target === './target.md').length
   if (referenceTargetCount !== 3) {
     throw new Error('reference fixture should count definition, shortcut, and full reference links exactly once')
+  }
+  const codeSpanSeparatedLink = collectLinks('[text]`code`(target.md)')
+  if (codeSpanSeparatedLink.links.length > 0 || codeSpanSeparatedLink.unresolvedReferences.length > 0) {
+    throw new Error('code-span stripping should preserve separators between adjacent Markdown tokens')
   }
   if (!isMarkdownPath('/repo/README.markdown') || isMarkdownPath('/repo/diagram.svg')) {
     throw new Error('Markdown target fixture should not treat asset fragments as heading anchors')
