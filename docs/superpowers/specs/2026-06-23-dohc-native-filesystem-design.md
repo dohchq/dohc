@@ -284,9 +284,11 @@ Phase 0 should use a normal folder plus reconciliation:
    - Store `workspaceId`, source mount binding, and either a canonical path for
      ordinary entries or an opaque/redacted path token for protected,
      secret-backed, or engine-managed entries. File identity where available,
-     size, mtime, content hash, immutable `versionId`, and version/base metadata
-     are stored with that redacted form; the real protected path remains only
-     inside the authorization envelope.
+     size, mtime, immutable `versionId`, version/base metadata, and either a
+     plain content hash for ordinary non-secret entries or a keyed commitment /
+     opaque authorized hash handle for protected or secret-backed entries are
+     stored with that redacted form; the real protected path remains only inside
+     the authorization envelope.
 
 2. **While dohc is running**
    - Use OS file watching for create/modify/delete/rename events.
@@ -296,10 +298,11 @@ Phase 0 should use a normal folder plus reconciliation:
      immutable `versionId`, source mount binding, version/base metadata, capture
      token, and actor/device/session provenance. Ordinary paths may include the
      canonical path. Protected or secret-backed paths must use an opaque/redacted
-     path token or keyed commitment in the durability log; the real path remains
-     only inside the authorization envelope. Secret-backed writes are included
-     only as encrypted references/envelopes or broker metadata, never plaintext
-     secret content.
+     path token plus keyed commitment or opaque authorized hash handle in the
+     durability log; reusable raw content hashes for those paths must not be
+     persisted or exported. The real path remains only inside the authorization
+     envelope. Secret-backed writes are included only as encrypted
+     references/envelopes or broker metadata, never plaintext secret content.
      Provenance is stored as a policy-governed envelope: durable internal audit
      retains actor id, actor kind, authorizing principal, source kind
      (`human`, `agent`, `import`, `sync`, or `automation`), device id, session id,

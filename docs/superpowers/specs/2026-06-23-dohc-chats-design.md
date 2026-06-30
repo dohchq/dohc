@@ -438,7 +438,7 @@ Fields:
 
 ```ts
 type ChatThreadBase = {
-  id: string
+  threadId: string
   workspaceId: string
   title?: string
   status: 'open' | 'closed' | 'decided' | 'archived'

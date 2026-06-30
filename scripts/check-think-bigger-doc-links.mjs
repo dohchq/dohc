@@ -332,6 +332,7 @@ const collectLinks = (markdown) => {
   const nestedImageLinkPattern = /\[!\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
+  const footnoteDefinitionPattern = /^\s{0,3}\[\^[^\]\n]+\]:\s*/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
   const autolinkPattern = /<([A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>/g
@@ -361,7 +362,10 @@ const collectLinks = (markdown) => {
 
   for (const { text: line, lineNumber } of lines) {
     let prose = stripCodeSpans(line)
-    if (referenceDefinitionPattern.test(prose)) {
+    const footnoteDefinition = prose.match(footnoteDefinitionPattern)
+    if (footnoteDefinition) {
+      prose = prose.slice(footnoteDefinition[0].length)
+    } else if (referenceDefinitionPattern.test(prose)) {
       continue
     }
     for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
@@ -459,6 +463,10 @@ const assertCheckerFixtures = () => {
   const rawHtmlLink = collectLinks('<a href="./target.md#custom-anchor">target</a>')
   if (!rawHtmlLink.links.some((link) => link.target === './target.md#custom-anchor')) {
     throw new Error('raw HTML link fixture should collect href destinations')
+  }
+  const footnoteBodyLink = collectLinks('[^note]: See [visible](./visible.md)')
+  if (!footnoteBodyLink.links.some((link) => link.target === './visible.md')) {
+    throw new Error('footnote body fixture should validate visible links')
   }
 
   const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
