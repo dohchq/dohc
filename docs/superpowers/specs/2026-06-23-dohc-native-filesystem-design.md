@@ -268,11 +268,13 @@ pin code/kernel/**
 ```
 
 Materialization state must be legible. Users and agents should be able to tell
-whether a subtree is local, virtual, or pinned. Policy schema, status reporting,
-and UI must use `virtual` as the canonical label for a non-materialized path that
-remains addressable through dohc APIs. On-demand hydration is behavior of a
-`virtual` path, not a separate persisted state; legacy/imported `lazy` labels map
-to `virtual` before validation or status output.
+whether a subtree is local or virtual, and whether it is pinned. Policy schema,
+status reporting, and UI must use `virtual` as the canonical label for a
+non-materialized path that remains addressable through dohc APIs. On-demand
+hydration is behavior of a `virtual` path, not a separate persisted state;
+legacy/imported `lazy` labels map to `virtual` before validation or status
+output. `pinned` is an orthogonal boolean retention request, not a third
+materialization value.
 
 ## API-native access
 
@@ -586,13 +588,14 @@ capture/sync ingestion by default. Recursive self-capture is forbidden: history,
 status, conflicts, indexes, caches, and generated projections under `.dohc/`
 must not be exported, searched, synced, or re-ingested as ordinary user files.
 The importer applies the same allowlist-before-quarantine rule here: only a
-small explicit allowlist of source-backed policy files such as
+small explicit allowlist of source-backed policy inputs such as
 `.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary workspace-root
-`.dohcignore` may participate in normal tracking, and even those files are
-interpreted as policy inputs, not arbitrary captured content. All other
-`.dohc/**` paths are reserved, non-user-content inputs that must be quarantined
-with an explainable record or handled through engine-specific recovery rather
-than captured as ordinary files or silently skipped.
+`.dohcignore` may be parsed and normalized. Even those allowlisted files are
+interpreted as engine policy inputs outside the normal captured-content pipeline,
+not as ordinary tracked files. All other `.dohc/**` paths are reserved,
+non-user-content inputs that must be quarantined with an explainable record or
+handled through engine-specific recovery rather than captured as ordinary files
+or silently skipped.
 
 Example:
 

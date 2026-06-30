@@ -202,9 +202,9 @@ Examples:
 A channel can be a general discussion space or can attach to workspace scope:
 
 - folder.
-- project.
-- client/entity.
-- app.
+- project through a folder, atom, file, or version target.
+- client/entity through an atom or folder target.
+- app through a file, folder, atom, or version target.
 - version.
 - workspace object.
 
@@ -219,7 +219,9 @@ Example:
 ```
 
 This lets dohc show relevant chats from the file, folder, or version being
-viewed.
+viewed. Broader concepts such as projects, clients, entities, apps, or arbitrary
+workspace objects must map to an explicit supported `ThreadLinkTargetType`, or
+wait for a new enum value plus registered resolver support.
 
 ## DMs and small group chats
 
@@ -381,10 +383,16 @@ after creation. The active uniqueness key is
 `channelConversationId: "default"` for the default channel stream conversation.
 Non-default `channelConversationId` values must be server-issued and
 deterministic for the same channel-conversation context; clients must not invent
-them. Renaming or moving a channel changes channel metadata, not this key.
-Changing the channel association requires tombstoning/archiving the old thread
-and creating a new thread, so one conversation cannot fork into multiple active
-`ChatThread` records for the same channel identity.
+them. The server derives the id from a canonical channel-conversation context
+tuple, such as default stream, linked work target, or explicitly named
+subconversation, after authorization and normalization. The same context tuple
+must reuse the existing id through atomic get-or-create; a materially different
+context tuple gets a new deterministic id. Atomic get-or-create dedupes
+concurrent creation but does not let clients choose the id. Renaming or moving a
+channel changes channel metadata, not this key. Changing the channel association
+requires tombstoning/archiving the old thread and creating a new thread, so one
+conversation cannot fork into multiple active `ChatThread` records for the same
+channel identity.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current

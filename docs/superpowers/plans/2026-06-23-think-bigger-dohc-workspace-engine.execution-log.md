@@ -15,25 +15,9 @@ Source specs:
 
 ## Current PR Snapshot
 
-This block is a non-authoritative orientation snapshot for PR00 and the
-provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
-append-only history below is the source of truth if this summary drifts; this
-block is only a quick pointer into that latest entry.
-
-- **Last updated:** derive from the newest owning PR00 pass entry below.
-- **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
-  https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** derive latest rerun and pending/clean state from the
-  newest owning PR00 pass entry below; do not hand-maintain SHA/count here.
-- **PR00 tests:** derive latest validation evidence from the newest owning PR00
-  pass entry below; required gates remain docs sanity, docs link/anchor check,
-  and the `@dohc/web` brand guard.
-- **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
-  CodeRabbit clean rerun is required before completion or merge-readiness.
-- **P0D-P0G lane state:** current provisional stack after P0C/P0D/P0E/P0F,
-  respectively; lane PRs are pending/opened, not approved, and have not run
-  lane-specific CodeRabbit. P0G local validation has passed on the provisional
-  integrated stack.
+Use the newest owning PR00 pass entry in the append-only history below as the
+live status snapshot. Do not duplicate mutable SHA/count/test/open-item/lane
+state here; each new pass entry owns that information and is the source of truth.
 
 ## How To Use This Log
 
@@ -2447,12 +2431,36 @@ Hundred-twenty-fifth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-twenty-sixth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Made PR 14 UI-only over the PR 12-owned canonical `ThreadLink` contract.
+  - Replaced the mutable Current PR Snapshot details with a pointer to the newest
+    owning PR00 pass entry.
+  - Tightened `.dohc/**` wording so allowlisted policy inputs are parsed as
+    engine policy, not normal captured content.
+  - Reworded materialization so only `local` and `virtual` are persisted states,
+    with `pinned` as an orthogonal flag.
+  - Clarified broader channel attachment concepts as mappings to supported
+    `ThreadLinkTargetType` values unless new enum/resolver support is added.
+  - Added the server-side `channelConversationId` get-or-create minting rule.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
-Mutable active blockers live in the newest PR00 pass entry and are mirrored only
-for quick orientation in Current PR Snapshot. This section is an append-only
-derived summary for historical unresolved-finding categories; there are no
-additional historical categories beyond the pass log above.
+Mutable active blockers live in the newest PR00 pass entry. This section is an
+append-only derived summary for historical unresolved-finding categories; there
+are no additional historical categories beyond the pass log above.
 
 ### Subagent Reviews
 

@@ -2131,7 +2131,8 @@ links, activity, read state, and reactions.
 
 **Scope:**
 
-- Add `ThreadLink` UI and APIs.
+- Add UI over the PR 12-owned canonical `ThreadLink` APIs and storage; PR 14
+  must not define a parallel link contract.
 - Link chats to files/folders/versions/moments and agent runs.
 - Show related chats in file side rail.
 - Show related chats in version/history views.
