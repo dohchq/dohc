@@ -169,7 +169,6 @@ type RetryableWriteFailureCode =
   | 'rate_limited'
 
 type TerminalRetirementReason =
-  | 'auto_retired_payload_retention_expired'
   | 'operator_disposition_retired'
 
 type ExpiredRetryRecordKind =
@@ -398,57 +397,50 @@ rejected-before-acceptance items. Accepted holding records are durable accepted
 writes, even though they are not yet canonical workspace state. They must remain
 recoverable with reconstructible payload and retry metadata until protection
 checks succeed and canonicalization completes, until explicit operator
-disposition is recorded for a record that cannot safely become canonical, or
-until the finite `AcceptedHoldingRecordPolicy.maxRecoverableHoldingPayloadMs`
-hard cap is reached. For accepted holding records, any TTL, retry-horizon,
+disposition is recorded for a record that cannot safely become canonical. For
+accepted holding records, any TTL, retry-horizon,
 compaction, or colder-storage policy may throttle retries, compact derived
 retry/index metadata, or move accepted payload bytes to colder durable storage,
-but it must preserve reconstructible payload bytes until one of those three
-events occurs. If the hard cap wins before canonicalization or disposition, the
-record transitions to `terminal-retired` and payload bytes may be deleted,
-cryptoshredded, or compacted into non-reconstructible evidence. If a
+but it must preserve reconstructible payload bytes until canonicalization
+completes or explicit operator disposition retires the record. Time alone must
+not transition an accepted holding record to `terminal-retired`. If a
 rejected-before-acceptance item expires, or if an accepted record is retired
-through explicit disposition or payload-retention expiry, the engine preserves
-durable rejection, disposition, retirement, or expiration evidence. Humans,
-agents, imports, and sync processes all get the same guarantee: an accepted
-change is not silently lost inside the recoverable window, but it also does not
-become canonical workspace state until protection checks pass.
+through explicit disposition, the engine preserves durable rejection,
+disposition, retirement, or expiration evidence. Humans, agents, imports, and
+sync processes all get the same guarantee: an accepted change is not silently
+lost while it awaits canonicalization or disposition, but it also does not become
+canonical workspace state until protection checks pass.
 Accepted records still have a bounded operator-visible lifecycle. The Phase 0
 decision note defines
 `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`,
-`operatorDispositionDueAt`, and a mandatory finite
-`AcceptedHoldingRecordPolicy.maxRecoverableHoldingPayloadMs`; when the
+`operatorDispositionDueAt`, and an operator escalation policy; when the
 canonicalization deadline is reached, the record must be escalated into an
 explicit disposition queue, marked overdue in status APIs, and only derived
 retry/index metadata may be compacted or moved to colder durable storage
 according to policy. Garbage collection may remove only derived retry/index
 metadata after the disposition deadline while the operator window is open; the
 reconstructible payload remains until
-canonicalization succeeds, an explicit operator disposition record retires it,
-or the effective finite `maxRecoverableHoldingPayloadMs` bound is reached.
+canonicalization succeeds or an explicit operator disposition record retires it.
 `operatorDispositionDueAt` marks the item overdue for operator/status handling;
 it does not itself cryptoshred or compact reconstructible bytes.
 Deadline precedence is fixed when lifecycle fields disagree:
 `replayUntil` controls how long the idempotency result must replay and never
 extends reconstructible payload retention; `operatorDispositionDueAt` and
 `maxPendingCanonicalizationMs` control when `pending_canonicalization` becomes
-`overdue_disposition`; `retentionUntil` and
-`maxRecoverableHoldingPayloadMs` control reconstructible payload retention, with
-the earlier effective payload-retention deadline winning. If payload retention
-expires before `replayUntil`, the record transitions exactly once to
-`terminal-retired` with reason
-`auto_retired_payload_retention_expired`; retries before `replayUntil` replay
-that minimal terminal result without reconstructible bytes. Only retries after
+`overdue_disposition`; `retentionUntil` for accepted records is an
+operator/status deadline, not a payload-deletion deadline. Only explicit
+operator disposition may transition an accepted holding record to
+`terminal-retired` with reason `operator_disposition_retired`; retries before
+`replayUntil` replay that terminal result after disposition. Only retries after
 `replayUntil` may return `idempotency-expired`.
-No accepted holding record may remain recoverable forever: if no
-workspace-specific recovery-retention policy is configured, the engine's default
-finite `maxRecoverableHoldingPayloadMs` applies, and workspaces may only choose
-values inside the product/org maximum. When the effective maximum recovery
-window is reached, still-unresolved accepted records must enter terminal
-retirement with `auto_retired_payload_retention_expired`: payload bytes are
-deleted, cryptoshredded, or compacted into a non-reconstructible evidence
-record, while minimal metadata needed for audit, idempotency expiry, abuse
-controls, and user-facing explanation is retained.
+No accepted holding record may remain unreviewed forever: if no
+workspace-specific disposition policy is configured, the engine's default finite
+operator-escalation window applies, and workspaces may only choose values inside
+the product/org maximum. When the effective maximum pending window is reached,
+still-unresolved accepted records must enter `overdue_disposition` and remain
+operator-visible until canonicalized or explicitly dispositioned. Payload bytes
+must not be deleted, cryptoshredded, or compacted into non-reconstructible
+evidence without that explicit disposition record.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.

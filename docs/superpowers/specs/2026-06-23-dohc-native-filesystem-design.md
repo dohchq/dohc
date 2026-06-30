@@ -116,8 +116,10 @@ workspace tree walkers skip `.versions/**` by default. Reconciliation must first
 enumerate all engine-bound `.versions/<version>/` mounts for the active
 workspace, then only the engine's workspace/version mount resolver may enter
 each managed root, and only with an explicit workspace/version binding. Ordinary
-user-created `.versions` folders or aliases are not active named-version mounts
-and stay excluded from generic traversal and canonical promotion.
+user-created `.versions` folders or aliases are not active named-version mounts:
+the reserved-namespace scan classifies them fail-closed into quarantine or
+manual resolution. They are excluded from ordinary content traversal and never
+silently skipped, ignored, or promoted into a named version.
 
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.
@@ -431,6 +433,14 @@ non-secret-backed object operands. Secret-backed overwrite, delete,
 rename/move source, and replace source/destination operands must use another
 permitted freshness guard such as `expectedBaseVersion` or `expectedEtag`;
 plaintext or redacted secret hash equality is not a valid precondition.
+For secret-backed operands, `expectedEtag`, `expectedBaseVersion`, and opaque
+authorized hash handles are server-minted freshness tokens, not client-provided
+content hashes. Callers may present only opaque tokens obtained from an
+authorized read/status path; the server re-derives actor identity, authorization,
+workspace/version scope, and token validity before accepting the guard. Browser
+or client-provided payload digests, redacted hashes, or equality claims are
+ignored for secret-backed overwrite, delete, rename/move, replace source, and
+replace destination checks.
 
 `rename` and `move` use the same atomic path-change primitive and validation
 rules. `rename` is the preferred API name when the parent path is unchanged and
@@ -1307,10 +1317,13 @@ The first proof should demonstrate the whole shape without solving every driver:
    unversioned, and unsynced.
 7. `.env` path patterns get exclusion/redaction smoke coverage through
    `.dohc/files.toml` policy, without requiring tracked-as-secret-backed/private
-   behavior in the first proof slice.
-8. Unauthorized export redacts or excludes `.env`.
-9. A simple conflict preserves both sides and exposes `.dohc/conflicts/`.
-10. An API can read/write the same version without relying on a real filesystem.
+   `.env` behavior in the first proof slice.
+8. One non-`.env` secret-backed fixture proves durable capture, redacted status,
+   conflict projection through `.dohc/conflicts/`, and export behavior without
+   plaintext leakage.
+9. Unauthorized export redacts or excludes `.env`.
+10. A simple conflict preserves both sides and exposes `.dohc/conflicts/`.
+11. An API can read/write the same version without relying on a real filesystem.
 
 If this works, dohc has the beginning of a filesystem that feels normal to
 humans and agents while being much safer and more powerful than normal folders,

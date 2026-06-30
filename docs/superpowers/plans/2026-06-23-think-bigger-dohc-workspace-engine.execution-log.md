@@ -4956,6 +4956,47 @@ Two-hundred-eleventh pass:
 - Overrides:
   - None approved.
 
+Two-hundred-twelfth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: eight follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's eight follow-up findings:
+  - Added the execution log to the mega plan's Source Specs inventory.
+  - Split `ProjectionValidation` expectations between writable,
+    `readOnly`, and `internalOnly` projections.
+  - Clarified Phase 0/PR01/PR12 chat schema ownership so Phase 0 owns only
+    ephemeral/provisional fixtures and PR12 owns durable chat persistence.
+  - Replaced manual Corepack setup with pinned `pnpm/action-setup` before
+    setup-node so setup-node pnpm caching has pnpm on PATH.
+  - Clarified unmanaged `.versions/**` paths fail closed into quarantine/manual
+    resolution instead of being silently skipped or promoted.
+  - Made secret-backed freshness guards server-minted opaque tokens, never
+    client-provided content hashes.
+  - Added one non-`.env` secret-backed proof fixture while keeping `.env` scoped
+    to exclusion/redaction smoke.
+  - Changed accepted holding lifecycle so reconstructible accepted payload bytes
+    remain until canonicalization or explicit operator disposition.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and

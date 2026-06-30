@@ -34,6 +34,7 @@ This mega plan collates and orchestrates:
 - [dohc Versioned Workspace Design](../specs/2026-06-22-dohc-versioned-workspace-design.md)
 - [dohc Native Filesystem Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
 - [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
+- [Think Bigger dohc Workspace Engine Execution Log](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md)
 
 Those files are the conceptual inputs. This file is the execution plan.
 
@@ -127,8 +128,13 @@ than skipped.
 - Target: no silent last-writer-wins for tracked workspace content.
 - Target: no raw conflict markers as the primary UX.
 - Target: no hidden safety-relevant state.
-- Target: every content/projection driver must declare snapshot, diff, merge/conflict,
-  projection, search, export, restore, and ACL behavior.
+- Target: every writable content/projection driver must declare the
+  `ProjectionValidation` behaviors that apply to that surface: snapshot,
+  diff, merge/conflict, projection, search, export, restore, and ACL behavior.
+  `readOnly` projections declare read/search/export/ACL behavior only; internal
+  `internalOnly` projections declare validation, ownership, retention, and
+  exclusion behavior instead of impossible round-trip diff/merge/restore
+  guarantees.
 - Target: no skipped E2E tests for implemented, shipped, or in-scope surfaces;
   deferred surfaces are recorded as not applicable, not skipped.
 
@@ -913,7 +919,7 @@ the PR 01-owned contract instead.
 | Symbols | Phase 0 baseline | PR 01 | PR 12 |
 | --- | --- | --- | --- |
 | `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
-| `ChatThread`, `ThreadMessage`, chat `ThreadLink` | Provisional fixture owner until PR 01 lands. | Versioned bridge only so file/history/search proof code can compile; not final owner. | Single final owner; adopts or migrates/backfills the Phase 0/PR 01 bridge, then owns channels, DMs, linked-work behavior, and full chat storage. |
+| `ChatThread`, `ThreadMessage`, chat `ThreadLink` | Ephemeral/provisional fixture owner only; Phase 0 must not claim durable ownership of live persisted chat rows. | Versioned bridge only so file/history/search proof code can compile; owns migration metadata for provisional rows but not final chat storage. | Single final owner; explicitly adopts, migrates, or backfills from the Phase 0/PR 01 bridge, then owns durable channels, DMs, linked-work behavior, and full chat storage. |
 | `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | Provisional fixture owner only when needed for Phase 0 chat bridge tests; must use monotonic cursor semantics and server-owned revision tokens. | Explicit bridge owner from the **PR01 Schema Promotion Checkpoint** until PR 12 lands, using schema version `chat-read-state-bridge-v0`. PR 01 owns rebuild/invalidation of bridge read-state projections and the migration boundary from Phase 0 fixtures, but does not own final cursor semantics beyond monotonic cursor plus server-owned revision/CAS compatibility. | Single final owner; migrates/backfills from `chat-read-state-bridge-v0`, owns cursor semantics, server-owned revision/CAS token behavior, projection rebuild/invalidation, and compatibility for legacy read-state rows. |
 | `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
 
