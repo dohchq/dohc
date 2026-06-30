@@ -30,7 +30,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:dohc Workspace Engine documentation and CI infrastructure|(?:dohc\s+)?Think Bigger Workspace Engine)$/im
+    /^Cohort:\s*(?:dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine)$/m
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
     const header = raw.split(/\r?\n/).slice(0, 12).join('\n')

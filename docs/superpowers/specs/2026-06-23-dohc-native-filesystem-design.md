@@ -1,7 +1,7 @@
 # dohc Native Filesystem Design
 
 Status: exploratory architecture direction
-Cohort: Think Bigger Workspace Engine
+Cohort: dohc Think Bigger Workspace Engine
 Date: 2026-06-23
 
 Companion: `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`

@@ -3474,6 +3474,26 @@ Hundred-sixty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-sixty-seventh pass:
+
+- Fixed CodeRabbit's two follow-up findings:
+  - Tightened Think Bigger cohort discovery to lowercase dohc-branded headers and
+    updated the three source spec cohort markers.
+  - Narrowed Phase 0 CodeRabbit override wording to documented non-critical
+    documentation-only exceptions.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an
@@ -3575,7 +3595,7 @@ Gate evidence:
       attribution.
 - [ ] Agent chat replies display as `<User Name>'s agent`.
 - [ ] CodeRabbit approved every Phase 0 PR or user approved documented
-      non-sensitive non-blocker overrides.
+      non-critical documentation-only exceptions.
 - [ ] Architecture/security/QA subagent reviews complete.
 - [ ] Expansion roadmap has been revised with Phase 0 findings.
 

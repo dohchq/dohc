@@ -1,7 +1,7 @@
 # dohc Chats Design
 
 Status: exploratory architecture direction
-Cohort: Think Bigger Workspace Engine
+Cohort: dohc Think Bigger Workspace Engine
 Date: 2026-06-23
 
 Companions:

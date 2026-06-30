@@ -1,7 +1,7 @@
 # dohc Versioned Workspace Design
 
 Status: exploratory architecture direction
-Cohort: Think Bigger Workspace Engine
+Cohort: dohc Think Bigger Workspace Engine
 Date: 2026-06-22
 
 ## Core thesis
