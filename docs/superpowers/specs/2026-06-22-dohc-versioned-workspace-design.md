@@ -227,13 +227,30 @@ type WriteResult =
     }
   | {
       kind: 'idempotency-expired'
-      holdingRecordId?: string
+      holdingRecordId: string
       idempotencyResultId: string
       workspaceId: string
       versionId: string
       idempotencyKey: string
       expiredAt: UnixMsDecimalString
-      recordKind: ExpiredRetryRecordKind
+      recordKind:
+        | 'accepted_holding_record'
+        | 'rejected_record'
+        | 'quarantined_record'
+        | 'terminal_retired_record'
+      reasonCode: 'idempotency_expired'
+    }
+  | {
+      kind: 'idempotency-expired'
+      idempotencyResultId: string
+      workspaceId: string
+      versionId: string
+      idempotencyKey: string
+      expiredAt: UnixMsDecimalString
+      recordKind:
+        | 'canonical_result'
+        | 'retryable_failure_record'
+        | 'conflict_record'
       reasonCode: 'idempotency_expired'
     }
   | {

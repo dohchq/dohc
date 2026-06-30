@@ -143,7 +143,7 @@ const collectLinks = (markdown) => {
       : destination
   )
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, '')
-  const linkPattern = /!?\[[^\]\n]+\]\((<[^>\n]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g
+  const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|[^)\s]*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const autolinkPattern = /<((?:https?:|mailto:|app:|\.{1,2}\/|\/|[A-Za-z0-9_.-]+\/)[^<>\s]*)>/g

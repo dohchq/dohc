@@ -2674,6 +2674,31 @@ Hundred-thirty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-thirty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest four-issue rerun:
+  - Split `idempotency-expired` into holding-record and non-holding-record
+    variants so holding-record expirations always carry `holdingRecordId`.
+  - Expanded inline link parsing to handle empty labels and single-quoted or
+    parenthesized titles.
+  - Aligned `LinkThreadActivity.linkTarget.targetVersionRef` with canonical null
+    representation.
+  - Removed duplicated chat projection-path mechanics from the chat spec and
+    replaced them with a pointer to the native filesystem projection writer
+    contract.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

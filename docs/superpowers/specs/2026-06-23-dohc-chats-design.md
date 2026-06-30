@@ -756,9 +756,15 @@ type LinkThreadActivity = ThreadActivityBase & {
     targetType: ThreadLinkTargetType
     targetWorkspaceId: string
     targetId: string
-    targetVersionRef?: VersionRef
+    targetVersionRef: VersionRef | null
   }
 }
+
+`LinkThreadActivity.linkTarget.targetVersionRef` uses the same canonical
+nullability as `CanonicalThreadLinkKeyParts`: missing version refs are serialized
+as `null`, never omitted. Link activity writers, replay, export, and projection
+rebuilds must read and write that canonical form so the activity payload and
+canonical link key produce the same normalized target tuple.
 
 type MentionNotificationThreadActivity = ThreadActivityBase & {
   kind: 'mention_notification_enqueued' | 'mention_notification_resolved'
@@ -972,71 +978,17 @@ and notifications. It should be an action.
 
 Agents should still get readable context projections:
 
-```text
-.dohc/chats/v1-<digest>.md
-```
-
 That projection is primarily for reading/reference/export. It should not be the
-canonical write path for posting. Before any chat text is written to this
-projected Markdown file, the projection pipeline must classify secret content
-and apply the same policy-aware redaction rules used by chat rendering, search,
-notifications, summaries, and export. Derived chat files must never persist
-plaintext secrets outside the authorized secret-backed read path.
-`.dohc/chats/**` is an explicit reserved internal projection scope under the
-same fail-closed `.dohc/**` reserved-namespace rules used by the native
-filesystem model. It is not a source-backed policy file, not an allowlisted
-user-content path, and is not re-ingested as canonical user content.
-The displayed `v1-<digest>.md` filename is the canonical deterministic
-projection path shape; the raw thread id must not be used as a projection
-filename. Projection writers must map the canonical thread id and visibility
-scope to a deterministic filename using one fixed algorithm across all runtimes.
-For v1, `projectionKind` is an explicit canonical enum with these exact values:
-
-```ts
-type ChatProjectionKind =
-  | 'agent_context'
-  | 'export'
-  | 'search_index'
-  | 'notification_context'
-```
-
-Writers and readers must not invent aliases, fallbacks, or implementation-local
-strings. New projection kinds require a documented compatibility rule; if the
-digest tuple changes incompatibly, use a new filename prefix such as `v2-`.
-The projection scope is a canonical tagged tuple: `owner` for the
-workspace-private internal projection, or
-`shareGrant:<grantId>:<authzScopeId>` with both identifiers percent-encoded
-using the same canonical escaping rules on every runtime. `authzScopeId` is a
-server-issued opaque identifier for the exact authorization and redaction set
-used to materialize the projection. Compute the digest over a length-prefixed
-tuple with fields in this exact order: `workspaceId`, `threadId`,
-`projectionKind`, and `projectionScope`. Each field is first normalized to
-Unicode NFC, encoded as UTF-8 bytes, then framed as
-`uint32-be-byte-length || bytes`; the concatenated framed tuple is hashed with
-`sha256`. Then encode the digest as lowercase RFC 4648 base32 with no padding,
-and write `.dohc/chats/v1-<digest>.md`. The field order, length-prefix framing,
-Unicode normalization, UTF-8 encoding, hash, lowercase digest encoding,
-no-padding rule, grant-aware projection scope, and `v1-` prefix are the
-canonical contract and must not vary by implementation. The projection must
-store or otherwise verify the exact canonical thread id, workspace id,
-projection kind, projection scope, and derived filename in metadata before
-writing, and must reject ambiguous ids or any computed filename that already
-maps to a different canonical tuple. Before writing or reusing a shared
-projection, the implementation must verify the precise authorization/redaction
-context represented by `authzScopeId`; grant or redaction changes require a new
-scope id and therefore a new filename digest. Projection writers must reject path
-separators, relative
-path segments, control characters, reserved names, and any other unsafe input
-before constructing the projection path, so a crafted thread id cannot traverse
-directories or overwrite another projection.
-At write time, the projection writer must resolve and verify that the final
-target remains under the workspace `.dohc/chats/` root, refuse to follow
-symlinks for parent or target path components, and open/create the target with
-safe no-follow primitives where the platform provides them. Writes must use
-atomic create/replace semantics and fail closed if any canonicalization,
-descriptor/handle continuity, or root-containment check changes between
-validation and write, so symlink swaps or other TOCTOU races cannot redirect
-projection output.
+canonical write path for posting. The native filesystem design owns the
+canonical projection-path behavior, including reserved-namespace handling,
+deterministic filename construction, root containment, and TOCTOU-safe projection
+writes. This chat spec owns only the projection source data and policy contract:
+before any chat text is projected, the projection pipeline must classify secret
+content and apply the same policy-aware redaction rules used by chat rendering,
+search, notifications, summaries, and export. Derived chat projections must never
+persist plaintext secrets outside the authorized secret-backed read path, and
+projection writers/readers must use the filesystem spec's projection writer and
+projection scope rules instead of inventing local path algorithms.
 
 ## File projections
 
@@ -1076,8 +1028,7 @@ projection from canonical chat state. The user or agent should be directed to
 post through chat actions instead of editing the projection. Projection
 renderers must use the same body escaping/sanitization rules as the interactive
 chat UI, and must run secret classification/redaction before writing any message
-body into the canonical deterministic projection path
-`.dohc/chats/v1-<digest>.md`.
+body into the filesystem-owned projection writer output.
 
 ## Integration with files and versions
 
