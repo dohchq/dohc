@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const canonicalRepoRoot = fs.realpathSync(repoRoot)
 
 const expectedThinkBiggerDocs = [
   'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
@@ -158,8 +159,22 @@ for (const file of files) {
     continue
   }
 
-  const text = fs.readFileSync(filePath, 'utf8')
-  anchorCache.set(filePath, collectAnchors(text))
+  let canonicalFilePath
+  try {
+    canonicalFilePath = fs.realpathSync(filePath)
+  } catch {
+    failures.push(`missing source file ${file}`)
+    continue
+  }
+
+  const relativeFile = path.relative(canonicalRepoRoot, canonicalFilePath)
+  if (relativeFile.startsWith('..') || path.isAbsolute(relativeFile)) {
+    failures.push(`source file escapes repository root ${file}`)
+    continue
+  }
+
+  const text = fs.readFileSync(canonicalFilePath, 'utf8')
+  anchorCache.set(canonicalFilePath, collectAnchors(text))
   for (const raw of collectLinks(text)) {
     if (/^(https?:|mailto:|app:)/.test(raw)) {
       continue
@@ -183,7 +198,15 @@ for (const file of files) {
         ? path.resolve(filePath)
         : path.resolve(path.dirname(filePath), decodedTarget),
     )
-    const relativeTarget = path.relative(repoRoot, targetPath)
+    let canonicalTargetPath
+    try {
+      canonicalTargetPath = fs.realpathSync(targetPath)
+    } catch {
+      failures.push(`${file}: missing link target ${raw}`)
+      continue
+    }
+
+    const relativeTarget = path.relative(canonicalRepoRoot, canonicalTargetPath)
     if (relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) {
       failures.push(`${file}: link target escapes repository root ${raw}`)
       continue
@@ -191,7 +214,7 @@ for (const file of files) {
 
     let targetStat
     try {
-      targetStat = fs.statSync(targetPath)
+      targetStat = fs.statSync(canonicalTargetPath)
     } catch {
       failures.push(`${file}: missing link target ${raw}`)
       continue
@@ -206,7 +229,7 @@ for (const file of files) {
       continue
     }
 
-    if (!anchorsFor(targetPath).has(slug(decodedAnchor))) {
+    if (!anchorsFor(canonicalTargetPath).has(slug(decodedAnchor))) {
       failures.push(`${file}: missing anchor ${raw}`)
     }
   }

@@ -308,24 +308,28 @@ agents, imports, and sync processes all get the same guarantee: an accepted
 change is not silently lost, but it also does not become canonical workspace
 state until protection checks pass.
 Accepted records still have a bounded operator-visible lifecycle. The Phase 0
-decision note defines `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`
-and `operatorDispositionDueAt`; when the deadline is reached, the record must be
-escalated into an explicit disposition queue, marked overdue in status APIs, and
-compacted or moved to colder durable storage according to policy. Garbage
-collection may remove only derived retry/index metadata after the disposition
-deadline while the operator window is open; the reconstructable payload remains
-until canonicalization succeeds, an explicit operator disposition record retires
-it, or a workspace policy with a documented user-visible recovery SLA reaches
-its explicit `maxRecoverableHoldingPayloadMs` bound. `operatorDispositionDueAt`
-marks the item overdue for operator/status handling; it does not itself
-cryptoshred or compact reconstructable bytes. If no workspace recovery-retention
-policy is configured, still-unresolved accepted records remain recoverable until
-explicit operator disposition. Only the policy-controlled terminal path or an
-explicit operator disposition may retire reconstructable bytes with
-`auto_retired_payload_retention_expired`: payload bytes are deleted,
-cryptoshredded, or compacted into a non-reconstructable evidence record, while
-minimal metadata needed for audit, idempotency expiry, abuse controls, and
-user-facing explanation is retained.
+decision note defines
+`AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`,
+`operatorDispositionDueAt`, and a mandatory finite
+`AcceptedHoldingRecordPolicy.maxRecoverableHoldingPayloadMs`; when the
+canonicalization deadline is reached, the record must be escalated into an
+explicit disposition queue, marked overdue in status APIs, and compacted or
+moved to colder durable storage according to policy. Garbage collection may
+remove only derived retry/index metadata after the disposition deadline while
+the operator window is open; the reconstructable payload remains until
+canonicalization succeeds, an explicit operator disposition record retires it,
+or the effective finite `maxRecoverableHoldingPayloadMs` bound is reached.
+`operatorDispositionDueAt` marks the item overdue for operator/status handling;
+it does not itself cryptoshred or compact reconstructable bytes.
+No accepted holding record may remain recoverable forever: if no
+workspace-specific recovery-retention policy is configured, the engine's default
+finite `maxRecoverableHoldingPayloadMs` applies, and workspaces may only choose
+values inside the product/org maximum. When the effective maximum recovery
+window is reached, still-unresolved accepted records must enter terminal
+retirement with `auto_retired_payload_retention_expired`: payload bytes are
+deleted, cryptoshredded, or compacted into a non-reconstructable evidence
+record, while minimal metadata needed for audit, idempotency expiry, abuse
+controls, and user-facing explanation is retained.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.
@@ -740,10 +744,14 @@ horizon, an API retry with the same key must fail closed with an explicit
 silently apply as a new mutation. Implementations may garbage-collect expired key
 tombstones only after the same maximum retry horizon has passed or the operation
 namespace is rotated.
-The canonical retry-horizon values are defined once by the Phase 0 decision note
-under `Idempotency Retry Horizons`, then promoted into the PR 01 shared
-`WorkspaceIdempotencyPolicy` contract. This spec and the native filesystem spec
-both reference those policy names instead of duplicating values:
+### Idempotency Retry Horizons And WorkspaceIdempotencyPolicy
+
+The canonical retry-horizon values are defined once by this committed PR00
+source section,
+[`Idempotency Retry Horizons And WorkspaceIdempotencyPolicy`](#idempotency-retry-horizons-and-workspaceidempotencypolicy),
+then promoted into the PR 01 shared `WorkspaceIdempotencyPolicy` contract. This
+spec and the native filesystem spec both reference those policy names instead
+of duplicating values:
 `apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
 `filesystemCaptureDedupHorizonMs`, and
 `filesystemCaptureTombstoneRetentionMs`. Any PR that changes the values must

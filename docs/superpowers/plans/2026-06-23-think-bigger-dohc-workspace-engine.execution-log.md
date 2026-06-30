@@ -15,12 +15,12 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Last updated:** current through the Hundred-thirtieth pass below.
+- **Last updated:** see the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `e1342a0` reported 7 issues;
-  hundred-thirtieth pass fixes are recorded below; CodeRabbit rerun remains
-  pending.
+- **PR00 CodeRabbit:** latest completed rerun on `6abb501` reported 4 issues;
+  the newest owning PR00 pass entry records follow-up fixes and pending rerun
+  status.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2517,6 +2517,31 @@ Hundred-thirtieth pass:
   - Surfaced `durable-pending`, quarantined, rejected, retryable, and retired
     write states in filesystem status projections.
   - Added Versioning and Filesystem reviewers to the PR01 subagent lane.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirty-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest four-issue rerun:
+  - Added a finite maximum recovery-retention path for accepted holding records
+    so unresolved durable-pending payloads eventually become terminal-retired
+    evidence instead of remaining unbounded.
+  - Added a stable `Idempotency Retry Horizons And WorkspaceIdempotencyPolicy`
+    contract heading for the retry-horizon source section.
+  - Made docs link target validation resolve symlinks before repository-boundary
+    checks.
+  - Replaced the execution-log `Last updated` ordinal with a generic newest-pass
+    pointer.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
