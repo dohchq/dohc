@@ -15,12 +15,17 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Owning PR00 pass:** the newest PR00 pass entry below is the source of truth
-  for live CodeRabbit status, test evidence, open overrides, and completion
-  state.
-- **Snapshot drift rule:** do not duplicate mutable status in this block. Update
-  only the newest owning PR00 pass entry when review status, validation evidence,
-  overrides, or completion state changes.
+- **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
+  live CodeRabbit status, test evidence, open overrides, and completion state.
+- **CodeRabbit status:** review loop in progress. The latest completed rerun
+  raised seven findings that are addressed in the newest pass; a committed
+  rerun is still required.
+- **Test evidence:** the newest pass records `git diff --check`, both Think
+  Bigger docs link-check invocations, and the brand guard test passing.
+- **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
+  remains pending human approval.
+- **Completion state:** not complete or merge-ready until CodeRabbit is clean and
+  the docs-only local-agent-CLI exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
@@ -252,22 +257,37 @@ Date completed:
 
 ### Commands Run
 
+#### Setup And Discovery
+
 ```bash
 git status --short --branch
 git remote -v
 gh --version
 gh auth status
 rg -n "Execution Topology|worktree|implementation thread|one implementation PR|Rust Kernel Spike|Phase 0 branch/worktree/chat ownership" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+```
+
+#### Initial Validation
+
+```bash
 git diff --cached --check
-# Historical ordering note: the validation commands later in this block were run
-# before the push/PR creation actions below; this initial setup list is grouped
-# by discovery/setup flow, not strict gate order.
-git push -u origin codex/think-bigger-00-readiness-scaffold
-gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "Add dohc Think Bigger workspace engine plan"
-coderabbit review --agent -t committed -c AGENTS.md
 rg -n "<workspace-root>|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 git diff --check
 pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+node scripts/check-think-bigger-doc-links.mjs
+```
+
+#### Remote PR And Review
+
+```bash
+git push -u origin codex/think-bigger-00-readiness-scaffold
+gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "Add dohc Think Bigger workspace engine plan"
+coderabbit review --agent -t committed -c AGENTS.md
+```
+
+#### Node 24 Validation
+
+```bash
 curl -fsSL https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz -o /tmp/dohc-node-v24.18.0-linux-x64.tar.xz
 curl -fsSL https://nodejs.org/dist/v24.18.0/SHASUMS256.txt -o /tmp/dohc-node-v24.18.0-SHASUMS256.txt
 expected=$(grep ' node-v24.18.0-linux-x64.tar.xz$' /tmp/dohc-node-v24.18.0-SHASUMS256.txt | awk '{print $1}')
@@ -280,7 +300,6 @@ tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0 --s
 /tmp/dohc-node-v24.18.0/bin/node -v
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --version
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
-node scripts/check-think-bigger-doc-links.mjs
 ```
 
 ### E2E / Visual / Manual QA
@@ -3206,6 +3225,37 @@ Hundred-fifty-seventh pass:
   - Aligned the PR00 plan with the workflow's path-filtered trigger model and
     broadened the workflow filter to `docs/superpowers/**` so superpowers doc
     renames and linked-target moves run the manifest-backed checker.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-eighth pass:
+
+- Fixed CodeRabbit's seven follow-up findings:
+  - Made the docs checker ignore Markdown footnote definitions and references
+    instead of treating them as file reference links.
+  - Extended inline-link parsing to accept one level of balanced parentheses in
+    destinations.
+  - Removed the recorded outcome from the `retryable-failure.commitState`
+    semantics and clarified that a later recorded proof returns a canonical or
+    durable result instead.
+  - Added an explicit visibility-denied propagation note tying
+    `visibility_denied` to `quarantined_visibility`.
+  - Widened `Phase0SharedSubstrateBaseline` ownership to every later Phase 0
+    lane after P0A/P0R.
+  - Restored a concise self-contained Current PR Snapshot while keeping the
+    newest pass entries as the audit trail.
+  - Split the original command evidence block into Setup, Initial Validation,
+    Remote PR/review, and Node 24 validation subsections.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

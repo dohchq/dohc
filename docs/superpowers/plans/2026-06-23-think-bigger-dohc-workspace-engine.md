@@ -878,16 +878,16 @@ blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
 After P0A and P0R, Phase 0 must land a small provisional shared-substrate
-baseline before P0B, P0D, or P0E branch into implementation. The named
+baseline before any later Phase 0 lane branches into implementation. The named
 provisional source of truth is `Phase0SharedSubstrateBaseline` in the shared
 substrate package scaffold. It owns the early `WorkspaceObject`,
 `WorkspaceVersion`, `VersionRef`, stable object ID, `ConflictRecord`,
 `ThreadLink`, and file/chat link shapes for Phase 0 lanes only. It must be
-versioned, tested, and owned in one place; P0B/P0D/P0E must import, reuse, or
-schema-versionedly extend these symbols rather than invent parallel shapes. PR
-01 remains the final schema source and must either adopt the provisional shapes
-unchanged or migrate/backfill them through an explicit schema-version boundary
-after P0G.
+versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and P0G
+must import, reuse, or schema-versionedly extend these symbols rather than
+invent parallel shapes. PR 01 remains the final schema source and must either
+adopt the provisional shapes unchanged or migrate/backfill them through an
+explicit schema-version boundary after P0G.
 
 #### PR P0A - Current System Inventory And Decisions
 

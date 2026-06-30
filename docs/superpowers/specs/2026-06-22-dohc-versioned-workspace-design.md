@@ -301,6 +301,11 @@ type WriteResult =
     }
 ```
 
+`visibility_denied` is an external public denial reason for visibility-boundary
+failures that are rejected before canonical acceptance. Visibility failures that
+enter holding storage use `quarantineState: 'quarantined_visibility'` and still
+carry `reasonCode: 'visibility_denied'`.
+
 Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
 stack details, policy rule names, secret/path internals, and operator notes stay
 server-side and appear only through separately authorized diagnostics.
@@ -330,10 +335,11 @@ idempotency key, operation fingerprint, `idempotencyResultId`,
 state itself cannot be persisted, the engine must not acknowledge a replayable
 `WriteResult`; the caller must retry until the engine can durably record and
 replay the outcome or prove a canonical/durable result.
-`commitState` is the single source of truth for whether a canonical mutation is
-known absent (`no_canonical_commit_recorded`), unknown and requires retry
-(`commit_state_unknown_retry_required`), or later proven recorded
-(`canonical_commit_recorded`).
+`commitState` on `retryable-failure` is the single source of truth for whether a
+canonical mutation is known absent (`no_canonical_commit_recorded`) or unknown
+and requires retry (`commit_state_unknown_retry_required`). If retry handling
+later proves the canonical mutation was recorded, it returns the canonical or
+durable result rather than continuing to return `retryable-failure`.
 Retryable failures always carry the original `idempotencyKey`; retries must
 preserve it. `terminal-retired` is a first-class terminal `WriteResult` while
 its retained retirement metadata is addressable; it degrades to

@@ -211,13 +211,14 @@ const collectLinks = (markdown) => {
   const lines = [...contentLines(markdown)]
   const referenceDefinitions = new Map()
   const normalizeLabel = (label) => label.trim().replace(/\s+/g, ' ').toLowerCase()
+  const isFootnoteLabel = (label) => label.trim().startsWith('^')
   const normalizeDestination = (destination) => (
     destination.startsWith('<') && destination.endsWith('>')
       ? destination.slice(1, -1)
       : destination
   )
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, '')
-  const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|[^)\s]*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
+  const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
@@ -227,6 +228,9 @@ const collectLinks = (markdown) => {
     const prose = stripCodeSpans(line)
     const definition = prose.match(referenceDefinitionPattern)
     if (definition) {
+      if (isFootnoteLabel(definition[1])) {
+        continue
+      }
       const destination = normalizeDestination(definition[2])
       referenceDefinitions.set(normalizeLabel(definition[1]), destination)
       links.push(destination)
@@ -240,6 +244,9 @@ const collectLinks = (markdown) => {
     }
     for (const match of prose.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
+      if (isFootnoteLabel(label)) {
+        continue
+      }
       const destination = referenceDefinitions.get(label)
       if (destination) {
         links.push(destination)
@@ -248,6 +255,9 @@ const collectLinks = (markdown) => {
       }
     }
     for (const match of prose.matchAll(shortcutReferencePattern)) {
+      if (isFootnoteLabel(match[1])) {
+        continue
+      }
       const destination = referenceDefinitions.get(normalizeLabel(match[1]))
       if (destination) {
         links.push(destination)
