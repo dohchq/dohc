@@ -884,26 +884,24 @@ blockers in
 After P0A and P0R, Phase 0 must land a small provisional shared-substrate
 baseline before any later Phase 0 lane branches into implementation. The named
 provisional source of truth is `Phase0SharedSubstrateBaseline` in the shared
-substrate package scaffold. It owns the early `WorkspaceObject`,
-`WorkspaceVersion`, `VersionRef`, stable object ID, `ConflictRecord`,
-`ThreadLink`, and file/chat link shapes for Phase 0 lanes only. It must be
-versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and P0G
-must not start implementation branches until this baseline is finalized, and
-must import, reuse, or schema-versionedly extend these symbols rather than
-invent parallel shapes. PR 01 remains the final schema source and must either
-adopt the provisional shapes unchanged or migrate/backfill them through an
-explicit schema-version boundary after P0G.
-For chat specifically, `Phase0SharedSubstrateBaseline` owns only the provisional
-`ChatThread`, `ThreadMessage`, and `ThreadLink` symbols needed by P0E and the
-proof arc. PR 01 consumes those exact symbols as carried-forward substrate
-inputs, not a second chat schema. PR 12 then schema-versionedly extends or
-migrates the same symbols for channels, DMs, and full chat behavior. The
-migration direction is one-way: Phase 0 -> PR 01 -> PR 12, with explicit
-backfill if a later phase changes field shape.
-Later PR entries may state acceptance criteria or migration notes for those
-symbols, but they are not ownership sources. `Phase0SharedSubstrateBaseline` is
-the only Phase 0 definition site for `WorkspaceObject`, `WorkspaceVersion`,
-`VersionRef`, `ConflictRecord`, `ThreadLink`, `ChatThread`, and `ThreadMessage`.
+substrate package scaffold. It owns temporary Phase 0 fixture symbols for
+`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
+`ConflictRecord`, `ThreadLink`, and file/chat link shapes only until PR 01 lands.
+It must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F,
+and P0G must not start implementation branches until this baseline is finalized,
+and must import or reuse these provisional symbols rather than invent parallel
+shapes.
+PR 01 is the single canonical schema owner for `WorkspaceObject`,
+`WorkspaceVersion`, `VersionRef`, `ConflictRecord`, `ThreadLink`, `ChatThread`,
+and `ThreadMessage`. It must adopt the provisional shapes unchanged or
+migrate/backfill them through an explicit schema-version boundary after P0G.
+PR 12 consumes the PR 01 canonical `ChatThread`, `ThreadMessage`, and
+`ThreadLink` symbols and only schema-versionedly extends or migrates them for
+channels, DMs, and full chat behavior. The migration direction is one-way:
+Phase 0 provisional fixtures -> PR 01 canonical schema -> PR 12 chat extensions,
+with explicit backfill if a later phase changes field shape. Later PR entries
+may state acceptance criteria or migration notes for those symbols, but they are
+not ownership sources.
 
 #### PR P0A - Current System Inventory And Decisions
 

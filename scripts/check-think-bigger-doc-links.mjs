@@ -121,8 +121,41 @@ function* contentLines(markdown) {
   let fenceLength = 0
   let inIndentedCode = false
   let activeListIndent = null
+  let inHtmlComment = false
 
-  for (const line of markdown.split(/\r?\n/)) {
+  const stripHtmlComments = (line) => {
+    let rest = line
+    let visible = ''
+    while (rest.length > 0) {
+      if (inHtmlComment) {
+        const end = rest.indexOf('-->')
+        if (end === -1) {
+          return visible
+        }
+        rest = rest.slice(end + 3)
+        inHtmlComment = false
+        continue
+      }
+
+      const start = rest.indexOf('<!--')
+      if (start === -1) {
+        return visible + rest
+      }
+
+      visible += rest.slice(0, start)
+      rest = rest.slice(start + 4)
+      const end = rest.indexOf('-->')
+      if (end === -1) {
+        inHtmlComment = true
+        return visible
+      }
+      rest = rest.slice(end + 3)
+    }
+    return visible
+  }
+
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = inFence ? rawLine : stripHtmlComments(rawLine)
     const rawFence = line.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
@@ -243,6 +276,7 @@ const collectLinks = (markdown) => {
       : destination
   )
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, '')
+  const nestedImageLinkPattern = /\[!\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
@@ -263,7 +297,12 @@ const collectLinks = (markdown) => {
   }
 
   for (const line of lines) {
-    const prose = stripCodeSpans(line)
+    let prose = stripCodeSpans(line)
+    for (const match of prose.matchAll(nestedImageLinkPattern)) {
+      links.push(normalizeDestination(match[1]))
+      links.push(normalizeDestination(match[2]))
+    }
+    prose = prose.replace(nestedImageLinkPattern, '')
     for (const match of prose.matchAll(linkPattern)) {
       links.push(normalizeDestination(match[1]))
     }
@@ -298,6 +337,23 @@ const collectLinks = (markdown) => {
 
   return { links, unresolvedReferences }
 }
+
+const assertCheckerFixtures = () => {
+  const commented = collectLinks('<!-- [hidden](./missing.md) -->\nVisible')
+  if (commented.links.length > 0) {
+    throw new Error('HTML comment fixture should not produce links')
+  }
+  if (collectAnchors('<!-- # Hidden -->').has('hidden')) {
+    throw new Error('HTML comment fixture should not produce anchors')
+  }
+
+  const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')
+  if (!nested.links.includes('./inner.png') || !nested.links.includes('./outer.md')) {
+    throw new Error('nested image link fixture should include inner and outer destinations')
+  }
+}
+
+assertCheckerFixtures()
 
 const failures = []
 const anchorCache = new Map()

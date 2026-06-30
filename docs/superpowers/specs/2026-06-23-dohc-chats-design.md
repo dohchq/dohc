@@ -142,7 +142,10 @@ equivalent CAS semantics that advances `lastReadCursor` only when the incoming
 `(threadSequence, createdAt, messageId)` tuple is greater than the stored tuple.
 Before CAS evaluation or any tuple-to-message existence lookup, the caller must
 be authorized for the target workspace/thread using server-derived identity:
-workspace scope, thread visibility, and channel/DM membership must pass first.
+workspace scope, thread visibility, channel/DM membership, and any shared-channel
+or shared-grant authorization must pass first. Revoked or expired shared grants
+fail closed before `lastReadCursor` comparison or `ThreadMessage` existence
+lookup.
 If the incoming tuple exactly equals the stored `lastReadCursor`, the operation
 is an idempotent success with no state change after authorization; it does not
 re-check `ThreadMessage` existence. Only after authorization succeeds and the
@@ -1250,12 +1253,12 @@ The first engine-backed chat links should target defined Phase 0 identities:
 - agent runs.
 - decisions.
 - tasks.
+- shares/exports with explicit share grants.
 
 Later substrate identities can add links to:
 
 - apps/sites.
 - databases/rows.
-- shares/exports.
 
 The same chat can appear in multiple places:
 

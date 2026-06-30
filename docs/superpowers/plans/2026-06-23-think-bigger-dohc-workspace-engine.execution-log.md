@@ -15,7 +15,7 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** `Hundred-seventy-third pass` below owns PR00
+- **Canonical live status block:** `Hundred-seventy-fourth pass` below owns PR00
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
@@ -214,7 +214,8 @@ Date completed:
 
 ## PR 00 - Mega Plan And Readiness Scaffold
 
-> Historical entry; see Current PR Snapshot above for live status.
+> Historical entry; see Current PR Pointer above and the canonical live-status
+> block in the latest PR00 pass for live status.
 
 Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
@@ -3639,6 +3640,45 @@ Hundred-seventy-third pass:
     Think Bigger docs.
   - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventy-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's nine follow-up findings:
+  - Added `operatorDispositionDueAt` to quarantined write results.
+  - Ignored HTML comments in docs-link content scanning.
+  - Captured both inner image and outer link destinations for nested image links,
+    with in-script fixtures covering comments and nested links.
+  - Updated the historical PR00 status note to reference the Current PR Pointer.
+  - Made PR 01 the single canonical schema owner for chat/workspace substrate
+    symbols, with Phase 0 as provisional fixtures and PR 12 as schema-versioned
+    chat extensions.
+  - Preserved policy source ordinal and rule index through filesystem export and
+    re-import.
+  - Clarified that version write access does not bypass path-level policy gates.
+  - Moved shares/exports with explicit grants into the current chat link target
+    scope.
+  - Required shared-channel/shared-grant reauthorization before read-state CAS or
+    message existence lookup.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Overrides:

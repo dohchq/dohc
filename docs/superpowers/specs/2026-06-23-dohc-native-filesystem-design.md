@@ -202,8 +202,10 @@ into version history until fresh server/engine-derived validation succeeds.
 
 dohc should not make agents second-class writers.
 
-If an actor can write to a version, the actor can edit files in that version.
-The actor can be:
+If an actor has version-level write access and passes the path-level policy
+checks below, the actor can edit files in that version. Version membership alone
+does not bypass user locks, folder/atom access, sharing boundaries, protected
+paths, skill-turn gates, or any other effective-policy check. The actor can be:
 
 - a human.
 - an agent.
@@ -1120,7 +1122,8 @@ Export should produce:
 - readable files.
 - the full policy envelope required to re-import without changing file
   semantics, including whether each governed entry is secret-backed or
-  non-secret.
+  non-secret plus the effective-policy resolver's normalized source ordinal and
+  rule index for each emitted rule.
 - only allowlisted source-backed policy files such as `.dohc/files.toml`,
   `.dohc/visibility.toml`, and optional workspace-root `.dohcignore`.
 - history/provenance metadata.
@@ -1133,9 +1136,10 @@ generated projections, durability internals, or other engine state as ordinary
 workspace files. Only the explicitly allowlisted policy inputs above may cross
 the boundary, and only through the engine policy parsing/export path.
 That engine policy export path is responsible for preserving enough normalized
-policy state to reconstruct secret-backed versus non-secret files on re-import;
-re-import must fail closed rather than treating an entry with missing policy
-envelope data as ordinary content.
+policy state to reconstruct secret-backed versus non-secret files on re-import,
+including equal-specificity tie-breaking from the original source ordinal and
+rule index; re-import must fail closed rather than treating an entry with missing
+policy envelope or ordering data as ordinary content.
 
 Generated or internal `.dohc/**` state is excluded from export unless it is one
 of the named policy inputs above and crosses through the engine policy export

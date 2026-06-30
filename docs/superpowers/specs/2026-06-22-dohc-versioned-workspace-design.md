@@ -251,6 +251,7 @@ type WriteResult =
       reasonCode: PublicDeniedReasonCode
       acceptedAt: UnixMsDecimalString
       quarantinedAt: UnixMsDecimalString
+      operatorDispositionDueAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
       quarantineState: QuarantinedStatus
     }
