@@ -347,6 +347,13 @@ type WriteResult =
     }
 ```
 
+`recordKind` is a public response field only on `durable-pending` and
+`idempotency-expired` variants. Canonical, retryable-failure, and conflict
+responses do not expose `recordKind`; their backing idempotency-store rows may be
+classified internally as `canonical_result`, `retryable_failure_record`, or
+`conflict_record`, but that classification is not part of the public
+`WriteResult` payload.
+
 `visibility_denied` is an external public denial reason for visibility-boundary
 failures that are rejected before canonical acceptance. Visibility failures that
 enter holding storage use `quarantineState: 'quarantined_visibility'` and still
@@ -495,14 +502,14 @@ from an accepted durable-pending holding record.
 Canonical writes, retryable failures, and conflicts without holding records use
 the terminal idempotency replay path with the persisted `idempotencyResultId`
 and `idempotencyReplayToken` only; they do not require or accept
-`holdingRecordId`. Those terminal replay records use
-`recordKind: 'canonical_result'`, `recordKind: 'retryable_failure_record'`, or
-`recordKind: 'conflict_record'`, and the retryable-failure/conflict cases remain
-terminal replay records rather than holding-record retries. Disposition,
-expiration, and lookup-only details beyond that canonical terminal response live
-in the status query path, not alternate write-retry responses. A stale retry
-must not silently create a second accepted holding record or an uncorrelated
-denial.
+`holdingRecordId`. Their internal idempotency-store rows may be classified as
+`canonical_result`, `retryable_failure_record`, or `conflict_record`, but the
+public `canonical`, `retryable-failure`, and `conflict` `WriteResult` shapes do
+not expose `recordKind`. The retryable-failure/conflict cases remain terminal
+replay records rather than holding-record retries. Disposition, expiration, and
+lookup-only details beyond that canonical terminal response live in the status
+query path, not alternate write-retry responses. A stale retry must not silently
+create a second accepted holding record or an uncorrelated denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through
@@ -748,8 +755,10 @@ dohc should track two levels:
      only after the canonical mutation is durable and visible through `read`.
      `watch` catches up asynchronously. A durability ack without canonical
      visibility can return only `durable-pending`, `retryable-failure`,
-     `rejected`, `quarantined`, `idempotency-expired`, `terminal-retired`, or
-     `conflict`, never `canonical`.
+     `rejected`, `quarantined`, `terminal-retired`, or `conflict`, never
+     `canonical`.
+   - `idempotency-expired` belongs to retry-expiry handling, not canonical
+     visibility; it is returned when a retry arrives after the replay horizon.
    - not necessarily the main visible timeline.
 
 2. **Meaningful moments**

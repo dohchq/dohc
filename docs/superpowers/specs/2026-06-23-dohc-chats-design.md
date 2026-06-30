@@ -761,9 +761,13 @@ uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
 the normalized `CanonicalThreadLinkKey` plus raw target tuple
 `(targetWorkspaceId, targetType, targetId, targetVersionRef, shareGrantId,
 visibilityScope)` captured on the activity event.
-Cycle checks traverse only active `ThreadLink` records in the current projection
-where `deletedAt` is absent. Tombstoned historical links are retained for audit
-and replay but do not participate in cycle detection or block a future relink.
+Cycle checks traverse only canonical active `ThreadLink` records where
+`deletedAt` is absent, inside the same graph lock, CAS, serialized transaction,
+or equivalent single-writer critical section used for the link mutation.
+`ChatThreadProjection.linkedWork` is never authoritative for cycle validation
+unless it has been rebuilt and locked against that same canonical set before the
+check. Tombstoned historical links are retained for audit and replay but do not
+participate in cycle detection or block a future relink.
 `ThreadLink` target fields, `shareGrantId`, and `visibilityScope` are immutable
 after creation. Changing a link means tombstoning the old link with
 `link_removed` activity and creating a new link with `link_added` activity; there
@@ -1387,8 +1391,12 @@ server-assigned target identifiers:
   `(workspaceId, channelId, channelConversationId)` and persists the
   `ThreadMessage` plus the `threadKind: 'channel'` `chat_created` activity when
   this is the first send for that tuple in the same serialized unit. The
-  idempotency result returns `threadId`, `channelConversationId`, and `messageId`,
-  and retries return the same triple.
+  `chat_created` activity is exactly-once: only the writer that wins the unique
+  `ChatThread` reservation for `(workspaceId, channelId, channelConversationId)`
+  may emit it, and retries or concurrent first sends that observe an existing
+  `ChatThread` must not emit duplicate creation provenance. The idempotency
+  result returns `threadId`, `channelConversationId`, and `messageId`, and retries
+  return the same triple.
 - `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
   in the idempotency result, and retries return that same `messageId`.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected

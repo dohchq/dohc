@@ -5475,7 +5475,7 @@ Two-hundred-twenty-fifth pass:
 
 Two-hundred-twenty-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5491,6 +5491,45 @@ Two-hundred-twenty-sixth pass:
     live pass block.
   - Required `secretProjection` to remain explicit in status/API/UI serialization,
     preserving `protectedLocal` versus `plaintextLocal`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-twenty-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Made channel first-send `chat_created` provenance exactly-once by binding it
+    to the unique `ChatThread` reservation winner.
+  - Required `chat_thread` cycle validation to read canonical active
+    `ThreadLink` records under the link write guard.
+  - Clarified public `recordKind` ownership in `WriteResult` and kept
+    canonical/retryable/conflict record classifications internal.
+  - Removed `idempotency-expired` from canonical-visibility outcomes.
+  - Separated retry-only `idempotency-expired` from persisted native filesystem
+    status surfaces.
+  - Required startup reconciliation to hash ambiguous candidates unless the
+    filesystem proves content stability.
+  - Replaced the conflict winner fallback with a single total order and metadata
+    recording rule.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

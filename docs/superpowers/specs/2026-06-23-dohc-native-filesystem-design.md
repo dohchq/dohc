@@ -84,6 +84,11 @@ after the configured retry horizon has elapsed. Capture, retry, and status paths
 must use that boundary consistently: lifecycle/retention transitions are
 `terminal-retired`, while late retry attempts after the retry horizon are
 `idempotency-expired`.
+Persisted workspace status surfaces, including `.dohc/status.json`, API status
+responses, and UI badges, must not serialize `idempotency-expired` as durable
+workspace state. They serialize the current lifecycle state, such as
+`terminal-retired`, and return `idempotency-expired` only from retry-flow APIs for
+late attempts against an expired idempotency/replay horizon.
 
 ## Filesystem shape
 
@@ -318,7 +323,10 @@ Phase 0 should use a normal folder plus reconciliation:
    - Run a reconciliation pass before declaring the workspace clean.
    - Walk metadata for the materialized tree.
    - Compare against the last known index.
-   - Hash only files whose metadata or identity changed, plus suspicious cases.
+   - Hash files whose metadata or identity changed, plus any candidate whose
+     metadata cannot prove content stability on the active filesystem. A
+     filesystem-specific trust guarantee may skip this fallback only when it can
+     prove unchanged content despite preserved size/mtime.
    - Detect creates, edits, deletes, and likely renames/moves.
    - Promote a captured result only when the persisted `workspaceId`, immutable
      `versionId`, and source mount binding match the workspace, version, and
@@ -1172,7 +1180,7 @@ path.
 dohc should therefore keep the mounted tree coherent and buildable while still
 preserving conflicts.
 
-Possible rule:
+Rule:
 
 - the visible path shows the chosen/current value.
 - all conflicting states are preserved in the engine.
@@ -1186,9 +1194,11 @@ Possible rule:
 The chosen/current value must be deterministic and auditable:
 
 - prefer an explicit user/system resolution commit when present.
-- otherwise use a stable engine rule, such as highest logical clock followed by
-  deterministic actor/version tiebreaker.
-- record `chosen_from`, `base`, and rationale in conflict metadata.
+- otherwise use the stable engine fallback order: highest logical clock wins; if
+  tied, choose the lexicographically smallest UTF-8 tuple of
+  `(versionId, objectId, actorId, operationId)` among the conflicting candidates.
+- record `chosen_from`, `base`, the winning fallback tuple, and rationale in
+  conflict metadata.
 - never switch the visible winner silently without emitting a status/event
   update.
 
