@@ -109,6 +109,9 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_visibility'
   | 'quarantined_provenance'
   | 'quarantined_proof'
+  | 'quarantined_locked'
+  | 'quarantined_version_access'
+  | 'quarantined_skill_turn'
 
 type QuarantinedStatus = Exclude<
   DeniedOrQuarantinedStatus,

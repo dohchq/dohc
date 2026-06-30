@@ -2940,6 +2940,30 @@ Hundred-forty-seventh pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-eighth pass:
+
+- Fixed CodeRabbit's four follow-up findings:
+  - Added `quarantined_locked`, `quarantined_version_access`, and
+    `quarantined_skill_turn` to the internal write-gate failure taxonomy.
+  - Made native filesystem accepted-but-not-promoted state consistently surface
+    as `durable-pending`, with no separate `accepted-pending` status.
+  - Made chat activity ids server-assigned and unique within workspace/thread
+    scope.
+  - Made `ThreadLink.deletedById` server-owned and populated only from the
+    canonical `link_removed` activity.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

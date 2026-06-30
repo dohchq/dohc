@@ -68,7 +68,10 @@ data does not remain exposed after access changes. Durable audit/history/export
 records stay intact and continue to rely on authorization checks. Thread
 activity records are append-only events keyed by
 `(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
-sequence.
+sequence. `activityId` is server-assigned and unique within the
+`(workspaceId, threadId)` scope; clients cannot supply or override it, and replay
+or dedupe logic must treat the server-issued activity id/sequence as the only
+authoritative activity identity.
 `ThreadLink` create/update paths must validate the target workspace/resource
 identity, share/grant id, and visibility scope against trusted server-side grant
 state before any link or activity record is persisted. Client-provided grant
@@ -333,7 +336,7 @@ type ThreadLinkBase = ThreadLinkScope & {
   readonly createdById: string // server-owned immutable creator actor id
   createdAt: UnixMsDecimalString
   deletedAt?: UnixMsDecimalString
-  deletedById?: string
+  readonly deletedById?: string // server-owned immutable remover actor id
 }
 
 type VersionedObjectThreadLink = ThreadLinkBase & {
@@ -707,7 +710,7 @@ type ChatBodySnapshot =
   | { kind: 'secretRef', secretObjectId: string, redactedPreview?: string }
 
 type ThreadActivityBase = {
-  id: string
+  readonly id: string // server-assigned unique activity id within workspace/thread
   workspaceId: string
   threadId: string
   readonly actorId: string // server-owned immutable activity actor id
@@ -910,6 +913,10 @@ For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
 audit/replay can identify the exact affected link even after the derived
 `linkedWork` cache is rebuilt. Reaction add/remove replay affects one exact
 reaction through the `ReactionIdentity` XOR above.
+`ThreadLink.deletedById` is populated only from the server-owned actor on the
+canonical `link_removed` activity written in the same atomic unit as the
+tombstone; client-supplied remover identity is ignored or rejected and must never
+override the persisted link deletion actor.
 Mention and notification rebuilds use
 `MentionNotificationThreadActivity` as the durable source of truth. Notification
 queues, search snippets, unread/mention badges, exports, and replay jobs rebuild

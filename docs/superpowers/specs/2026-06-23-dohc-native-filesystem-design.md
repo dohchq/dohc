@@ -45,7 +45,9 @@ protocol.
 When local capture is accepted but canonical promotion is still pending, callers
 must receive the shared `WriteResult.kind: 'durable-pending'` shape with a
 `holdingRecordId`, not a successful canonical write. Rejection, quarantine, and
-accepted-pending states are distinct client-visible outcomes.
+retryable/terminal failures are distinct client-visible outcomes.
+Accepted-but-not-yet-promoted writes surface only as `durable-pending`; this spec
+does not define a separate `accepted-pending` status name.
 
 ## Filesystem shape
 
