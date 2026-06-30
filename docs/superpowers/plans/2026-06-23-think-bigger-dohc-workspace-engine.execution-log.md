@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-twentieth pass below.
+- **Last updated:** current through the Hundred-twenty-first pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `40b1ca9` reported 4 issues;
-  hundred-twentieth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `230f181` reported 9 issues;
+  hundred-twenty-first pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2309,6 +2309,35 @@ Hundred-twentieth pass:
   - Added a docs CI/workflow requirement to run
     `node scripts/check-think-bigger-doc-links.mjs` on every docs PR.
   - Updated the Current PR Snapshot to the `40b1ca9` four-issue rerun.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twenty-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest nine-issue rerun:
+  - Clarified opening write-outcome terminology so `durable-pending` means
+    accepted-but-not-canonical and `retryable-failure` means evaluator outage or
+    indeterminate state.
+  - Allowed retryable-failure replay to later prove canonical mutation by using
+    `recordedAsCanonicalMutation: true | false | 'unknown'`.
+  - Pointed Phase 0 decision notes and blockers at the exact execution-log file.
+  - Kept PR 00 as docs/readiness setup and moved Foundation alpha proof wording
+    to PR 01-04.
+  - Marked `ThreadMessage.id`, `editedById`, and `deletedById` as
+    server-assigned identity fields and required authorization before parent
+    existence lookup.
+  - Added Unicode NFC normalization before reserved namespace checks in
+    filesystem path canonicalization.
+  - Added the required `.env.team` `secret_projection` example field.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.

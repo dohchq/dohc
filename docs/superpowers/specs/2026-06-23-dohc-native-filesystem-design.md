@@ -107,19 +107,22 @@ and unmanaged `.versions` content is never silently promoted into a named versio
 
 Path canonicalization must happen before API path handling, import, attach,
 sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and
-before any storage access. After canonicalization, reserved namespace handling is
-defined only by the reserved-namespace collision contract above: the allowlisted
-policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and optional
-workspace-root `.dohcignore`; all other `.dohc/**` content and unmanaged
-`.versions/**` fail closed into rejection, quarantine, safe rename proposal, or
-manual resolution. Symlinks, hardlinks, junctions, bind mounts, aliases, or any
-equivalent filesystem indirection that resolves outside the active workspace,
-crosses into another workspace, or enters a disallowed reserved namespace must
-be rejected or quarantined before capture or API dispatch. If the engine cannot
-prove the resolved target and file identity are inside the active workspace
-boundary, it fails closed. This path boundary applies to every API path
-operation and file capture that may back an atom, folder, entity, share, or
-capture record.
+before any storage access. Canonicalization first normalizes path segments to
+Unicode NFC, then applies the platform/case-folding policy, workspace-boundary
+resolution, and reserved-namespace checks so composed and decomposed names match
+the same `.dohc/**` and `.versions/**` rules. After canonicalization, reserved
+namespace handling is defined only by the reserved-namespace collision contract
+above: the allowlisted policy inputs are `.dohc/files.toml`,
+`.dohc/visibility.toml`, and optional workspace-root `.dohcignore`; all other
+`.dohc/**` content and unmanaged `.versions/**` fail closed into rejection,
+quarantine, safe rename proposal, or manual resolution. Symlinks, hardlinks,
+junctions, bind mounts, aliases, or any equivalent filesystem indirection that
+resolves outside the active workspace, crosses into another workspace, or enters
+a disallowed reserved namespace must be rejected or quarantined before capture
+or API dispatch. If the engine cannot prove the resolved target and file
+identity are inside the active workspace boundary, it fails closed. This path
+boundary applies to every API path operation and file capture that may back an
+atom, folder, entity, share, or capture record.
 Canonicalization must also be TOCTOU-safe: after a path is resolved, subsequent
 stat/read/write/capture work must use the same verified descriptor, handle,
 inode/file-id binding, or equivalent identity-bound mechanism. The engine must
@@ -639,6 +642,7 @@ visibility = "team"
 agent_access = "ask"
 pinned = false
 materialized = "local"
+secret_projection = "protectedLocal"
 ```
 
 The policy file is not blindly trusted as authorization. It expresses desired

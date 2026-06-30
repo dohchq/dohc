@@ -800,8 +800,9 @@ Phase 0 stretch/follow-up outcomes, useful but not minimum acceptance gates:
 
 ### Phase 0 Decisions
 
-Before implementation starts, write a short decision note inside this plan's
-execution log covering:
+Before implementation starts, write a short decision note inside
+`docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`
+covering:
 
 1. **Storage baseline**
    - Which existing dohc packages/tables/files are the starting point?
@@ -848,7 +849,8 @@ These PRs precede PR 01 in the expansion roadmap.
 Do not begin PR 01 or any later roadmap PR until Phase 0 passes, and do not
 begin contract or implementation work until P0A writes and gets approval for the
 current-system inventory, storage/filesystem decision note, and unresolved
-blockers in the execution log.
+blockers in
+`docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1494,7 +1496,8 @@ split it before opening.
 
 Milestones:
 
-- **Foundation alpha:** PR 00-04 prove shared contracts, stable IDs, typed
+- **Foundation setup:** PR 00 remains the docs/readiness scaffold.
+- **Foundation alpha:** PR 01-04 prove shared contracts, stable IDs, typed
   events, versions, and effective policy.
 - **Filesystem/version proof:** PR 05-11 prove normal files, versions,
   snapshots, conflicts, policies, secrets, lazy hydration, and API parity.

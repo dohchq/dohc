@@ -12,10 +12,11 @@ The user-facing promise is simple:
 
 > Use normal files. Humans and agents can edit them. Accepted writes are durably
 > recorded immediately. Writes that pass protection checks become canonical
-> immediately; writes that cannot yet become canonical return `durable-pending`,
-> and rejected/quarantined writes keep durable recovery/audit handles. dohc
-> remembers what happened, supports parallel versions, and helps reconcile
-> conflicts.
+> immediately; accepted writes that cannot yet become canonical return
+> `durable-pending`; evaluator outages or indeterminate evaluator results return
+> `retryable-failure` without pretending the write was accepted; and
+> rejected/quarantined writes keep durable recovery/audit handles. dohc remembers
+> what happened, supports parallel versions, and helps reconcile conflicts.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -174,7 +175,7 @@ type WriteResult =
       idempotencyResultId: string
       idempotencyReplayToken: string
       commitState: 'no_canonical_commit_recorded' | 'commit_state_unknown_retry_required'
-      recordedAsCanonicalMutation: false | 'unknown'
+      recordedAsCanonicalMutation: true | false | 'unknown'
     }
   | {
       kind: 'rejected'

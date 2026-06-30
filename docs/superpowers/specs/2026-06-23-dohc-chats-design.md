@@ -534,7 +534,7 @@ Fields:
 
 ```ts
 type ThreadMessage = {
-  id: string
+  id: string // server-issued; unique within (workspaceId, threadId)
   workspaceId: string
   threadId: string
   threadSequence: UInt64DecimalString
@@ -545,24 +545,31 @@ type ThreadMessage = {
   bodyRevision: UInt64DecimalString
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
   editedAt?: UnixMsDecimalString // server-assigned; client values rejected
-  editedById?: string
+  readonly editedById?: string // server-assigned immutable edit actor id
   // Derived cache from the canonical message_deleted activity.
   deletedAt?: UnixMsDecimalString
-  deletedById?: string
+  readonly deletedById?: string // server-assigned immutable delete actor id
   deleteReason?: string
   tombstone?: boolean
 }
 ```
 
-If `parentMessageId` is present, it must reference an existing message in the
-same workspace and `threadId`, must not equal the message's own `id`, and must
-not introduce a cycle in the ancestry chain. `ThreadMessage.workspaceId` must
-match `ChatThread.workspaceId` wherever messages are written, read, indexed,
-notified, or projected. Message create/update paths must reject the write before
-persistence unless the parent reference exists in the same workspace/thread, is
-not self-referential, and does not introduce a cycle. Rendering nested replies,
-indexing, notification fanout, and projection generation recheck the same
-invariant as downstream safeguards only.
+`ThreadMessage.id` is assigned by the server and unique within
+`(workspaceId, threadId)`. Message create retries must reuse the same
+server-assigned id through the idempotency result, or be rejected as
+`replay_metadata_mismatch`, so ordering tie-breakers and read cursors can rely on
+a stable unique message identifier.
+If `parentMessageId` is present, authorization for that parent message in the
+same workspace/thread must be checked before any existence lookup or hidden-row
+distinction is exposed. After authorization, the parent must reference an
+existing accessible message in the same workspace and `threadId`, must not equal
+the message's own `id`, and must not introduce a cycle in the ancestry chain.
+`ThreadMessage.workspaceId` must match `ChatThread.workspaceId` wherever messages
+are written, read, indexed, notified, or projected. Message create/update paths
+must reject client-supplied `id`, `editedById`, or `deletedById` values; those
+fields are server-assigned from authenticated activity identity only. Rendering
+nested replies, indexing, notification fanout, and projection generation recheck
+the same invariant as downstream safeguards only.
 `parentMessageId` is immutable after `message_created`. Generic message update
 flows must reject any attempt to change it. If dohc later supports reparenting,
 that must be a dedicated `ThreadActivity` with replay/projection rules that
