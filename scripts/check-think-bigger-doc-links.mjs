@@ -30,7 +30,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Think Bigger dohc Workspace Engine|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/m
+    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/m
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
     return thinkBiggerCohortPattern.test(raw)
@@ -79,14 +79,22 @@ if (unexpectedDiscoveredDocs.length > 0) {
 
 const files = discoveredThinkBiggerDocs
 
-const visibleHeadingText = (heading) => heading
-  .replace(/!\[([^\]\n]*)\]\([^)]*\)/g, '$1')
-  .replace(/\[([^\]\n]+)\]\([^)]*\)/g, '$1')
-  .replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1')
-  .replace(/`([^`]*)`/g, '$1')
-  .replace(/(^|[^\w])__([^_\n]+)__($|[^\w])/g, '$1$2$3')
-  .replace(/(^|[^\w])_([^_\n]+)_($|[^\w])/g, '$1$2$3')
-  .replace(/<[^>]+>/g, '')
+const visibleHeadingText = (heading) => {
+  const codeSpans = []
+  const withCodePlaceholders = heading.replace(/`([^`]*)`/g, (_match, code) => {
+    const index = codeSpans.push(code) - 1
+    return `\u0000${index}\u0000`
+  })
+
+  return withCodePlaceholders
+    .replace(/!\[([^\]\n]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]\n]+)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1')
+    .replace(/(^|[^\w])__([^_\n]+)__($|[^\w])/g, '$1$2$3')
+    .replace(/(^|[^\w])_([^_\n]+)_($|[^\w])/g, '$1$2$3')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\u0000(\d+)\u0000/g, (_match, index) => codeSpans[Number(index)] ?? '')
+}
 
 const decodeCodePoint = (value, radix, fallback) => {
   const codePoint = Number.parseInt(value, radix)
@@ -356,6 +364,9 @@ const assertCheckerFixtures = () => {
   }
   if (collectAnchors('<!-- # Hidden -->').has('hidden')) {
     throw new Error('HTML comment fixture should not produce anchors')
+  }
+  if (!collectAnchors('## `WriteResult<T>`').has('writeresultt')) {
+    throw new Error('generic code-span heading fixture should preserve type text in anchors')
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')

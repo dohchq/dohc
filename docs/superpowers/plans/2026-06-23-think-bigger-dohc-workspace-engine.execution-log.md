@@ -4041,6 +4041,42 @@ Hundred-eighty-fifth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-eighty-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Clarified that accepted holding payloads remain reconstructible until
+    canonicalization, explicit disposition, or the finite
+    `maxRecoverableHoldingPayloadMs` hard cap, and that hard-cap expiry
+    transitions to `terminal-retired` with non-reconstructible evidence.
+  - Separated holding-record retries from terminal idempotency replay:
+    `holdingRecordId` is required only for real holding records, while
+    canonical, retryable-failure, and conflict records replay through
+    `idempotencyResultId` / `idempotencyReplayToken`.
+  - Added the missing `Architecture specifications and mega-plan` cohort-label
+    variant to the Think Bigger docs discovery matcher.
+  - Preserved generic code-span text such as `WriteResult<T>` in generated
+    heading anchors and added a checker fixture for that case.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

@@ -387,19 +387,22 @@ canonical durability paths. TTL eviction applies only to
 rejected-before-acceptance items. Accepted holding records are durable accepted
 writes, even though they are not yet canonical workspace state. They must remain
 recoverable with reconstructible payload and retry metadata until protection
-checks succeed and canonicalization completes, or until explicit operator
-disposition is recorded for a record that cannot safely become canonical. For
-accepted holding records, any TTL, retry-horizon, compaction, or colder-storage
-policy may throttle retries, compact derived retry/index metadata, or move
-accepted payload bytes to colder durable storage, but it must preserve the
-reconstructible payload bytes until canonicalization completes or explicit
-operator disposition is recorded; it is not an eviction or deletion policy for
-accepted payloads. If a rejected-before-acceptance item
-expires, or if an accepted record is retired through explicit disposition, the
-engine preserves durable rejection, disposition, or expiration evidence. Humans,
+checks succeed and canonicalization completes, until explicit operator
+disposition is recorded for a record that cannot safely become canonical, or
+until the finite `AcceptedHoldingRecordPolicy.maxRecoverableHoldingPayloadMs`
+hard cap is reached. For accepted holding records, any TTL, retry-horizon,
+compaction, or colder-storage policy may throttle retries, compact derived
+retry/index metadata, or move accepted payload bytes to colder durable storage,
+but it must preserve reconstructible payload bytes until one of those three
+events occurs. If the hard cap wins before canonicalization or disposition, the
+record transitions to `terminal-retired` and payload bytes may be deleted,
+cryptoshredded, or compacted into non-reconstructible evidence. If a
+rejected-before-acceptance item expires, or if an accepted record is retired
+through explicit disposition or payload-retention expiry, the engine preserves
+durable rejection, disposition, retirement, or expiration evidence. Humans,
 agents, imports, and sync processes all get the same guarantee: an accepted
-change is not silently lost, but it also does not become canonical workspace
-state until protection checks pass.
+change is not silently lost inside the recoverable window, but it also does not
+become canonical workspace state until protection checks pass.
 Accepted records still have a bounded operator-visible lifecycle. The Phase 0
 decision note defines
 `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`,
@@ -439,26 +442,31 @@ controls, and user-facing explanation is retained.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.
-Retries using the same idempotency key, `holdingRecordId`, and matching replay
-metadata derive the response from the record's current durable state, not only
+Holding-record retries apply only when a real `holdingRecordId` exists. Retries
+using the same idempotency key, `holdingRecordId`, and matching replay metadata
+derive the response from the holding record's current durable state, not only
 from the original `replayUntil` window. If the accepted record has promoted,
 retry returns the canonical result or deterministic equivalent. If it is still
 accepted but not promoted, retry returns `durable-pending` while the
 idempotency/retry horizon allows key reuse. If it has become `rejected`,
 `quarantined`, or `terminal-retired`, retry returns that current state while the
 corresponding retention or retirement metadata is still addressable. Only after
-the record's retry horizon or retained idempotency metadata expires does the
-write API return the canonical `idempotency-expired` response for that
+the holding record's retry horizon or retained idempotency metadata expires does
+the write API return the canonical `idempotency-expired` response for that
 `holdingRecordId`, with `recordKind: 'accepted_holding_record'`,
 `recordKind: 'rejected_record'`, `recordKind: 'quarantined_record'`, or
 `recordKind: 'terminal_retired_record'`.
 Canonical writes, retryable failures, and conflicts without holding records use
-the same terminal replay path with `recordKind: 'canonical_result'`,
-`recordKind: 'retryable_failure_record'`, or `recordKind: 'conflict_record'`
-and the persisted `idempotencyResultId`. Disposition, expiration, and
-lookup-only details beyond that canonical terminal response live in the status
-query path, not alternate write-retry responses. A stale retry must not silently
-create a second accepted holding record or an uncorrelated denial.
+the terminal idempotency replay path with the persisted `idempotencyResultId`
+and `idempotencyReplayToken` only; they do not require or accept
+`holdingRecordId`. Those terminal replay records use
+`recordKind: 'canonical_result'`, `recordKind: 'retryable_failure_record'`, or
+`recordKind: 'conflict_record'`, and the retryable-failure/conflict cases remain
+terminal replay records rather than holding-record retries. Disposition,
+expiration, and lookup-only details beyond that canonical terminal response live
+in the status query path, not alternate write-retry responses. A stale retry
+must not silently create a second accepted holding record or an uncorrelated
+denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through
