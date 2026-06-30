@@ -140,6 +140,7 @@ Date completed:
 - Merge scope:
 - Chat/file philosophy:
 - Rust kernel boundary:
+- Async workspace/request-token gating:
 - Approval/status:
 
 ### Local Agent CLI QA
@@ -4173,6 +4174,37 @@ Hundred-eighty-ninth pass:
   - Clarified that cross-projection `replace(...)` fallback commits ingestion,
     destination update, temp-source retirement/quarantine, history, and
     idempotency as one all-or-nothing durable unit.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-ninetieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Clarified that Think Bigger docs workflow path filters only trigger the CI
+    job; checker enforcement is manifest-backed and runs only when a covered
+    change triggers the workflow.
+  - Added `Async workspace/request-token gating` to the Phase 0 Decision Note
+    copy/paste template.
+  - Clarified that `ThreadLink` changes are tombstone plus recreate, never
+    in-place persisted row mutation.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

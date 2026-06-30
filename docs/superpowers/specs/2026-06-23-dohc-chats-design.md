@@ -73,10 +73,11 @@ sequence. `activityId` is server-assigned and unique within the
 `(workspaceId, threadId)` scope; clients cannot supply or override it, and replay
 or dedupe logic must treat the server-issued `activityId`/sequence as the only
 authoritative activity identity.
-`ThreadLink` create/update paths accept a request DTO, not a persisted
-`ThreadLink` row. The server validates the target workspace/resource identity,
-derives share/grant id and visibility scope from trusted authorization state,
-and populates stored `ThreadLink.shareGrantId`/`visibilityScope` only after that
+`ThreadLink` create paths accept a request DTO, not a persisted `ThreadLink`
+row. Changes are modeled as tombstone plus recreate, never as in-place row
+mutation. The server validates the target workspace/resource identity, derives
+share/grant id and visibility scope from trusted authorization state, and
+populates stored `ThreadLink.shareGrantId`/`visibilityScope` only after that
 check. Client-provided `shareGrantId` or `visibilityScope` fields are rejected
 before persistence; missing, expired, revoked, forged, mismatched, or ambiguous
 server-side grants fail closed before any link or activity record is persisted.
