@@ -272,8 +272,9 @@ contracts are mounted into the product surface:
 - channels.
 - agent runs. Until promotion, agent run events are provisional history/search
   references only and must use a stable surrogate key
-  `(workspaceId, runProvider, runExternalId | runEventId, createdAt)` with a
-  migration/backfill note before they become first-class `AgentRun` objects.
+  `(workspaceId, runProvider, runExternalId | runEventId)`; `createdAt` is
+  metadata only. Add a migration/backfill note before they become first-class
+  `AgentRun` objects.
 - shares.
 - apps.
 - databases.

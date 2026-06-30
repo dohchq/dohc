@@ -1,6 +1,7 @@
 # dohc Chats Design
 
 Status: exploratory architecture direction
+Cohort: Think Bigger Workspace Engine
 Date: 2026-06-23
 
 Companions:
@@ -240,11 +241,18 @@ Required surfaces:
 - quick handoff from a DM into a linked work chat.
 - ability to mention an agent in a DM.
 
-`canonicalizeDmParticipantIds(serverActorId, requestedParticipantIds)` receives
-the authenticated server-derived actor separately from the client-supplied
-participant list. The server actor is merged into the set before uniqueness-key
-generation, persistence, authorization, or fanout; client-supplied actor IDs are
-ignored or rejected as authority, so the creator cannot omit or spoof themself.
+```ts
+declare function canonicalizeDmParticipantIds(input: {
+  serverActorId: string
+  requestedParticipantIds: string[]
+}): DmParticipantIds
+```
+
+`canonicalizeDmParticipantIds` receives the authenticated server-derived actor
+separately from the client-supplied participant list. The server actor is merged
+into the set before uniqueness-key generation, persistence, authorization, or
+fanout; client-supplied actor IDs are ignored or rejected as authority, so the
+creator cannot omit or spoof themself.
 After canonicalization, `dmParticipantIds` must contain 2-16 unique participants.
 Raw duplicates are rejected before uniqueness-key generation or persistence;
 implementations must not silently dedupe duplicate participants. Oversized
@@ -410,22 +418,21 @@ after creation. The active uniqueness key is
 `(workspaceId, channelId, channelConversationId)`, with
 `channelConversationId: "default"` for the default channel stream conversation.
 Non-default `channelConversationId` values must be server-issued and
-deterministic for the same canonical channel-conversation context tuple; clients
-must not invent them. That tuple includes `workspaceId`, `channelId`,
+deterministic from one canonical channel-conversation context tuple; clients must
+not invent them. That tuple includes `workspaceId`, `channelId`,
 `conversationKind` (`default`, `linked_work`, or `named_subconversation`), and
-the kind-specific immutable discriminator: canonical linked-work target tuple
-for `linked_work`, normalized server-owned conversation key for
+the kind-specific immutable discriminator: canonical linked-work target tuple for
+`linked_work`, normalized server-owned conversation key for
 `named_subconversation`, or no extra discriminator for `default`. The same tuple
 must reuse the existing id through atomic get-or-create; a materially different
-tuple gets a new deterministic id. Atomic get-or-create dedupes concurrent
-creation but does not let clients choose the id. Channel renames, moves, topic
+tuple gets a new deterministic id and therefore a different thread. Ordinary
+`ThreadLink` rows added or removed after thread creation are separate linked-work
+metadata and never mutate the `channelConversationId`. Changing the channel
+association, conversation kind, linked-work discriminator that defined a
+`linked_work` conversation, or named-subconversation key requires tombstoning or
+archiving the old thread and creating a new one. Channel renames, moves, topic
 changes, ordering changes, and other channel metadata updates preserve
-`channelConversationId`. Adding/removing ordinary `ThreadLink` linked-work
-metadata after creation also preserves the id; changing the channel association,
-conversation kind, linked-work discriminator, or named-subconversation key
-requires tombstoning/archiving the old thread and creating a new thread, so one
-conversation cannot fork into multiple active `ChatThread` records for the same
-channel identity.
+`channelConversationId`.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current

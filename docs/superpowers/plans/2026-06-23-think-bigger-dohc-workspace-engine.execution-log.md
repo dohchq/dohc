@@ -290,8 +290,14 @@ node scripts/check-think-bigger-doc-links.mjs
   `pnpm@10.24.0`.
 - Earlier Node 18.19.1 run is retained only as exploratory output and is not
   counted as gate evidence because it does not satisfy the repo engine field.
-- Docs link/anchor checker passed over the five PR00 plan/spec docs with result:
+- Docs link/anchor checker passed over the exact five PR00 docs with result:
   `docs link/anchor check passed for 5 files`.
+  Covered docs:
+  `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md`,
+  `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`,
+  `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`,
+  `docs/superpowers/specs/2026-06-23-dohc-chats-design.md`, and
+  `docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md`.
 
 ### Local Agent CLI QA
 
@@ -3004,6 +3010,36 @@ Hundred-fiftieth pass:
     implementation and enforcement.
   - Narrowed the Foundation Alpha effective-policy gate to files, search, and
     export substrate.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-first pass:
+
+- Fixed CodeRabbit's six follow-up findings:
+  - Added Think Bigger cohort metadata to the three source specs and made the
+    docs checker discover specs by that metadata instead of an explicit filename
+    list.
+  - Preserved indented nested list items while still skipping true indented code
+    blocks in the docs checker.
+  - Added a concrete `canonicalizeDmParticipantIds` helper signature with
+    server-derived actor input.
+  - Clarified `ChannelChatThread` identity so creation context determines
+    `channelConversationId` and later `ThreadLink` metadata changes do not mutate
+    it.
+  - Made provisional agent-run surrogate keys use immutable source identifiers,
+    with `createdAt` as metadata only.
+  - Expanded the historical docs-check evidence to name the exact five PR00 docs,
+    including this execution log.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -21,6 +21,11 @@ if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((fil
 
 const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
+  const hasThinkBiggerCohortMetadata = (dir, name) => {
+    const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
+    const header = raw.split(/\r?\n/).slice(0, 12).join('\n')
+    return /^Cohort:\s*Think Bigger Workspace Engine$/m.test(header)
+  }
   const discoveryRoots = [
     {
       dir: 'docs/superpowers/plans',
@@ -28,11 +33,7 @@ const discoverThinkBiggerDocs = () => {
     },
     {
       dir: 'docs/superpowers/specs',
-      include: (name) => [
-        '2026-06-22-dohc-versioned-workspace-design.md',
-        '2026-06-23-dohc-chats-design.md',
-        '2026-06-23-dohc-native-filesystem-design.md',
-      ].includes(name),
+      include: (name) => hasThinkBiggerCohortMetadata('docs/superpowers/specs', name),
     },
   ]
   const safeReadDir = (dir) => {
@@ -105,7 +106,8 @@ function* contentLines(markdown) {
 
   for (const line of markdown.split(/\r?\n/)) {
     const fence = line.match(/^\s{0,3}(```+|~~~+)(.*)$/)
-    const indentedCode = /^(?: {4}|\t)/.test(line)
+    const indentedListItem = /^(?: {2,}|\t)\s*(?:[-+*]|\d+[.)])\s+/.test(line)
+    const indentedCode = /^(?: {4}|\t)/.test(line) && !indentedListItem
 
     if (fence && !inFence) {
       const marker = fence[1][0]
