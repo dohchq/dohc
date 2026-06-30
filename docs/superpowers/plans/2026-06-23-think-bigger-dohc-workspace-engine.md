@@ -270,13 +270,13 @@ Deferred substrate identities stay in the expansion backlog until their
 contracts are mounted into the product surface:
 
 - channels.
-- agent runs. Until promotion, agent run events are provisional history/search
-  references only and must use a stable surrogate key
+- agent runs. PR 01 owns the AgentRun identity contract and migration/backfill
+  semantics. Until PR 01 promotion, agent run events are provisional
+  history/search references only and must use the stable surrogate key
   `(workspaceId, runProvider, runExternalId)` when `runExternalId` is present,
   with `(workspaceId, runProvider, runEventId)` as the fallback when no external
   id exists. If neither identifier is present, replay/backfill fails closed;
-  `createdAt` is metadata only and never part of the surrogate key. Add a
-  migration/backfill note before they become first-class `AgentRun` objects.
+  `createdAt` is metadata only and never part of the surrogate key.
 - shares.
 - apps.
 - databases.
@@ -897,6 +897,7 @@ contracts and `Phase0SharedSubstrateBaseline` becomes historical-only.
 | --- | --- | --- | --- |
 | `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
 | `ChatThread`, `ThreadMessage`, chat `ThreadLink` | Provisional fixture owner until PR 01 lands. | Versioned bridge only so file/history/search proof code can compile; not final owner. | Single final owner; adopts or migrates/backfills the Phase 0/PR 01 bridge, then owns channels, DMs, linked-work behavior, and full chat storage. |
+| `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
 
 The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
 canonical core plus chat bridge -> PR 12 final chat/link schema. Later PR entries

@@ -223,7 +223,7 @@ type WriteResult =
       idempotencyReplayToken: string
       reasonCode: RetryableWriteFailureCode
       failedAt: UnixMsDecimalString
-      retryAfterMs?: UInt64DecimalString
+      retryAfterMs: UInt64DecimalString
       commitState:
         | 'no_canonical_commit_recorded'
         | 'commit_state_unknown_retry_required'
@@ -351,8 +351,13 @@ canonical mutation is known absent (`no_canonical_commit_recorded`) or unknown
 and requires retry (`commit_state_unknown_retry_required`). If retry handling
 later proves the canonical mutation was recorded, it returns the canonical or
 durable result rather than continuing to return `retryable-failure`.
-Retryable failures always carry the original `idempotencyKey`; retries must
-preserve it. `terminal-retired` is a first-class terminal `WriteResult` while
+Retryable failures always carry the original `idempotencyKey` and a non-optional
+`retryAfterMs` minimum delay. Callers must not retry the same idempotency key
+before that delay elapses; the engine chooses the delay for
+`service_unavailable`, `evaluator_unavailable`, `evaluator_indeterminate`,
+`quota_exceeded`, and `rate_limited` so retry pressure is bounded by policy
+rather than by each caller. Retries must preserve the original idempotency key.
+`terminal-retired` is a first-class terminal `WriteResult` while
 its retained retirement metadata is addressable; it degrades to
 `idempotency-expired` only after the retained idempotency/retry metadata for the
 retired record has expired.
@@ -483,12 +488,14 @@ attempt, the earliest matching class in that order wins.
   already-persisted accepted records with syntactically valid replay metadata but
   unresolved server-side provenance or binding evidence can stay quarantined or
   manual-only while resolution proceeds.
-- If server-derived authorization, permission, visibility, protected-path, lock,
-  version-access, skill-turn, provenance, attribution, or proof checks fail after
-  replay, the record resolves to the corresponding durable denial/quarantine
-  state.
+- If server-derived authorization, permission, policy, visibility,
+  protected-path, lock, version-access, skill-turn, provenance, attribution, or
+  proof checks fail after replay, the record resolves to the corresponding
+  durable denial/quarantine state.
   Authorization and permission failures use `not_authorized` externally and
   `quarantined_authorization` internally.
+  Policy failures use `policy_denied` externally and `quarantined_policy`
+  internally.
   Protected-path failures use `protected_path` externally and
   `quarantined_protection` internally.
   Visibility-boundary failures use `visibility_denied` externally and
@@ -900,7 +907,8 @@ workspace state changes. If the engine cannot persist the conflict envelope and
 idempotency tombstone durably, it must not acknowledge the conflict response.
 It returns `kind: 'retryable-failure'` for the same idempotency identity with
 `reasonCode: 'service_unavailable'`, commitState
-`'commit_state_unknown_retry_required'`, and an optional `retryAfterMs`. A retry
+`'commit_state_unknown_retry_required'`, and a non-optional `retryAfterMs`
+minimum delay. A retry
 with matching replay metadata must either finish and replay the durable conflict
 result, prove and return a canonical/durable result, or continue returning the
 same retryable failure until the commit state is no longer unknown.

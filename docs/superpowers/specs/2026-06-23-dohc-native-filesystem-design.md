@@ -128,12 +128,12 @@ quarantine; they remain internal engine state and are never re-ingested as user
 content. If import, attach, sync, or a raw filesystem scan finds unmanaged or
 out-of-contract `.versions/**`, foreign non-allowlisted `.dohc/**`, or aliases
 of those names where dohc expects engine state, dohc must not treat the content
-as normal workspace data. Managed `~/dohc/<space>/.versions/<version>/` roots are
-allowed only when they are bound to a known workspace/version by the engine.
-Foreign non-allowlisted `.dohc/**` content and unmanaged `.versions/**` content
-are quarantined with an explainable record or sent to manual resolution; they
-are not proposed for ordinary user-content safe rename. Only ordinary user
-content outside
+as normal workspace data. Managed
+`~/dohc/<workspace>/.versions/<version>/` roots are allowed only when they are
+bound to a known workspace/version by the engine. Foreign non-allowlisted
+`.dohc/**` content and unmanaged `.versions/**` content are quarantined with an
+explainable record or sent to manual resolution; they are not proposed for
+ordinary user-content safe rename. Only ordinary user content outside
 engine-managed namespaces may be proposed for a deterministic collision-proof
 safe rename before the workspace is activated. `.dohc/**` and `.versions/**`
 collisions remain quarantine-only or manual-resolution-only. For
@@ -149,7 +149,8 @@ is not allowed. Activation may proceed only if the reservation succeeds;
 reservation failure is a fail-closed collision that stays in quarantine or
 manual resolution.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
-and unmanaged `.versions` content is never silently promoted into a named version.
+and unmanaged `.versions/**` content is never silently promoted into a named
+version.
 
 Path canonicalization must happen before API path handling, import, attach,
 sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and

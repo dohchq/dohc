@@ -282,6 +282,16 @@ const collectLinks = (markdown) => {
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
   const autolinkPattern = /<((?:https?:|mailto:|app:|\.{1,2}\/|\/|[A-Za-z0-9_.-]+\/)[^<>\s]*)>/g
+  const bracketIndexTokenPattern = /^(?:[A-Za-z_$][A-Za-z0-9_$]*|\d+)$/
+  const looksLikeBracketIndexing = (prose, match) => {
+    const index = match.index ?? -1
+    const before = index > 0 ? prose[index - 1] : ''
+    const left = match[1].trim()
+    const right = match[2].trim()
+    const bothIndexTokens = bracketIndexTokenPattern.test(left) && bracketIndexTokenPattern.test(right)
+    const bothNumeric = /^\d+$/.test(left) && /^\d+$/.test(right)
+    return bothIndexTokens && (bothNumeric || /[A-Za-z0-9_$)\]]/.test(before))
+  }
 
   for (const line of lines) {
     const prose = stripCodeSpans(line)
@@ -314,6 +324,8 @@ const collectLinks = (markdown) => {
       const destination = referenceDefinitions.get(label)
       if (destination) {
         links.push(destination)
+      } else if (looksLikeBracketIndexing(prose, match)) {
+        continue
       } else {
         unresolvedReferences.push(match[0])
       }
@@ -350,6 +362,16 @@ const assertCheckerFixtures = () => {
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')
   if (!nested.links.includes('./inner.png') || !nested.links.includes('./outer.md')) {
     throw new Error('nested image link fixture should include inner and outer destinations')
+  }
+
+  const bracketIndexing = collectLinks('Matrix M[i][j] and coordinates [1][2] are notation, not links.')
+  if (bracketIndexing.unresolvedReferences.length > 0) {
+    throw new Error('bracket-indexing fixture should not produce unresolved reference links')
+  }
+
+  const missingReference = collectLinks('[missing][reference]')
+  if (!missingReference.unresolvedReferences.includes('[missing][reference]')) {
+    throw new Error('missing reference fixture should still report unresolved reference links')
   }
 }
 

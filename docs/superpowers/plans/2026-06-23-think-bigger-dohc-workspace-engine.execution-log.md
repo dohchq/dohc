@@ -3936,6 +3936,41 @@ Hundred-eighty-second pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-eighty-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Made `retryAfterMs` non-optional for retryable write failures and required
+    callers to respect the minimum delay for same-key retries.
+  - Added the missing replay mapping from `policy` failures to
+    `policy_denied` / `quarantined_policy`.
+  - Assigned PR 01 as the single AgentRun identity and replay/backfill contract
+    owner, with the stable surrogate key repeated in the ownership matrix.
+  - Normalized managed-version path vocabulary to
+    `~/dohc/<workspace>/.versions/<version>/` and `.versions/**`.
+  - Updated the Think Bigger docs link checker so bracket-index notation such as
+    `M[i][j]` or `[1][2]` is not reported as an unresolved reference link while
+    real missing reference-style links still fail.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and
