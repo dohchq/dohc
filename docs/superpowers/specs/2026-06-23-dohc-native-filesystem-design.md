@@ -369,31 +369,31 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 ```text
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAbsent,
   targetObjectId: required for overwrite; omit only when expectedAbsent is used,
   idempotencyKey
 })
 delete(workspaceId, versionId, path, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
   targetObjectId: required,
   idempotencyKey
 })
 rename(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
   sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
 move(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
   sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
 replace(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
   sourceObjectId,
-  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
   destinationObjectId,
   idempotencyKey
 })
@@ -512,7 +512,10 @@ path or version references fail closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
-version, etag, content hash, or an absence assertion for creates.
+version, etag, non-secret-backed content hash, or an absence assertion for
+creates. Secret-backed overwrites must use `expectedBaseVersion` or
+`expectedEtag`; hash-based equality is not a valid freshness proof for protected
+paths.
 Create and overwrite calls must be explicit: `precondition: expectedAbsent` is
 the create-only precondition token, means "create only if no object exists at
 this path", and must omit `targetObjectId`.

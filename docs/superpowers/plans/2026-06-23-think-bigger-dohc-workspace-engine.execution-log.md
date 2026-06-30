@@ -167,9 +167,11 @@ Date completed:
 - Overrides:
 - Override approval reference:
 
-### Unresolved Findings
+### Live Blockers And Overrides
 
-- ...
+- Current unresolved blockers:
+- Pending non-blocker overrides:
+- Approved override references:
 
 ### Subagent Reviews
 
@@ -4552,6 +4554,44 @@ Two-hundredth pass:
     artifacts to keep secret-backed inputs encrypted or redacted.
   - Added a PR 01 mechanical lint/test gate for the
     `Phase0SharedSubstrateBaseline` cutoff after the Schema Promotion Checkpoint.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Two-hundred-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings handled; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed or resolved CodeRabbit's six follow-up findings:
+  - Verified the `github-slugger` lockfile finding as stale: current
+    `pnpm-lock.yaml` already contains the root importer, package, and snapshot
+    entries for `github-slugger@2.0.0`.
+  - Added the current `Think Bigger dohc Workspace Engine docs and CI
+    enforcement` cohort alias to the docs checker.
+  - Changed blockquote handling so visible quoted prose/headings are validated
+    after stripping `>`, while quoted fenced and indented code remain excluded.
+  - Marked native API `expectedContentHash` operands as non-secret only and
+    tightened the `write(...)` prose for secret-backed protected paths.
+  - Consolidated P0S under the single PR01 Schema Promotion Checkpoint ownership
+    handoff.
+  - Renamed the reusable execution-log blocker template heading to
+    `Live Blockers And Overrides` so it is distinct from the historical
+    `Unresolved Findings` category index.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

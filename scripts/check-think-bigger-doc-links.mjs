@@ -31,7 +31,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -184,9 +184,9 @@ function* contentLines(markdown) {
   }
 
   for (const rawLine of markdown.split(/\r?\n/)) {
-    const line = inFence ? rawLine : stripHtmlComments(rawLine)
-    const blockquoteLine = !inFence && /^(?:[ \t]*>[ \t]?)+/.test(line)
-    const fenceLine = line.replace(/^(?:[ \t]*>[ \t]?)+/, '')
+    const rawVisibleLine = inFence ? rawLine : stripHtmlComments(rawLine)
+    const line = inFence ? rawVisibleLine : rawVisibleLine.replace(/^(?:[ \t]*>[ \t]?)+/, '')
+    const fenceLine = rawVisibleLine.replace(/^(?:[ \t]*>[ \t]?)+/, '')
     const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
@@ -230,11 +230,6 @@ function* contentLines(markdown) {
         fenceChar = null
         fenceLength = 0
       }
-      continue
-    }
-
-    if (blockquoteLine) {
-      activeListIndent = null
       continue
     }
 
@@ -415,12 +410,16 @@ const assertCheckerFixtures = () => {
   if (quotedFence.links.length > 0 || quotedFence.unresolvedReferences.length > 0) {
     throw new Error('blockquote fenced-code fixture should not produce links')
   }
-  const quotedProse = collectLinks('> [hidden](./missing.md)')
-  if (quotedProse.links.length > 0 || quotedProse.unresolvedReferences.length > 0) {
-    throw new Error('blockquote prose fixture should not produce links')
+  const quotedProse = collectLinks('> [visible](./visible.md)')
+  if (!quotedProse.links.includes('./visible.md') || quotedProse.unresolvedReferences.length > 0) {
+    throw new Error('blockquote prose fixture should produce visible links')
   }
-  if (collectAnchors('> ## Hidden').has('hidden')) {
-    throw new Error('blockquote heading fixture should not produce anchors')
+  if (!collectAnchors('> ## Visible').has('visible')) {
+    throw new Error('blockquote heading fixture should produce visible anchors')
+  }
+  const quotedIndentedCode = collectLinks('>     [hidden](./missing.md)')
+  if (quotedIndentedCode.links.length > 0 || quotedIndentedCode.unresolvedReferences.length > 0) {
+    throw new Error('blockquote indented-code fixture should not produce links')
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')
