@@ -1122,6 +1122,12 @@ history.
 
 - Search text file and linked chat.
 - Apply minimal effective policy to files, chat links, projections, and search.
+- Add provisional Phase 0 policy resolver hooks for linked chat/projection
+  visibility before search consumes those surfaces: file effective policy,
+  `ThreadLink` visibility, chat projection visibility, and search indexing must
+  all resolve through one Phase 0 baseline policy result instead of local
+  ad hoc checks. PR 04 may replace the provisional hook only through an explicit
+  migration/backfill boundary.
 - Default `.env` to ignored/excluded/redacted until secret-backed files exist.
 
 **Tests:**
@@ -1656,6 +1662,11 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 **Scope:**
 
 - Add or extend shared package for workspace engine contracts.
+- Bootstrap the canonical schema source before claiming generated consumers:
+  choose the checked-in IDL/schema location, define the generator or conformance
+  command, wire the TypeScript package entrypoint, and add either the Rust crate
+  plus Cargo manifest that consumes it or an explicit Rust conformance fixture
+  that blocks generated-consumer claims until the crate exists.
 - Define the canonical IDL/source for the core workspace/version/event/projection
   substrate here:
   `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,

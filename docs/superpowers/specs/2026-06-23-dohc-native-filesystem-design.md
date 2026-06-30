@@ -118,25 +118,22 @@ durability capture only; promotion into canonical history still requires a
 server/engine-derived principal, workspace/version resolution, and policy
 validation before the captured write can leave quarantine.
 
-Reserved namespace collisions fail closed. The importer evaluates the explicit
-source-backed policy allowlist before applying reserved-namespace quarantine:
-approved policy inputs such as `.dohc/files.toml`, `.dohc/visibility.toml`, and
-optional workspace-root `.dohcignore` may be parsed as engine policy inputs.
-Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and
-durability internals are excluded from import, attach, sync, and raw scan
-quarantine; they remain internal engine state and are never re-ingested as user
-content. If import, attach, sync, or a raw filesystem scan finds unmanaged or
-out-of-contract `.versions/**`, foreign non-allowlisted `.dohc/**`, or aliases
-of those names where dohc expects engine state, dohc must not treat the content
-as normal workspace data. Managed
-`~/dohc/<workspace>/.versions/<version>/` roots are allowed only when they are
-bound to a known workspace/version by the engine. Foreign non-allowlisted
-`.dohc/**` content and unmanaged `.versions/**` content are quarantined with an
-explainable record or sent to manual resolution; they are not proposed for
-ordinary user-content safe rename. Only ordinary user content outside
-engine-managed namespaces may be proposed for a deterministic collision-proof
-safe rename before the workspace is activated. `.dohc/**` and `.versions/**`
-collisions remain quarantine-only or manual-resolution-only. For
+Reserved namespace collisions fail closed. Reserved namespace handling for
+import, attach, sync, and raw filesystem scan is defined by this table:
+
+| Candidate | Import / Attach / Sync / Raw Scan Action |
+| --- | --- |
+| Allowlisted policy inputs: `.dohc/files.toml`, `.dohc/visibility.toml`, optional workspace-root `.dohcignore` | Parse as engine policy input outside the ordinary captured-content pipeline. |
+| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Exclude from import, attach, sync, and raw scan quarantine; never re-ingest as user content. |
+| Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never propose ordinary user-content safe rename. |
+| Managed `~/dohc/<workspace>/.versions/<version>/` bound to a known workspace/version by the engine | Allow only through the engine workspace/version mount resolver, not generic tree walkers. |
+| Unmanaged or out-of-contract `.versions/**` or aliases of `.versions` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never silently promote into a named version. |
+| Ordinary user content outside engine-managed namespaces that collides with a reserved namespace | May receive a deterministic collision-proof safe-rename proposal before activation. |
+
+Only ordinary user content outside engine-managed namespaces may be proposed for
+a deterministic collision-proof safe rename before the workspace is activated.
+`.dohc/**` and `.versions/**` collisions remain quarantine-only or
+manual-resolution-only. For
 secret-backed or secret-eligible inputs, quarantine records and safe-rename
 proposals must redact sensitive basenames, raw hashes, and path details, using
 opaque placeholders or keyed commitments instead. Safe rename proposals must
@@ -165,7 +162,13 @@ enforce the profile are rejected, quarantined, or attached read-only until a
 compatible projection is available. Workspace-boundary resolution and
 reserved-namespace checks use that same workspace-level identity rule, so
 composed/decomposed or case variants cannot resolve differently on different
-clients or bypass the same `.dohc/**` and `.versions/**` rules. After
+clients or bypass the same `.dohc/**` and `.versions/**` rules. If two distinct
+native paths normalize to the same canonical workspace path after NFC,
+case-folding, or the workspace equivalence profile, import, reconciliation,
+scan, API dispatch, and storage access fail closed: all colliding candidates are
+quarantined or activation aborts until the user resolves the collision. The
+engine must not merge the paths, alternate between them, or pick a winner
+implicitly. After
 canonicalization, reserved namespace
 handling is defined only by the reserved-namespace collision contract above: the
 allowlisted policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and
@@ -732,11 +735,13 @@ A workspace can define readable policy files such as:
 ```
 
 Early versions may start with a simpler workspace-root `.dohcignore`, but the
-durable model should support richer rules. `.dohcignore` is normalized into the
-same canonical source-order band as `.dohc/files.toml` before effective-policy
-resolution; within that band, canonical workspace-relative path order decides
-ties. Importer, materializer, export, quarantine, and tracking decisions must
-all resolve `.dohcignore` through that same normalized policy source order.
+durable model should support richer rules. `.dohcignore` is normalized into a
+fixed lower-precedence sub-band immediately before `.dohc/files.toml`, so
+`.dohc/files.toml` overrides `.dohcignore` for equal-specificity tracking,
+materialization, export, quarantine, and sync decisions. Importer, materializer,
+export, quarantine, and tracking decisions must all resolve `.dohcignore`
+through that same explicit source order rather than falling back to path-order
+ties.
 
 `.dohc/**` is engine-managed internal state and is excluded from normal
 capture/sync ingestion by default. Recursive self-capture is forbidden: history,
@@ -855,10 +860,10 @@ The canonical policy source ordinal is a stable engine-assigned integer for the
 normalized policy source after imports and aliases are resolved. The `.dohcignore`
 precedence and banding rule in [Policy Files](#policy-files) is canonical:
 importer, materializer, export, quarantine, tracking, and effective-policy
-resolution all normalize workspace-root `.dohcignore` into the `.dohc/files.toml`
-source-order band before rule resolution. Built-in defaults, object hard
-constraints, version policy, `.dohc/files.toml` plus its normalized
-`.dohcignore` alias, `.dohc/visibility.toml`, and authorized user overrides each
+resolution all normalize workspace-root `.dohcignore` into the fixed
+lower-precedence sub-band immediately before `.dohc/files.toml`. Built-in
+defaults, object hard constraints, version policy, the `.dohcignore` sub-band,
+`.dohc/files.toml`, `.dohc/visibility.toml`, and authorized user overrides each
 occupy reserved source-order bands; multiple files inside the same band are
 ordered by canonical workspace-relative path using bytewise UTF-8 order. The
 resolved ordinal is recorded with the normalized rule so equal-specificity

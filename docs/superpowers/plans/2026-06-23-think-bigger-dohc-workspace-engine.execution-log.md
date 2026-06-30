@@ -4218,6 +4218,47 @@ Hundred-ninetieth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-ninety-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun
+    is required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Added `cross_workspace_reference` to `PublicValidationErrorCode` and wired
+    it into cross-workspace binding validation.
+  - Aligned filesystem capture-token failures with the existing
+    `retryable-failure` result instead of implying a separate retryable capture
+    result kind.
+  - Replaced reserved-namespace prose with a decision table for allowlisted
+    policy inputs, engine-owned `.dohc/**`, foreign `.dohc/**`, managed
+    `.versions/**`, unmanaged `.versions/**`, and ordinary safe-rename cases.
+  - Added fail-closed handling for distinct native paths that normalize to the
+    same canonical workspace path after NFC/case/equivalence normalization.
+  - Made workspace-root `.dohcignore` a fixed lower-precedence sub-band before
+    `.dohc/files.toml` instead of relying on path-order ties.
+  - Added provisional Phase 0 chat/link/projection policy resolver hooks before
+    P0F search consumes linked chat surfaces.
+  - Added PR 01 schema bootstrap requirements for IDL/schema location,
+    generator/conformance command, TypeScript entrypoint, and Rust crate or
+    blocking Rust conformance fixture.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

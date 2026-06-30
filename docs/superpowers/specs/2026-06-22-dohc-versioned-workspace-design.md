@@ -151,6 +151,7 @@ type PublicValidationErrorCode =
   | 'incompatible_precondition'
   | 'invalid_path'
   | 'invalid_version'
+  | 'cross_workspace_reference'
   | 'replay_metadata_mismatch'
 
 type RetryableWriteFailureCode =
@@ -496,7 +497,11 @@ that order wins.
 
 - If workspace/version binding metadata is malformed, mismatched, crosses
   workspace scope, or cannot be proven before a holding record exists, return a
-  `PublicValidationErrorCode` before holding-area persistence. Only
+  `PublicValidationErrorCode` before holding-area persistence. Use
+  `cross_workspace_reference` for syntactically valid metadata that points
+  outside the active workspace, including cross-workspace atom, folder, entity,
+  share, capture, file-object, version, event, projection, history, holding, or
+  conflict references. Only
   already-persisted accepted records with syntactically valid replay metadata but
   unresolved server-side provenance or binding evidence can stay quarantined or
   manual-only while resolution proceeds.
@@ -534,7 +539,10 @@ version, event, chat link, projection, history record, holding record, conflict
 envelope, conflict replay token, durability-log entry, idempotency result, and
 idempotency tombstone carries `workspaceId`. Write, read, query, search, import,
 sync, and projection boundaries reject cross-workspace references by default,
-even when an actor is otherwise valid.
+even when an actor is otherwise valid. Pre-persistence cross-workspace
+references fail with `cross_workspace_reference` rather than generic
+`invalid_request`; post-acceptance replay uses the same code before any
+canonical mutation can be promoted.
 
 Review gates are enforced whenever workspace policy, protected-path rules,
 ownership rules, skill-turn policy, or visibility policy requires them, including
@@ -776,10 +784,12 @@ or session capture id. First-write bootstrap uses an engine-owned
 `expectedAbsent`-equivalent token for a path with no prior object, not a missing
 token. When the file is saved or captured, the filesystem path submits that
 engine-owned token with the incoming bytes. Missing or ambiguous engine capture
-tokens fail closed through retryable capture failure or a pre-persistence
-validation error before any holding record, quarantine record, or canonical
-mutation is allocated. Quarantine is reserved for accepted holding records whose
-well-formed replay data reaches server-side policy/protection evaluation. A
+tokens fail closed through the existing `retryable-failure` result when capture
+infrastructure cannot currently prove commit state, or through a
+`PublicValidationErrorCode` before any holding record, quarantine record, or
+canonical mutation is allocated when the token problem is deterministic.
+Quarantine is reserved for accepted holding records whose well-formed replay
+data reaches server-side policy/protection evaluation. A
 well-formed but stale capture token is a real write conflict and returns the
 same deterministic current-vs-incoming conflict behavior as the API write flow
 instead of blindly overwriting canonical state.
