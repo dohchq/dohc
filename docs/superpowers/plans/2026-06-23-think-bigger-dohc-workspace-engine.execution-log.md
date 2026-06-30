@@ -4077,6 +4077,41 @@ Hundred-eighty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-eighty-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Clarified that missing or ambiguous filesystem capture tokens fail closed as
+    retryable capture failure or pre-persistence validation error before any
+    holding/quarantine/canonical record is allocated; stale well-formed tokens
+    remain deterministic conflicts.
+  - Made the Think Bigger cohort label matcher case-insensitive while preserving
+    the anchored `Cohort:` metadata line.
+  - Added server-owned `ThreadReadState.readStateRevision` as the explicit CAS
+    token source for read-state idempotency and stale-write detection.
+  - Made decision/task chat links stable-object links with
+    `targetVersionRef: null` across create requests, stored links, canonical key
+    parts, resolver behavior, and link activity payloads.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

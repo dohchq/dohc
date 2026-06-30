@@ -98,6 +98,7 @@ type ThreadReadState = {
     createdAt: UnixMsDecimalString
     messageId: string
   }
+  readStateRevision: UInt64DecimalString // server-owned CAS/revision token
   updatedAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 ```
@@ -114,7 +115,8 @@ layers, not the shared schema. `ThreadReadState.updatedAt`,
 accepted from client payloads. All boundary readers must parse, range-check, and
 reserialize to the canonical form before storing, comparing, indexing, or
 projecting `threadSequence`, `bodyRevision`, `createdAt`, `editedAt`,
-`deletedAt`, `lastActivityAt`, `updatedAt`, or read-state cursor fields.
+`deletedAt`, `lastActivityAt`, `updatedAt`, `readStateRevision`, or read-state
+cursor fields.
 Implementations compare them as integer values using a 64-bit/BigInt-safe path,
 never as floating-point JavaScript numbers and never with locale string
 collation.
@@ -157,6 +159,15 @@ workspace or thread does not match, or the tuple is forged/stale relative to
 persisted message state, the read-state update is rejected fail-closed.
 Concurrent stale updates must no-op or retry, never overwrite a newer cursor
 with an older one.
+
+The causal read-state revision token is `ThreadReadState.readStateRevision`.
+It is server-owned, scoped to `(workspaceId, threadId, actorId)`, assigned by
+the canonical read-state store, and advanced exactly when the persisted
+`lastReadCursor` advances. Idempotent equal-cursor updates return the existing
+revision without advancing it. `mark_thread_read` and `update_read_state`
+derive their stable idempotency identity from actor, thread, read cursor, and
+this persisted `readStateRevision` CAS token; callers may pass an expected
+revision for stale-write detection but may never set or mint the next revision.
 
 `ThreadMessage.threadSequence` is the authoritative per-thread monotonic
 sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
@@ -394,8 +405,12 @@ type ThreadLinkCreateRequest =
       targetVersionRef?: never
     })
   | (ThreadLinkCreateRequestBase & {
-      targetType: 'share' | 'decision' | 'task'
+      targetType: 'share'
       targetVersionRef?: VersionRef
+    })
+  | (ThreadLinkCreateRequestBase & {
+      targetType: 'decision' | 'task'
+      targetVersionRef?: never
     })
 
 type ThreadLinkBase = ThreadLinkScope & {
@@ -444,12 +459,12 @@ type ChatThreadThreadLink = ThreadLinkBase & {
 
 type DecisionThreadLink = ThreadLinkBase & {
   targetType: 'decision'
-  targetVersionRef?: VersionRef
+  targetVersionRef?: never
 }
 
 type TaskThreadLink = ThreadLinkBase & {
   targetType: 'task'
-  targetVersionRef?: VersionRef
+  targetVersionRef?: never
 }
 
 type ThreadLink =
@@ -519,6 +534,9 @@ normalization:
 - Build `CanonicalThreadLinkKeyParts` with `null` for absent
   `targetVersionRef`, `shareGrantId`, or `visibilityScope`; do not use reserved
   sentinel strings or prefix-concatenated fields.
+- `decision` and `task` links are stable workspace-object links and must always
+  canonicalize `targetVersionRef` to `null`; create requests that include a
+  `targetVersionRef` for those target types fail closed before key derivation.
 - Encode the parts as a framed tuple in fixed field order:
   `[["workspaceId", value], ["threadId", value], ["scopeKind", value],
   ["targetWorkspaceId", value], ["targetType", value], ["targetId", value],
@@ -574,7 +592,8 @@ pairs fail closed before link creation, resolution, search projection, export,
 notification fanout, or UI rendering. Each resolver enforces workspace scope,
 target ACLs, and shared-grant/redaction policy for its scope. The `decision` and
 `task` resolvers must resolve stable workspace-scoped decision/task object IDs,
-enforce the target object's effective policy and visibility, and apply the same
+require `targetVersionRef: null` in the normalized canonical key, enforce the
+target object's effective policy and visibility, and apply the same
 shared-grant/redaction checks as file or atom links before link creation,
 projection, export, notification, or replay. Adding any other target kind
 requires extending the enum, registering internal and shared resolver behavior
@@ -919,8 +938,10 @@ type LinkThreadActivity = ThreadActivityBase & {
 `VersionRef | null` representation as `CanonicalThreadLinkKeyParts`: object key
 order is `versionRefKind`, `versionId`, `versionEtag`, then `historyMomentId`;
 optional absent fields are omitted inside the object, and missing version refs
-are serialized as `null`, never omitted. Link activity writers, replay, export,
-and projection rebuilds must read and write that canonical form so the activity
+are serialized as `null`, never omitted. `decision` and `task` link activities
+must store `targetVersionRef: null` for the same stable-object target tuple used
+by link creation and resolver lookup. Link activity writers, replay, export, and
+projection rebuilds must read and write that canonical form so the activity
 payload and canonical link key produce the same normalized target tuple.
 
 type MentionNotificationThreadActivity = ThreadActivityBase & {
@@ -1132,7 +1153,7 @@ server-assigned target identifiers:
   or any equivalent edit state.
 - `mark_thread_read` and `update_read_state` require an `idempotencyKey` or a
   server-derived stable read-state idempotency identity bound to actor, thread,
-  read cursor, and causal read-state revision.
+  read cursor, and the causal `ThreadReadState.readStateRevision` CAS token.
 - `link_chat_to_work` requires an `idempotencyKey` plus the target link request
   fields. The handler derives `CanonicalThreadLinkKey` server-side from the
   authorized, policy-normalized target, grant, and visibility fields; callers

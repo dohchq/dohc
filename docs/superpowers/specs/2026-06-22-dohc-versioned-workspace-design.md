@@ -774,10 +774,13 @@ or session capture id. First-write bootstrap uses an engine-owned
 `expectedAbsent`-equivalent token for a path with no prior object, not a missing
 token. When the file is saved or captured, the filesystem path submits that
 engine-owned token with the incoming bytes. Missing or ambiguous engine capture
-tokens fail closed through quarantine or retryable capture failure; a well-formed
-but stale capture token is a real write conflict and returns the same
-deterministic current-vs-incoming conflict behavior as the API write flow instead
-of blindly overwriting canonical state.
+tokens fail closed through retryable capture failure or a pre-persistence
+validation error before any holding record, quarantine record, or canonical
+mutation is allocated. Quarantine is reserved for accepted holding records whose
+well-formed replay data reaches server-side policy/protection evaluation. A
+well-formed but stale capture token is a real write conflict and returns the
+same deterministic current-vs-incoming conflict behavior as the API write flow
+instead of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
