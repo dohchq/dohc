@@ -151,6 +151,21 @@ type ExpiredRetryRecordKind =
   | 'quarantined_record'
   | 'terminal_retired_record'
 
+type HoldingExpiredRetryRecordKind = Extract<
+  ExpiredRetryRecordKind,
+  | 'accepted_holding_record'
+  | 'rejected_record'
+  | 'quarantined_record'
+  | 'terminal_retired_record'
+>
+
+type NonHoldingExpiredRetryRecordKind = Extract<
+  ExpiredRetryRecordKind,
+  | 'canonical_result'
+  | 'retryable_failure_record'
+  | 'conflict_record'
+>
+
 type WriteResult =
   | {
       kind: 'canonical'
@@ -234,30 +249,25 @@ type WriteResult =
     }
   | {
       kind: 'idempotency-expired'
+      recordScope: 'holding'
       holdingRecordId: string
       idempotencyResultId: string
       workspaceId: string
       versionId: string
       idempotencyKey: string
       expiredAt: UnixMsDecimalString
-      recordKind:
-        | 'accepted_holding_record'
-        | 'rejected_record'
-        | 'quarantined_record'
-        | 'terminal_retired_record'
+      recordKind: HoldingExpiredRetryRecordKind
       reasonCode: 'idempotency_expired'
     }
   | {
       kind: 'idempotency-expired'
+      recordScope: 'non_holding'
       idempotencyResultId: string
       workspaceId: string
       versionId: string
       idempotencyKey: string
       expiredAt: UnixMsDecimalString
-      recordKind:
-        | 'canonical_result'
-        | 'retryable_failure_record'
-        | 'conflict_record'
+      recordKind: NonHoldingExpiredRetryRecordKind
       reasonCode: 'idempotency_expired'
     }
   | {
@@ -328,13 +338,13 @@ deterministic backpressure so ingest floods cannot exhaust storage or starve
 canonical durability paths. TTL eviction applies only to
 rejected-before-acceptance items. Accepted holding records are durable accepted
 writes, even though they are not yet canonical workspace state. They must remain
-recoverable with reconstructable payload and retry metadata until protection
+recoverable with reconstructible payload and retry metadata until protection
 checks succeed and canonicalization completes, or until explicit operator
 disposition is recorded for a record that cannot safely become canonical. For
 accepted holding records, any TTL, retry-horizon, compaction, or colder-storage
 policy may throttle retries, compact derived retry/index metadata, or move
 accepted payload bytes to colder durable storage, but it must preserve the
-reconstructable payload bytes until canonicalization completes or explicit
+reconstructible payload bytes until canonicalization completes or explicit
 operator disposition is recorded; it is not an eviction or deletion policy for
 accepted payloads. If a rejected-before-acceptance item
 expires, or if an accepted record is retired through explicit disposition, the
@@ -351,18 +361,18 @@ canonicalization deadline is reached, the record must be escalated into an
 explicit disposition queue, marked overdue in status APIs, and compacted or
 moved to colder durable storage according to policy. Garbage collection may
 remove only derived retry/index metadata after the disposition deadline while
-the operator window is open; the reconstructable payload remains until
+the operator window is open; the reconstructible payload remains until
 canonicalization succeeds, an explicit operator disposition record retires it,
 or the effective finite `maxRecoverableHoldingPayloadMs` bound is reached.
 `operatorDispositionDueAt` marks the item overdue for operator/status handling;
-it does not itself cryptoshred or compact reconstructable bytes.
+it does not itself cryptoshred or compact reconstructible bytes.
 No accepted holding record may remain recoverable forever: if no
 workspace-specific recovery-retention policy is configured, the engine's default
 finite `maxRecoverableHoldingPayloadMs` applies, and workspaces may only choose
 values inside the product/org maximum. When the effective maximum recovery
 window is reached, still-unresolved accepted records must enter terminal
 retirement with `auto_retired_payload_retention_expired`: payload bytes are
-deleted, cryptoshredded, or compacted into a non-reconstructable evidence
+deleted, cryptoshredded, or compacted into a non-reconstructible evidence
 record, while minimal metadata needed for audit, idempotency expiry, abuse
 controls, and user-facing explanation is retained.
 Status APIs and retry tooling represent that state as a `terminal-retired`
@@ -716,6 +726,14 @@ restore(workspaceId, versionId, checkpointId, {
   idempotencyKey
 })
 ```
+
+`rename(...)` is the same-directory basename-change operation: `fromPath` and
+`toPath` must share a canonical parent path, and the destination must be absent.
+`move(...)` is the cross-directory relocation operation: the canonical parent
+path changes, the destination must be absent, and the same source precondition,
+`sourceObjectId`, `destinationPrecondition`, and `idempotencyKey` rules apply.
+Destination-present path changes are not `rename(...)` or `move(...)`; they must
+use `replace(...)` with both source and destination identities.
 
 The filesystem is one interface. It should not be the only possible execution
 environment.

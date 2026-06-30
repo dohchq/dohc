@@ -673,6 +673,10 @@ the edit path: edit attempts must fail closed before commit, with no new
 update, notification update, or summary update. Restoring a deleted message, if
 allowed by policy, requires a dedicated restore activity that preserves the
 delete/edit audit trail instead of rewriting the tombstone in place.
+A restore clears the derived `ThreadMessage.deletedAt`, `deletedById`,
+`deleteReason`, and `tombstone` cache fields only in the same atomic unit that
+appends the restore activity, writes the restored body revision, and rebuilds
+authorized projections/search/notifications/summaries from the restored body.
 
 Edits must append immutable activity and replace the current message body in the
 same transaction or serialized unit of work, with the activity written first
@@ -741,13 +745,24 @@ type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
   tombstoneHash?: string
 }
 
+type MessageRestoreThreadActivity = ThreadActivityBase & {
+  messageId: string
+  kind: 'message_restored'
+  restoredBody: ChatBodySnapshot
+  restoredBodyRevision: UInt64DecimalString
+  restoreReason?: string
+  bodyHash: string
+  nextBodyHash: string
+}
+
 `nextBodyHash`, `bodyHash`, and `tombstoneHash` are lowercase hex SHA-256 over a
 canonical JSON payload with sorted object keys, no insignificant whitespace, and
 all strings normalized to Unicode NFC before UTF-8 encoding. `nextBodyHash`
 hashes `["chat-body:v1", workspaceId, threadId, messageId, bodyRevision,
 nextBodySnapshot]`, where `nextBodySnapshot` is the canonical current
-`ChatBodySnapshot` after create/edit. `bodyHash` uses the same `chat-body:v1`
-payload for the referenced persisted body revision. `tombstoneHash` hashes
+`ChatBodySnapshot` after create/edit/restore. `bodyHash` uses the same
+`chat-body:v1` payload for the referenced persisted body revision.
+`tombstoneHash` hashes
 `["chat-tombstone:v1", workspaceId, threadId, messageId, previousBodyRevision,
 previousBody, deleteReasonOrNull]`, where `previousBody` is the canonical
 `ChatBodySnapshot` preserved by the delete activity.
@@ -756,9 +771,9 @@ rules as message bodies and thread titles: escape by default, sanitize only
 through the allowlisted formatting subset, and redact or omit where the viewer
 lacks access. History, export, projection, search snippet, and notification
 surfaces must not render raw `deleteReason` text.
-Message create, edit, and delete lifecycle activities must populate `bodyHash`
+Message create, edit, restore, and delete lifecycle activities must populate `bodyHash`
 from this same canonical persisted-body hash used by
-`MentionNotificationThreadActivity`. For create/edit, `bodyHash` is the
+`MentionNotificationThreadActivity`. For create/edit/restore, `bodyHash` is the
 persisted resulting body revision and must match `nextBodyHash`; for delete,
 `bodyHash` is the previous persisted body revision preserved by the delete
 activity. Replay, export, mention fanout, and history rebuilds must verify this
@@ -845,18 +860,22 @@ type ThreadActivity =
   | MessageEditThreadActivity
   | MessageDeleteThreadActivity
   | MessageDeleteLegacyThreadActivity
+  | MessageRestoreThreadActivity
   | ReactionThreadActivity
   | LinkThreadActivity
   | MentionNotificationThreadActivity
 ```
 
-For `message_created`, `message_edited`, `message_deleted`, `reaction_added`,
-and `reaction_removed`, `messageId`, `actorId`, `actorKind`, and `createdAt` are
-required. For `message_edited`, `previousBody` and `previousBodyRevision` are
-also required. For in-system `message_deleted` events, `previousBody` and
-`previousBodyRevision` are required and must preserve the deleted body as
-plaintext, redacted, or secret-backed snapshot according to policy. Legacy import
-flows that cannot recover a prior body revision must map to
+For `message_created`, `message_edited`, `message_deleted`, `message_restored`,
+`reaction_added`, and `reaction_removed`, `messageId`, `actorId`, `actorKind`,
+and `createdAt` are required. For `message_edited`, `previousBody` and
+`previousBodyRevision` are also required. For in-system `message_deleted` events,
+`previousBody` and `previousBodyRevision` are required and must preserve the
+deleted body as plaintext, redacted, or secret-backed snapshot according to
+policy. `message_restored` must create a new current body revision from
+`restoredBody`, preserve the earlier delete/edit activities for replay/export,
+and atomically repair the `ThreadMessage` cache plus projections/search from the
+new body. Legacy import flows that cannot recover a prior body revision must map to
 `message_deleted_legacy`, which renders as a tombstone, preserves
 `legacyImportId`, `deleteReason`, and any available redacted/secret-backed body
 snapshot, and is handled explicitly by history/export/replay as incomplete legacy

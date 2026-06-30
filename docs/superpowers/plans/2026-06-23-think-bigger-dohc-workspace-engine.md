@@ -1632,6 +1632,7 @@ must use.
 - Security Reviewer.
 - Versioning Reviewer.
 - Filesystem Reviewer.
+- Chats Reviewer.
 
 **CodeRabbit focus:**
 
@@ -2324,7 +2325,7 @@ dohc file/folder/version sharing.
 
 - Shared channel invitations.
 - External participant/workspace model.
-- Explicit cross-workspace share/federation objects.
+- Explicit cross-workspace share objects.
 - Resource visibility preview.
 - Share selected files/folders/versions/chats.
 - Deny unshared workspace reads.

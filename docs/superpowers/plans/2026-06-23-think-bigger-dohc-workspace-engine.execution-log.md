@@ -18,7 +18,7 @@ Source specs:
 - **PR00 source of truth:** see the newest owning PR00 pass entry below for
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
-  https://github.com/dohc-ai/dohc/pull/46.
+  [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
 ## How To Use This Log
 
@@ -217,7 +217,7 @@ Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
 Worktree: `<current checkout>`
 Implementation workstream, if used: main orchestration workstream
-PR Link: https://github.com/dohc-ai/dohc/pull/46
+PR Link: [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46)
 Date started: 2026-06-24
 Date completed:
 
@@ -2873,6 +2873,34 @@ Hundred-forty-fifth pass:
     storage/filesystem smoke and focused-package validation shape.
   - Reworded the Phase 0 proof gate so File/API writes durably capture
     immediately, while canonical promotion remains validation-gated.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-forty-sixth pass:
+
+- Fixed CodeRabbit's ten follow-up findings:
+  - Replaced content-driven docs discovery with deterministic root/path rules and
+    kept the manifest as the expected-set comparator.
+  - Added holding/non-holding `idempotency-expired` discriminants and centralized
+    expired record-kind aliases.
+  - Clarified `rename(...)` versus `move(...)` semantics in the versioned
+    workspace API and routed destination-present path changes to `replace(...)`.
+  - Standardized `reconstructible` terminology in the holding-record lifecycle.
+  - Added a dedicated `message_restored` activity and restore cache/projection
+    lifecycle to the chat activity model.
+  - Replaced native filesystem `VersionRef` wording with `versionId`.
+  - Added the PR 01 Chats Reviewer, narrowed cross-workspace share wording, and
+    converted PR links to Markdown link syntax.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

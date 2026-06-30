@@ -371,7 +371,7 @@ This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
 examples below use explicit `workspaceId` and required version identifiers. A
 `read(...)` or `stat(...)` response includes the stable `objectId`, current
-`etag`, `contentHash`, and `VersionRef` needed by mutation preconditions.
+`etag`, `contentHash`, and `versionId` needed by mutation preconditions.
 `list(...)` entries include the same stable `objectId` and freshness metadata
 for each returned child. Callers obtain `sourceObjectId`, `targetObjectId`, and
 `destinationObjectId` through `stat(...)`, `read(...)`, or paginated `list(...)`

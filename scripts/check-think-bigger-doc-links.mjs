@@ -21,9 +21,19 @@ if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((fil
 
 const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
-  const expectedDocSet = new Set(expectedThinkBiggerDocs)
-  const expectedDocDirs = [...new Set(expectedThinkBiggerDocs.map((file) => path.posix.dirname(file)))]
-  const expectedDocBasenames = expectedThinkBiggerDocs.map((file) => path.posix.basename(file))
+  const discoveryRoots = [
+    {
+      dir: 'docs/superpowers/plans',
+      include: (name) => /^2026-06-23-think-bigger-.*\.md$/.test(name),
+    },
+    {
+      dir: 'docs/superpowers/specs',
+      include: (name) => {
+        const docDate = name.slice(0, 10)
+        return /^2026-\d{2}-\d{2}-dohc-.*-design\.md$/.test(name) && docDate >= '2026-06-22'
+      },
+    },
+  ]
   const safeReadDir = (dir) => {
     try {
       return fs.readdirSync(path.resolve(repoRoot, dir))
@@ -32,20 +42,10 @@ const discoverThinkBiggerDocs = () => {
     }
   }
 
-  const isThinkBiggerRelatedDoc = (file) => {
-    if (expectedDocSet.has(file) || path.posix.basename(file).includes('think-bigger')) {
-      return true
-    }
-
-    const raw = fs.readFileSync(path.resolve(repoRoot, file), 'utf8')
-    return /think bigger/i.test(raw) || expectedDocBasenames.some((basename) => raw.includes(basename))
-  }
-
-  return expectedDocDirs
-    .flatMap((dir) => safeReadDir(dir)
-      .filter((name) => name.endsWith('.md'))
+  return discoveryRoots
+    .flatMap(({ dir, include }) => safeReadDir(dir)
+      .filter((name) => name.endsWith('.md') && include(name))
       .map((name) => repoRelativePath(dir, name)))
-    .filter(isThinkBiggerRelatedDoc)
     .sort()
 }
 
