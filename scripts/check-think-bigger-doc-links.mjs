@@ -318,6 +318,11 @@ for (const file of files) {
     failures.push(`${file}: unresolved reference link ${raw}`)
   }
   for (const raw of links) {
+    if (raw === '') {
+      failures.push(`${file}: empty link target`)
+      continue
+    }
+
     if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
       continue
     }

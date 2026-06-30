@@ -3176,6 +3176,28 @@ Hundred-fifty-fifth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-fifty-sixth pass:
+
+- CodeRabbit rerun emitted two findings, then exceeded the healthy no-output
+  window and was stopped before a complete event. The emitted findings were
+  treated as actionable and fixed:
+  - Required `retryable-failure` write results to durably persist the
+    idempotency result state before acknowledgement.
+  - Made the docs checker reject literal empty Markdown link destinations like
+    `[label]()` while preserving normal `#anchor` links.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

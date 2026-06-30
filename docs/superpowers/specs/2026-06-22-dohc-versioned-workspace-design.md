@@ -323,6 +323,13 @@ write, conflict, and durable-pending results: repeated delivery with the same
 operation fingerprint returns the same `idempotencyResultId`,
 `idempotencyReplayToken`, and `commitState` until retry handling can prove and
 return a canonical/durable result or a deterministic terminal outcome.
+Before acknowledging `kind: 'retryable-failure'`, the engine must durably
+persist that idempotency result state for the same workspace, version,
+idempotency key, operation fingerprint, `idempotencyResultId`,
+`idempotencyReplayToken`, and `commitState`. If the retryable-failure result
+state itself cannot be persisted, the engine must not acknowledge a replayable
+`WriteResult`; the caller must retry until the engine can durably record and
+replay the outcome or prove a canonical/durable result.
 `commitState` is the single source of truth for whether a canonical mutation is
 known absent (`no_canonical_commit_recorded`), unknown and requires retry
 (`commit_state_unknown_retry_required`), or later proven recorded
