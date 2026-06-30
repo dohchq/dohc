@@ -366,6 +366,10 @@ type ThreadLinkCreateRequestBase = {
   visibilityScope?: never
 }
 
+type SharedThreadLinkCreateRequestBase = ThreadLinkCreateRequestBase & {
+  requestedScopeKind: 'shared'
+}
+
 type ObjectTargetVersionRef = {
   versionRefKind: 'object_version'
   versionId: string
@@ -409,7 +413,7 @@ type ThreadLinkCreateRequest =
       targetType: 'agent_run' | 'chat_thread'
       targetVersionRef?: never
     })
-  | (ThreadLinkCreateRequestBase & {
+  | (SharedThreadLinkCreateRequestBase & {
       targetType: 'share'
       targetVersionRef?: VersionRef
     })
@@ -429,6 +433,12 @@ type ThreadLinkBase = ThreadLinkScope & {
   deletedAt?: UnixMsDecimalString
   readonly deletedById?: string // server-owned immutable remover actor id
 }
+
+// Share-link creation is shared-only. A targetType: 'share' request with
+// requestedScopeKind: 'internal' fails closed before key derivation, replay,
+// projection, export, or fanout. Stored ShareThreadLink rows always carry
+// scopeKind: 'shared', server-derived shareGrantId, and server-derived
+// visibilityScope.
 
 type VersionedObjectThreadLink =
   | (ThreadLinkBase & {

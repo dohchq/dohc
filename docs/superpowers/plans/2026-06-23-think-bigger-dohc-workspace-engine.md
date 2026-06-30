@@ -1661,9 +1661,9 @@ Foundation alpha and the relevant surface proof are complete.
   job. `workflow_dispatch` and the scheduled drift check run the same checker for
   non-PR drift visibility. The checker is the fail-closed enforcement mechanism:
   it must compare the manifest with repository inventory, validate links/anchors,
-  and fail when doc renames, execution-log edits, manifest changes, dependency
-  manifest/lockfile changes, workflow changes, checker changes, linked-target
-  drift, or discovered-doc drift make the manifest and repository disagree.
+  and fail when doc renames, execution-log edits, manifest changes,
+  linked-target drift, or discovered-doc drift make the manifest and repository
+  disagree.
 
 **CodeRabbit focus:**
 

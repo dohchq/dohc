@@ -528,6 +528,17 @@ that order wins.
   Visibility-boundary failures use `visibility_denied` externally and
   `quarantined_visibility` internally; they must not be collapsed into
   `policy_denied` or `not_authorized`.
+  Lock failures use `locked` externally and `quarantined_locked` internally.
+  Version-access failures use `version_access_denied` externally and
+  `quarantined_version_access` internally.
+  Skill-turn failures use `skill_turn_denied` externally and
+  `quarantined_skill_turn` internally.
+  Provenance failures use `provenance_denied` externally and
+  `quarantined_provenance` internally.
+  Attribution failures use `attribution_denied` externally and
+  `quarantined_attribution` internally.
+  Proof failures use `proof_denied` externally and `quarantined_proof`
+  internally.
 - If the causal base is stale, advanced, missing, or otherwise no longer matches
   the target version state, the retry returns a deterministic `conflict` and
   preserves the incoming record for manual reconciliation. Stale causal state is

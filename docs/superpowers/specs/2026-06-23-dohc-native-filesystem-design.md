@@ -150,7 +150,12 @@ content/id hash for ordinary non-secret inputs, then reserved atomically at
 activation time with create-if-absent, `O_EXCL`, or an equivalent exclusive
 reservation primitive. A non-atomic check-then-create flow is not allowed.
 Activation may proceed only if the reservation succeeds; reservation failure is
-a fail-closed collision that stays in quarantine or manual resolution.
+a fail-closed collision that stays in quarantine or manual resolution only when
+the exclusive reservation proves an actual destination-name collision. Transient
+mount, storage, permission-probe, or reservation-service failures are classified
+separately as `retryable-failure` or the equivalent retryable capture outcome;
+they do not consume collision disposition or become safe-rename quarantine
+records unless a real namespace collision is proven.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions/**` content is never silently promoted into a named
 version.
@@ -1227,6 +1232,16 @@ Export should produce:
 - enough metadata to re-import and compare, including the workspace
   path-equivalence profile: case sensitivity/folding, Unicode normalization, and
   mount-compatibility constraints.
+
+Default ownership export operates on a clean canonical snapshot. If the selected
+workspace scope contains unresolved `durable-pending`, `quarantined`, or
+`conflict` records, export fails closed with a status report identifying the
+non-canonical records the caller is allowed to see. It must not silently omit,
+flatten, or convert those reconciliation artifacts into ordinary files. A
+separate operator reconciliation export may carry pending/quarantine/conflict
+metadata through an authorized diagnostic path, but that bundle is not ordinary
+workspace export and must preserve the same redaction, secret, and policy
+boundaries as status/conflict views.
 
 Export must never include `.dohc/**` history, status, conflicts, indexes, caches,
 generated projections, durability internals, or other engine state as ordinary

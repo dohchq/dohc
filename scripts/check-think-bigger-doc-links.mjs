@@ -40,7 +40,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Architecture Specifications|Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -364,7 +364,7 @@ const collectLinks = (markdown) => {
       } else if (looksLikeBracketIndexing(prose, match)) {
         continue
       } else {
-        unresolvedReferences.push(match[0])
+        unresolvedReferences.push({ reference: match[0], lineNumber })
       }
     }
     for (const match of prose.matchAll(shortcutReferencePattern)) {
@@ -451,7 +451,7 @@ const assertCheckerFixtures = () => {
   }
 
   const missingReference = collectLinks('[missing][reference]')
-  if (!missingReference.unresolvedReferences.includes('[missing][reference]')) {
+  if (!missingReference.unresolvedReferences.some((entry) => entry.reference === '[missing][reference]' && entry.lineNumber === 1)) {
     throw new Error('missing reference fixture should still report unresolved reference links')
   }
 }
@@ -509,8 +509,8 @@ for (const file of files) {
   anchorCache.set(canonicalFilePath, collectAnchors(text))
   const { links, unresolvedReferences } = collectLinks(text)
   const formatLocation = (lineNumber) => `${file}:${lineNumber}`
-  for (const raw of unresolvedReferences) {
-    failures.push(`${file}: unresolved reference link ${raw}`)
+  for (const { reference, lineNumber } of unresolvedReferences) {
+    failures.push(`${formatLocation(lineNumber)}: unresolved reference link ${reference}`)
   }
   for (const { target: raw, lineNumber } of links) {
     const location = formatLocation(lineNumber)

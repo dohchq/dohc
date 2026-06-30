@@ -4711,6 +4711,40 @@ Two-hundred-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Two-hundred-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Added line numbers to unresolved reference reports in the docs checker.
+  - Added the `Core Architecture Specs` cohort alias to discovery.
+  - Completed replay-time denial/quarantine reason mapping for lock,
+    version-access, skill-turn, provenance, attribution, and proof failures.
+  - Made `targetType: 'share'` ThreadLink create requests shared-only.
+  - Narrowed the docs checker gate wording to docs inventory/link/anchor drift.
+  - Split safe-rename reservation collisions from retryable mount/storage
+    reservation failures.
+  - Required default export to fail closed when the selected scope has
+    unresolved durable-pending, quarantine, or conflict records.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and
