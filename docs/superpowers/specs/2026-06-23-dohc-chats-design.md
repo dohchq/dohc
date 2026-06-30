@@ -353,11 +353,23 @@ type ChatThreadThreadLink = ThreadLinkBase & {
   targetVersionRef?: never
 }
 
+type DecisionThreadLink = ThreadLinkBase & {
+  targetType: 'decision'
+  targetVersionRef?: VersionRef
+}
+
+type TaskThreadLink = ThreadLinkBase & {
+  targetType: 'task'
+  targetVersionRef?: VersionRef
+}
+
 type ThreadLink =
   | VersionedObjectThreadLink
   | AgentRunThreadLink
   | ShareThreadLink
   | ChatThreadThreadLink
+  | DecisionThreadLink
+  | TaskThreadLink
 
 type ActiveThreadLink = ThreadLink & {
   deletedAt?: never
@@ -467,10 +479,14 @@ Target types resolve through a server-side resolver registry keyed by
 full `CanonicalThreadLinkKeyParts` tuple. Unknown or unregistered scope/type
 pairs fail closed before link creation, resolution, search projection, export,
 notification fanout, or UI rendering. Each resolver enforces workspace scope,
-target ACLs, and shared-grant/redaction policy for its scope; adding a new
-target kind requires extending the enum, registering internal and shared
-resolver behavior where applicable, and adding authorization, projection, export,
-and replay tests for that kind.
+target ACLs, and shared-grant/redaction policy for its scope. The `decision` and
+`task` resolvers must resolve stable workspace-scoped decision/task object IDs,
+enforce the target object's effective policy and visibility, and apply the same
+shared-grant/redaction checks as file or atom links before link creation,
+projection, export, notification, or replay. Adding any other target kind
+requires extending the enum, registering internal and shared resolver behavior
+where applicable, and adding authorization, projection, export, and replay tests
+for that kind.
 `chat_thread` links must be acyclic. A thread cannot link to itself, and link
 creation must reject any target that would introduce a cycle in the
 `chat_thread`-to-`chat_thread` graph under a graph lock, CAS, serialized

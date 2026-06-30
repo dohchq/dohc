@@ -106,6 +106,8 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_protection'
   | 'quarantined_attribution'
   | 'quarantined_policy'
+  | 'quarantined_provenance'
+  | 'quarantined_proof'
 
 type QuarantinedStatus = Exclude<
   DeniedOrQuarantinedStatus,
@@ -119,6 +121,9 @@ type PublicDeniedReasonCode =
   | 'locked'
   | 'version_access_denied'
   | 'skill_turn_denied'
+  | 'provenance_denied'
+  | 'attribution_denied'
+  | 'proof_denied'
 
 type PublicValidationErrorCode =
   | 'invalid_request'

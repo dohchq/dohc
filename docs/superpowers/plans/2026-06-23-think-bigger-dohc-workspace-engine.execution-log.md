@@ -2768,6 +2768,26 @@ Hundred-fortieth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Added provenance/attribution/proof denial and quarantine enum values.
+  - Filtered raw HTML closing tags out of docs-checker autolink collection.
+  - Added concrete `DecisionThreadLink` and `TaskThreadLink` variants plus
+    resolver authorization requirements.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an
