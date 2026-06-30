@@ -1177,12 +1177,13 @@ read-state updates, links, notifications, summaries, and projections, must also
 respect user locks, folder/atom/file sharing boundaries, protected work, and
 skill-turn/review gates before persisting or materializing derived state.
 
-Renderer surfaces that load channels, chats, linked work, summaries, search
-results, or side-rail state asynchronously must guard responses with a
-workspace/request token and verify that token again at apply time before
-mutating UI state. Abort signals are supplemental cancellation, not the only
-guard. A slow response for workspace A must be ignored rather than repainting
-workspace B after a workspace switch.
+Renderer surfaces that load any workspace-scoped chat state asynchronously,
+including channels, chats, linked work, summaries, search results, side-rail
+state, presence, typing, read-state, and notification surfaces, must guard
+responses with a workspace/request token and verify that token again at apply
+time before mutating UI state. Abort signals are supplemental cancellation, not
+the only guard. A slow response for workspace A must be ignored rather than
+repainting workspace B after a workspace switch.
 
 This does not violate the dohc file philosophy. Chats are social actions, not
 plain file writes. Posting a message triggers activity, mentions, read state,

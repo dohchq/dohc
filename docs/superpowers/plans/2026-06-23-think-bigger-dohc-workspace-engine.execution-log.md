@@ -15,7 +15,7 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** `Hundred-seventy-ninth pass` below owns PR00
+- **Canonical live status block:** `Hundred-eightieth pass` below owns PR00
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
@@ -3822,6 +3822,40 @@ Hundred-seventy-ninth pass:
 - Fixed CodeRabbit's one follow-up finding:
   - Added explicit replay mapping for protected-path failures:
     `protected_path` externally and `quarantined_protection` internally.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-eightieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Added the `Design specs and mega plan` cohort alias to docs discovery.
+  - Added `policy` to replay first-match precedence.
+  - Split holding-area replay E2E wording for stale CAS conflicts versus invalid
+    workspace/version binding validation failures.
+  - Changed public export guidance for secret-backed files like `.env` to omit
+    them by default or use a non-secret placeholder such as `.env.example`.
+  - Broadened chat renderer workspace-token guards to presence, typing,
+    read-state, and notification surfaces.
+  - Expanded bridge-auth negative tests to cover missing or wrong authenticated
+    local-channel binding.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

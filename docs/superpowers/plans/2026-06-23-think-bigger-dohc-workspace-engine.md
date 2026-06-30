@@ -340,7 +340,8 @@ Examples:
 
 - normal source file projection: `writable` + `sourceValidated`.
 - `.dohc/chats/v1-<digest>.md`: `readOnly` + `none` by default.
-- public export of `.env`: `redacted` + `none`, or excluded.
+- public export of secret-backed files such as `.env`: excluded by default, or
+  replaced with a non-secret placeholder such as `.env.example`.
 - generated dashboard summary: `lossy` + `none` unless explicitly source-backed.
 - `.dohc/status.json`: `readOnly` + `internalOnly`.
 - `.dohc/files.toml`: `writable` + `policyValidated`.
@@ -964,10 +965,10 @@ implementation.
 - TypeScript contract tests for request/response shape.
 - fixture-based scan/hash benchmark.
 - failure-mode test for malformed paths and missing workspace roots.
-- negative bridge-auth test that sends forged client-supplied actor, workspace,
-  and version metadata and verifies the bridge rejects or ignores those fields,
-  resolving identity only from the authenticated local channel and server/engine
-  context.
+- negative bridge-auth tests that reject forged client-supplied actor,
+  workspace, and version metadata, reject requests missing a valid authenticated
+  local-channel binding, reject requests bound to the wrong channel, and resolve
+  identity only from the authenticated local channel plus server/engine context.
 
 **Acceptance:**
 

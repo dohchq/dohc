@@ -473,9 +473,9 @@ same replay metadata:
 Replay evaluation is first-match in this order; once a class matches, later
 checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
 malformed/cross-scope binding, causal base conflict, authorization/permission,
-visibility, protected-path, lock, version-access, skill-turn, provenance,
-attribution, then proof. If multiple server-derived checks fail in one replay
-attempt, the earliest matching class in that order wins.
+policy, visibility, protected-path, lock, version-access, skill-turn,
+provenance, attribution, then proof. If multiple server-derived checks fail in
+one replay attempt, the earliest matching class in that order wins.
 
 - If the captured causal base still matches and apply-time policy revalidation
   passes, the record may become canonical.
@@ -1187,9 +1187,9 @@ The first proof should be small but real:
     version, event, chat link, projection, and history record is
     workspace-scoped, and that cross-workspace references are rejected by
     default.
-12. E2E proves holding-area replay is causal: stale base/CAS tokens or
-    workspace/version mismatches never apply as canonical state and instead
-    degrade to conflict/manual reconciliation or remain quarantined.
+12. E2E proves holding-area replay is causal: stale base/CAS tokens degrade to
+    conflict/manual reconciliation, while malformed or cross-scope
+    workspace/version bindings fail validation before holding storage.
 13. E2E proves holding-area abuse resistance: per-workspace/per-actor quotas,
     TTL retention bounds, payload-size caps, ingest rate limits, and
     deterministic backpressure prevent storage exhaustion or canonical
