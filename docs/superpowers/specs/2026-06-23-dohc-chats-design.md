@@ -1048,16 +1048,30 @@ by link creation and resolver lookup. Link activity writers, replay, export, and
 projection rebuilds must read and write that canonical form so the activity
 payload and canonical link key produce the same normalized target tuple.
 
-type MentionNotificationThreadActivity = ThreadActivityBase & {
-  kind: 'mention_notification_enqueued' | 'mention_notification_resolved'
+type MentionNotificationThreadActivityBase = ThreadActivityBase & {
   messageId: string
   bodyRevision: UInt64DecimalString
   authzScopeId: string
   mentionedActorIds: string[]
   notificationId: string
-  notificationStatus: 'queued' | 'sent' | 'suppressed' | 'resolved'
   bodyHash: string
 }
+
+type MentionNotificationEnqueuedThreadActivity =
+  MentionNotificationThreadActivityBase & {
+    kind: 'mention_notification_enqueued'
+    notificationStatus: 'queued' | 'sent' | 'suppressed'
+  }
+
+type MentionNotificationResolvedThreadActivity =
+  MentionNotificationThreadActivityBase & {
+    kind: 'mention_notification_resolved'
+    notificationStatus: 'resolved'
+  }
+
+type MentionNotificationThreadActivity =
+  | MentionNotificationEnqueuedThreadActivity
+  | MentionNotificationResolvedThreadActivity
 
 `MentionNotificationThreadActivity.mentionedActorIds` must be canonical before
 storage: normalize each actor ID to its persisted form, deduplicate by exact

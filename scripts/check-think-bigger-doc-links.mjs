@@ -345,6 +345,9 @@ const collectLinks = (markdown) => {
 
   for (const { text: line, lineNumber } of lines) {
     let prose = stripCodeSpans(line)
+    if (referenceDefinitionPattern.test(prose)) {
+      continue
+    }
     for (const match of prose.matchAll(nestedImageLinkPattern)) {
       addLink(normalizeDestination(match[1]), lineNumber)
       addLink(normalizeDestination(match[2]), lineNumber)
@@ -367,6 +370,7 @@ const collectLinks = (markdown) => {
         unresolvedReferences.push({ reference: match[0], lineNumber })
       }
     }
+    prose = prose.replace(referenceUsePattern, '')
     for (const match of prose.matchAll(shortcutReferencePattern)) {
       if (isFootnoteLabel(match[1])) {
         continue
@@ -455,6 +459,11 @@ const assertCheckerFixtures = () => {
   const missingReference = collectLinks('[missing][reference]')
   if (!missingReference.unresolvedReferences.some((entry) => entry.reference === '[missing][reference]' && entry.lineNumber === 1)) {
     throw new Error('missing reference fixture should still report unresolved reference links')
+  }
+  const referenceLinks = collectLinks('[ref]: ./target.md\n[ref]\n[full][ref]')
+  const referenceTargetCount = referenceLinks.links.filter((link) => link.target === './target.md').length
+  if (referenceTargetCount !== 3) {
+    throw new Error('reference fixture should count definition, shortcut, and full reference links exactly once')
   }
   if (!isMarkdownPath('/repo/README.markdown') || isMarkdownPath('/repo/diagram.svg')) {
     throw new Error('Markdown target fixture should not treat asset fragments as heading anchors')

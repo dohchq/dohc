@@ -1237,8 +1237,8 @@ This model preserves the core dohc philosophy:
 The engine is sophisticated, but the user experience should remain obvious:
 
 > You are editing a version of your workspace. Authorized writes save. dohc
-> remembers everything. You can create other versions, compare them, merge them,
-> share them, or go back.
+> preserves the audit and recovery state required by policy. You can create
+> other versions, compare them, merge them, share them, or go back.
 
 ## Open questions
 

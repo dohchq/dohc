@@ -428,6 +428,14 @@ restore(workspaceId, versionId, checkpointId, {
 })
 ```
 
+`watch`, `snapshot`, and `diff` expose the same secret-safe projection contract
+as `read`, `stat`, `list`, and `search`. They must never emit raw
+secret-backed contents or raw secret-backed paths in event payloads, snapshot
+entries, diff headers, diff hunks, nested metadata, derived labels, or repair
+records. Before any output leaves the engine boundary, secret-backed path and
+content fields are redacted, omitted, or replaced with authorized opaque tokens
+according to the effective file policy and viewer authorization.
+
 In every API shape above, `expectedContentHash` is accepted only for
 non-secret-backed object operands. Secret-backed overwrite, delete,
 rename/move source, and replace source/destination operands must use another
@@ -463,10 +471,10 @@ best-effort cleanup/repair records after publish where necessary. Those
 projection chores are not the canonical mutation and must not be exposed as
 delete-plus-create history. If the source identity/freshness or
 destination-absence proof cannot be established, the operation returns a
-deterministic validation, conflict, `rejected`, or `quarantined` result with
-manual-follow-up metadata according to the capture/API path. `conflict` remains
-reserved for cases where the engine can form the base/current/incoming
-preservation envelope described above.
+deterministic validation, `rejected`, `quarantined`, or `retryable-failure`
+result with manual-follow-up metadata according to the capture/API path.
+`conflict` remains reserved for cases where the engine can form the
+base/current/incoming preservation envelope described above.
 If the destination already exists, the operation is an overwrite-rename and must
 map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart
 reconciliation must classify common editor temp-file-then-rename saves this way:
@@ -491,10 +499,12 @@ the source object remains provenance for the incoming bytes. If source bytes
 cannot be read durably, either freshness precondition fails, either identity
 cannot be proven, or a required pre-publish staging step cannot be made durable,
 the fallback aborts before the canonical mutation and resolves through the same
-deterministic validation, conflict, `rejected`, `quarantined`, or
-`retryable-failure` path as other write-producing mutations. If post-publish
-projection cleanup fails, the engine records repair/quarantine follow-up without
-exposing partial canonical state. Manual follow-up is operator workflow metadata,
+deterministic validation, `rejected`, `quarantined`, or `retryable-failure` path
+as other write-producing mutations. Reserve `conflict` for cases where the
+engine has a preserved base/current/incoming envelope proving true merge
+divergence. If post-publish projection cleanup fails, the engine records
+repair/quarantine follow-up without exposing partial canonical state. Manual
+follow-up is operator workflow metadata,
 not a `WriteResult.kind`. For secret-backed inputs, staged bytes, rollback
 artifacts, quarantine records, and cleanup/repair records must stay encrypted or
 redacted; plaintext `.env` bytes or other secret values must never be written
