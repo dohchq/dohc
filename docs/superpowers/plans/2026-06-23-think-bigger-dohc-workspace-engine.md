@@ -31,9 +31,9 @@ Agents collaborate like users, without special source-control knowledge.
 
 This mega plan collates and orchestrates:
 
-- `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`
-- `docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md`
-- `docs/superpowers/specs/2026-06-23-dohc-chats-design.md`
+- [dohc Versioned Workspace Design](../specs/2026-06-22-dohc-versioned-workspace-design.md)
+- [dohc Native Filesystem / Dropbox For Agents Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
+- [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
 
 Those files are the conceptual inputs. This file is the execution plan.
 
@@ -795,8 +795,11 @@ Phase 0 stretch/follow-up outcomes, useful but not minimum acceptance gates:
 
 - search performance and ranking beyond the proof slice.
 - polished linked-chat UI beyond proving that one chat is linked and visible.
-- local agent CLI validation beyond the approved docs-only PR00 exception.
 - full QA matrix expansion beyond the focused proof-arc gates.
+
+Required E2E checks still include the P0G local-agent CLI validation once
+implementation PRs begin. The PR00 docs-only local-agent-CLI exception applies
+only to this readiness scaffold, not to the Phase 0 implementation gates.
 
 ### Phase 0 Decisions
 

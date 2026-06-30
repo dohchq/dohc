@@ -171,7 +171,7 @@ type WriteResult =
       kind: 'retryable-failure'
       workspaceId: string
       versionId: string
-      idempotencyKey?: string
+      idempotencyKey: string
       reasonCode: RetryableWriteFailureCode
       failedAt: UnixMsDecimalString
       retryAfterMs?: UInt64DecimalString
@@ -260,6 +260,10 @@ operation fingerprint returns the same `idempotencyResultId`,
 return a canonical/durable result or a deterministic terminal outcome.
 `commitState` is the single source of truth for whether a canonical mutation is
 known absent, unknown and requires retry, or later proven recorded.
+Retryable failures always carry the original `idempotencyKey`; retries must
+preserve it. `terminal-retired` is a first-class terminal `WriteResult` and does
+not degrade into `idempotency-expired`; `idempotency-expired` is used only when
+the retained idempotency/retry metadata for the relevant result kind has expired.
 
 Rejected and quarantined ingests must still be durable in a non-canonical
 holding area with enough metadata to retry or explain the decision after

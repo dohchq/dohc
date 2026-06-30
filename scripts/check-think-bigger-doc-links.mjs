@@ -20,7 +20,16 @@ const visibleHeadingText = (heading) => heading
   .replace(/`([^`]*)`/g, '$1')
   .replace(/<[^>]+>/g, '')
 
-const slug = (heading) => visibleHeadingText(heading)
+const decodeHtmlEntities = (text) => text
+  .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+  .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+  .replace(/&amp;/g, '&')
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;/g, "'")
+
+const slug = (heading) => decodeHtmlEntities(visibleHeadingText(heading))
   .trim()
   .toLowerCase()
   .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}~]/g, '')

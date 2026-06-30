@@ -540,7 +540,7 @@ type ThreadMessage = {
   threadSequence: UInt64DecimalString
   parentMessageId?: string
   readonly authorId: string // server-owned immutable author actor id
-  authorKind: 'human' | 'agent' | 'system'
+  readonly authorKind: 'human' | 'agent' | 'system' // server-assigned from authenticated identity
   body: string
   bodyRevision: UInt64DecimalString
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
@@ -566,8 +566,9 @@ existing accessible message in the same workspace and `threadId`, must not equal
 the message's own `id`, and must not introduce a cycle in the ancestry chain.
 `ThreadMessage.workspaceId` must match `ChatThread.workspaceId` wherever messages
 are written, read, indexed, notified, or projected. Message create/update paths
-must reject client-supplied `id`, `editedById`, or `deletedById` values; those
-fields are server-assigned from authenticated activity identity only. Rendering
+must reject client-supplied `id`, `authorId`, `authorKind`, `editedById`, or
+`deletedById` values; those fields are server-assigned from authenticated
+activity identity only, never from browser-provided user identity. Rendering
 nested replies, indexing, notification fanout, and projection generation recheck
 the same invariant as downstream safeguards only.
 `parentMessageId` is immutable after `message_created`. Generic message update
