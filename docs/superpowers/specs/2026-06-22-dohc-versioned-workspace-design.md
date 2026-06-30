@@ -495,6 +495,8 @@ attempt, the earliest matching class in that order wins.
   state.
   Authorization and permission failures use `not_authorized` externally and
   `quarantined_authorization` internally.
+  Protected-path failures use `protected_path` externally and
+  `quarantined_protection` internally.
   Visibility-boundary failures use `visibility_denied` externally and
   `quarantined_visibility` internally; they must not be collapsed into
   `policy_denied` or `not_authorized`.
