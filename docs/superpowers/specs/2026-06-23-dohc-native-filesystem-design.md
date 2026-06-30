@@ -1215,8 +1215,9 @@ The system should expose:
 - what is conflicted.
 - what is secret-backed.
 - what is excluded/redacted on export.
-- what is captured but still `durable-pending` or quarantined instead of
-  canonical version history.
+- what is captured but still `durable-pending`, `rejected`, `quarantined`,
+  `retryable-failure`, `terminal-retired`, or otherwise not canonical version
+  history.
 
 Possible surfaces:
 
