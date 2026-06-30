@@ -628,9 +628,15 @@ better answer.
       `<User Name>'s agent`, but normal file versioning must work even when
       dohc only sees a local file change.
 
-12. **Phase 0 success demo:** prove the full loop with one ordinary text file,
-    one named version, history/restore, compare/merge/conflict preservation,
-    one linked chat, search, and no `.env` leakage.
+12. **Phase 0 success demo:**
+    - Must-pass: prove the full loop with one ordinary text file, one named
+      version, history/restore, compare/merge/conflict preservation, one linked
+      chat, search, and no `.env` leakage.
+    - Demo-only: keep the UI plain but understandable; do not require polished
+      chat texture, advanced ranking, or full workspace scale for Phase 0.
+    - Future-phase: external/shared channels, rich chat presence, virtual
+      filesystem scale, secret-backed `.env`, SQLite/app-aware merge, and
+      broad release hardening remain outside the Phase 0 completion gate.
 
 ## Runtime And Language Strategy
 
@@ -780,13 +786,15 @@ full roadmap and must be grounded in the current repository implementation.
 Phase 0 must-pass gates prove:
 
 ```text
-normal file edit
-  -> automatic history
-  -> restore
-  -> named version
-  -> compare/merge
-  -> conflict preservation
-  -> one chat linked to the file
+must-pass: normal file edit
+  -> must-pass: automatic history
+  -> must-pass: restore
+  -> must-pass: named version
+  -> must-pass: compare/merge
+  -> must-pass: conflict preservation
+  -> must-pass: one chat linked to the file
+  -> must-pass: search across linked file/chat
+  -> must-pass: `.env` exclusion/redaction smoke
 ```
 
 It should use one content driver first: ordinary text/file content. Do not
@@ -868,6 +876,15 @@ begin contract or implementation work until P0A writes and gets approval for the
 current-system inventory, storage/filesystem decision note, and unresolved
 blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
+
+After P0A and P0R, Phase 0 must land a small shared-substrate baseline before
+P0B, P0D, or P0E branch into implementation. That baseline freezes the early
+`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
+`ConflictRecord`, `ThreadLink`, and file/chat link shapes that later Phase 0
+lanes share. It may be provisional, but it must be versioned, tested, and owned
+in one place; P0B/P0D/P0E must not invent parallel shapes that PR 01 later has
+to reconcile. PR 01 formalizes and expands this baseline after P0G, rather than
+being the first place those shared interfaces appear.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1518,8 +1535,13 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
-- **Phase 0 gate:** P0A-P0G must complete and update the plan with proof-arc
-  evidence before PR 01-04 begin Foundation alpha implementation work.
+- **Phase 0 baseline freeze:** immediately after P0A/P0R and before P0B, P0D,
+  or P0E proceed, land the minimal shared substrate baseline for
+  `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object IDs, and
+  the provisional conflict/link/chat shapes those lanes consume.
+- **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
+  the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
+  implementation work.
 - **Foundation alpha:** PR 01-04 prove shared contracts, stable IDs, typed
   events, versions, and effective policy.
 - **Filesystem/version proof:** PR 05-11 prove normal files, versions,

@@ -98,16 +98,22 @@ const slug = (heading) => decodeHtmlEntities(visibleHeadingText(heading))
   .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}~]/g, '')
   .replace(/\s/g, '-')
 
+const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
+
 function* contentLines(markdown) {
   let inFence = false
   let fenceChar = null
   let fenceLength = 0
   let inIndentedCode = false
+  let activeListIndent = null
 
   for (const line of markdown.split(/\r?\n/)) {
     const fence = line.match(/^\s{0,3}(```+|~~~+)(.*)$/)
-    const indentedListItem = /^(?: {2,}|\t)\s*(?:[-+*]|\d+[.)])\s+/.test(line)
-    const indentedCode = /^(?: {4}|\t)/.test(line) && !indentedListItem
+    const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])\s+/)
+    const indentedListItem = Boolean(listItem)
+    const leadingIndent = indentationWidth(line)
+    const listContinuation = activeListIndent !== null && line.trim() !== '' && leadingIndent > activeListIndent
+    const indentedCode = /^(?: {4}|\t)/.test(line) && !indentedListItem && !listContinuation
 
     if (fence && !inFence) {
       const marker = fence[1][0]
@@ -132,6 +138,7 @@ function* contentLines(markdown) {
 
     if (!inFence && indentedCode) {
       inIndentedCode = true
+      activeListIndent = null
       continue
     }
 
@@ -143,6 +150,11 @@ function* contentLines(markdown) {
     }
 
     if (!inFence) {
+      if (indentedListItem) {
+        activeListIndent = indentationWidth(listItem[1])
+      } else if (line.trim() !== '' && activeListIndent !== null && leadingIndent <= activeListIndent) {
+        activeListIndent = null
+      }
       yield line
     }
   }
@@ -298,7 +310,7 @@ for (const file of files) {
     failures.push(`${file}: unresolved reference link ${raw}`)
   }
   for (const raw of links) {
-    if (/^(https?:|mailto:|app:)/.test(raw)) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
       continue
     }
 

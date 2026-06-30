@@ -211,6 +211,7 @@ type WriteResult =
       commitState:
         | 'no_canonical_commit_recorded'
         | 'commit_state_unknown_retry_required'
+        | 'canonical_commit_recorded'
     }
   | {
       kind: 'rejected'
@@ -318,7 +319,9 @@ operation fingerprint returns the same `idempotencyResultId`,
 `idempotencyReplayToken`, and `commitState` until retry handling can prove and
 return a canonical/durable result or a deterministic terminal outcome.
 `commitState` is the single source of truth for whether a canonical mutation is
-known absent, unknown and requires retry, or later proven recorded.
+known absent (`no_canonical_commit_recorded`), unknown and requires retry
+(`commit_state_unknown_retry_required`), or later proven recorded
+(`canonical_commit_recorded`).
 Retryable failures always carry the original `idempotencyKey`; retries must
 preserve it. `terminal-retired` is a first-class terminal `WriteResult` while
 its retained retirement metadata is addressable; it degrades to
@@ -816,6 +819,12 @@ idempotency result for the same workspace/version/idempotency identity. A retry
 with matching replay metadata returns that same conflict envelope even if later
 workspace state changes. If the engine cannot persist the conflict envelope and
 idempotency tombstone durably, it must not acknowledge the conflict response.
+It returns `kind: 'retryable-failure'` for the same idempotency identity with
+`reasonCode: 'service_unavailable'`, commitState
+`'commit_state_unknown_retry_required'`, and an optional `retryAfterMs`. A retry
+with matching replay metadata must either finish and replay the durable conflict
+result, prove and return a canonical/durable result, or continue returning the
+same retryable failure until the commit state is no longer unknown.
 Idempotency records must be persisted through the documented maximum retry
 horizon for that operation type and transport after the operation reaches a
 terminal result. The idempotency record/tombstone must be committed in the same
@@ -839,19 +848,17 @@ namespace is rotated.
 
 ### Idempotency Retry Horizons And WorkspaceIdempotencyPolicy
 
-The canonical retry-horizon values are defined once by this committed PR00
-source section,
-[`Idempotency Retry Horizons And WorkspaceIdempotencyPolicy`](#idempotency-retry-horizons-and-workspaceidempotencypolicy),
-then promoted into the PR 01 shared `WorkspaceIdempotencyPolicy` contract. This
-spec and the native filesystem spec both reference those policy names instead
-of duplicating values:
+This PR00 section is reference-only for retry-horizon names and invariants. It
+does not own numeric baselines. PR 01's shared `WorkspaceIdempotencyPolicy`
+contract is the sole source of truth for the numeric values of:
 `apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
 `filesystemCaptureDedupHorizonMs`, and
-`filesystemCaptureTombstoneRetentionMs`. Numeric baselines are explicitly
-deferred/TBD until PR 01 publishes the shared `WorkspaceIdempotencyPolicy`
-contract; implementation PRs must not ship independent defaults before that
-contract lands. Any PR that sets or changes the values must update the shared
-contract and execution log before changing implementation behavior.
+`filesystemCaptureTombstoneRetentionMs`. This spec and the native filesystem
+spec may reference those policy names, but must not duplicate values before PR
+01 lands the shared contract. Implementation PRs must not ship independent
+defaults before that contract lands. Any PR that sets or changes the values must
+update the shared contract and execution log before changing implementation
+behavior.
 
 Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
 Those paths use an engine-generated capture token and engine-side deduplication

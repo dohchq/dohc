@@ -50,6 +50,36 @@ retryable/terminal failures are distinct client-visible outcomes.
 Accepted-but-not-yet-promoted writes surface only as `durable-pending`; this spec
 does not define a separate `accepted-pending` status name.
 
+The authoritative native-filesystem write-result vocabulary is the shared
+versioned-workspace `WriteResult.kind` enum:
+
+- `canonical`: the write was promoted into canonical workspace history.
+- `durable-pending`: the write was captured durably in holding storage with a
+  `holdingRecordId`, but has not been promoted yet.
+- `conflict`: promotion found a preserved base/current/incoming conflict
+  envelope.
+- `quarantined`: capture or promotion cannot safely continue without an
+  explainable holding record and later disposition.
+- `rejected`: validation reached an authorization, policy, visibility,
+  protection, lock, version-access, skill-turn, provenance, attribution, or proof
+  denial before canonical acceptance.
+- `retryable-failure`: infrastructure or evaluator state is unavailable or
+  indeterminate, and the same operation should retry with its original
+  idempotency identity.
+- `terminal-retired`: a previously retained holding or idempotency record is no
+  longer actionable but still has minimal audit/idempotency metadata.
+- `idempotency-expired`: the retry horizon has passed, so the old key cannot be
+  silently treated as a new write.
+
+Native capture maps outcomes through that enum only: accepted-but-not-promoted
+writes return `durable-pending`; policy denials return `rejected`; suspicious,
+reserved, malformed-after-capture, or indeterminate local filesystem material
+returns `quarantined`; transient capture/promote outages return
+`retryable-failure`; conflict preservation returns `conflict`; successful
+promotion returns `canonical`; and retention expiry returns `terminal-retired`
+or `idempotency-expired` depending on whether minimal retry metadata is still
+inside the configured horizon.
+
 ## Filesystem shape
 
 A dohc workspace should have a normal, obvious folder shape:

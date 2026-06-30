@@ -1018,25 +1018,37 @@ server-assigned target identifiers:
   `bodyRevision`.
 - `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected
   `bodyRevision`.
+- `add_reaction` and `remove_reaction` require an `idempotencyKey`, `messageId`,
+  reaction key, and target message revision or equivalent reaction-set revision.
+- `mark_thread_read` and `update_read_state` require an `idempotencyKey` or a
+  server-derived stable read-state idempotency identity bound to actor, thread,
+  read cursor, and causal read-state revision.
 - `link_chat_to_work` requires an `idempotencyKey` and the
   `CanonicalThreadLinkKey`.
+- `summarize_chat` requires an `idempotencyKey` or worker request id bound to
+  thread, visible message range, summary target, model/config fingerprint, and
+  authorization scope.
 
 Before persisting or emitting side effects, each handler reserves the
 workspace-scoped idempotency record for the same actor, operation, key, and
 canonical operands atomically in the same transaction or serialized unit of work
-as the thread/message/link mutation. That same unit also writes a durable outbox
-or replayable side-effect ledger for notification fanout, search indexing,
-export/history fanout, projection invalidation, and any other derived work keyed
-by the same workspace/thread/message/link/idempotency identity. The idempotency
-record and side-effect ledger are persisted before any fanout, projection
-invalidation, notification, search indexing, or export work is emitted. A
-matching retry returns the existing result and replays, completes, or suppresses
-side effects from the committed ledger without creating duplicate messages,
-activities, notifications, links, projection invalidations, or fanout jobs. If
-the mutation commits but a worker crashes, retry/recovery must be able to
-regenerate downstream work from the durable mutation plus ledger; if the ledger
-cannot be committed with the mutation, the handler must not acknowledge success.
-A key reused with different operands fails closed with `replay_metadata_mismatch`.
+as the thread/message/link/reaction/read-state/summary mutation. Worker-owned
+mutations use the same rule with their server-derived request identity. That
+same unit also writes a durable outbox or replayable side-effect ledger for
+notification fanout, search indexing, export/history fanout, projection
+invalidation, summary fanout, read-state fanout, and any other derived work keyed
+by the same workspace, thread, message, link, reaction, read-state, summary, and
+idempotency identity. The idempotency record and side-effect ledger are persisted
+before any fanout, projection invalidation, notification, search indexing, export
+work, read-state materialization, or summary write is emitted. A matching retry
+returns the existing result and replays, completes, or suppresses side effects
+from the committed ledger without creating duplicate
+messages, activities, notifications, links, reactions, read-state transitions,
+summaries, projection invalidations, or fanout jobs. If the mutation commits but
+a worker crashes, retry/recovery must be able to regenerate downstream work from
+the durable mutation plus ledger; if the ledger cannot be committed with the
+mutation, the handler must not acknowledge success. A key reused with different
+operands fails closed with `replay_metadata_mismatch`.
 Client-supplied `threadId` on create or `messageId` on reply is rejected; those
 identifiers are server-owned outputs of the idempotency result. Chat idempotency
 records must be retained for the workspace's configured mutation retry horizon

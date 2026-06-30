@@ -18,8 +18,8 @@ Source specs:
 - **PR00 source of truth:** see the newest owning PR00 pass entry below for
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised checker, snapshot, and DM canonicalization findings that are addressed
-  in the newest pass; a committed rerun is still required.
+  raised workflow, checker, plan-gating, and spec-contract findings that are
+  addressed in the newest pass; a committed rerun is still required.
 - **Test evidence:** the newest pass records `git diff --check`, both Think
   Bigger docs link-check invocations, and the brand guard test passing.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
@@ -3071,6 +3071,40 @@ Hundred-fifty-second pass:
     open-override, and completion-state fields.
   - Removed the duplicate `canonicalizeDmParticipantIds(rawActorIds: string[])`
     declaration so only the server-aware helper signature remains.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-third pass:
+
+- Fixed CodeRabbit's ten follow-up findings:
+  - Restored path filters on the Think Bigger docs workflow so unrelated PRs and
+    pushes do not run the docs job.
+  - Kept nested-list continuation prose eligible for docs link checking while
+    still skipping true indented code blocks.
+  - Skipped any valid absolute URI scheme in the docs checker instead of only a
+    few hard-coded schemes.
+  - Added the retryable conflict-persistence fallback with
+    `commit_state_unknown_retry_required`.
+  - Made retry-horizon numeric ownership strictly reference-only in PR00, with
+    PR 01's `WorkspaceIdempotencyPolicy` as the sole numeric source of truth.
+  - Added `canonical_commit_recorded` to the retryable write `commitState`
+    vocabulary and named it in the prose.
+  - Split Phase 0 success criteria into must-pass, demo-only, and future-phase
+    buckets.
+  - Added the early Phase 0 shared-substrate baseline freeze before P0B/P0D/P0E.
+  - Added one authoritative native-filesystem `WriteResult.kind` outcome map.
+  - Extended chat mutation idempotency/replay/outbox semantics to reactions,
+    read-state updates, summaries, and worker-owned mutations.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
