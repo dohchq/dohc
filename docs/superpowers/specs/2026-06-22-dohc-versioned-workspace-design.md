@@ -121,8 +121,10 @@ type PublicDeniedReasonCode =
   | 'invalid_request'
   | 'quota_exceeded'
   | 'rate_limited'
-  | 'service_unavailable'
   | 'replay_metadata_mismatch'
+
+type RetryableWriteFailureCode =
+  | 'service_unavailable'
 
 type TerminalRetirementReason =
   | 'auto_retired_payload_retention_expired'
@@ -150,7 +152,21 @@ type WriteResult =
       acceptedAt: UnixMsDecimalString
       replayUntil: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
-      pendingState: 'pending_protection' | 'pending_canonicalization' | 'overdue_disposition'
+      pendingState:
+        | 'pending_protection'
+        | 'pending_review'
+        | 'pending_canonicalization'
+        | 'overdue_disposition'
+    }
+  | {
+      kind: 'retryable-failure'
+      workspaceId: string
+      versionId: string
+      idempotencyKey?: string
+      reasonCode: RetryableWriteFailureCode
+      failedAt: UnixMsDecimalString
+      retryAfterMs?: UInt64DecimalString
+      recordedAsCanonicalMutation: false
     }
   | {
       kind: 'rejected'
@@ -217,6 +233,10 @@ type WriteResult =
 Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
 stack details, policy rule names, secret/path internals, and operator notes stay
 server-side and appear only through separately authorized diagnostics.
+Transient infrastructure outages are not public denial reasons and must not be
+represented as terminal `rejected` or `quarantined` outcomes. They return the
+distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a
+later retry while recording that no canonical mutation was acknowledged.
 
 Rejected and quarantined ingests must still be durable in a non-canonical
 holding area with enough metadata to retry or explain the decision after
@@ -501,10 +521,11 @@ For rich documents, the projection contract must be explicit. If a Markdown
 document is backed by a canonical Y.Doc, `docs/plan.md` is a Markdown projection
 and `atoms.body` is a derived cache. Saving that file must either translate the
 edit back through a Y.Doc transaction with the same causal precondition rules as
-API writes, or reject/preserve the edit as a conflict if the driver cannot
-round-trip it safely. The engine regenerates Markdown/`atoms.body` from the
-canonical Y.Doc after a successful commit; direct file edits must not create a
-second authoritative body that can diverge from Y.Doc state.
+API writes, or normalize benign serializer/formatter changes and preserve only
+semantic mismatches as conflicts if the driver cannot round-trip them safely.
+The engine regenerates Markdown/`atoms.body` from the canonical Y.Doc after a
+successful commit; direct file edits must not create a second authoritative body
+that can diverge from Y.Doc state.
 
 Projection safety is mandatory. Any HTML/renderable projection, including HTML
 atoms and app/site previews, must be sanitized and sandboxed before display.

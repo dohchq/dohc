@@ -136,6 +136,11 @@ for (const file of files) {
         ? path.resolve(filePath)
         : path.resolve(path.dirname(filePath), decodedTarget),
     )
+    const relativeTarget = path.relative(repoRoot, targetPath)
+    if (relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) {
+      failures.push(`${file}: link target escapes repository root ${raw}`)
+      continue
+    }
 
     let targetStat
     try {

@@ -238,7 +238,8 @@ participants. Raw duplicates are rejected before uniqueness-key generation or
 persistence; implementations must not silently dedupe duplicate participants.
 Oversized canonical participant lists fail closed before persistence. Larger
 conversations should use channels or shared channels. Every service that builds
-the canonical participant set uses this same reject-duplicates policy.
+the canonical participant set uses this same `canonicalizeDmParticipantIds`
+validation path before uniqueness-key generation or persistence.
 
 DMs should still be source-aware when needed:
 
@@ -278,6 +279,12 @@ type ChatThreadProjection = ChatThread & {
   linkedWork: ActiveThreadLink[]
 }
 
+type DmParticipantIds = readonly string[] & {
+  readonly __brand: 'DmParticipantIds2To16'
+}
+
+declare function canonicalizeDmParticipantIds(rawActorIds: string[]): DmParticipantIds
+
 type ChannelChatThread = ChatThreadBase & {
   channelId: string
   channelConversationId: string
@@ -286,7 +293,7 @@ type ChannelChatThread = ChatThreadBase & {
 
 type DmChatThread = ChatThreadBase & {
   channelId?: never
-  dmParticipantIds: [string, string, ...string[]]
+  dmParticipantIds: DmParticipantIds
 }
 
 type ChatThread = ChannelChatThread | DmChatThread

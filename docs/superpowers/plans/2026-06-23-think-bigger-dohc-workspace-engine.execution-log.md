@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-thirteenth pass below.
+- **Last updated:** current through the Hundred-fourteenth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `adb3a68` reported 3 issues;
-  hundred-thirteenth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `33ef712` reported 7 issues;
+  hundred-fourteenth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2144,6 +2144,34 @@ Hundred-thirteenth pass:
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
   - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`, confirming repo-root-stable path resolution.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fourteenth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Constrained docs link targets under the checker repo root before `stat` or
+    file reads.
+  - Added `pending_review` to durable pending writes and separated
+    `service_unavailable` into a retryable non-denial `WriteResult`.
+  - Clarified rich-document Markdown/Y.Doc projection saves so benign
+    serializer normalization is not treated as conflict.
+  - Tightened secret-backed conflict envelopes to expose keyed commitments, not
+    raw hashes, by default.
+  - Required ordinary local writes to attach to a server-derived principal
+    before leaving quarantine and promoting to canonical history.
+  - Added a branded `DmParticipantIds` canonicalization path with the shared
+    2-16 participant constraint before persistence or uniqueness-key generation.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`, confirming repo-root-stable path resolution and
+    root containment.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Overrides:

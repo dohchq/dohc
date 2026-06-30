@@ -163,12 +163,14 @@ required when the agent performs a social/action-native operation such as
 posting a chat message.
 Managed mounts and dohc-controlled agent launches must bind the capture session
 to an active server/engine-derived principal before writes can promote to
-version history. Capture-time policy checks use that principal plus workspace
-scope, user locks, folder/atom access, sharing boundaries, protected paths, and
-skill-turn gates. If a raw OS write arrives without a resolvable active
-principal, dohc may record device/session provenance in the local durability log,
-but promotion to canonical history stays quarantined until a valid principal and
-policy decision are established.
+version history. Ordinary local editor and shell writes use the same
+server-derived principal resolution path, such as OS session binding or an
+explicit attach token, before promotion can leave quarantine. Capture-time policy
+checks use that principal plus workspace scope, user locks, folder/atom access,
+sharing boundaries, protected paths, and skill-turn gates. If a raw OS write
+arrives without a resolvable active principal, dohc may record device/session
+provenance in the local durability log, but promotion to canonical history stays
+quarantined until a valid principal and policy decision are established.
 
 ## Local capture and reconciliation
 
@@ -363,10 +365,11 @@ only as that mutually exclusive precondition mode, not as a separate boolean
 field beside another precondition.
 
 Conflict responses are secret-safe envelopes by default: they return only
-opaque object/version handles, hashes, operation kinds, and minimal conflict
-status. Policy decisions, explanatory metadata, redacted previews, and full
-current/incoming/restored/secret-backed bytes are materialized only through the
-server-side authorization path for that caller and resolution session.
+opaque object/version handles, keyed commitments, operation kinds, and minimal
+conflict status. Policy decisions, explanatory metadata, redacted previews, raw
+digests, and full current/incoming/restored/secret-backed bytes are materialized
+only through the server-side authorization path for that caller and resolution
+session.
 
 `delete(...)`, `rename(...)`, and `move(...)` are write-producing filesystem
 mutations. Delete requires the path's `targetObjectId`, exactly one freshness
