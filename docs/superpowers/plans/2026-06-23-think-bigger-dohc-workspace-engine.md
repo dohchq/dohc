@@ -1815,15 +1815,17 @@ projections.
 
 - users and agents can work in separate version folders with normal file ops.
 
-### PR 07 - Compare And Merge For Text/File Driver
+### PR 07 - Generalize The P0D Merge Engine
 
-**Goal:** Add common-base compare/merge for normal files and text.
+**Goal:** Reuse the P0D compare/merge/conflict contract and extend it to the
+broader text/file driver surfaces.
 
 **Scope:**
 
-- Implement base/current/incoming model.
-- Add clean merge.
-- Add conflict preservation.
+- Reuse P0D's frozen base/current/incoming conflict model; do not define a
+  second conflict schema.
+- Generalize clean merge beyond the Phase 0 proof path.
+- Generalize conflict preservation beyond the Phase 0 proof path.
 - Add `.dohc/conflicts/` projection or UI/API equivalent.
 - Avoid raw conflict markers as primary UX.
 
@@ -1833,12 +1835,13 @@ projections.
 - same-line conflict.
 - delete-vs-edit conflict.
 - rename or move handling if supported.
-- conflict preserves base/current/incoming.
+- conflict preserves the P0D base/current/incoming envelope.
 
 **E2E:**
 
 - two versions edit same file.
-- conflict appears and both sides are recoverable.
+- conflict appears through the generalized P0D envelope and both sides are
+  recoverable.
 
 **CodeRabbit focus:**
 
@@ -1848,7 +1851,8 @@ projections.
 
 **Acceptance:**
 
-- basic file versions can reconcile safely.
+- broader file versions reconcile safely through the P0D-owned merge/conflict
+  contract.
 
 ### PR 08 - Secret-Backed Files
 

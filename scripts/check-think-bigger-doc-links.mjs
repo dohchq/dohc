@@ -13,14 +13,18 @@ const files = [
   'docs/superpowers/specs/2026-06-23-dohc-chats-design.md',
 ]
 
-const slug = (heading) => heading
-  .trim()
-  .toLowerCase()
+const visibleHeadingText = (heading) => heading
+  .replace(/!\[([^\]\n]*)\]\([^)]*\)/g, '$1')
+  .replace(/\[([^\]\n]+)\]\([^)]*\)/g, '$1')
+  .replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1')
   .replace(/`([^`]*)`/g, '$1')
   .replace(/<[^>]+>/g, '')
+
+const slug = (heading) => visibleHeadingText(heading)
+  .trim()
+  .toLowerCase()
   .replace(/[^a-z0-9\s-]/g, '')
   .replace(/\s+/g, '-')
-  .replace(/-+/g, '-')
 
 function* contentLines(markdown) {
   let inFence = false
@@ -84,6 +88,16 @@ const collectLinks = (markdown) => {
 }
 
 const failures = []
+const anchorCache = new Map()
+
+const anchorsFor = (targetPath) => {
+  let anchors = anchorCache.get(targetPath)
+  if (!anchors) {
+    anchors = collectAnchors(fs.readFileSync(targetPath, 'utf8'))
+    anchorCache.set(targetPath, anchors)
+  }
+  return anchors
+}
 
 for (const file of files) {
   const filePath = path.resolve(repoRoot, file)
@@ -94,6 +108,7 @@ for (const file of files) {
   }
 
   const text = fs.readFileSync(filePath, 'utf8')
+  anchorCache.set(filePath, collectAnchors(text))
   for (const raw of collectLinks(text)) {
     if (/^(https?:|mailto:|app:)/.test(raw)) {
       continue
@@ -140,10 +155,7 @@ for (const file of files) {
       continue
     }
 
-    const targetText = fs.readFileSync(targetPath, 'utf8')
-    const anchors = collectAnchors(targetText)
-
-    if (!anchors.has(slug(decodedAnchor))) {
+    if (!anchorsFor(targetPath).has(slug(decodedAnchor))) {
       failures.push(`${file}: missing anchor ${raw}`)
     }
   }

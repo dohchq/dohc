@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-sixteenth pass below.
+- **Last updated:** current through the Hundred-seventeenth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `30c2887` reported 4 issues;
-  hundred-sixteenth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `d0190cc` reported 3 issues;
+  hundred-seventeenth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2214,6 +2214,27 @@ Hundred-sixteenth pass:
     projections and ordinary plaintext hydration are represented distinctly in
     schema, status/UI serialization, and agent-readable views.
   - Updated the Current PR Snapshot to the `30c2887` four-issue rerun.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventeenth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Made PR 07 explicitly generalize the P0D-owned compare/merge/conflict
+    contract instead of defining overlapping ownership.
+  - Added anchor caching to the docs link checker and reused the current file's
+    parsed anchors for self-links.
+  - Updated heading slug normalization to handle inline link/image visible text
+    and avoid collapsing repeated hyphens.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
