@@ -21,6 +21,8 @@ if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((fil
 
 const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
+  const expectedSpecDocs = new Set(expectedThinkBiggerDocs
+    .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
     const header = raw.split(/\r?\n/).slice(0, 12).join('\n')
@@ -33,7 +35,10 @@ const discoverThinkBiggerDocs = () => {
     },
     {
       dir: 'docs/superpowers/specs',
-      include: (name) => hasThinkBiggerCohortMetadata('docs/superpowers/specs', name),
+      include: (name) => {
+        const file = repoRelativePath('docs/superpowers/specs', name)
+        return expectedSpecDocs.has(file) || hasThinkBiggerCohortMetadata('docs/superpowers/specs', name)
+      },
     },
   ]
   const safeReadDir = (dir) => {

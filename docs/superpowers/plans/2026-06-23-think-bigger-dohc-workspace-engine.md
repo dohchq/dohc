@@ -1551,9 +1551,10 @@ Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
 - **Phase 0 provisional baseline freeze:** immediately after P0A/P0R and before
-  P0B, P0D, or P0E proceed, land the minimal Phase 0 shared substrate baseline
-  for `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object IDs,
-  and the provisional conflict/link/chat shapes those lanes consume.
+  P0B, P0C, P0D, P0E, P0F, or P0G proceed, land the minimal Phase 0 shared
+  substrate baseline for `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`,
+  stable object IDs, and the provisional conflict/link/chat shapes those lanes
+  consume.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.

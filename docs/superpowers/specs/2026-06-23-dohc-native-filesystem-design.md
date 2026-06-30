@@ -480,7 +480,7 @@ entries, projections, notifications, or search-index side effects. Idempotency
 records must be persisted through the documented maximum retry horizon for that
 operation type and transport after the operation reaches a terminal result. After
 that horizon, an API retry with the same key must fail closed with an explicit
-`idempotency_expired` response or a deterministic conflict response; it must not
+`idempotency-expired` response or a deterministic conflict response; it must not
 silently apply as a new mutation.
 Implementations may garbage-collect expired key tombstones only after the same
 maximum retry horizon has passed or the operation namespace is rotated.

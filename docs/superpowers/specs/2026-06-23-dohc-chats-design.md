@@ -907,15 +907,16 @@ new body. Legacy import flows that cannot recover a prior body revision must map
 snapshot, and is handled explicitly by history/export/replay as incomplete legacy
 evidence rather than a normal in-system delete. Reaction events must satisfy
 exactly one identity mode: either a
-stable `reactionId`, or the complete deterministic tuple `(messageId, actorId,
-reactionKey)`. `ThreadActivityBase.actorId` is the authoritative reaction actor
-identity for authorization, replay, export, notification fanout, and idempotency.
+stable `reactionId`, or the complete deterministic tuple `(workspaceId,
+threadId, messageId, actorId, reactionKey)`. `ThreadActivityBase.actorId` is the
+authoritative reaction actor identity for authorization, replay, export,
+notification fanout, and idempotency.
 `ReactionIdentity` must not introduce a second reaction actor field; legacy
 imports that contain a mismatched reaction actor must normalize to the event
 `actorId` or fail closed before replay.
 Reaction writes are idempotent by the chosen identity mode. A stable
-`reactionId` dedupes by that id; tuple mode treats `(messageId, actorId,
-reactionKey)` as one idempotent key. Repeated `reaction_added` or
+`reactionId` dedupes by that id; tuple mode treats `(workspaceId, threadId,
+messageId, actorId, reactionKey)` as one idempotent key. Repeated `reaction_added` or
 `reaction_removed` writes for the same key must return the existing result or a
 deterministic no-op and must not create duplicate activity, reactions,
 notifications, export entries, or replay effects.

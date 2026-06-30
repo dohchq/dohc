@@ -18,7 +18,7 @@ Source specs:
 - **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
   live CodeRabbit status, test evidence, open overrides, and completion state.
 - **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised four findings that are addressed in the newest pass; a committed rerun
+  raised five findings that are addressed in the newest pass; a committed rerun
   is still required.
 - **Test evidence:** the newest pass records `git diff --check`, both Think
   Bigger docs link-check invocations, and the brand guard test passing.
@@ -3280,6 +3280,29 @@ Hundred-fifty-ninth pass:
   - Made DM duplicate handling explicit: all client-supplied self entries are
     stripped before duplicate checks, while duplicates among non-self requested
     participants fail closed.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixtieth pass:
+
+- Fixed CodeRabbit's five follow-up findings:
+  - Made docs discovery include manifest-listed source specs directly while
+    retaining cohort-metadata discovery for new specs.
+  - Updated the Current PR Snapshot to the latest five-finding review batch.
+  - Normalized native filesystem expiry wording to `idempotency-expired`.
+  - Aligned the roadmap milestone so the provisional baseline freeze blocks
+    P0B, P0C, P0D, P0E, P0F, and P0G until the shared substrate baseline lands.
+  - Added `(workspaceId, threadId)` to tuple-mode reaction idempotency keys.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
