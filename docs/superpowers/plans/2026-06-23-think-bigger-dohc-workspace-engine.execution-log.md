@@ -15,16 +15,16 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Authoritative live status:** `Hundred-seventy-first pass` below owns live
+- **Authoritative live status:** `Hundred-seventy-second pass` below owns live
   CodeRabbit status, test evidence, open overrides, and completion state for
   PR00.
-- **Snapshot role:** this block is derived from `Hundred-seventy-first pass` and
+- **Snapshot role:** this block is derived from `Hundred-seventy-second pass` and
   does not own mutable review state.
-- **CodeRabbit status:** derive from `Hundred-seventy-first pass`.
-- **Test evidence:** derive from the `Hundred-seventy-first pass` validation block.
+- **CodeRabbit status:** derive from `Hundred-seventy-second pass`.
+- **Test evidence:** derive from the `Hundred-seventy-second pass` validation block.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
   remains pending human approval.
-- **Completion state:** derive from `Hundred-seventy-first pass`; not complete or
+- **Completion state:** derive from `Hundred-seventy-second pass`; not complete or
   merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
   exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
@@ -3586,6 +3586,33 @@ Hundred-seventy-first pass:
     validation errors instead of `conflict`.
   - Required `replace(...)` source and destination to stay on the same underlying
     filesystem or mount projection.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventy-second pass:
+
+- Fixed CodeRabbit's six follow-up findings:
+  - Included provenance, attribution, and proof in the headline write-path deny
+    gate list.
+  - Adjusted docs-link slug whitespace handling to remove non-space whitespace
+    instead of hyphenating it.
+  - Added a decision-note / unresolved-blocker slot for storage, filesystem,
+    secret, merge, and async-gating decisions in the execution-log template.
+  - Kept rename/move topology failures inside shared `WriteResult.kind` outcomes
+    by routing them through `rejected` or `quarantined`.
+  - Extended chat idempotency retention to cover downstream worker recovery and
+    durable ledger replay windows.
+  - Removed JS-Date-specific timestamp bounds from the shared chat schema.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -110,7 +110,8 @@ const slug = (heading) => decodeHtmlEntities(visibleHeadingText(heading))
   .toLowerCase()
   .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}~]/g, '')
   .replace(/[\u00a1-\u00bf\u2010-\u2027\u2030-\u205e\u2e00-\u2e7f\u3000-\u303f\ufe10-\ufe1f\ufe30-\ufe4f\uff00-\uff65]/g, '')
-  .replace(/\s/g, '-')
+  .replace(/[^\S ]+/g, '')
+  .replace(/ +/g, '-')
 
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
 

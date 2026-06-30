@@ -1351,6 +1351,8 @@ For every PR/phase record:
 - subagent reviews.
 - manual QA.
 - remaining risks.
+- decision note / unresolved blockers, including storage, filesystem, secret,
+  merge, and async-gating decisions plus resolution status.
 - follow-up deletion conditions.
 - baseline machine/CI profile.
 - cold/warm fixture state and measured values.

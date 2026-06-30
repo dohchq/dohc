@@ -107,8 +107,8 @@ must reject signs, decimal points, separators, whitespace, locale/non-ASCII
 digits, empty strings, leading zeros except the literal `0`, and values outside
 the declared range. `UInt64DecimalString` is `0` through
 `18446744073709551615`. `UnixMsDecimalString` is non-negative Unix epoch
-milliseconds through `8640000000000000`. Platform-specific timestamp bounds
-belong in translation layers, not the shared schema. `ThreadReadState.updatedAt`,
+milliseconds. Runtime-specific timestamp bounds, if any, belong in translation
+layers, not the shared schema. `ThreadReadState.updatedAt`,
 `ThreadMessage.createdAt`, `ThreadMessage.editedAt`, and
 `ThreadActivityBase.createdAt` are pinned to server time and must not be
 accepted from client payloads. All boundary readers must parse, range-check, and
@@ -1165,9 +1165,10 @@ operands fails closed with `replay_metadata_mismatch`.
 Client-supplied `threadId` on create or `messageId` on reply is rejected; those
 identifiers are server-owned outputs of the idempotency result. Chat idempotency
 records must be retained for the workspace's configured mutation retry horizon
-and no less than the maximum client/offline retry window; after expiry, late
-retries fail closed with an explicit idempotency-expired response rather than
-creating duplicate side effects.
+and no less than the maximum client/offline retry window or the longest
+downstream worker recovery/durable ledger replay window, whichever is larger;
+after expiry, late retries fail closed with an explicit idempotency-expired
+response rather than creating duplicate side effects.
 All chat API and worker mutation paths, including edits, deletes, reactions,
 read-state updates, links, notifications, summaries, and projections, must also
 respect user locks, folder/atom/file sharing boundaries, protected work, and

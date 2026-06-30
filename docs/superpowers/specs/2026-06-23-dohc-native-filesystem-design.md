@@ -397,7 +397,7 @@ changes. Both require source identity, destination absence, causal
 preconditions, and idempotency, and neither may degrade into delete-plus-create
 semantics. If source and destination resolve to different physical filesystems,
 volumes, or mount projections, `rename(...)` and `move(...)` fail closed with no
-mutation, surfacing `quarantined` or a validation error with manual-follow-up
+mutation, surfacing `rejected` or `quarantined` with manual-follow-up
 metadata according to the capture/API path instead of falling back to copy/delete
 behavior. `conflict` remains reserved for cases where the engine can form the
 base/current/incoming preservation envelope described above.
@@ -406,9 +406,9 @@ map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and resta
 reconciliation must classify common editor temp-file-then-rename saves this way:
 the temp source provides `sourceObjectId`, the existing destination provides
 `destinationObjectId`, and both sides carry freshness preconditions. If the
-destination identity cannot be proven, the capture resolves to `quarantined` or
-a validation error with manual-follow-up metadata instead of applying a
-path-only overwrite. Manual follow-up is operator workflow metadata, not a
+destination identity cannot be proven, the capture resolves to `rejected` or
+`quarantined` with manual-follow-up metadata instead of applying a path-only
+overwrite. Manual follow-up is operator workflow metadata, not a
 `WriteResult.kind`.
 
 This answers the API-native workspace requirement. The file mount and the API

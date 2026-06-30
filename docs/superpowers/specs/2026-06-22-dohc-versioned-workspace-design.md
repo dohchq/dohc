@@ -83,8 +83,9 @@ derived by the server/engine, never trusted from the caller. Humans, agents,
 automations, imports, and sync processes all pass through the same protection
 checks before a write can land. The write path is fail-closed: substantive
 authorization, ownership/review gate, policy, visibility, protected-path,
-user-lock, version-access, or skill-turn decisions can deny a write, but an
-unavailable or indeterminate evaluator is classified as `retryable-failure`.
+user-lock, version-access, skill-turn, provenance, attribution, or proof
+decisions can deny a write, but an unavailable or indeterminate evaluator is
+classified as `retryable-failure`.
 `retryable-failure.commitState: 'no_canonical_commit_recorded'` means the engine
 proved no canonical mutation was applied. `retryable-failure.commitState:
 'commit_state_unknown_retry_required'` means the mutation may already be
