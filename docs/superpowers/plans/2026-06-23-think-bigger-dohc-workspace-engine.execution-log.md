@@ -58,15 +58,17 @@ secret-handling, data-loss, or review-gate blockers.
 
 ## PR Lane Inventory
 
-P0A-P0G branches are provisional throughput work started after user approval for
-unattended Phase 0 execution on 2026-06-24. Current live state is recorded only
-in the canonical live-status block in the latest PR00 pass below. This table
-records static lane ownership, branch, worktree, and planned validation shape.
+P0A-P0G branches plus the P0R spike and P0S shared-substrate checkpoint are
+provisional throughput work started after user approval for unattended Phase 0
+execution on 2026-06-24. Current live state is recorded only in the canonical
+live-status block in the latest PR00 pass below. This table records static lane
+ownership, branch, worktree, and planned validation shape.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR workstream | docs + minimal storage/filesystem smoke + focused package tests | Provisional lane. |
 | P0R | Rust Workspace Kernel Spike | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR workstream | cargo test + perf | Provisional lane. |
+| P0S | Shared Substrate Freeze | TBD / PR01 schema promotion checkpoint | TBD | main orchestration + schema-baseline lane | shared substrate tests + consumer import checks | Live checkpoint before P0B-P0G; consolidated under PR01 Schema Promotion Checkpoint. |
 | P0B | Minimal Versioned Text Store | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0C | File/API Write Capture And History | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR workstream | workspace-engine/history/mcp/desktop + feasible matrix | Provisional lane. |
 | P0D | Compare, Clean Merge, Conflict Preservation | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR workstream | workspace-engine + workspace-history + typecheck | Provisional lane. |
@@ -4815,6 +4817,40 @@ Two-hundred-seventh pass:
 - Overrides:
   - None approved.
 
+Two-hundred-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Added the `Design specs for versioning, chats, and filesystem` cohort alias
+    to the docs checker discovery regex.
+  - Added P0S to the live PR lane inventory and Phase 0 Proof Arc PR list.
+  - Tightened native filesystem idempotency wording so secret-backed operands
+    use server-scoped opaque fingerprints that are never returned to clients.
+  - Normalized chat channel `linkedTargets` as a sorted/deduped canonical set
+    and made `linked_work` channel conversations use exactly one canonical
+    target discriminator.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and
@@ -4864,6 +4900,7 @@ PRs:
 
 - P0A
 - P0R
+- P0S
 - P0B
 - P0C
 - P0D

@@ -250,6 +250,15 @@ type Channel = {
 }
 ```
 
+`linkedTargets` is a server-normalized set, not caller-order-sensitive input.
+The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
+tuple used by `ThreadLink` creation, rejects unsupported or unauthorized
+targets, deduplicates exact duplicates, and persists the set sorted by
+canonical target serialization. General channel context, ACL expansion, side-rail
+projection, search, and export use that normalized set. Array order and
+duplicates must never participate in channel identity, thread identity, or
+conversation-id derivation.
+
 `channelId` is the durable identity. `channelSlug` is a server-normalized lookup
 alias that may change on rename, but renames must not change `channelId`, fork
 existing `ChatThread` rows, rewrite message history, or invalidate durable
@@ -574,8 +583,8 @@ Non-default `channelConversationId` values must be server-issued and
 deterministic from one canonical channel-conversation context tuple; clients must
 not invent them. That tuple includes `workspaceId`, `channelId`,
 `conversationKind` (`default`, `linked_work`, or `named_subconversation`), and
-the kind-specific immutable discriminator: canonical linked-work target tuple for
-`linked_work`, normalized server-owned conversation key for
+the kind-specific immutable discriminator: exactly one canonical linked-work
+target tuple for `linked_work`, normalized server-owned conversation key for
 `named_subconversation`, or no extra discriminator for `default`. The same tuple
 must reuse the existing id through atomic get-or-create; a materially different
 tuple gets a new deterministic id and therefore a different thread. Ordinary
@@ -585,7 +594,11 @@ association, conversation kind, linked-work discriminator that defined a
 `linked_work` conversation, or named-subconversation key requires tombstoning or
 archiving the old thread and creating a new one. Channel renames, moves, topic
 changes, ordering changes, and other channel metadata updates preserve
-`channelConversationId`.
+`channelConversationId`. Multi-target channel context from `Channel.linkedTargets`
+does not derive a `linked_work` conversation id from array order; a linked-work
+conversation chooses one normalized target discriminator, while broader
+multi-target discussion uses the default conversation or a server-owned
+`named_subconversation` key.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current

@@ -572,12 +572,18 @@ snapshot/etag or target base, the merge returns a deterministic conflict
 response instead of applying stale output.
 
 API-originated write-producing operations must carry an idempotency key bound to
-the actor/session, workspace, version, operation type, target, write payload
-digest or canonical operation payload fingerprint, full operation operand tuple
-after workspace path canonicalization and equivalence normalization, and causal
-precondition. Payload or operand changes must produce a different idempotency
-identity even when the path and precondition are unchanged. Duplicate
-delivery with the same idempotency key returns the original result or a
+the actor/session, workspace, version, operation type, target, causal
+precondition, full operation operand tuple after workspace path canonicalization
+and equivalence normalization, and a server-scoped opaque operand fingerprint.
+Non-secret operands may derive that fingerprint from a canonical payload digest.
+For secret-backed operands, payload bytes must contribute only inside the
+server/secret boundary through a keyed digest, handle, or equivalent opaque
+fingerprint; raw payload bytes, reusable payload digests, and equality-oracle
+fingerprints must never be returned to clients, exported, logged as ordinary
+metadata, or included in a client-visible idempotency identity. Payload or
+operand changes must still produce a different idempotency identity even when
+the path and precondition are unchanged. Duplicate delivery with the same
+idempotency key returns the original result or a
 deterministic equivalent without creating extra canonical mutations, history
 entries, projections, notifications, or search-index side effects. Idempotency
 records must be persisted through the documented maximum retry horizon for that
