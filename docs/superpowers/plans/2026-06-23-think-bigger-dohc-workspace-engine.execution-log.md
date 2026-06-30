@@ -5274,7 +5274,7 @@ Two-hundred-twentieth pass:
 
 Two-hundred-twenty-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5297,6 +5297,41 @@ Two-hundred-twenty-first pass:
   - Restricted accepted holding-record retries to canonical, durable-pending,
     quarantined, terminal-retired, or expired outcomes, reserving
     `rejected_record` for pre-acceptance rejection records.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-twenty-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Clarified PR 01 owns only the chat read-state compatibility bridge, while
+    PR 12 owns the authoritative `ThreadReadState` schema.
+  - Restricted `create_chat` to DM creation and kept channel-backed thread
+    creation inside `send_channel_message`.
+  - Added `channel-target-ledger-sync` so channel-backed `ThreadLink` mutations
+    append matching `ChannelTargetActivity` rows before fanout.
+  - Added explicit validation-error rows for `invalid_request`/request-shape
+    failures, `capture_token_invalid`, and `replay_metadata_mismatch` to the
+    normative gate/retry matrix.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

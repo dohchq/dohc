@@ -663,6 +663,16 @@ projections, search, and notifications from active canonical links only. If the
 derived list includes a tombstoned link, omits an active link, or otherwise
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
+For a `ChannelChatThread`, the same transaction or serialized unit must also run
+`channel-target-ledger-sync`: normalize the changed `ThreadLink` target into a
+`ChannelLinkedTargetRef`, append the matching `ChannelTargetActivity`
+(`channel_target_linked` or `channel_target_unlinked`) for the thread's
+`channelId`, and enqueue the same durable outbox identity used for side rails,
+search, export, replay, and projection invalidation. DM threads do not emit
+`ChannelTargetActivity`. If a retry observes an already-active or tombstoned
+`ThreadLink`, it must also observe the matching channel-target activity before
+reporting the idempotent result; otherwise the link mutation is incomplete and
+must repair through the same `channel-target-ledger-sync` step before fanout.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
@@ -969,14 +979,29 @@ type ThreadActivityBase = {
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 
-type ChatCreateThreadActivity = ThreadActivityBase & {
+type ChannelChatCreateThreadActivity = ThreadActivityBase & {
   kind: 'chat_created'
-  threadKind: 'channel' | 'dm'
+  threadKind: 'channel'
   title?: string
-  channelId?: string
-  channelConversationId?: string
-  dmParticipantIds?: DmParticipantIds
+  channelId: string
+  channelConversationId: string
+  dmParticipantIds?: never
 }
+
+type DmChatCreateThreadActivity = ThreadActivityBase & {
+  kind: 'chat_created'
+  threadKind: 'dm'
+  title?: string
+  channelId?: never
+  channelConversationId?: never
+  dmParticipantIds: DmParticipantIds
+}
+
+type ChatCreateThreadActivity =
+  // create_chat emits only the DM variant. Channel-backed threads are created
+  // only by send_channel_message in the same atomic unit as the first message.
+  | ChannelChatCreateThreadActivity
+  | DmChatCreateThreadActivity
 
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
@@ -1321,13 +1346,17 @@ the authority model.
 Chat mutation handlers are idempotent by stable request identifiers and
 server-assigned target identifiers:
 
-- `create_chat` requires an `idempotencyKey`; the server assigns `threadId` in
-  the idempotency result, and retries return that same `threadId`.
+- `create_chat` requires an `idempotencyKey`; it creates DM threads only, emits
+  the `threadKind: 'dm'` `chat_created` activity, assigns `threadId` in the
+  idempotency result, and retries return that same `threadId`. Channel-backed
+  threads must not be created through `create_chat`.
 - `send_channel_message` requires an `idempotencyKey`; the server atomically
   resolves or creates the channel-backed `ChatThread` by
   `(workspaceId, channelId, channelConversationId)` and persists the
-  `ThreadMessage` in the same serialized unit. The idempotency result returns
-  both `threadId` and `messageId`, and retries return the same pair.
+  `ThreadMessage` plus the `threadKind: 'channel'` `chat_created` activity when
+  this is the first send for that tuple in the same serialized unit. The
+  idempotency result returns both `threadId` and `messageId`, and retries return
+  the same pair.
 - `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
   in the idempotency result, and retries return that same `messageId`.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected

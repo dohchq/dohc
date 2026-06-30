@@ -106,7 +106,10 @@ Normative gate/retry matrix:
 
 | Gate outcome | Public result | Commit state / record |
 | --- | --- | --- |
-| Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before durable acceptance | `rejected` or validation error | `rejected_before_acceptance`; no canonical commit. |
+| Malformed request, missing/incompatible precondition, invalid path/version, or cross-workspace reference before persistence | validation error such as `invalid_request`, `malformed_request`, `missing_precondition`, `incompatible_precondition`, `invalid_path`, `invalid_version`, or `cross_workspace_reference` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Replayed idempotency key with mismatched actor/session, workspace, version context, operation type, target, payload digest, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before durable acceptance | `rejected` | `rejected_before_acceptance`; no canonical commit. |
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
 | Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |

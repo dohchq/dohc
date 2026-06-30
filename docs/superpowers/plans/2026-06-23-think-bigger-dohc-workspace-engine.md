@@ -1701,17 +1701,19 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  `ProjectionValidation`, `ThreadReadState`, and `AgentRun`.
+  `ProjectionValidation`, and `AgentRun`.
 - Formalize and extend the carried-forward `ConflictRecord` contract from
   `Phase0SharedSubstrateBaseline`, preserving the `ConflictRecord` symbol and the
   `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
   migration/backfill boundary supersedes it.
-- Consume the Phase 0 `ThreadReadState` bridge contract from
+- Consume the Phase 0 chat read-state compatibility bridge from
   `Phase0SharedSubstrateBaseline`, preserving monotonic cursor semantics and
-  server-owned revision tokens until PR 12 owns the final read-state schema.
+  server-owned revision tokens only as bridge requirements. PR 01 must not define
+  the authoritative `ThreadReadState` contract; PR 12 owns that final schema.
 - Define the `AgentRun` identity contract and migration/backfill semantics here
   so PR 01 is the single canonical owner for agent-run identity.
-- Consume provisional chat/read-state/link symbols exactly as assigned in the
+- Consume provisional chat bridge/read-state-bridge/link symbols exactly as
+  assigned in the
   [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix);
   this PR must not restate or redefine chat-schema ownership locally.
 - Define link dereference shape: source/owning workspace ID, target type, target
