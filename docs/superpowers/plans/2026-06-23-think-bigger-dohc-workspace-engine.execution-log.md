@@ -15,13 +15,15 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
-  live CodeRabbit status, test evidence, open overrides, and completion state.
-- **CodeRabbit status:** see the newest PR00 pass entry below.
-- **Test evidence:** derive from the latest validation block.
+- **Authoritative live status:** the newest PR00 pass entry below owns live
+  CodeRabbit status, test evidence, open overrides, and completion state.
+- **Snapshot role:** this block is derived from the newest PR00 pass entry and
+  does not own mutable review state.
+- **CodeRabbit status:** derive from the newest PR00 pass entry.
+- **Test evidence:** derive from the newest PR00 validation block.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
   remains pending human approval.
-- **Completion state:** derive from the latest PR00 pass entry; not complete or
+- **Completion state:** derive from the newest PR00 pass entry; not complete or
   merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
   exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
@@ -3439,6 +3441,26 @@ Hundred-sixty-fifth pass:
     `shareGrantId`/`visibilityScope` server-populated only.
   - Wrapped Think Bigger manifest read/parse failures with an actionable checker
     error.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixty-sixth pass:
+
+- Fixed CodeRabbit's two follow-up findings:
+  - Made the docs checker skip self-closing HTML tags such as `<br/>`, `<hr/>`,
+    and `<wbr/>` during autolink scanning.
+  - Clarified that the newest PR00 pass entry owns live status while Current PR
+    Snapshot is a derived summary.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

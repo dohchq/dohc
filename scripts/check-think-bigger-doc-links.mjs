@@ -279,7 +279,7 @@ const collectLinks = (markdown) => {
       }
     }
     for (const match of prose.matchAll(autolinkPattern)) {
-      if (/^<\/[A-Za-z][A-Za-z0-9-]*>$/.test(match[0])) {
+      if (/^<\/?[A-Za-z][A-Za-z0-9-]*\s*\/?>$/.test(match[0])) {
         continue
       }
       links.push(match[1])
