@@ -472,9 +472,11 @@ must still hit the storage constraint before `link_added` fanout or projection
 updates. If the storage engine cannot express a partial unique index directly,
 it must use an active-link reservation row keyed by
 `(workspaceId, CanonicalThreadLinkKey)` and reserve it in the same transaction or
-serialized unit of work as the `ThreadLink` mutation. A uniqueness conflict is
-resolved by reading the existing active `ThreadLink`, returning the idempotent
-result, and skipping duplicate activity/fanout.
+serialized unit of work as the `ThreadLink` mutation. Tombstoning a link must
+release or supersede that active reservation in the same transaction that sets
+`deletedAt`, while preserving the historical tombstone record. A uniqueness
+conflict is resolved by reading the existing active `ThreadLink`, returning the
+idempotent result, and skipping duplicate activity/fanout.
 A retry for the same normalized key must upsert or no-op against the existing
 active `ThreadLink` and must not create a second active link or duplicate
 `link_added` fanout.
@@ -779,8 +781,10 @@ type MessageRestoreThreadActivity = ThreadActivityBase & {
 
 `nextBodyHash`, `bodyHash`, and `tombstoneHash` are lowercase hex SHA-256 over a
 canonical JSON payload with sorted object keys, no insignificant whitespace, and
-all strings normalized to Unicode NFC before UTF-8 encoding. `nextBodyHash`
-hashes `["chat-body:v1", workspaceId, threadId, messageId, bodyRevision,
+only user-authored text fields normalized to Unicode NFC before UTF-8 encoding.
+Opaque IDs such as `workspaceId`, `threadId`, and `messageId` are hashed
+byte-for-byte from their canonical stored form. `nextBodyHash` hashes
+`["chat-body:v1", workspaceId, threadId, messageId, bodyRevision,
 nextBodySnapshot]`, where `nextBodySnapshot` is the canonical current
 `ChatBodySnapshot` after create/edit/restore. `bodyHash` uses the same
 `chat-body:v1` payload for the referenced persisted body revision.

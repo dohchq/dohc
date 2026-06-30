@@ -18,7 +18,7 @@ Source specs:
 - **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
   live CodeRabbit status, test evidence, open overrides, and completion state.
 - **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised seven findings that are addressed in the newest pass; a committed rerun
+  raised six findings that are addressed in the newest pass; a committed rerun
   is still required.
 - **Test evidence:** the newest pass records `git diff --check`, both Think
   Bigger docs link-check invocations, and the brand guard test passing.
@@ -171,6 +171,7 @@ Date completed:
 - Findings:
 - Fixes:
 - Overrides:
+- Override approval reference:
 
 ### Unresolved Findings
 
@@ -3332,6 +3333,32 @@ Hundred-sixty-first pass:
   - Clarified explicit user override precedence in policy resolution.
   - Extended docs anchor slug normalization to strip common Unicode punctuation
     ranges.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixty-second pass:
+
+- Fixed CodeRabbit's six follow-up findings:
+  - Added explicit holding-record deadline precedence for replay, pending
+    canonicalization, operator disposition, and recoverable payload retention.
+  - Defined clean Markdown/Y.Doc projection round-trip criteria and semantic
+    conflict handling.
+  - Clarified chat body hash normalization so opaque IDs hash exactly as stored.
+  - Required ThreadLink tombstones to release or supersede active-link
+    reservations so future relinks can succeed.
+  - Made cross-mount `rename(...)` and `move(...)` fail closed without copy/delete
+    fallback.
+  - Added `Override approval reference` to the execution-log CodeRabbit template.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

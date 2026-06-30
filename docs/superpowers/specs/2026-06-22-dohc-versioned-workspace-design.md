@@ -395,6 +395,15 @@ canonicalization succeeds, an explicit operator disposition record retires it,
 or the effective finite `maxRecoverableHoldingPayloadMs` bound is reached.
 `operatorDispositionDueAt` marks the item overdue for operator/status handling;
 it does not itself cryptoshred or compact reconstructible bytes.
+Deadline precedence is fixed when lifecycle fields disagree:
+`replayUntil` controls how long the idempotency result must replay and never
+extends reconstructible payload retention; `operatorDispositionDueAt` and
+`maxPendingCanonicalizationMs` control when `pending_canonicalization` becomes
+`overdue_disposition`; `retentionUntil` and
+`maxRecoverableHoldingPayloadMs` control reconstructible payload retention, with
+the earlier effective payload-retention deadline winning. If payload retention
+expires before `replayUntil`, retries keep replaying a minimal
+`terminal-retired` or `idempotency-expired` result without reconstructible bytes.
 No accepted holding record may remain recoverable forever: if no
 workspace-specific recovery-retention policy is configured, the engine's default
 finite `maxRecoverableHoldingPayloadMs` applies, and workspaces may only choose
@@ -675,6 +684,15 @@ and `atoms.body` is a derived cache. Saving that file must either translate the
 edit back through a Y.Doc transaction with the same causal precondition rules as
 API writes, or normalize benign serializer/formatter changes and preserve only
 semantic mismatches as conflicts if the driver cannot round-trip them safely.
+The driver decides clean round-trip by parsing the edited Markdown projection,
+applying the canonical serializer/formatter normalization, and comparing the
+resulting semantic Y.Doc operation against the causal base captured when the
+projection was materialized. If the normalized semantic operation applies
+cleanly to the current Y.Doc under that precondition, the write commits through a
+Y.Doc transaction. If parsing loses structure, serializer normalization changes
+meaning, or the causal base no longer matches, the write returns a semantic
+conflict with current Y.Doc state and incoming Markdown preserved for
+reconciliation.
 The engine regenerates Markdown/`atoms.body` from the canonical Y.Doc after a
 successful commit; direct file edits must not create a second authoritative body
 that can diverge from Y.Doc state.

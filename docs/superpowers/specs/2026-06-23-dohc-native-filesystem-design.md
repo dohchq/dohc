@@ -391,7 +391,10 @@ rules. `rename` is the preferred API name when the parent path is unchanged and
 only the basename changes; `move` is the preferred API name when the parent path
 changes. Both require source identity, destination absence, causal
 preconditions, and idempotency, and neither may degrade into delete-plus-create
-semantics.
+semantics. If source and destination resolve to different physical filesystems,
+volumes, or mount projections, `rename(...)` and `move(...)` fail closed with no
+mutation, surfacing `conflict`, `quarantined`, or a validation error according to
+the capture/API path instead of falling back to copy/delete behavior.
 If the destination already exists, the operation is an overwrite-rename and must
 map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart
 reconciliation must classify common editor temp-file-then-rename saves this way:
