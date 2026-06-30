@@ -275,14 +275,6 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 node scripts/check-think-bigger-doc-links.mjs
 ```
 
-#### Remote PR And Review
-
-```bash
-git push -u origin codex/think-bigger-00-readiness-scaffold
-gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "Add dohc Think Bigger workspace engine plan"
-coderabbit review --agent -t committed -c AGENTS.md
-```
-
 #### Node 24 Validation
 
 ```bash
@@ -298,6 +290,14 @@ tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0 --s
 /tmp/dohc-node-v24.18.0/bin/node -v
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --version
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+```
+
+#### Remote PR And Review
+
+```bash
+git push -u origin codex/think-bigger-00-readiness-scaffold
+gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "Add dohc Think Bigger workspace engine plan"
+coderabbit review --agent -t committed -c AGENTS.md
 ```
 
 ### E2E / Visual / Manual QA
@@ -3890,6 +3890,39 @@ Hundred-eighty-first pass:
   - Deduped collected doc links before validation.
   - Adjusted slug generation so each remaining space becomes one GitHub-style
     hyphen.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-eighty-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Moved historical Node 24 validation evidence before remote push/PR/review
+    commands.
+  - Clarified that generic materialized workspace tree walkers skip `.versions/**`
+    by default and only engine-managed version mounts may enter those roots.
+  - Distinguished managed engine-owned `.dohc/**` state from foreign
+    out-of-contract `.dohc/**` material in reserved-namespace quarantine rules.
+  - Broadened shared-channel redaction to thread titles, participant lists,
+    inbox/side-rail entries, activity feeds, unread badges, messages, links, and
+    references.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

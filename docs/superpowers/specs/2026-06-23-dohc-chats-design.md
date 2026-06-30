@@ -1467,14 +1467,16 @@ sharing substrate.
 
 The channel should not grant broad workspace access. Shared channel access must
 compose with normal file/folder/version visibility.
-Every message, link, projected reference, and free-text mention inside a shared
-channel must be re-authorized or redacted against normal workspace policy before
-rendering, search, projection, notification materialization, or export. An
-external viewer can see only the chat content and work artifacts explicitly
-shared with them; non-shared files, atoms, versions, app views, agent runs, and
-unshared links remain hidden even if they are mentioned inside an otherwise
-shared thread. Explicitly shared links and work references remain visible only
-when their server-side grant is still valid for that viewer and redaction scope.
+Every message, thread title, participant list, inbox or side-rail entry, activity
+feed item, unread badge, link, projected reference, and free-text mention inside
+a shared channel must be re-authorized or redacted against normal workspace
+policy before rendering, search, projection, notification materialization, or
+export. An external viewer can see only the chat content and work artifacts
+explicitly shared with them; non-shared files, atoms, versions, app views, agent
+runs, participants, thread subjects, unread state, activity, and unshared links
+remain hidden even if they are mentioned inside an otherwise shared thread.
+Explicitly shared links and work references remain visible only when their
+server-side grant is still valid for that viewer and redaction scope.
 
 User-facing preview before sharing:
 

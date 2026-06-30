@@ -106,7 +106,10 @@ Named versions can appear as their own folders or mounts:
 
 These `.versions/<version>/` roots are valid managed version locations only
 when the engine creates or resolves them as named-version mounts for the active
-workspace. They are not ordinary user-created folders.
+workspace. They are not ordinary user-created folders. Generic materialized
+workspace tree walkers skip `.versions/**` by default; only the engine's
+workspace/version mount resolver may enter a managed `.versions/<version>/`
+root, and only with an explicit workspace/version binding.
 
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.
@@ -118,16 +121,19 @@ validation before the captured write can leave quarantine.
 Reserved namespace collisions fail closed. The importer evaluates the explicit
 source-backed policy allowlist before applying reserved-namespace quarantine:
 approved policy inputs such as `.dohc/files.toml`, `.dohc/visibility.toml`, and
-optional workspace-root `.dohcignore` may be parsed as engine policy inputs,
-while all other `.dohc/**` content remains reserved engine state. If import,
-attach, sync, or a raw filesystem scan finds unmanaged or out-of-contract
-`.versions/**`, non-allowlisted `.dohc/**`, or aliases of those names where
-dohc expects engine state, dohc must not treat the content as normal workspace
-data. Managed `~/dohc/<space>/.versions/<version>/` roots are allowed only when
-they are bound to a known workspace/version by the engine. Non-allowlisted
-`.dohc/**` content and unmanaged `.versions/**` content are quarantined with an
-explainable record or sent to manual resolution; they are not proposed for
-ordinary user-content safe rename. Only ordinary user content outside
+optional workspace-root `.dohcignore` may be parsed as engine policy inputs.
+Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and
+durability internals are excluded from import, attach, sync, and raw scan
+quarantine; they remain internal engine state and are never re-ingested as user
+content. If import, attach, sync, or a raw filesystem scan finds unmanaged or
+out-of-contract `.versions/**`, foreign non-allowlisted `.dohc/**`, or aliases
+of those names where dohc expects engine state, dohc must not treat the content
+as normal workspace data. Managed `~/dohc/<space>/.versions/<version>/` roots are
+allowed only when they are bound to a known workspace/version by the engine.
+Foreign non-allowlisted `.dohc/**` content and unmanaged `.versions/**` content
+are quarantined with an explainable record or sent to manual resolution; they
+are not proposed for ordinary user-content safe rename. Only ordinary user
+content outside
 engine-managed namespaces may be proposed for a deterministic collision-proof
 safe rename before the workspace is activated. `.dohc/**` and `.versions/**`
 collisions remain quarantine-only or manual-resolution-only. For
