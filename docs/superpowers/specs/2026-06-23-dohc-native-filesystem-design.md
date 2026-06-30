@@ -435,6 +435,7 @@ replace(workspaceId, versionId, fromPath, toPath, {
 })
 list(workspaceId, versionId, path, { pageToken, pageSize })
 stat(workspaceId, versionId, path)
+status(workspaceId, versionId, path?, { requestToken?, includeInternal? })
 search(workspaceId, versionId, query, { pageToken, pageSize })
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
@@ -698,6 +699,25 @@ type WorkspaceAsyncPayload = {
   sequence: UInt64DecimalString
   pageToken?: string
 }
+
+type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
+  path?: string
+  materialized: 'local' | 'virtual'
+  pinned: boolean
+  secretProjection: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
+  writeState:
+    | 'canonical'
+    | 'durable-pending'
+    | 'conflict'
+    | 'quarantined'
+    | 'rejected'
+    | 'retryable-failure'
+    | 'terminal-retired'
+  holdingRecordId?: string
+  conflictReplayToken?: string
+  idempotencyResultId?: string
+  idempotencyReplayToken?: string
+}
 ```
 
 `requestToken` is an opaque server/engine-minted request-stream token returned
@@ -729,6 +749,11 @@ is stale. Server timestamps are metadata only and must not decide freshness
 unless they are explicitly defined as a monotonic per-stream counter. A stale
 response from one workspace/version/session must never repaint another or
 regress current UI state.
+`status(...)`, `.dohc/status.json` generation, CLI status streaming, and UI status
+badges must use `WorkspaceStatusPayload` or an isomorphic shape. A status update
+must be dropped before mutating UI/cache state unless its `workspaceId`,
+`versionId`, `requestToken`, and `sequence` match the currently active
+workspace/version/request stream and advance the canonical per-stream sequence.
 
 ## File state axes
 

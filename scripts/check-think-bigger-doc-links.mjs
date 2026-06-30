@@ -284,9 +284,11 @@ const collectAnchors = (markdown) => {
     anchors.add(slug(headingText.replace(/[ \t]+#+[ \t]*$/, ''), slugger))
   }
   let previousLine = null
+  const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
 
   for (const { text: line } of contentLines(markdown)) {
-    for (const match of line.matchAll(rawHtmlAnchorTagPattern)) {
+    const prose = stripCodeSpans(line)
+    for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
       const anchor = htmlAttributeValue(match[0], 'id') ?? htmlAttributeValue(match[0], 'name')
       if (anchor) {
         anchors.add(anchor)
@@ -370,7 +372,7 @@ const collectLinks = (markdown) => {
     }
     for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
       const href = htmlAttributeValue(match[0], 'href')
-      if (href) {
+      if (href !== null) {
         addLink(href, lineNumber)
       }
     }
@@ -463,6 +465,13 @@ const assertCheckerFixtures = () => {
   const rawHtmlLink = collectLinks('<a href="./target.md#custom-anchor">target</a>')
   if (!rawHtmlLink.links.some((link) => link.target === './target.md#custom-anchor')) {
     throw new Error('raw HTML link fixture should collect href destinations')
+  }
+  const rawHtmlEmptyHref = collectLinks('<a href="">empty</a>')
+  if (!rawHtmlEmptyHref.links.some((link) => link.target === '')) {
+    throw new Error('raw HTML empty href fixture should reach empty-target validation')
+  }
+  if (collectAnchors('`<a id="fake"></a>`').has('fake')) {
+    throw new Error('raw HTML anchor fixture should ignore inline code spans')
   }
   const rawHtmlDataAttributes = collectLinks('<a data-href="./hidden.md" data-id="hidden-anchor">target</a>')
   if (rawHtmlDataAttributes.links.length > 0 || collectAnchors('<a data-id="hidden-anchor"></a>').has('hidden-anchor')) {

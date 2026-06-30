@@ -210,9 +210,13 @@ type ExpiredRetryRecordKind =
 type HoldingExpiredRetryRecordKind = Extract<
   ExpiredRetryRecordKind,
   | 'accepted_holding_record'
-  | 'rejected_record'
   | 'quarantined_record'
   | 'terminal_retired_record'
+>
+
+type RejectedExpiredRetryRecordKind = Extract<
+  ExpiredRetryRecordKind,
+  | 'rejected_record'
 >
 
 type NonHoldingExpiredRetryRecordKind = Extract<
@@ -321,6 +325,18 @@ type WriteResult =
     }
   | {
       kind: 'idempotency-expired'
+      recordScope: 'rejected'
+      holdingRecordId: string
+      idempotencyResultId: string
+      workspaceId: string
+      versionId: string
+      idempotencyKey: string
+      expiredAt: UnixMsDecimalString
+      recordKind: RejectedExpiredRetryRecordKind
+      reasonCode: 'idempotency_expired'
+    }
+  | {
+      kind: 'idempotency-expired'
       recordScope: 'non_holding'
       idempotencyResultId: string
       workspaceId: string
@@ -420,11 +436,13 @@ with enough metadata to explain the decision, retry where allowed, or audit the
 outcome after evaluators recover. `rejected` means the write failed a protection
 gate before canonical acceptance and stores `rejectedAt`; `quarantined` means
 the write was accepted into the holding area but could not become canonical and
-stores `acceptedAt` plus `quarantinedAt`. Both durable results carry the required
-`versionId` for the requested or accepted version bound to the holding record.
-Both durable results are addressable by `holdingRecordId`; operators, status
-APIs, retry tooling, and audit/export jobs use that id to correlate the response
-with the retained rejected-before-acceptance or quarantined record.
+stores `acceptedAt` plus `quarantinedAt`. `terminal-retired` is the later
+retirement state for retained rejected-before-acceptance or accepted holding
+records. These durable results carry the required `versionId` for the requested
+or accepted version bound to the holding record. `rejected`, `quarantined`, and
+`terminal-retired` are addressable by `holdingRecordId`; operators, status APIs,
+retry tooling, and audit/export jobs use that id to correlate the response with
+the retained rejected-before-acceptance, quarantined, or retired record.
 The holding area separates rejected-before-acceptance items from accepted
 holding records. It must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and

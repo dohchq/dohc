@@ -297,16 +297,15 @@ type ChannelTargetActivity = {
 }
 ```
 
-`Channel.linkedTargets` is only a derived read model/cache, not an authoritative
-mutable record. The sole canonical source for channel-level linked targets is the
-append-only channel-target ledger, represented in replay/export as
-`ChannelTargetActivity` rows. `ThreadLink` remains the canonical source for
-thread-level linked work on a specific `ChatThread`; `ChannelTargetActivity` is
-the canonical source for channel context, ACL expansion, side-rail discovery,
-search, and export at the channel level. The server may store the normalized
+There is one canonical source per linked-work scope. `ThreadLink` is the
+authoritative record for thread-level links on a specific `ChatThread`.
+`ChannelTargetActivity` is the authoritative record for channel-level linked
+targets. `Channel.linkedTargets` and `ChatThreadProjection.linkedWork` are
+read-only projections/caches rebuilt from those ledgers; neither field is an
+authoritative mutable record. The server may store the normalized
 `Channel.linkedTargets` projection on the channel row for fast reads, but that
-stored set is rebuilt from the ledger and ignored whenever it disagrees with the
-channel-target ledger.
+stored set is rebuilt from the channel-target ledger and ignored whenever it
+disagrees with `ChannelTargetActivity`.
 
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
 tuple used by channel-target activity and compatible with `ThreadLink` creation,
@@ -1021,7 +1020,7 @@ type ThreadActivityBase = {
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 
-type ChannelChatCreateThreadActivity = ThreadActivityBase & {
+type SendChannelMessageThreadCreatedActivity = ThreadActivityBase & {
   kind: 'chat_created'
   threadKind: 'channel'
   title?: string
@@ -1030,7 +1029,7 @@ type ChannelChatCreateThreadActivity = ThreadActivityBase & {
   dmParticipantIds?: never
 }
 
-type DmChatCreateThreadActivity = ThreadActivityBase & {
+type CreateChatDmThreadCreatedActivity = ThreadActivityBase & {
   kind: 'chat_created'
   threadKind: 'dm'
   title?: string
@@ -1039,11 +1038,13 @@ type DmChatCreateThreadActivity = ThreadActivityBase & {
   dmParticipantIds: DmParticipantIds
 }
 
-type ChatCreateThreadActivity =
-  // create_chat emits only the DM variant. Channel-backed threads are created
-  // only by send_channel_message in the same atomic unit as the first message.
-  | ChannelChatCreateThreadActivity
-  | DmChatCreateThreadActivity
+type ThreadCreatedActivity =
+  // create_chat emits only CreateChatDmThreadCreatedActivity. Channel-backed
+  // threads are created only by send_channel_message, which emits
+  // SendChannelMessageThreadCreatedActivity in the same atomic unit as the first
+  // message.
+  | SendChannelMessageThreadCreatedActivity
+  | CreateChatDmThreadCreatedActivity
 
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
@@ -1249,7 +1250,7 @@ not append duplicate activities, duplicate queue rows, unstable unread/mention
 badges, duplicate notifications, or duplicate export/history records.
 
 type ThreadActivity =
-  | ChatCreateThreadActivity
+  | ThreadCreatedActivity
   | MessageCreateThreadActivity
   | MessageEditThreadActivity
   | MessageDeleteThreadActivity

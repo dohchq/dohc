@@ -817,8 +817,8 @@ channels, or rich chat texture until the proof arc passes.
 
 Phase 0 must also prove the architecture is fast enough to build on. A correct
 but sluggish proof is not acceptable; the must-pass performance gate covers
-native-feeling local file edits, startup reconciliation, and history display
-under the initial performance budgets.
+native-feeling local file edits, startup reconciliation, file-history/timeline
+render, and history display under the initial performance budgets.
 
 Phase 0 stretch/follow-up outcomes, useful but not minimum acceptance gates:
 
@@ -1560,6 +1560,9 @@ and hoping to optimize later.
   explicit remote cold-start conditions.
 - external editor save reflected in dohc UI/history status: under 500ms local
   target after file watcher event.
+- render file-history/timeline view for 1,000 coalesced moments: under 500ms to
+  first useful content, with incremental loading or virtualization for larger
+  histories.
 - coalesce 100 file writes into a moment: under 3s without renderer blocking.
 - absorb 1,000 ignored/cache file events without visible UI jank or sync flood.
 - render channel with 1,000 chats: under 500ms to first useful content.

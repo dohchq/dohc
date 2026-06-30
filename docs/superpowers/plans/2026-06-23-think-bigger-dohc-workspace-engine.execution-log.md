@@ -5588,7 +5588,7 @@ Two-hundred-twenty-eighth pass:
 
 Two-hundred-twenty-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5604,6 +5604,43 @@ Two-hundred-twenty-ninth pass:
     and aligned the nearby prose.
   - Scoped filesystem capture/replay tokens to `(workspaceId, versionId, path)`
     and separated them from deduplication fingerprints.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-thirtieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's nine follow-up findings:
+  - Added an explicit file-history/timeline render performance budget.
+  - Updated raw HTML link checking to validate empty `href` targets.
+  - Ignored raw HTML anchors inside inline code spans.
+  - Split `rejected_record` retry expiry out of the holding-state expiry union.
+  - Clarified `terminal-retired` correlation through `holdingRecordId`.
+  - Added `status(...)` to the native filesystem API list.
+  - Added `WorkspaceStatusPayload` freshness fields and status update guards.
+  - Renamed thread-created activity types so `create_chat` and
+    `send_channel_message` creation provenance are distinct.
+  - Reworded channel/thread linked-work ownership so ledgers are authoritative and
+    projections are read-only caches.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
