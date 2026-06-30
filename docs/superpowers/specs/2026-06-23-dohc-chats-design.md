@@ -73,11 +73,13 @@ sequence. `activityId` is server-assigned and unique within the
 `(workspaceId, threadId)` scope; clients cannot supply or override it, and replay
 or dedupe logic must treat the server-issued `activityId`/sequence as the only
 authoritative activity identity.
-`ThreadLink` create/update paths must validate the target workspace/resource
-identity, share/grant id, and visibility scope against trusted server-side grant
-state before any link or activity record is persisted. Client-provided grant
-fields are hints only; missing, expired, revoked, forged, mismatched, or
-ambiguous grants fail closed before persistence.
+`ThreadLink` create/update paths accept a request DTO, not a persisted
+`ThreadLink` row. The server validates the target workspace/resource identity,
+derives share/grant id and visibility scope from trusted authorization state,
+and populates stored `ThreadLink.shareGrantId`/`visibilityScope` only after that
+check. Client-provided `shareGrantId` or `visibilityScope` fields are rejected
+before persistence; missing, expired, revoked, forged, mismatched, or ambiguous
+server-side grants fail closed before any link or activity record is persisted.
 
 The UI can say chat. The system should not inherit a stream-first data model.
 
@@ -249,20 +251,21 @@ declare function canonicalizeDmParticipantIds(input: {
 ```
 
 `canonicalizeDmParticipantIds` receives the authenticated server-derived actor
-separately from the client-supplied participant list. The server first strips all
-`serverActorId` self entries from `requestedParticipantIds`; any number of
-client-supplied self entries are ignored for authority and do not count as
-duplicate participants. The server actor is then merged into the set before
-uniqueness-key generation, persistence, authorization, or fanout, so the creator
-cannot omit or spoof themself.
-After canonicalization, `dmParticipantIds` must contain 2-16 unique participants.
-Raw duplicates among non-self requested participants are rejected before
-uniqueness-key generation or persistence; implementations must not silently
-dedupe duplicate other participants. Oversized canonical participant lists fail
-closed before persistence. Larger conversations should use channels or shared
-channels. Every service that builds the canonical participant set uses this same
-`canonicalizeDmParticipantIds` validation path before uniqueness-key generation
-or persistence.
+separately from the client-supplied participant list. The server first normalizes
+`serverActorId` and every requested participant ID to their persisted actor-id
+form. It then strips all requested entries equal to the normalized
+`serverActorId`; any number of client-supplied self entries are ignored for
+authority and do not count as duplicate participants. Raw duplicates among the
+remaining non-self requested participants are rejected before uniqueness-key
+generation or persistence; implementations must not silently dedupe duplicate
+other participants. The server actor is then merged into the normalized
+participant set before uniqueness-key generation, persistence, authorization, or
+fanout, so the creator cannot omit or spoof themself. After canonicalization,
+`dmParticipantIds` must contain 2-16 unique participants. Oversized canonical
+participant lists fail closed before persistence. Larger conversations should
+use channels or shared channels. Every service that builds the canonical
+participant set uses this same `canonicalizeDmParticipantIds` validation path
+before uniqueness-key generation or persistence.
 
 DMs should still be source-aware when needed:
 
@@ -334,6 +337,17 @@ type ThreadLinkTargetType =
 type ThreadLinkScope =
   | { scopeKind: 'internal'; shareGrantId?: never; visibilityScope?: never }
   | { scopeKind: 'shared'; shareGrantId: string; visibilityScope: string }
+
+type ThreadLinkCreateRequest = {
+  threadId: string
+  targetWorkspaceId: string
+  targetType: ThreadLinkTargetType
+  targetId: string
+  targetVersionRef?: VersionRef
+  requestedScopeKind: 'internal' | 'shared'
+  shareGrantId?: never
+  visibilityScope?: never
+}
 
 type VersionRef = {
   versionId: string

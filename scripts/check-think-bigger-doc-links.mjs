@@ -11,7 +11,13 @@ const manifestPath = path.resolve(
   'docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json',
 )
 
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+let manifest
+try {
+  manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+} catch (error) {
+  console.error(`Unable to read Think Bigger docs manifest at ${manifestPath}: ${error.message}`)
+  process.exit(1)
+}
 const expectedThinkBiggerDocs = manifest.thinkBiggerDocs
 
 if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((file) => typeof file !== 'string')) {
