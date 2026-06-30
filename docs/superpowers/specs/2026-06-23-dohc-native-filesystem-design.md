@@ -134,6 +134,10 @@ and effective policy before it is persisted into version history. Unauthorized
 or indeterminate writes must be quarantined rather than merged into canonical
 history. Local durability logging may still record the raw capture; promotion to
 shared history waits for fresh server/engine-derived validation.
+Before classification and policy checks complete, secret-eligible captures must
+be stored encrypted or as path/object metadata only; quarantine must not persist
+plaintext secret bytes in ordinary durability payloads, logs, search, previews,
+or conflict artifacts.
 Authorization/policy resolution is fail-closed: if authoritative workspace
 membership, share state, lock state, or effective-policy inputs are stale,
 unavailable, or indeterminate, the write remains quarantined and is not promoted
@@ -497,16 +501,16 @@ At least six independent dimensions are needed:
 
 Examples:
 
-| Path | Tracked | Versioned | Synced | Materialized | Pinned | Secret-backed |
-| --- | --- | --- | --- | --- | --- | --- |
-| `docs/**` | yes | yes | yes | virtual | optional | no |
-| `apps/**` | yes | yes | yes | virtual | optional | no |
-| `data/raw/**` | yes | yes | yes | virtual | no | no |
-| `node_modules/**` | no | no | no | local | no | no |
-| `dist/**` | no | no | no | local | no | no |
-| `.cache/**` | no | no | no | local | no | no |
-| `scratch/**` | no | no | no | local | no | no |
-| `.env` | yes | yes | yes | local | no | yes |
+| Path | Tracked | Versioned | Synced | Materialized | Pinned | Secret-backed | Secret projection |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `docs/**` | yes | yes | yes | virtual | optional | no | none |
+| `apps/**` | yes | yes | yes | virtual | optional | no | none |
+| `data/raw/**` | yes | yes | yes | virtual | no | no | none |
+| `node_modules/**` | no | no | no | local | no | no | none |
+| `dist/**` | no | no | no | local | no | no | none |
+| `.cache/**` | no | no | no | local | no | no | none |
+| `scratch/**` | no | no | no | local | no | no | none |
+| `.env` | yes | yes | yes | local | no | yes | protectedLocal |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
 output, and cache folders.

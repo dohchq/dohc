@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-eighteenth pass below.
+- **Last updated:** current through the Hundred-nineteenth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `76f6a25` reported 6 issues;
-  hundred-eighteenth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `2bb5b2d` reported 7 issues;
+  hundred-nineteenth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2262,6 +2262,32 @@ Hundred-eighteenth pass:
   - Split `FilePolicy` into non-secret and secret-backed variants so
     secret-backed policies require a concrete `secretProjection`.
   - Updated the Current PR Snapshot to the `76f6a25` six-issue rerun.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-nineteenth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Tightened docs-link fenced-code handling so only valid closing fences close
+    an active fence, and preserved literal trailing heading `#` characters.
+  - Generalized `idempotency-expired` to cover canonical results, retryable
+    failures, and conflict records without holding records.
+  - Added secret-safe quarantine storage rules for secret-eligible captures
+    before classification and policy checks finish.
+  - Added `secretProjection` to the policy summary matrix.
+  - Defined server-issued deterministic non-default `channelConversationId`
+    values for channel chat threads.
+  - Added persisted `bodyHash` to message lifecycle activities for replay,
+    export, and mention verification.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.

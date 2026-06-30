@@ -32,16 +32,22 @@ function* contentLines(markdown) {
   let fenceLength = 0
 
   for (const line of markdown.split(/\r?\n/)) {
-    const fence = line.match(/^\s{0,3}(```+|~~~+)/)
+    const fence = line.match(/^\s{0,3}(```+|~~~+)(.*)$/)
 
-    if (fence) {
+    if (fence && !inFence) {
       const marker = fence[1][0]
       const markerLength = fence[1].length
-      if (!inFence) {
-        inFence = true
-        fenceChar = marker
-        fenceLength = markerLength
-      } else if (marker === fenceChar && markerLength >= fenceLength) {
+      inFence = true
+      fenceChar = marker
+      fenceLength = markerLength
+      continue
+    }
+
+    if (fence && inFence) {
+      const marker = fence[1][0]
+      const markerLength = fence[1].length
+      const trailing = fence[2]
+      if (marker === fenceChar && markerLength >= fenceLength && trailing.trim() === '') {
         inFence = false
         fenceChar = null
         fenceLength = 0
@@ -60,12 +66,12 @@ const collectAnchors = (markdown) => {
   const seen = new Map()
 
   for (const line of contentLines(markdown)) {
-    const heading = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/)
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*$/)
     if (!heading) {
       continue
     }
 
-    const base = slug(heading[1])
+    const base = slug(heading[1].replace(/[ \t]+#+[ \t]*$/, ''))
     const count = seen.get(base) ?? 0
     seen.set(base, count + 1)
     anchors.add(count === 0 ? base : `${base}-${count}`)

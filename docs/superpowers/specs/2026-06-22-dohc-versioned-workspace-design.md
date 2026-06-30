@@ -133,6 +133,9 @@ type TerminalRetirementReason =
   | 'operator_disposition_retired'
 
 type ExpiredRetryRecordKind =
+  | 'canonical_result'
+  | 'retryable_failure_record'
+  | 'conflict_record'
   | 'accepted_holding_record'
   | 'rejected_record'
   | 'quarantined_record'
@@ -208,7 +211,8 @@ type WriteResult =
     }
   | {
       kind: 'idempotency-expired'
-      holdingRecordId: string
+      holdingRecordId?: string
+      idempotencyResultId: string
       workspaceId: string
       versionId: string
       idempotencyKey: string
@@ -313,10 +317,13 @@ the record's retry horizon or retained idempotency metadata expires does the
 write API return the canonical `idempotency-expired` response for that
 `holdingRecordId`, with `recordKind: 'accepted_holding_record'`,
 `recordKind: 'rejected_record'`, or `recordKind: 'quarantined_record'`.
-Disposition, expiration, and lookup-only details beyond that canonical terminal
-response live in the status query path, not alternate write-retry responses. A
-stale retry must not silently create a second accepted holding record or an
-uncorrelated denial.
+Canonical writes, retryable failures, and conflicts without holding records use
+the same terminal replay path with `recordKind: 'canonical_result'`,
+`recordKind: 'retryable_failure_record'`, or `recordKind: 'conflict_record'`
+and the persisted `idempotencyResultId`. Disposition, expiration, and
+lookup-only details beyond that canonical terminal response live in the status
+query path, not alternate write-retry responses. A stale retry must not silently
+create a second accepted holding record or an uncorrelated denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

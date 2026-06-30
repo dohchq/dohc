@@ -379,10 +379,12 @@ For `ChannelChatThread`, `channelId` and `channelConversationId` are immutable
 after creation. The active uniqueness key is
 `(workspaceId, channelId, channelConversationId)`, with
 `channelConversationId: "default"` for the default channel stream conversation.
-Renaming or moving a channel changes channel metadata, not this key. Changing the
-channel association requires tombstoning/archiving the old thread and creating a
-new thread, so one conversation cannot fork into multiple active `ChatThread`
-records for the same channel identity.
+Non-default `channelConversationId` values must be server-issued and
+deterministic for the same channel-conversation context; clients must not invent
+them. Renaming or moving a channel changes channel metadata, not this key.
+Changing the channel association requires tombstoning/archiving the old thread
+and creating a new thread, so one conversation cannot fork into multiple active
+`ChatThread` records for the same channel identity.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current
@@ -645,6 +647,7 @@ type ThreadActivityBase = {
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
   kind: 'message_created'
+  bodyHash: string
   nextBodyHash: string
 }
 
@@ -653,6 +656,7 @@ type MessageEditThreadActivity = ThreadActivityBase & {
   kind: 'message_edited'
   previousBody: ChatBodySnapshot
   previousBodyRevision: UInt64DecimalString
+  bodyHash: string
   nextBodyHash: string
 }
 
@@ -662,6 +666,7 @@ type MessageDeleteThreadActivity = ThreadActivityBase & {
   previousBody: ChatBodySnapshot
   previousBodyRevision: UInt64DecimalString
   deleteReason?: string
+  bodyHash: string
   tombstoneHash: string
 }
 
@@ -671,6 +676,7 @@ type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
   legacyImportId: string
   previousBody?: ChatBodySnapshot
   deleteReason?: string
+  bodyHash?: string
   tombstoneHash?: string
 }
 
@@ -684,6 +690,13 @@ payload for the referenced persisted body revision. `tombstoneHash` hashes
 `["chat-tombstone:v1", workspaceId, threadId, messageId, previousBodyRevision,
 previousBody, deleteReasonOrNull]`, where `previousBody` is the canonical
 `ChatBodySnapshot` preserved by the delete activity.
+Message create, edit, and delete lifecycle activities must populate `bodyHash`
+from this same canonical persisted-body hash used by
+`MentionNotificationThreadActivity`. For create/edit, `bodyHash` is the
+persisted resulting body revision and must match `nextBodyHash`; for delete,
+`bodyHash` is the previous persisted body revision preserved by the delete
+activity. Replay, export, mention fanout, and history rebuilds must verify this
+hash before deriving notifications or visible projections.
 
 type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }
