@@ -17,6 +17,7 @@ const expectedThinkBiggerDocs = [
 const discoverThinkBiggerDocs = () => {
   const planDir = 'docs/superpowers/plans'
   const specDir = 'docs/superpowers/specs'
+  const repoRelativePath = (...segments) => path.posix.join(...segments)
   const specNameFragments = [
     'dohc-versioned-workspace-design',
     'dohc-chats-design',
@@ -24,10 +25,10 @@ const discoverThinkBiggerDocs = () => {
   ]
   const planDocs = fs.readdirSync(path.resolve(repoRoot, planDir))
     .filter((name) => name.includes('think-bigger-dohc-workspace-engine') && name.endsWith('.md'))
-    .map((name) => path.join(planDir, name))
+    .map((name) => repoRelativePath(planDir, name))
   const specDocs = fs.readdirSync(path.resolve(repoRoot, specDir))
     .filter((name) => name.endsWith('.md') && specNameFragments.some((fragment) => name.includes(fragment)))
-    .map((name) => path.join(specDir, name))
+    .map((name) => repoRelativePath(specDir, name))
 
   return [...planDocs, ...specDocs].sort()
 }
@@ -128,7 +129,7 @@ const collectLinks = (markdown) => {
   const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
 
   for (const line of contentLines(markdown)) {
-    const prose = line.replace(/`[^`]*`/g, '')
+    const prose = line.replace(/(`+)(?:(?!\1).)*\1/g, '')
     for (const match of prose.matchAll(linkPattern)) {
       links.push(match[1])
     }

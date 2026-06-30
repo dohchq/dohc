@@ -113,21 +113,23 @@ and unmanaged `.versions` content is never silently promoted into a named versio
 
 Path canonicalization must happen before API path handling, import, attach,
 sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and
-before any storage access. Canonicalization first normalizes path segments to
-Unicode NFC, then applies the platform/case-folding policy, workspace-boundary
-resolution, and reserved-namespace checks so composed and decomposed names match
-the same `.dohc/**` and `.versions/**` rules. After canonicalization, reserved
-namespace handling is defined only by the reserved-namespace collision contract
-above: the allowlisted policy inputs are `.dohc/files.toml`,
-`.dohc/visibility.toml`, and optional workspace-root `.dohcignore`; all other
-`.dohc/**` content and unmanaged `.versions/**` fail closed into rejection,
-quarantine, or manual resolution. Safe rename proposal remains available only
-for non-engine user content that collides with a reserved namespace. Symlinks,
-hardlinks, junctions, bind mounts, aliases, or any equivalent filesystem
-indirection that resolves outside the active workspace, crosses into another
-workspace, or enters a disallowed reserved namespace must be rejected or
-quarantined before capture or API dispatch. If the engine cannot prove the
-resolved target and file
+before any storage access. Canonicalization first normalizes separators,
+collapses repeated separators, resolves `.` segments, rejects unresolved `..`
+traversal, rejects platform device/UNC/root-escape forms outside the workspace
+contract, then normalizes path segments to Unicode NFC and applies the
+platform/case-folding policy, workspace-boundary resolution, and
+reserved-namespace checks so composed and decomposed names match the same
+`.dohc/**` and `.versions/**` rules. After canonicalization, reserved namespace
+handling is defined only by the reserved-namespace collision contract above: the
+allowlisted policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and
+optional workspace-root `.dohcignore`; all other `.dohc/**` content and
+unmanaged `.versions/**` fail closed into rejection, quarantine, or manual
+resolution. Safe rename proposal remains available only for non-engine user
+content that collides with a reserved namespace. Symlinks, hardlinks, junctions,
+bind mounts, aliases, or any equivalent filesystem indirection that resolves
+outside the active workspace, crosses into another workspace, or enters a
+disallowed reserved namespace must be rejected or quarantined before capture or
+API dispatch. If the engine cannot prove the resolved target and file
 identity are inside the active workspace boundary, it fails closed. This path
 boundary applies to every API path operation and file capture that may back an
 atom, folder, entity, share, or capture record.
@@ -463,9 +465,9 @@ same deterministic secret-safe conflict envelope as `write(...)`, preserving
 references to current and requested-restored content instead of applying the
 restore.
 
-Every async watch/status/snapshot payload must include workspace identity,
-version identity, a request token or equivalent correlation id, and a monotonic
-ordering guard before it can update UI state:
+Every async watch/status/snapshot/list/search payload must include workspace
+identity, version identity, a request token or equivalent correlation id, and a
+monotonic ordering guard before it can update UI state:
 
 ```ts
 // Canonical base-10 unsigned 64-bit integer.
@@ -476,6 +478,7 @@ type WorkspaceAsyncPayload = {
   versionId: string
   requestToken: string
   sequence: UInt64DecimalString
+  pageToken?: string
 }
 ```
 
@@ -485,15 +488,20 @@ digits, or leading zeros except the literal `0`, with range
 `0..18446744073709551615`. Producers must serialize this canonical form, and
 clients must parse, range-check, and reserialize before freshness comparison.
 Handlers for `watch(workspaceId, versionId, path)`,
-`snapshot(workspaceId, versionId)`, status APIs, and filesystem loading must
-verify these fields before applying results. Each handler also compares the
-payload sequence or cursor against the latest applied value for the same
+`snapshot(workspaceId, versionId)`, `list(workspaceId, versionId, path, ...)`,
+`search(workspaceId, versionId, query, ...)`, status APIs, and filesystem loading
+must verify these fields before applying results. Each handler also compares the
+payload sequence against the latest applied value for the same
 workspace/version/request stream using BigInt-safe comparison of canonical
 `UInt64DecimalString` values, never floating-point numbers, locale string
-collation, or non-canonical decimal strings. Server timestamps are metadata only
-and must not decide freshness unless they are explicitly defined as a monotonic
-per-stream counter. A stale response from one workspace/version/session must
-never repaint another or regress current UI state.
+collation, or non-canonical decimal strings. For paginated `list` and `search`,
+the `pageToken` or cursor is part of the request stream identity and must match
+the currently active workspace/version/request before appending or replacing
+results; a page for an older token, older sequence, or different request stream
+is stale. Server timestamps are metadata only and must not decide freshness
+unless they are explicitly defined as a monotonic per-stream counter. A stale
+response from one workspace/version/session must never repaint another or
+regress current UI state.
 
 ## File state axes
 
@@ -993,6 +1001,8 @@ The system should expose:
 - what is conflicted.
 - what is secret-backed.
 - what is excluded/redacted on export.
+- what is captured but still `durable-pending` or quarantined instead of
+  canonical version history.
 
 Possible surfaces:
 
@@ -1003,6 +1013,12 @@ Possible surfaces:
 - API status calls.
 
 Hidden mechanics are okay. Hidden safety-relevant state is not.
+Status projections must use the same write-state terminology as the API
+contract. If a save is captured locally but not yet canonical, `dohc status`, UI
+badges, `.dohc/status.json`, and API status calls must show whether it is
+`durable-pending`, `quarantined`, `rejected`, `retryable-failure`, or
+`terminal-retired`, and must include the relevant `holdingRecordId` or
+idempotency correlation when policy permits.
 `.dohc/status.json` is an engine status projection, not user content; it follows
 the `.dohc/**` internal-state boundary and must not be re-ingested as a normal
 workspace file.

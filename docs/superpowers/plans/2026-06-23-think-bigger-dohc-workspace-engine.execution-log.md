@@ -15,11 +15,11 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Last updated:** current through the Hundred-twenty-ninth pass below.
+- **Last updated:** current through the Hundred-thirtieth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `03e7634` reported 7 issues;
-  hundred-twenty-ninth pass fixes are recorded below; CodeRabbit rerun remains
+- **PR00 CodeRabbit:** latest completed rerun on `e1342a0` reported 7 issues;
+  hundred-thirtieth pass fixes are recorded below; CodeRabbit rerun remains
   pending.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
@@ -2490,6 +2490,33 @@ Hundred-twenty-ninth pass:
     `CanonicalThreadLinkKey`.
   - Pinned shared TypeScript boundary validation to Zod.
   - Updated the Current PR Snapshot to the `03e7634` seven-issue rerun.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirtieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Added `terminal_retired_record` to expired retry records and aligned
+    `terminal-retired` replay lifecycle wording.
+  - Normalized discovered checker paths to POSIX repo-relative strings and
+    ignored variable-length inline code spans during Markdown link collection.
+  - Required full path normalization for separators, dot segments, traversal,
+    and platform device/UNC escape forms before path policy checks.
+  - Extended async freshness guards to paginated `list(...)` and `search(...)`
+    payloads with workspace/version/request/page-token validation.
+  - Surfaced `durable-pending`, quarantined, rejected, retryable, and retired
+    write states in filesystem status projections.
+  - Added Versioning and Filesystem reviewers to the PR01 subagent lane.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

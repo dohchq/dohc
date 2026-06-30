@@ -1608,6 +1608,8 @@ must use.
 
 - Architecture Reviewer.
 - Security Reviewer.
+- Versioning Reviewer.
+- Filesystem Reviewer.
 
 **CodeRabbit focus:**
 

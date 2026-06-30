@@ -140,6 +140,7 @@ type ExpiredRetryRecordKind =
   | 'accepted_holding_record'
   | 'rejected_record'
   | 'quarantined_record'
+  | 'terminal_retired_record'
 
 type WriteResult =
   | {
@@ -270,9 +271,10 @@ return a canonical/durable result or a deterministic terminal outcome.
 `commitState` is the single source of truth for whether a canonical mutation is
 known absent, unknown and requires retry, or later proven recorded.
 Retryable failures always carry the original `idempotencyKey`; retries must
-preserve it. `terminal-retired` is a first-class terminal `WriteResult` and does
-not degrade into `idempotency-expired`; `idempotency-expired` is used only when
-the retained idempotency/retry metadata for the relevant result kind has expired.
+preserve it. `terminal-retired` is a first-class terminal `WriteResult` while
+its retained retirement metadata is addressable; it degrades to
+`idempotency-expired` only after the retained idempotency/retry metadata for the
+retired record has expired.
 
 Rejected and quarantined ingests must still be durable in a non-canonical
 holding area with enough metadata to retry or explain the decision after
@@ -338,7 +340,8 @@ corresponding retention or retirement metadata is still addressable. Only after
 the record's retry horizon or retained idempotency metadata expires does the
 write API return the canonical `idempotency-expired` response for that
 `holdingRecordId`, with `recordKind: 'accepted_holding_record'`,
-`recordKind: 'rejected_record'`, or `recordKind: 'quarantined_record'`.
+`recordKind: 'rejected_record'`, `recordKind: 'quarantined_record'`, or
+`recordKind: 'terminal_retired_record'`.
 Canonical writes, retryable failures, and conflicts without holding records use
 the same terminal replay path with `recordKind: 'canonical_result'`,
 `recordKind: 'retryable_failure_record'`, or `recordKind: 'conflict_record'`
