@@ -240,13 +240,18 @@ Required surfaces:
 - quick handoff from a DM into a linked work chat.
 - ability to mention an agent in a DM.
 
-After canonicalization, `dmParticipantIds` must contain 2-16 unique
-participants. Raw duplicates are rejected before uniqueness-key generation or
-persistence; implementations must not silently dedupe duplicate participants.
-Oversized canonical participant lists fail closed before persistence. Larger
-conversations should use channels or shared channels. Every service that builds
-the canonical participant set uses this same `canonicalizeDmParticipantIds`
-validation path before uniqueness-key generation or persistence.
+`canonicalizeDmParticipantIds(serverActorId, requestedParticipantIds)` receives
+the authenticated server-derived actor separately from the client-supplied
+participant list. The server actor is merged into the set before uniqueness-key
+generation, persistence, authorization, or fanout; client-supplied actor IDs are
+ignored or rejected as authority, so the creator cannot omit or spoof themself.
+After canonicalization, `dmParticipantIds` must contain 2-16 unique participants.
+Raw duplicates are rejected before uniqueness-key generation or persistence;
+implementations must not silently dedupe duplicate participants. Oversized
+canonical participant lists fail closed before persistence. Larger conversations
+should use channels or shared channels. Every service that builds the canonical
+participant set uses this same `canonicalizeDmParticipantIds` validation path
+before uniqueness-key generation or persistence.
 
 DMs should still be source-aware when needed:
 

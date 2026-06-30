@@ -412,7 +412,10 @@ they can affect engine behavior:
 
 - `.dohc/files.toml`
 - `.dohc/visibility.toml`
-- optional workspace-root `.dohcignore`
+
+Workspace-root `.dohcignore` is deferred until the policy resolver PR assigns it
+an implementation and enforcement owner; until then it is not part of the
+source-backed policy allowlist.
 
 Internal projection/reserved-state examples are inspectable, but they are not
 source-backed user content, not importable as ordinary workspace files, and not

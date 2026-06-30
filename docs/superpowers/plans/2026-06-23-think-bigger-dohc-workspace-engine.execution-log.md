@@ -2993,6 +2993,30 @@ Hundred-forty-ninth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-fiftieth pass:
+
+- Fixed CodeRabbit's four follow-up findings:
+  - Made DM participant canonicalization take the server-derived actor
+    separately and merge it before uniqueness-key generation.
+  - Added the full operation operand tuple to native filesystem idempotency
+    identity.
+  - Deferred workspace-root `.dohcignore` until a policy resolver PR owns
+    implementation and enforcement.
+  - Narrowed the Foundation Alpha effective-policy gate to files, search, and
+    export substrate.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an
@@ -3112,8 +3136,7 @@ Gate evidence:
 
 - [ ] Stable IDs exist for substrate fixtures.
 - [ ] Typed events are workspace-scoped.
-- [ ] Effective policy resolver covers files, links, search, notifications,
-      projections, and export.
+- [ ] Effective policy resolver covers files, search, and export substrate.
 - [ ] CodeRabbit approved every PR or user approved documented non-sensitive
       non-blocker overrides.
 - [ ] Security subagent review complete.

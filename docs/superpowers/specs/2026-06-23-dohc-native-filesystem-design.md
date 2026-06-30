@@ -440,16 +440,17 @@ response instead of applying stale output.
 
 API-originated write-producing operations must carry an idempotency key bound to
 the actor/session, workspace, version, operation type, target, write payload
-digest or canonical operation payload fingerprint, and causal precondition.
-Payload changes must produce a different idempotency identity even when the path
-and precondition are unchanged. Duplicate delivery with the same idempotency key
-returns the original result or a deterministic equivalent without creating extra
-canonical mutations, history entries, projections, notifications, or
-search-index side effects. Idempotency records must be persisted through the
-documented maximum retry horizon for that operation type and transport after the
-operation reaches a terminal result. After that horizon, an API retry with the
-same key must fail closed with an explicit `idempotency_expired` response or a
-deterministic conflict response; it must not silently apply as a new mutation.
+digest or canonical operation payload fingerprint, full operation operand tuple,
+and causal precondition. Payload or operand changes must produce a different
+idempotency identity even when the path and precondition are unchanged. Duplicate
+delivery with the same idempotency key returns the original result or a
+deterministic equivalent without creating extra canonical mutations, history
+entries, projections, notifications, or search-index side effects. Idempotency
+records must be persisted through the documented maximum retry horizon for that
+operation type and transport after the operation reaches a terminal result. After
+that horizon, an API retry with the same key must fail closed with an explicit
+`idempotency_expired` response or a deterministic conflict response; it must not
+silently apply as a new mutation.
 Implementations may garbage-collect expired key tombstones only after the same
 maximum retry horizon has passed or the operation namespace is rotated.
 Tombstone garbage collection is not enough by itself: after a namespace is
