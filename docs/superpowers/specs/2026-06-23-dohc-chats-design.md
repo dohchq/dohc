@@ -423,6 +423,17 @@ normalization:
 - The stored key is `thread-link:v1:<lowercase-sha256-hex>` over those exact
   bytes.
 
+The store enforces active-link uniqueness with a workspace-scoped partial unique
+index, compare-and-swap reservation, or equivalent serializable constraint on
+`(workspaceId, CanonicalThreadLinkKey)` where `deletedAt` is absent. The helper
+is not the authority: bypassed helpers, retries, replays, and concurrent writers
+must still hit the storage constraint before `link_added` fanout or projection
+updates. If the storage engine cannot express a partial unique index directly,
+it must use an active-link reservation row keyed by
+`(workspaceId, CanonicalThreadLinkKey)` and reserve it in the same transaction or
+serialized unit of work as the `ThreadLink` mutation. A uniqueness conflict is
+resolved by reading the existing active `ThreadLink`, returning the idempotent
+result, and skipping duplicate activity/fanout.
 A retry for the same normalized key must upsert or no-op against the existing
 active `ThreadLink` and must not create a second active link or duplicate
 `link_added` fanout.

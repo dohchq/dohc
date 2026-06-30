@@ -15,11 +15,12 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Last updated:** current through the Hundred-twenty-eighth pass below.
+- **Last updated:** current through the Hundred-twenty-ninth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `9e848b4` reported 6 issues;
-  hundred-twenty-eighth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `03e7634` reported 7 issues;
+  hundred-twenty-ninth pass fixes are recorded below; CodeRabbit rerun remains
+  pending.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -282,43 +283,7 @@ tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0 --s
 /tmp/dohc-node-v24.18.0/bin/node -v
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --version
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" /tmp/dohc-node-v24.18.0/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
-env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" node <<'NODE'
-const fs = require('fs')
-const path = require('path')
-const files = [
-  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
-  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
-  'docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md',
-  'docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md',
-  'docs/superpowers/specs/2026-06-23-dohc-chats-design.md',
-]
-const slug = (s) => s.trim().toLowerCase().replace(/`([^`]*)`/g, '$1').replace(/<[^>]+>/g, '').replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-')
-const failures = []
-for (const file of files) {
-  const text = fs.readFileSync(file, 'utf8')
-  const re = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
-  for (const match of text.matchAll(re)) {
-    const raw = match[1]
-    if (/^(https?:|mailto:|app:|#)/.test(raw)) continue
-    const [targetRaw, anchorRaw] = raw.split('#')
-    const targetPath = path.normalize(path.resolve(path.dirname(file), decodeURIComponent(targetRaw || file)))
-    if (!fs.existsSync(targetPath)) {
-      failures.push(`${file}: missing link target ${raw}`)
-      continue
-    }
-    if (anchorRaw) {
-      const targetText = fs.readFileSync(targetPath, 'utf8')
-      const anchors = new Set([...targetText.matchAll(/^#{1,6}\s+(.+)$/gm)].map((h) => slug(h[1])))
-      if (!anchors.has(anchorRaw.toLowerCase())) failures.push(`${file}: missing anchor ${raw}`)
-    }
-  }
-}
-if (failures.length) {
-  console.error(failures.join('\n'))
-  process.exit(1)
-}
-console.log(`docs link/anchor check passed for ${files.length} files`)
-NODE
+node scripts/check-think-bigger-doc-links.mjs
 ```
 
 ### E2E / Visual / Manual QA
@@ -2497,6 +2462,34 @@ Hundred-twenty-eighth pass:
     retention/expiry behavior.
   - Renamed the source spec link to `dohc Native Filesystem Design`.
   - Populated Current PR Snapshot with concrete latest PR00 status.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twenty-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Added exact expected Think Bigger docs coverage to the docs link checker so
+    it cannot silently pass after checking zero or too few files.
+  - Replaced the old embedded docs-link command record with the hardened shared
+    checker script.
+  - Split engine-state quarantine from user-content safe-rename handling for
+    `.dohc/**` and unmanaged `.versions/**` collisions.
+  - Required encrypted payload envelopes for secret-eligible quarantine writes
+    that captured payload bytes.
+  - Added storage-level active-link uniqueness enforcement for
+    `CanonicalThreadLinkKey`.
+  - Pinned shared TypeScript boundary validation to Zod.
+  - Updated the Current PR Snapshot to the `03e7634` seven-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

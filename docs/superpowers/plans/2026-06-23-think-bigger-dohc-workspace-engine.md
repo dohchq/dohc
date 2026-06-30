@@ -1588,8 +1588,10 @@ must use.
 - Define one core effective policy input/output type for filesystem, search, and
   export substrate. Chat, notification, secret, and external-share policy
   extensions land with their consuming PRs and must compose with the core type.
-- Add mandatory zod/valibot-style runtime validation for all shared boundary
-  types carrying workspace, version, and policy data across the core substrate.
+- Add mandatory Zod runtime validation for all shared TypeScript boundary types
+  carrying workspace, version, and policy data across the core substrate. Other
+  runtime targets must use adapters or generated schemas that round-trip against
+  the shared Zod contracts instead of introducing a competing validation stack.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

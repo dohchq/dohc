@@ -91,21 +91,23 @@ attach, sync, or a raw filesystem scan finds unmanaged or out-of-contract
 `.versions/**`, non-allowlisted `.dohc/**`, or aliases of those names where
 dohc expects engine state, dohc must not treat the content as normal workspace
 data. Managed `~/dohc/<space>/.versions/<version>/` roots are allowed only when
-they are bound to a known workspace/version by the engine. Other reserved
-namespace content is quarantined with an explainable record, proposed for a
-deterministic collision-proof safe rename outside reserved namespaces, or sent
-to manual resolution before the workspace is activated. For secret-backed or
-secret-eligible inputs, quarantine records and safe-rename proposals must redact
-sensitive basenames, raw hashes, and path details, using opaque placeholders or
-keyed commitments instead. Safe rename proposals must never overwrite existing
-user content; destination names are derived from a stable sanitized basename
-plus a workspace-scoped content/id hash for ordinary inputs, or from
-non-sensitive opaque identifiers for secret-backed inputs, then reserved
-atomically at activation time with create-if-absent, `O_EXCL`, or an equivalent
-exclusive reservation primitive. A non-atomic check-then-create flow is not
-allowed. Activation may proceed only if the reservation succeeds; reservation
-failure is a fail-closed collision that stays in quarantine or manual
-resolution.
+they are bound to a known workspace/version by the engine. Non-allowlisted
+`.dohc/**` content and unmanaged `.versions/**` content are quarantined with an
+explainable record or sent to manual resolution; they are not proposed for
+ordinary user-content safe rename. Only non-engine user content that collides
+with a reserved namespace may be proposed for a deterministic collision-proof
+safe rename outside reserved namespaces before the workspace is activated. For
+secret-backed or secret-eligible inputs, quarantine records and safe-rename
+proposals must redact sensitive basenames, raw hashes, and path details, using
+opaque placeholders or keyed commitments instead. Safe rename proposals must
+never overwrite existing user content; destination names are derived from a
+stable sanitized basename plus a workspace-scoped content/id hash for ordinary
+inputs, or from non-sensitive opaque identifiers for secret-backed inputs, then
+reserved atomically at activation time with create-if-absent, `O_EXCL`, or an
+equivalent exclusive reservation primitive. A non-atomic check-then-create flow
+is not allowed. Activation may proceed only if the reservation succeeds;
+reservation failure is a fail-closed collision that stays in quarantine or
+manual resolution.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions` content is never silently promoted into a named version.
 
@@ -119,11 +121,13 @@ namespace handling is defined only by the reserved-namespace collision contract
 above: the allowlisted policy inputs are `.dohc/files.toml`,
 `.dohc/visibility.toml`, and optional workspace-root `.dohcignore`; all other
 `.dohc/**` content and unmanaged `.versions/**` fail closed into rejection,
-quarantine, safe rename proposal, or manual resolution. Symlinks, hardlinks,
-junctions, bind mounts, aliases, or any equivalent filesystem indirection that
-resolves outside the active workspace, crosses into another workspace, or enters
-a disallowed reserved namespace must be rejected or quarantined before capture
-or API dispatch. If the engine cannot prove the resolved target and file
+quarantine, or manual resolution. Safe rename proposal remains available only
+for non-engine user content that collides with a reserved namespace. Symlinks,
+hardlinks, junctions, bind mounts, aliases, or any equivalent filesystem
+indirection that resolves outside the active workspace, crosses into another
+workspace, or enters a disallowed reserved namespace must be rejected or
+quarantined before capture or API dispatch. If the engine cannot prove the
+resolved target and file
 identity are inside the active workspace boundary, it fails closed. This path
 boundary applies to every API path operation and file capture that may back an
 atom, folder, entity, share, or capture record.
@@ -141,10 +145,12 @@ and effective policy before it is persisted into version history. Unauthorized
 or indeterminate writes must be quarantined rather than merged into canonical
 history. Local durability logging may still record the raw capture; promotion to
 shared history waits for fresh server/engine-derived validation.
-Before classification and policy checks complete, secret-eligible captures must
-be stored encrypted or as path/object metadata only; quarantine must not persist
-plaintext secret bytes in ordinary durability payloads, logs, search, previews,
-or conflict artifacts.
+Before classification and policy checks complete, secret-eligible captures that
+include payload bytes must retain an encrypted payload envelope plus metadata
+until the write is promoted or explicitly discarded. Metadata-only quarantine is
+allowed only for pure discovery events that did not read or write payload bytes.
+Quarantine must not persist plaintext secret bytes in ordinary durability
+payloads, logs, search, previews, or conflict artifacts.
 Authorization/policy resolution is fail-closed: if authoritative workspace
 membership, share state, lock state, or effective-policy inputs are stale,
 unavailable, or indeterminate, the write remains quarantined and is not promoted

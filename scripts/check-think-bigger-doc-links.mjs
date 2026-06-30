@@ -6,20 +6,41 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
+const expectedThinkBiggerDocs = [
+  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
+  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
+  'docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md',
+  'docs/superpowers/specs/2026-06-23-dohc-chats-design.md',
+  'docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md',
+]
+
 const discoverThinkBiggerDocs = () => {
   const planDir = 'docs/superpowers/plans'
   const specDir = 'docs/superpowers/specs'
+  const specNameFragments = [
+    'dohc-versioned-workspace-design',
+    'dohc-chats-design',
+    'dohc-native-filesystem-design',
+  ]
   const planDocs = fs.readdirSync(path.resolve(repoRoot, planDir))
     .filter((name) => name.includes('think-bigger-dohc-workspace-engine') && name.endsWith('.md'))
     .map((name) => path.join(planDir, name))
   const specDocs = fs.readdirSync(path.resolve(repoRoot, specDir))
-    .filter((name) => /^2026-06-(22-dohc-versioned-workspace-design|23-dohc-(native-filesystem|chats)-design)\.md$/.test(name))
+    .filter((name) => name.endsWith('.md') && specNameFragments.some((fragment) => name.includes(fragment)))
     .map((name) => path.join(specDir, name))
 
   return [...planDocs, ...specDocs].sort()
 }
 
-const files = discoverThinkBiggerDocs()
+const discoveredThinkBiggerDocs = discoverThinkBiggerDocs()
+const missingExpectedDocs = expectedThinkBiggerDocs.filter((file) => !discoveredThinkBiggerDocs.includes(file))
+
+if (missingExpectedDocs.length > 0) {
+  console.error(`Think Bigger docs discovery missed expected files:\n${missingExpectedDocs.join('\n')}`)
+  process.exit(1)
+}
+
+const files = discoveredThinkBiggerDocs
 
 const visibleHeadingText = (heading) => heading
   .replace(/!\[([^\]\n]*)\]\([^)]*\)/g, '$1')
