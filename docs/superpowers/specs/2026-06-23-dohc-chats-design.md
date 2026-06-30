@@ -845,9 +845,11 @@ not infer lifecycle state from activity kind alone.
 `authzScopeId` is the exact server-issued authorization/redaction context for
 the mention notification projection. It must be derived server-side from the
 same grant/scope resolver used by shared chat and linked-work projections, and
-client-supplied scope ids are ignored or rejected before enqueue.
+client-supplied scope ids are ignored or rejected before enqueue. Scope changes
+may update projection/fanout context, but they must not create a new immutable
+notification identity for the same message revision and mentioned actor set.
 `notificationId` is deterministic for a mention notification lifecycle:
-`mention:<workspaceId>:<threadId>:<authzScopeId>:<messageId>:<bodyRevision>:<sha256(canonicalMentionedActorIdsJson)>`.
+`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<sha256(canonicalMentionedActorIdsJson)>`.
 Each non-hash component is UTF-8 percent-encoded with RFC 3986 unreserved
 characters left literal (`A-Z a-z 0-9 - . _ ~`) and all other bytes encoded as
 uppercase `%HH`, then joined with literal `:` separators. `bodyRevision` is the
@@ -860,8 +862,8 @@ but it is not part of `notificationId` so redaction/sanitization views cannot
 change the notification identity.
 The enqueue path must upsert or no-op by that expanded id, and
 resolve/replay/fanout must dedupe by the exact same canonical `notificationId`
-string. Repeated enqueue or resolve attempts for the same authz scope, message
-revision, and canonical mention set return the existing result or a
+string. Repeated enqueue or resolve attempts for the same message revision and
+canonical mention set return the existing result or a
 deterministic no-op; they must not append duplicate activities, duplicate queue
 rows, unstable unread/mention badges, duplicate notifications, or duplicate
 export/history records.

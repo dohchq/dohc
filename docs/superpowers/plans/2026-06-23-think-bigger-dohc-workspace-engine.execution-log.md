@@ -2964,6 +2964,35 @@ Hundred-forty-eighth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-ninth pass:
+
+- Fixed CodeRabbit's six follow-up findings:
+  - Removed path filters from `.github/workflows/think-bigger-docs.yml` so linked
+    target moves/deletions outside docs still run the checker.
+  - Updated PR00 plan wording so the docs workflow explicitly covers
+    plan/spec/execution-log edits, manifest updates, renames, and linked target
+    moves.
+  - Split non-persistent validation failures from durable `rejected` and
+    `quarantined` holding-record paths in the versioned workspace spec.
+  - Removed `authzScopeId` from mention notification identity while keeping it as
+    server-issued projection/fanout context.
+  - Expanded migration cutover scope to include versions, chats, messages,
+    search-index entries, exports, and projections.
+  - Marked deferred agent run events as provisional history/search references
+    with a stable surrogate key until first-class promotion.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

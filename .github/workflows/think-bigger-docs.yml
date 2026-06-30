@@ -4,21 +4,9 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - ".github/workflows/think-bigger-docs.yml"
-      - "docs/superpowers/plans/**/*.md"
-      - "docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json"
-      - "docs/superpowers/specs/**/*.md"
-      - "scripts/check-think-bigger-doc-links.mjs"
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/think-bigger-docs.yml"
-      - "docs/superpowers/plans/**/*.md"
-      - "docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json"
-      - "docs/superpowers/specs/**/*.md"
-      - "scripts/check-think-bigger-doc-links.mjs"
   workflow_dispatch:
 
 concurrency:

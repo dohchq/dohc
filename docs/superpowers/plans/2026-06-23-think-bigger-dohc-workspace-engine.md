@@ -270,7 +270,10 @@ Deferred substrate identities stay in the expansion backlog until their
 contracts are mounted into the product surface:
 
 - channels.
-- agent runs.
+- agent runs. Until promotion, agent run events are provisional history/search
+  references only and must use a stable surrogate key
+  `(workspaceId, runProvider, runExternalId | runEventId, createdAt)` with a
+  migration/backfill note before they become first-class `AgentRun` objects.
 - shares.
 - apps.
 - databases.
@@ -1539,9 +1542,9 @@ Foundation alpha and the relevant surface proof are complete.
 - Add the checked-in Think Bigger docs manifest consumed by
   `scripts/check-think-bigger-doc-links.mjs`.
 - Add `.github/workflows/think-bigger-docs.yml` so CI runs the manifest-backed
-  checker on Think Bigger plan/spec docs, manifest, workflow, and checker
-  changes, using manifest-triggered and Think Bigger doc path filters so doc
-  additions, removals, renames, and manifest updates run the fail-closed
+  checker for pull requests and pushes to `main`, without path filters, so
+  Think Bigger plan/spec/execution-log edits, manifest updates, checker changes,
+  doc renames, and linked target moves all run the fail-closed
   manifest/inventory check with the manifest as the source of truth.
 - Add the canonical links from this plan to the source specs and execution log.
 
@@ -1549,11 +1552,12 @@ Foundation alpha and the relevant surface proof are complete.
 
 - mandatory docs link/anchor check:
   `node scripts/check-think-bigger-doc-links.mjs`.
-- docs CI/workflow must run the checker against every Think Bigger plan/spec/
-  execution-log doc, using the checked-in Think Bigger docs manifest as the
-  source of truth. The checker must compare the manifest with repository
-  inventory and fail closed when they diverge so newly added Think Bigger docs
-  cannot bypass anchor validation.
+- docs CI/workflow must run the checker against every Think Bigger
+  plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
+  the source of truth. The workflow runs without path filters so linked target
+  moves, doc renames, execution-log edits, manifest changes, workflow changes,
+  and checker changes cannot bypass anchor validation. The checker must compare
+  the manifest with repository inventory and fail closed when they diverge.
 
 **CodeRabbit focus:**
 
@@ -2471,8 +2475,9 @@ substrate without data loss.
   linked-work projections. Chat unread/read-state projections, mention badges,
   thread cursors, and cursor-derived notification state must be rebuilt or
   invalidated before cutover. Projection refresh must enforce the new workspace
-  scoping rules consistently for every migrated atom, folder, entity, share, and
-  capture before cutover.
+  scoping rules consistently for every migrated atom, folder, entity, share,
+  capture, version, chat, message, search-index entry, export, and projection
+  before cutover.
 - Preserve current agent run history or map to moments where possible.
 - Add rollback for migration.
 
