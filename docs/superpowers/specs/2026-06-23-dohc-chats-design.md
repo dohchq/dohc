@@ -703,9 +703,13 @@ Authorized legal erasure is the exception to original-body retention: when a
 GDPR/CCPA or equivalent request is approved through policy, the engine may
 cryptographically purge, destroy keys for, or irreversibly redact the original
 body while preserving `deletedAt`, `tombstone`, deletion-placeholder rendering,
-and minimal audit metadata. Secret-backed references, encrypted payloads, or
-redacted forms replace plaintext wherever audit/history access would otherwise
-have retained the original body.
+minimal audit metadata, and the original persisted-body `bodyHash`. `bodyHash`
+is retained separately from the plaintext or encrypted body payload as
+non-renderable verification metadata, so replay/export/audit jobs can still prove
+which canonical body revision was deleted after the body itself is purged.
+Secret-backed references, encrypted payloads, or redacted forms replace
+plaintext wherever audit/history access would otherwise have retained the
+original body.
 
 `message_edited` is valid only for non-deleted `ThreadMessage` rows. Once
 `deletedAt` is present or `tombstone` is true, tombstone state is terminal for
@@ -807,8 +811,11 @@ nextBodySnapshot]`, where `nextBodySnapshot` is the canonical current
 `chat-body:v1` payload for the referenced persisted body revision.
 `tombstoneHash` hashes
 `["chat-tombstone:v1", workspaceId, threadId, messageId, previousBodyRevision,
-previousBody, deleteReasonOrNull]`, where `previousBody` is the canonical
-`ChatBodySnapshot` preserved by the delete activity.
+previousBodyHash, deleteReasonOrNull]`, where `previousBodyHash` is the
+canonical `bodyHash` of the deleted body revision. `previousBody` may be retained
+as plaintext, encrypted, secret-backed, or redacted audit material according to
+policy, but tombstone verification depends on `previousBodyHash`, not on
+re-reading the body payload.
 `deleteReason` is preserved user/agent text and must follow the same text-safety
 rules as message bodies and thread titles: escape by default, sanitize only
 through the allowlisted formatting subset, and redact or omit where the viewer
@@ -819,8 +826,10 @@ from this same canonical persisted-body hash used by
 `MentionNotificationThreadActivity`. For create/edit/restore, `bodyHash` is the
 persisted resulting body revision and must match `nextBodyHash`; for delete,
 `bodyHash` is the previous persisted body revision preserved by the delete
-activity. Replay, export, mention fanout, and history rebuilds must verify this
-hash before deriving notifications or visible projections.
+activity and is retained as non-renderable verification metadata even when legal
+erasure purges or redacts the original body payload. Replay, export, mention
+fanout, and history rebuilds must verify this hash before deriving notifications
+or visible projections.
 `MentionNotificationThreadActivity.bodyHash` always verifies the persisted body
 revision that produced the mention notification. Create/edit mention fanout uses
 the resulting body revision after the create/edit; delete or tombstone replay
@@ -955,7 +964,8 @@ Authorized history and export paths reconstruct the revision trail from these
 events. Normal chat rendering, search, notifications, projections, and summaries
 use the current `ThreadMessage.body` unless policy explicitly materializes
 historical revisions. Legal erasure may replace `previousBody` with a redacted
-snapshot while retaining edit provenance.
+snapshot while retaining edit provenance, the original `bodyHash`, and any
+`tombstoneHash` derived from that body hash.
 For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
 audit/replay can identify the exact affected link even after the derived
 `linkedWork` cache is rebuilt. Reaction add/remove replay affects one exact
@@ -1054,7 +1064,10 @@ server-assigned target identifiers:
 - `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected
   `bodyRevision`.
 - `add_reaction` and `remove_reaction` require an `idempotencyKey`, `messageId`,
-  reaction key, and target message revision or equivalent reaction-set revision.
+  and reaction key; idempotency and lookup are keyed only by the stable reaction
+  identity `(workspaceId, threadId, messageId, actorId, reactionKey)` or the
+  stable `reactionId`, not by the message body revision, reaction-set revision,
+  or any equivalent edit state.
 - `mark_thread_read` and `update_read_state` require an `idempotencyKey` or a
   server-derived stable read-state idempotency identity bound to actor, thread,
   read cursor, and causal read-state revision.

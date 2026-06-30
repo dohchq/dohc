@@ -15,15 +15,16 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Authoritative live status:** the newest PR00 pass entry below owns live
-  CodeRabbit status, test evidence, open overrides, and completion state.
-- **Snapshot role:** this block is derived from the newest PR00 pass entry and
+- **Authoritative live status:** `Hundred-sixty-ninth pass` below owns live
+  CodeRabbit status, test evidence, open overrides, and completion state for
+  PR00.
+- **Snapshot role:** this block is derived from `Hundred-sixty-ninth pass` and
   does not own mutable review state.
-- **CodeRabbit status:** derive from the newest PR00 pass entry.
-- **Test evidence:** derive from the newest PR00 validation block.
+- **CodeRabbit status:** derive from `Hundred-sixty-ninth pass`.
+- **Test evidence:** derive from the `Hundred-sixty-ninth pass` validation block.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
   remains pending human approval.
-- **Completion state:** derive from the newest PR00 pass entry; not complete or
+- **Completion state:** derive from `Hundred-sixty-ninth pass`; not complete or
   merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
   exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
@@ -3503,6 +3504,30 @@ Hundred-sixty-eighth pass:
     discovery.
   - Redacted protected, secret-backed, and engine-managed paths during first
     open/import metadata storage.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixty-ninth pass:
+
+- Fixed CodeRabbit's four follow-up findings:
+  - Cited the specific PR00 pass that owns the live Current PR Snapshot state.
+  - Made Think Bigger docs manifest access null-safe before validating the
+    `thinkBiggerDocs` array.
+  - Preserved deleted-message `bodyHash` as non-renderable verification metadata
+    across authorized legal erasure and made tombstone verification depend on the
+    previous body hash rather than re-reading erased body payloads.
+  - Aligned reaction API idempotency and lookup with stable reaction identity,
+    without coupling add/remove behavior to message or reaction-set revisions.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

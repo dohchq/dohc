@@ -18,7 +18,7 @@ try {
   console.error(`Unable to read Think Bigger docs manifest at ${manifestPath}: ${error.message}`)
   process.exit(1)
 }
-const expectedThinkBiggerDocs = manifest.thinkBiggerDocs
+const expectedThinkBiggerDocs = manifest?.thinkBiggerDocs
 
 if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((file) => typeof file !== 'string')) {
   console.error('Think Bigger docs manifest must contain a thinkBiggerDocs string array')
