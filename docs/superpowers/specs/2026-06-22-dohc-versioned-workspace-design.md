@@ -463,6 +463,13 @@ visibility, protected-path, lock, version-access, skill-turn, provenance,
 attribution, and proof checks. The retry outcome matrix is deterministic for the
 same replay metadata:
 
+Replay evaluation is first-match in this order; once a class matches, later
+checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
+malformed/cross-scope binding, causal base conflict, authorization/permission,
+visibility, protected-path, lock, version-access, skill-turn, provenance,
+attribution, then proof. If multiple server-derived checks fail in one replay
+attempt, the earliest matching class in that order wins.
+
 - If the captured causal base still matches and apply-time policy revalidation
   passes, the record may become canonical.
 - If the causal base is stale, advanced, missing, or otherwise no longer matches

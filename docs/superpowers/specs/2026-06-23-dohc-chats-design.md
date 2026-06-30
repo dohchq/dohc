@@ -253,12 +253,12 @@ declare function canonicalizeDmParticipantIds(input: {
 `canonicalizeDmParticipantIds` receives the authenticated server-derived actor
 separately from the client-supplied participant list. The server first normalizes
 `serverActorId` and every requested participant ID to their persisted actor-id
-form. It then strips all requested entries equal to the normalized
-`serverActorId`; any number of client-supplied self entries are ignored for
-authority and do not count as duplicate participants. Raw duplicates among the
-remaining non-self requested participants are rejected before uniqueness-key
-generation or persistence; implementations must not silently dedupe duplicate
-other participants. The server actor is then merged into the normalized
+form. Any client-supplied entry equal to the normalized `serverActorId` is
+rejected before uniqueness-key generation or persistence; the authenticated actor
+is added by the server, not accepted from the request. Raw duplicate requested
+participants that normalize to the same persisted actor ID are rejected before
+uniqueness-key generation or persistence; implementations must not silently
+dedupe participants. The server actor is then merged into the normalized
 participant set before uniqueness-key generation, persistence, authorization, or
 fanout, so the creator cannot omit or spoof themself. After canonicalization,
 `dmParticipantIds` must contain 2-16 unique participants. Oversized canonical
@@ -1130,8 +1130,10 @@ server-assigned target identifiers:
 - `mark_thread_read` and `update_read_state` require an `idempotencyKey` or a
   server-derived stable read-state idempotency identity bound to actor, thread,
   read cursor, and causal read-state revision.
-- `link_chat_to_work` requires an `idempotencyKey` and the
-  `CanonicalThreadLinkKey`.
+- `link_chat_to_work` requires an `idempotencyKey` plus the target link request
+  fields. The handler derives `CanonicalThreadLinkKey` server-side from the
+  authorized, policy-normalized target, grant, and visibility fields; callers
+  must not supply or override the canonical key.
 - `summarize_chat` requires an `idempotencyKey` or worker request id bound to
   thread, visible message range, summary target, model/config fingerprint, and
   authorization scope.
@@ -1141,7 +1143,11 @@ workspace-scoped idempotency record for the same actor, operation, key, and
 canonical operands atomically in the same transaction or serialized unit of work
 as the thread/message/link/reaction/read-state/summary mutation. Worker-owned
 mutations use the same rule with their server-derived request identity. That
-same unit also writes a durable outbox or replayable side-effect ledger for
+reservation uses the server-derived `CanonicalThreadLinkKey` for
+`link_chat_to_work` only after authorization, scope normalization, share-grant
+resolution, and visibility degradation have produced the final canonical
+operands.
+The same unit also writes a durable outbox or replayable side-effect ledger for
 notification fanout, search indexing, export/history fanout, projection
 invalidation, summary fanout, read-state fanout, and any other derived work keyed
 by the same workspace, thread, message, link, reaction, read-state, summary, and

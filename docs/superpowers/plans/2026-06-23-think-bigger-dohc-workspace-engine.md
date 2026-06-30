@@ -272,9 +272,11 @@ contracts are mounted into the product surface:
 - channels.
 - agent runs. Until promotion, agent run events are provisional history/search
   references only and must use a stable surrogate key
-  `(workspaceId, runProvider, runExternalId | runEventId)`; `createdAt` is
-  metadata only. Add a migration/backfill note before they become first-class
-  `AgentRun` objects.
+  `(workspaceId, runProvider, runExternalId)` when `runExternalId` is present,
+  with `(workspaceId, runProvider, runEventId)` as the fallback when no external
+  id exists. If neither identifier is present, replay/backfill fails closed;
+  `createdAt` is metadata only and never part of the surrogate key. Add a
+  migration/backfill note before they become first-class `AgentRun` objects.
 - shares.
 - apps.
 - databases.
@@ -380,11 +382,13 @@ Links between chats, files, folders, versions, moments, and agent runs must stor
 - target workspace ID.
 - stable target ID.
 - optional `VersionRef`.
-- display path/title at link time.
+- display path/title at link time only when policy permits; otherwise store a
+  redacted or policy-gated label that cannot reveal hidden target metadata.
 - ACL/degrade behavior.
 
 Links must survive rename/move, degrade cleanly when access is lost, and avoid
-leaking hidden target metadata.
+leaking hidden target metadata. If access is later revoked, stored display
+labels are hidden or replaced with the same degraded label used by dereference.
 
 ### Chats And Versioning
 

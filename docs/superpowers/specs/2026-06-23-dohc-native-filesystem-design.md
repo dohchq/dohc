@@ -397,16 +397,18 @@ changes. Both require source identity, destination absence, causal
 preconditions, and idempotency, and neither may degrade into delete-plus-create
 semantics. If source and destination resolve to different physical filesystems,
 volumes, or mount projections, `rename(...)` and `move(...)` fail closed with no
-mutation, surfacing `conflict`, `quarantined`, or a validation error according to
-the capture/API path instead of falling back to copy/delete behavior.
+mutation, surfacing `quarantined` or a validation error with manual-follow-up
+metadata according to the capture/API path instead of falling back to copy/delete
+behavior. `conflict` remains reserved for cases where the engine can form the
+base/current/incoming preservation envelope described above.
 If the destination already exists, the operation is an overwrite-rename and must
 map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart
 reconciliation must classify common editor temp-file-then-rename saves this way:
 the temp source provides `sourceObjectId`, the existing destination provides
 `destinationObjectId`, and both sides carry freshness preconditions. If the
-destination identity cannot be proven, the capture resolves to `conflict` or
-`quarantined` with manual-follow-up metadata instead of applying a path-only
-overwrite. Manual follow-up is operator workflow metadata, not a
+destination identity cannot be proven, the capture resolves to `quarantined` or
+a validation error with manual-follow-up metadata instead of applying a
+path-only overwrite. Manual follow-up is operator workflow metadata, not a
 `WriteResult.kind`.
 
 This answers the API-native workspace requirement. The file mount and the API
@@ -473,7 +475,10 @@ idempotency key. Rename/move with
 overwrite uses `replace(...)`, which carries `sourceObjectId`,
 `destinationObjectId`, source freshness precondition, destination freshness
 precondition, and idempotency key. That gives temp-file-then-rename saves a
-one-call atomic replace path without allowing a path-only overwrite.
+one-call atomic replace path without allowing a path-only overwrite. `replace(...)`
+requires source and destination to resolve to the same underlying filesystem or
+mount projection; cross-device or cross-projection replace attempts fail closed
+with no copy/delete fallback.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
 write-producing and must carry causal preconditions for both the source and

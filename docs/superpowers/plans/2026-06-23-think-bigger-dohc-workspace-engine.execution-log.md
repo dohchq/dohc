@@ -15,16 +15,16 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Authoritative live status:** `Hundred-seventieth pass` below owns live
+- **Authoritative live status:** `Hundred-seventy-first pass` below owns live
   CodeRabbit status, test evidence, open overrides, and completion state for
   PR00.
-- **Snapshot role:** this block is derived from `Hundred-seventieth pass` and
+- **Snapshot role:** this block is derived from `Hundred-seventy-first pass` and
   does not own mutable review state.
-- **CodeRabbit status:** derive from `Hundred-seventieth pass`.
-- **Test evidence:** derive from the `Hundred-seventieth pass` validation block.
+- **CodeRabbit status:** derive from `Hundred-seventy-first pass`.
+- **Test evidence:** derive from the `Hundred-seventy-first pass` validation block.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
   remains pending human approval.
-- **Completion state:** derive from `Hundred-seventieth pass`; not complete or
+- **Completion state:** derive from `Hundred-seventy-first pass`; not complete or
   merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
   exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
@@ -3568,6 +3568,37 @@ Hundred-seventieth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-seventy-first pass:
+
+- Fixed CodeRabbit's eight follow-up findings:
+  - Added deterministic first-match replay precedence for holding-area retry
+    failures.
+  - Included versions in the Foundation Alpha effective-policy gate evidence.
+  - Clarified deterministic agent-run surrogate keys and fail-closed backfill
+    behavior.
+  - Made link display labels policy-gated/redacted so stored titles and paths do
+    not leak hidden targets.
+  - Derived `CanonicalThreadLinkKey` server-side for `link_chat_to_work` before
+    idempotency reservation.
+  - Made DM participant canonicalization reject client-supplied self entries and
+    duplicate requested participants consistently.
+  - Routed unprovable rename/move/replace topology cases to quarantine or
+    validation errors instead of `conflict`.
+  - Required `replace(...)` source and destination to stay on the same underlying
+    filesystem or mount projection.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an
@@ -3687,7 +3718,8 @@ Gate evidence:
 
 - [ ] Stable IDs exist for substrate fixtures.
 - [ ] Typed events are workspace-scoped.
-- [ ] Effective policy resolver covers files, search, and export substrate.
+- [ ] Effective policy resolver covers files, versions, search, and export
+      substrate.
 - [ ] CodeRabbit approved every PR or user approved documented non-sensitive
       non-blocker overrides.
 - [ ] Security subagent review complete.
