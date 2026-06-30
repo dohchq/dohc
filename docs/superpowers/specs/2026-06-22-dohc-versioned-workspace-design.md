@@ -97,6 +97,7 @@ Write results are explicit:
 
 ```ts
 type UnixMsDecimalString = string // canonical base-10 Unix epoch milliseconds
+type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
 
 type DeniedOrQuarantinedStatus =
   | 'rejected_before_acceptance'

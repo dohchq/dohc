@@ -61,12 +61,14 @@ For `scopeKind: 'internal'`, `targetWorkspaceId` must equal `workspaceId`; any
 internal link with a different target workspace is rejected before persistence,
 activity fanout, projection, search, notification, export, or replay.
 Missing, expired, revoked, or ambiguous shared-channel grants fail closed for
-all of those paths. Grant revoke/expiry also triggers cleanup of server-held derived
+all of those paths. Grant revoke/expiry invalidates server-held derived
 projections, search snippets, notification caches, export staging artifacts, and
 other service-owned materialized chat context for that exception so stale shared
-data does not remain exposed after access changes. Thread activity records are
-append-only events keyed by `(workspaceId, threadId, activityId)` or an
-equivalent workspace/thread scoped sequence.
+data does not remain exposed after access changes. Durable audit/history/export
+records stay intact and continue to rely on authorization checks. Thread
+activity records are append-only events keyed by
+`(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
+sequence.
 `ThreadLink` create/update paths must validate the target workspace/resource
 identity, share/grant id, and visibility scope against trusted server-side grant
 state before any link or activity record is persisted. Client-provided grant

@@ -1014,13 +1014,13 @@ history.
 - One chat thread linked to a stable file object ID.
 - Message send.
 - Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
-  seeded in the shared substrate package scaffold. PR 01 formalizes the shared
-  contract boundary for these shapes before PR 12 extends them for channels,
-  DMs, and full chat schema.
+  seeded in the shared substrate package scaffold. P0E owns freezing and
+  versioning these shapes as the single provisional chat contract before PR 12
+  extends them for channels, DMs, and full chat schema.
   These provisional shapes must remain forward-compatible with PR 12, or PR 12
   must include a migration/backfill step that preserves existing chat data.
-  P0E must freeze this provisional schema as a versioned shared-substrate
-  boundary before PR 12 or PR 18 consume it; temporary fields must either carry a
+  PR 01 consumes this frozen P0E contract as part of the shared substrate and
+  must not introduce parallel chat shapes; temporary fields must either carry a
   schema version or have an explicit migration/backfill boundary.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
@@ -1540,8 +1540,9 @@ must use.
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
   `ProjectionValidation`, and `ConflictRecord`.
-- Formalize the shared substrate boundary for the P0E-seeded `ChatThread`,
-  `ThreadMessage`, and `ThreadLink` scaffold before PR 12/18 consume it.
+- Consume the P0E-frozen `ChatThread`, `ThreadMessage`, and `ThreadLink`
+  scaffold as the single provisional chat substrate; PR 01 must not introduce a
+  parallel chat schema.
 - Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
   that consume them: P0E may introduce minimal provisional chat/link contracts

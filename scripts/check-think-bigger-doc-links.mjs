@@ -22,9 +22,7 @@ const slug = (heading) => heading
   .replace(/\s+/g, '-')
   .replace(/-+/g, '-')
 
-const collectAnchors = (markdown) => {
-  const anchors = new Set()
-  const seen = new Map()
+function* contentLines(markdown) {
   let inFence = false
   let fenceChar = null
   let fenceLength = 0
@@ -47,10 +45,17 @@ const collectAnchors = (markdown) => {
       continue
     }
 
-    if (inFence) {
-      continue
+    if (!inFence) {
+      yield line
     }
+  }
+}
 
+const collectAnchors = (markdown) => {
+  const anchors = new Set()
+  const seen = new Map()
+
+  for (const line of contentLines(markdown)) {
     const heading = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/)
     if (!heading) {
       continue
@@ -68,32 +73,8 @@ const collectAnchors = (markdown) => {
 const collectLinks = (markdown) => {
   const links = []
   const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
-  let inFence = false
-  let fenceChar = null
-  let fenceLength = 0
 
-  for (const line of markdown.split(/\r?\n/)) {
-    const fence = line.match(/^\s{0,3}(```+|~~~+)/)
-
-    if (fence) {
-      const marker = fence[1][0]
-      const markerLength = fence[1].length
-      if (!inFence) {
-        inFence = true
-        fenceChar = marker
-        fenceLength = markerLength
-      } else if (marker === fenceChar && markerLength >= fenceLength) {
-        inFence = false
-        fenceChar = null
-        fenceLength = 0
-      }
-      continue
-    }
-
-    if (inFence) {
-      continue
-    }
-
+  for (const line of contentLines(markdown)) {
     for (const match of line.matchAll(linkPattern)) {
       links.push(match[1])
     }
@@ -162,7 +143,7 @@ for (const file of files) {
     const targetText = fs.readFileSync(targetPath, 'utf8')
     const anchors = collectAnchors(targetText)
 
-    if (!anchors.has(decodedAnchor.toLowerCase())) {
+    if (!anchors.has(slug(decodedAnchor))) {
       failures.push(`${file}: missing anchor ${raw}`)
     }
   }
