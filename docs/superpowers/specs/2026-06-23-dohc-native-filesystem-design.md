@@ -318,9 +318,9 @@ replace(workspaceId, versionId, fromPath, toPath, {
   destinationObjectId,
   idempotencyKey
 })
-list(workspaceId, versionId, path)
+list(workspaceId, versionId, path, { pageToken, pageSize })
 stat(workspaceId, versionId, path)
-search(workspaceId, versionId, query)
+search(workspaceId, versionId, query, { pageToken, pageSize })
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
@@ -345,6 +345,18 @@ semantics.
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
 examples below use explicit `workspaceId` and required version identifiers. A
+`read(...)` or `stat(...)` response includes the stable `objectId`, current
+`etag`, `contentHash`, and `VersionRef` needed by mutation preconditions.
+`list(...)` entries include the same stable `objectId` and freshness metadata
+for each returned child. Callers obtain `sourceObjectId`, `targetObjectId`, and
+`destinationObjectId` through `stat(...)`, `read(...)`, or paginated `list(...)`
+before invoking `write(...)`, `delete(...)`, `rename(...)`, `move(...)`, or
+`replace(...)`. `list(...)` and `search(...)` return bounded pages with an
+opaque `nextPageToken`; `pageSize` is capped by the server, an absent
+`pageToken` starts a new query, and a returned `nextPageToken` resumes the exact
+authorized workspace/version/query snapshot or fails closed if that snapshot is
+no longer valid for the caller.
+A
 validated bound session is represented to clients only as opaque session
 material. The server resolves the principal plus workspace/version binding from
 that session material and then dispatches the same explicit workspace/version

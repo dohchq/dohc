@@ -921,14 +921,20 @@ server-assigned target identifiers:
 - `link_chat_to_work` requires an `idempotencyKey` and the
   `CanonicalThreadLinkKey`.
 
-Before persisting or emitting side effects, each handler checks the
+Before persisting or emitting side effects, each handler reserves the
 workspace-scoped idempotency record for the same actor, operation, key, and
-canonical operands. A matching retry returns the existing result without
-creating duplicate messages, activities, notifications, links, projection
-invalidations, or fanout jobs. A key reused with different operands fails closed
-with `replay_metadata_mismatch`. Client-supplied `threadId` on create or
-`messageId` on reply is rejected; those identifiers are server-owned outputs of
-the idempotency result.
+canonical operands atomically in the same transaction or serialized unit of work
+as the thread/message/link mutation. The idempotency record is persisted before
+fanout, projection invalidation, notifications, search indexing, or export work
+is emitted. A matching retry returns the existing result without creating
+duplicate messages, activities, notifications, links, projection invalidations,
+or fanout jobs. A key reused with different operands fails closed with
+`replay_metadata_mismatch`. Client-supplied `threadId` on create or `messageId`
+on reply is rejected; those identifiers are server-owned outputs of the
+idempotency result. Chat idempotency records must be retained for the workspace's
+configured mutation retry horizon and no less than the maximum client/offline
+retry window; after expiry, late retries fail closed with an explicit
+idempotency-expired response rather than creating duplicate side effects.
 All chat API and worker mutation paths, including edits, deletes, reactions,
 read-state updates, links, notifications, summaries, and projections, must also
 respect user locks, folder/atom/file sharing boundaries, protected work, and

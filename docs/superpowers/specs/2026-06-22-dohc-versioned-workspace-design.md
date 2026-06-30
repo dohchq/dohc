@@ -179,8 +179,6 @@ type WriteResult =
       reasonCode: RetryableWriteFailureCode
       failedAt: UnixMsDecimalString
       retryAfterMs?: UInt64DecimalString
-      idempotencyResultId: string
-      idempotencyReplayToken: string
       commitState:
         | 'no_canonical_commit_recorded'
         | 'commit_state_unknown_retry_required'

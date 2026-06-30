@@ -15,9 +15,16 @@ Source specs:
 
 ## Current PR Snapshot
 
-Use the newest owning PR00 pass entry in the append-only history below as the
-live status snapshot. Do not duplicate mutable SHA/count/test/open-item/lane
-state here; each new pass entry owns that information and is the source of truth.
+- **Last updated:** current through the Hundred-twenty-eighth pass below.
+- **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
+  https://github.com/dohc-ai/dohc/pull/46.
+- **PR00 CodeRabbit:** latest completed rerun on `9e848b4` reported 6 issues;
+  hundred-twenty-eighth pass fixes are being applied and are pending rerun.
+- **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
+  guard are required before each push; latest evidence belongs in the newest
+  pass entry below.
+- **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
+  CodeRabbit clean rerun is required before completion or merge-readiness.
 
 ## How To Use This Log
 
@@ -2467,6 +2474,29 @@ Hundred-twenty-seventh pass:
     surfaces.
   - Reworded the docs CI/workflow requirement around manifest/glob target
     discovery for Think Bigger docs.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twenty-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Removed duplicated retryable-failure replay fields.
+  - Added paginated `list(...)`/`search(...)` contracts and stable object IDs on
+    read/stat/list lookup responses.
+  - Made chat idempotency reservation atomic with mutation writes and documented
+    retention/expiry behavior.
+  - Renamed the source spec link to `dohc Native Filesystem Design`.
+  - Populated Current PR Snapshot with concrete latest PR00 status.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -32,7 +32,7 @@ Agents collaborate like users, without special source-control knowledge.
 This mega plan collates and orchestrates:
 
 - [dohc Versioned Workspace Design](../specs/2026-06-22-dohc-versioned-workspace-design.md)
-- [dohc Native Filesystem / Dropbox For Agents Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
+- [dohc Native Filesystem Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
 - [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
 
 Those files are the conceptual inputs. This file is the execution plan.
