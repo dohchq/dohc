@@ -11,13 +11,14 @@ source-control concepts with new labels.
 
 The user-facing promise is simple:
 
-> Use normal files. Humans and agents can edit them. Accepted writes are durably
-> recorded immediately. Writes that pass protection checks become canonical
-> immediately; accepted writes that cannot yet become canonical return
-> `durable-pending`; evaluator outages or indeterminate evaluator results return
-> `retryable-failure` without pretending the write was accepted; and
-> rejected/quarantined writes keep durable recovery/audit handles. dohc remembers
-> what happened, supports parallel versions, and helps reconcile conflicts.
+> Use normal files. Humans and agents can edit them. Writes have two explicit
+> phases: durable recording and canonical acceptance. Writes that pass protection
+> checks become canonical immediately; writes that are durably recorded but cannot
+> yet become canonical return `durable-pending`; evaluator outages or
+> indeterminate evaluator results return `retryable-failure` without pretending
+> the write was durably accepted; and rejected/quarantined writes keep durable
+> recovery/audit handles. dohc remembers what happened, supports parallel
+> versions, and helps reconcile conflicts.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -397,10 +398,11 @@ decision note defines
 `operatorDispositionDueAt`, and a mandatory finite
 `AcceptedHoldingRecordPolicy.maxRecoverableHoldingPayloadMs`; when the
 canonicalization deadline is reached, the record must be escalated into an
-explicit disposition queue, marked overdue in status APIs, and compacted or
-moved to colder durable storage according to policy. Garbage collection may
-remove only derived retry/index metadata after the disposition deadline while
-the operator window is open; the reconstructible payload remains until
+explicit disposition queue, marked overdue in status APIs, and only derived
+retry/index metadata may be compacted or moved to colder durable storage
+according to policy. Garbage collection may remove only derived retry/index
+metadata after the disposition deadline while the operator window is open; the
+reconstructible payload remains until
 canonicalization succeeds, an explicit operator disposition record retires it,
 or the effective finite `maxRecoverableHoldingPayloadMs` bound is reached.
 `operatorDispositionDueAt` marks the item overdue for operator/status handling;

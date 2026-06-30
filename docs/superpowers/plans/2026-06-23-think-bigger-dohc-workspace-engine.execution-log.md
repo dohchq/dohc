@@ -15,7 +15,7 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** `Hundred-seventy-seventh pass` below owns PR00
+- **Canonical live status block:** `Hundred-seventy-eighth pass` below owns PR00
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
@@ -3765,6 +3765,37 @@ Hundred-seventy-seventh pass:
     block in the latest PR00 pass.
   - Added `WorkspaceEvent`, `DurabilityEvent`, and `HistoryMoment` to the
     provisional baseline and PR 01 canonical core substrate handoff.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventy-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Distinguished durable recording from canonical acceptance in the versioned
+    workspace intro.
+  - Tightened accepted holding-record retention so payload bytes are not
+    compacted/moved at canonicalization deadline, only derived metadata is.
+  - Added the `Architecture specs and mega-plan` cohort alias to docs discovery.
+  - Replaced repeated schema ownership prose with a single Phase 0 / PR 01 /
+    PR 12 ownership matrix and made PR 01/PR 12 entries reference it.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -884,30 +884,23 @@ blockers in
 After P0A and P0R, Phase 0 must land a small provisional shared-substrate
 baseline before any later Phase 0 lane branches into implementation. The named
 provisional source of truth is `Phase0SharedSubstrateBaseline` in the shared
-substrate package scaffold. It owns temporary Phase 0 fixture symbols for
-`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
-`WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord`,
-`ThreadLink`, and file/chat link shapes only until PR 01 lands.
-It must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F,
-and P0G must not start implementation branches until this baseline is finalized,
-and must import these provisional symbols from the baseline package rather than
-invent parallel shapes, ad hoc copies, or local lookalike types. After PR 01
-lands, new code must consume the PR 01-owned contracts and
-`Phase0SharedSubstrateBaseline` becomes historical-only.
-PR 01 is the single canonical schema owner for core workspace substrate:
-`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, and
-`WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, and `ConflictRecord`. For
-chat/link work, PR 01 carries only a versioned provisional bridge from Phase 0 so
-file/history/search proof code can compile; it must not claim final ownership of
-`ChatThread`, `ThreadMessage`, or chat `ThreadLink` contracts.
-PR 12 is the single owner of the final chat/link schema for `ChatThread`,
-`ThreadMessage`, and `ThreadLink`. It consumes the Phase 0/PR 01 bridge,
-adopts it unchanged or migrates/backfills it through an explicit schema-version
-boundary, then owns channels, DMs, linked-work behavior, and full chat storage.
+substrate package scaffold. It must be versioned, tested, and owned in one
+place; P0B, P0C, P0D, P0E, P0F, and P0G must import these provisional symbols
+from the baseline package rather than invent parallel shapes, ad hoc copies, or
+local lookalike types. After PR 01 lands, new code must consume the PR 01-owned
+contracts and `Phase0SharedSubstrateBaseline` becomes historical-only.
+
+#### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
+
+| Symbols | Phase 0 baseline | PR 01 | PR 12 |
+| --- | --- | --- | --- |
+| `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
+| `ChatThread`, `ThreadMessage`, chat `ThreadLink` | Provisional fixture owner until PR 01 lands. | Versioned bridge only so file/history/search proof code can compile; not final owner. | Single final owner; adopts or migrates/backfills the Phase 0/PR 01 bridge, then owns channels, DMs, linked-work behavior, and full chat storage. |
+
 The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
-versioned bridge -> PR 12 final chat/link schema. Later PR entries may state
-acceptance criteria or migration notes for those symbols, but they are not
-ownership sources.
+canonical core plus chat bridge -> PR 12 final chat/link schema. Later PR entries
+may state acceptance criteria or migration notes for those symbols, but they are
+not ownership sources.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1658,9 +1651,9 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
   migration/backfill boundary supersedes it.
 - Consume the `Phase0SharedSubstrateBaseline` `ChatThread`, `ThreadMessage`, and
-  `ThreadLink` scaffold as a versioned provisional overlay in the same shared
-  package; PR 01 must not introduce a parallel chat schema or claim final chat
-  ownership.
+  `ThreadLink` scaffold exactly as assigned in the Phase 0 / PR 01 / PR 12
+  Schema Ownership Matrix; PR 01 must not introduce a parallel chat schema or
+  claim final chat ownership.
 - Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
   that consume them: P0E may introduce minimal provisional chat/link contracts
@@ -2156,6 +2149,8 @@ links, activity, read state, and reactions.
   source workspace/thread, target type, target workspace, stable target id,
   optional `VersionRef`, display path/title captured at link time,
   ACL/degraded-render state.
+- Own the final `ChatThread`, `ThreadMessage`, and chat `ThreadLink` schema as
+  assigned in the Phase 0 / PR 01 / PR 12 Schema Ownership Matrix.
 - Model live chats as workspace objects, not as files that automatically fork
   with versions.
 
