@@ -15,7 +15,7 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** `Hundred-seventy-sixth pass` below owns PR00
+- **Canonical live status block:** `Hundred-seventy-seventh pass` below owns PR00
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
@@ -57,8 +57,8 @@ secret-handling, data-loss, or review-gate blockers.
 
 P0A-P0G branches are provisional throughput work started after user approval for
 unattended Phase 0 execution on 2026-06-24. Current live state is recorded only
-in Current PR Snapshot above. This table records static lane ownership, branch,
-worktree, and planned validation shape.
+in the canonical live-status block in the latest PR00 pass below. This table
+records static lane ownership, branch, worktree, and planned validation shape.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -3733,6 +3733,38 @@ Hundred-seventy-sixth pass:
     after PR 01 lands.
   - Prohibited hardlinks in writable/materialized workspace projections so shared
     inodes cannot break path-centric object identity.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventy-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Restricted docs-link external scheme bypass to `http`, `https`, `mailto`, and
+    `app`, rejecting disallowed schemes.
+  - Resolved leading-slash markdown links relative to the repository root rather
+    than the host filesystem root.
+  - Updated the PR lane inventory note to point at the canonical live-status
+    block in the latest PR00 pass.
+  - Added `WorkspaceEvent`, `DurabilityEvent`, and `HistoryMoment` to the
+    provisional baseline and PR 01 canonical core substrate handoff.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

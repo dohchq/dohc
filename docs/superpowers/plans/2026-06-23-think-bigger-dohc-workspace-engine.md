@@ -886,7 +886,8 @@ baseline before any later Phase 0 lane branches into implementation. The named
 provisional source of truth is `Phase0SharedSubstrateBaseline` in the shared
 substrate package scaffold. It owns temporary Phase 0 fixture symbols for
 `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
-`ConflictRecord`, `ThreadLink`, and file/chat link shapes only until PR 01 lands.
+`WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord`,
+`ThreadLink`, and file/chat link shapes only until PR 01 lands.
 It must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F,
 and P0G must not start implementation branches until this baseline is finalized,
 and must import these provisional symbols from the baseline package rather than
@@ -895,10 +896,10 @@ lands, new code must consume the PR 01-owned contracts and
 `Phase0SharedSubstrateBaseline` becomes historical-only.
 PR 01 is the single canonical schema owner for core workspace substrate:
 `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, and
-`ConflictRecord`. For chat/link work, PR 01 carries only a versioned provisional
-bridge from Phase 0 so file/history/search proof code can compile; it must not
-claim final ownership of `ChatThread`, `ThreadMessage`, or chat `ThreadLink`
-contracts.
+`WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, and `ConflictRecord`. For
+chat/link work, PR 01 carries only a versioned provisional bridge from Phase 0 so
+file/history/search proof code can compile; it must not claim final ownership of
+`ChatThread`, `ThreadMessage`, or chat `ThreadLink` contracts.
 PR 12 is the single owner of the final chat/link schema for `ChatThread`,
 `ThreadMessage`, and `ThreadLink`. It consumes the Phase 0/PR 01 bridge,
 adopts it unchanged or migrates/backfills it through an explicit schema-version

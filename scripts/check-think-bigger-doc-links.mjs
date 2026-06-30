@@ -414,7 +414,11 @@ for (const file of files) {
       continue
     }
 
-    if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    const scheme = raw.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase()
+    if (scheme) {
+      if (!['http', 'https', 'mailto', 'app'].includes(scheme)) {
+        failures.push(`${file}: disallowed link scheme ${raw}`)
+      }
       continue
     }
 
@@ -434,7 +438,9 @@ for (const file of files) {
     const targetPath = path.normalize(
       decodedTarget === ''
         ? path.resolve(filePath)
-        : path.resolve(path.dirname(filePath), decodedTarget),
+        : decodedTarget.startsWith('/')
+          ? path.resolve(repoRoot, decodedTarget.slice(1))
+          : path.resolve(path.dirname(filePath), decodedTarget),
     )
     let canonicalTargetPath
     try {
