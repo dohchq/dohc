@@ -22,8 +22,7 @@ Source specs:
 - **Archive boundary:** earlier PR00 pass entries under
   `Archived PR00 Pass History` are append-only background. Only the newest PR00
   pass's `Live PR00 status` block is mutable for current state.
-- **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
-  [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
+- **PR00 PR:** see the canonical live-status block in the latest PR00 pass below.
 
 ## How To Use This Log
 
@@ -5444,7 +5443,7 @@ Two-hundred-twenty-fourth pass:
 
 Two-hundred-twenty-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5460,6 +5459,38 @@ Two-hundred-twenty-fifth pass:
     `threadId` names.
   - Replaced reusable raw content hashes for protected/secret-backed filesystem
     entries with keyed commitments or opaque authorized hash handles.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-twenty-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Added root `package.json` and `pnpm-lock.yaml` to Think Bigger docs workflow
+    path filters.
+  - Froze the current PR pointer header so PR metadata lives only in the latest
+    live pass block.
+  - Required `secretProjection` to remain explicit in status/API/UI serialization,
+    preserving `protectedLocal` versus `plaintextLocal`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

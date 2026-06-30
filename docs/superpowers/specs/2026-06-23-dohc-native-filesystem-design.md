@@ -1228,9 +1228,10 @@ Every status projection must expose:
 - write state from the durable subset of `WriteResult.kind`: `canonical`,
   `durable-pending`, `conflict`, `quarantined`, `rejected`,
   `retryable-failure`, or `terminal-retired`.
-- secret state: secret-backed vs non-secret, whether plaintext is materialized
-  for this actor/session, and whether the path is excluded or redacted on
-  export.
+- secret state: secret-backed vs non-secret, explicit `secretProjection`
+  (`none`, `opaque`, `protectedLocal`, or `plaintextLocal`), whether plaintext is
+  materialized for this actor/session, and whether the path is excluded or
+  redacted on export.
 - conflict state: whether the visible path has a preserved conflict record, plus
   the conflict projection location when policy permits.
 
@@ -1248,8 +1249,11 @@ Hidden mechanics are okay. Hidden safety-relevant state is not.
 Status projections must use the same write-state terminology as the API
 contract. If a save is captured locally but not yet canonical, `dohc status`, UI
 badges, `.dohc/status.json`, and API status calls must show the materialization
-state, file-policy state, write state, secret state, export state, and conflict
-state above in one coherent record. They must include the relevant
+state, including `materialized` and `pinned`, file-policy state, write state,
+secret state, including the exact `secretProjection` value, export state, and
+conflict state above in one coherent record. They must preserve the
+`protectedLocal` versus `plaintextLocal` distinction in serialized status output
+and include the relevant
 `holdingRecordId`, `conflictReplayToken`, idempotency correlation, and conflict
 projection path when policy permits. A status projection must report `canonical`
 once the same write has promoted into history. `idempotency-expired` is not a
