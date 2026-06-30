@@ -517,14 +517,14 @@ specific actor can hydrate or read local plaintext for a protected path such as
 Secret-backed paths are never ordinary synced text. For `.env`, `synced` means
 encrypted/opaque sync of secret references, encrypted blobs, hashes, and redacted
 status, not plaintext replication or server-side plaintext hydration. Its
-`local` materialization state means policy-controlled local projection, not
-default plaintext exposure. Historical state, exports, search results, conflict
-envelopes, projections, and
-agent-readable views store opaque handles, hashes, and redacted status by
-default. Plaintext hydration requires explicit server-side materialization
-permission and must be recorded separately from normal materialization so `.env`
-does not become a plain history blob, search document, or cloud-readable text
-payload.
+`materialized: 'local'` state means bytes or a projection are present locally,
+while `secretProjection` distinguishes opaque, protected local, and plaintext
+exposure. Historical state, exports, search results, conflict envelopes,
+projections, and agent-readable views store opaque handles, hashes, and redacted
+status by default. Plaintext hydration requires explicit server-side
+materialization permission and must be recorded separately from normal
+materialization as `secretProjection: 'plaintextLocal'` so `.env` does not
+become a plain history blob, search document, or cloud-readable text payload.
 
 `tracked` and `versioned` are related but not identical. `versioned = true`
 implies `tracked = true`; `tracked = false` implies `versioned = false`.
@@ -622,6 +622,7 @@ public_export = "redact"
 agent_access = "explicit"
 pinned = false
 materialized = "local"
+secret_projection = "protectedLocal"
 
 [[rule]]
 match = ".env.team"
@@ -705,6 +706,7 @@ type FilePolicy = {
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
   materialized: 'local' | 'virtual'
+  secretProjection?: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
 }
 ```
 
@@ -712,6 +714,13 @@ type FilePolicy = {
 or represented virtually. `pinned` is the independent offline-retention request
 that asks dohc to keep local bytes hydrated when policy allows; pinning does not
 change tracking, versioning, searchability, export behavior, or visibility.
+`secretProjection` describes exposure for secret-backed paths separately from
+storage hydration: `opaque` means handles/redacted status only,
+`protectedLocal` means brokered or policy-controlled local projection, and
+`plaintextLocal` means ordinary OS-readable plaintext after an explicit grant.
+Status APIs, UI serialization, and agent-readable views must emit both
+`materialized` and `secretProjection` so protected secret material is never
+confused with normal local plaintext.
 When a subtree is both pinned and currently non-materialized, policy, status
 APIs, and UI represent it as `materialized: 'virtual'` plus `pinned: true`.
 `virtual` remains the canonical non-materialized label; pinned is shown as an
@@ -752,6 +761,7 @@ visibility: private
 publicExport: redact
 agentAccess: explicit
 materialized: local # protected/explicit local projection, not default exposure
+secretProjection: protectedLocal
 ```
 
 For an authorized user on their own machine, `.env` can look like a normal file

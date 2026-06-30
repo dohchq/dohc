@@ -79,10 +79,11 @@ protected-path rules, user locks, version access, visibility boundaries, and
 skill-turn gates before applying a change. Authenticated actor identity is
 derived by the server/engine, never trusted from the caller. Humans, agents,
 automations, imports, and sync processes all pass through the same protection
-checks before a write can land. The write path is fail-closed: if any
+checks before a write can land. The write path is fail-closed: substantive
 authorization, ownership/review gate, policy, visibility, protected-path,
-user-lock, version-access, or skill-turn evaluator is unavailable or
-indeterminate, the save is denied rather than applied.
+user-lock, version-access, or skill-turn decisions can deny a write, but an
+unavailable or indeterminate evaluator is classified as `retryable-failure` and
+does not apply a mutation.
 Canonical save success is acknowledged only after the mutation is durably
 committed to canonical workspace state and is visible to normal `read` semantics
 for that version. `watch` propagation and search indexing are eventually
@@ -113,8 +114,6 @@ type QuarantinedStatus = Exclude<
 type PublicDeniedReasonCode =
   | 'not_authorized'
   | 'policy_denied'
-  | 'policy_indeterminate'
-  | 'gate_indeterminate'
   | 'protected_path'
   | 'locked'
   | 'version_access_denied'
@@ -126,6 +125,8 @@ type PublicDeniedReasonCode =
 
 type RetryableWriteFailureCode =
   | 'service_unavailable'
+  | 'evaluator_unavailable'
+  | 'evaluator_indeterminate'
 
 type TerminalRetirementReason =
   | 'auto_retired_payload_retention_expired'
@@ -167,6 +168,9 @@ type WriteResult =
       reasonCode: RetryableWriteFailureCode
       failedAt: UnixMsDecimalString
       retryAfterMs?: UInt64DecimalString
+      idempotencyResultId: string
+      idempotencyReplayToken: string
+      commitState: 'no_canonical_commit_recorded' | 'commit_state_unknown_retry_required'
       recordedAsCanonicalMutation: false
     }
   | {
@@ -238,6 +242,11 @@ Transient infrastructure outages are not public denial reasons and must not be
 represented as terminal `rejected` or `quarantined` outcomes. They return the
 distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a
 later retry while recording that no canonical mutation was acknowledged.
+`retryable-failure` participates in the same idempotency-result envelope as
+write, conflict, and durable-pending results: repeated delivery with the same
+operation fingerprint returns the same `idempotencyResultId`,
+`idempotencyReplayToken`, and `commitState` until retry handling can prove and
+return a canonical/durable result or a deterministic terminal outcome.
 
 Rejected and quarantined ingests must still be durable in a non-canonical
 holding area with enough metadata to retry or explain the decision after
@@ -398,20 +407,22 @@ Agent-origin-capable ingest paths are different: dohc-controlled agent
 runtimes, skill turns, MCP/tool bridges, privileged agent workspace mounts, or
 sync/import channels that carry agent/run metadata must supply verifiable
 skill-turn context before becoming canonical state. If that proof is missing,
-stale, or indeterminate, the ingest is quarantined or rejected; it must not be
-downgraded into unverified local/session provenance. Sync/import flows must
-preserve their original provenance class. Only truly passive ordinary OS writes
-with no dohc-controlled agent/run context may remain local/device/session
-provenance when proof is absent; import/sync ingests without proof stay
-quarantined until they can be attributed or rejected.
+stale, or substantively invalid, the ingest is quarantined or rejected; if the
+required evaluator is unavailable or indeterminate, the ingest returns
+`retryable-failure` and does not become canonical. It must not be downgraded
+into unverified local/session provenance. Sync/import flows must preserve their
+original provenance class. Only truly passive ordinary OS writes with no
+dohc-controlled agent/run context may remain local/device/session provenance
+when proof is absent; import/sync ingests without proof stay quarantined until
+they can be attributed or rejected.
 Unverified local, device, or session edits still pass through server/engine-side
 workspace ownership, lock, protected-path, and visibility checks before they
 become canonical workspace state. If the engine cannot prove the required access
-or policy/skill-turn state, the ingest is quarantined or rejected rather than
-trusted. Agent-originated writes must fail closed when the relevant skill-turn
-gate cannot be evaluated or is indeterminate; local provenance does not bypass
-that evaluator when the write is being applied through a dohc-controlled
-agent/tool action.
+or policy/skill-turn state because the evaluator is unavailable or
+indeterminate, the ingest returns `retryable-failure`; substantive denial,
+missing proof, or invalid proof is quarantined or rejected rather than trusted.
+Local provenance does not bypass that evaluator when the write is being applied
+through a dohc-controlled agent/tool action.
 Agent-specific authorship is required for social actions like chat replies,
 where the message display must make clear whether the human or the user's agent
 wrote it.
@@ -943,8 +954,9 @@ The first proof should be small but real:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
 9. E2E proves fail-closed behavior when authorization, policy, visibility,
-   protected-path, lock, version-access, or skill-turn evaluators are
-   unavailable or indeterminate.
+   protected-path, lock, version-access, or skill-turn decisions deny access,
+   and retryable no-mutation behavior when required evaluators are unavailable
+   or indeterminate.
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
 11. E2E proves every persisted atom, folder, entity, share, capture, file,

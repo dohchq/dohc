@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-fifteenth pass below.
+- **Last updated:** current through the Hundred-sixteenth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `418d795` reported 5 issues;
-  hundred-fifteenth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `30c2887` reported 4 issues;
+  hundred-sixteenth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2190,6 +2190,30 @@ Hundred-fifteenth pass:
     consuming that frozen substrate instead of introducing parallel schemas.
   - Narrowed shared-channel grant revoke/expiry cleanup to derived caches and
     projections while preserving durable audit/history/export records.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixteenth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest four-issue rerun:
+  - Added explicit retryable-failure idempotency replay fields and commit-state
+    reporting so retries can dedupe safely when commit state is unknown.
+  - Reworded save-path and ingest evaluator failures so substantive decisions
+    deny/quarantine, while unavailable or indeterminate evaluators return a
+    retryable no-mutation outcome.
+  - Added `secretProjection` beside `materialized` so protected local secret
+    projections and ordinary plaintext hydration are represented distinctly in
+    schema, status/UI serialization, and agent-readable views.
+  - Updated the Current PR Snapshot to the `30c2887` four-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
