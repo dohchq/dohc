@@ -18,9 +18,7 @@ Source specs:
 - **Last updated:** see the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `da8c1d6` reported 6 issues;
-  the newest owning PR00 pass entry records follow-up fixes and pending rerun
-  status.
+- **PR00 CodeRabbit:** see the newest owning PR00 pass entry below.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -306,15 +304,15 @@ node scripts/check-think-bigger-doc-links.mjs
 - Docs-only exception approval: pending human approval before PR00 is marked
   complete or merge-ready.
 - Current implementation evidence exists in P0G, where the local agent CLI smoke
-  passed with a real Codex child process in a disposable workspace using
-  `DOHC_CODEX_SANDBOX=danger-full-access` as a one-off temporary QA exception.
-  This unsafe sandbox mode is not baseline behavior; the default Codex safe
+  passed with a real provider child process in a disposable workspace using a
+  provider-specific danger-full-access sandbox override as a one-off temporary QA
+  exception. This unsafe sandbox mode is not baseline behavior; the default safe
   sandbox remains the intended path.
-- Open follow-up: restore default safe-sandbox validation when `bubblewrap` or
-  Codex's bundled sandbox helper is available locally.
+- Open follow-up: restore default safe-sandbox validation when local sandbox
+  support is available.
 - Local agent result: not run for PR00 docs-only scaffold; exception pending.
-- Claude result, if available: not run for PR00 docs-only scaffold; exception
-  pending.
+- Alternative local-agent result, if available: not run for PR00 docs-only
+  scaffold; exception pending.
 - Transcript/artifact path: not applicable.
 - Secret redaction notes: not applicable.
 
@@ -2568,6 +2566,29 @@ Hundred-thirty-second pass:
   - Reflowed the native filesystem bound-session paragraph.
   - Marked `ThreadActivityBase.actorKind` as readonly server-owned provenance.
   - Updated the Current PR Snapshot to the `da8c1d6` six-issue rerun.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirty-third pass:
+
+- Fixed CodeRabbit follow-up findings from the latest four-issue rerun:
+  - Included `retryable-failure` in non-canonical durability acknowledgments.
+  - Required exact decoded fragment matching in the Think Bigger docs link
+    checker instead of re-slugging link fragments.
+  - Made the Current PR Snapshot delegate CodeRabbit status to the newest owning
+    PR00 pass entry instead of hardcoding commit/count values.
+  - Removed provider-specific product names from local-agent QA prose while
+    preserving the disposable-workspace and unsafe-sandbox exception evidence.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -236,7 +236,7 @@ for (const file of files) {
       continue
     }
 
-    if (!anchorsFor(canonicalTargetPath).has(slug(decodedAnchor))) {
+    if (!anchorsFor(canonicalTargetPath).has(decodedAnchor)) {
       failures.push(`${file}: missing anchor ${raw}`)
     }
   }

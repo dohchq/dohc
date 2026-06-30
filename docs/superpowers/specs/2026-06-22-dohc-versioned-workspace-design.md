@@ -526,9 +526,9 @@ dohc should track two levels:
    - canonical-write-success boundary: an immediate-save success is acknowledged
      only after the canonical mutation is durable and visible through `read`.
      `watch` catches up asynchronously. A durability ack without canonical
-     visibility can return only `durable-pending`, `rejected`, `quarantined`,
-     `idempotency-expired`, `terminal-retired`, or `conflict`, never
-     `canonical`.
+     visibility can return only `durable-pending`, `retryable-failure`,
+     `rejected`, `quarantined`, `idempotency-expired`, `terminal-retired`, or
+     `conflict`, never `canonical`.
    - not necessarily the main visible timeline.
 
 2. **Meaningful moments**
