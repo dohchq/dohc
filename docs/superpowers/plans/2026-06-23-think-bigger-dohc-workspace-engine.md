@@ -891,17 +891,20 @@ It must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F,
 and P0G must not start implementation branches until this baseline is finalized,
 and must import or reuse these provisional symbols rather than invent parallel
 shapes.
-PR 01 is the single canonical schema owner for `WorkspaceObject`,
-`WorkspaceVersion`, `VersionRef`, `ConflictRecord`, `ThreadLink`, `ChatThread`,
-and `ThreadMessage`. It must adopt the provisional shapes unchanged or
-migrate/backfill them through an explicit schema-version boundary after P0G.
-PR 12 consumes the PR 01 canonical `ChatThread`, `ThreadMessage`, and
-`ThreadLink` symbols and only schema-versionedly extends or migrates them for
-channels, DMs, and full chat behavior. The migration direction is one-way:
-Phase 0 provisional fixtures -> PR 01 canonical schema -> PR 12 chat extensions,
-with explicit backfill if a later phase changes field shape. Later PR entries
-may state acceptance criteria or migration notes for those symbols, but they are
-not ownership sources.
+PR 01 is the single canonical schema owner for core workspace substrate:
+`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, and
+`ConflictRecord`. For chat/link work, PR 01 carries only a versioned provisional
+bridge from Phase 0 so file/history/search proof code can compile; it must not
+claim final ownership of `ChatThread`, `ThreadMessage`, or chat `ThreadLink`
+contracts.
+PR 12 is the single owner of the final chat/link schema for `ChatThread`,
+`ThreadMessage`, and `ThreadLink`. It consumes the Phase 0/PR 01 bridge,
+adopts it unchanged or migrates/backfills it through an explicit schema-version
+boundary, then owns channels, DMs, linked-work behavior, and full chat storage.
+The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
+versioned bridge -> PR 12 final chat/link schema. Later PR entries may state
+acceptance criteria or migration notes for those symbols, but they are not
+ownership sources.
 
 #### PR P0A - Current System Inventory And Decisions
 

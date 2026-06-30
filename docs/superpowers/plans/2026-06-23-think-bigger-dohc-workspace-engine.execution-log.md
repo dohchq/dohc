@@ -15,7 +15,7 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** `Hundred-seventy-fourth pass` below owns PR00
+- **Canonical live status block:** `Hundred-seventy-fifth pass` below owns PR00
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
@@ -1026,9 +1026,9 @@ Fifty-fourth pass:
 
 Fifty-fifth pass:
 
-- Updated the PR00 status table to reflect the current pushed P0A-P0G stack:
-  P0D-P0G are now restacked on the latest P0C line, and P0G local validation
-  passed on the integrated proof arc.
+- Historical snapshot: recorded the then-current provisional pushed P0A-P0G
+  stack, where P0D-P0G were restacked on the latest P0C line and P0G local
+  validation had passed on the integrated proof arc.
 - Recorded the current local-agent evidence boundary: PR00 remains docs-only,
   while P0G proves the real provider child-process file edit in a disposable
   workspace using a provider-specific danger-full-access sandbox override as a
@@ -3673,6 +3673,37 @@ Hundred-seventy-fourth pass:
     scope.
   - Required shared-channel/shared-grant reauthorization before read-state CAS or
     message existence lookup.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-seventy-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Made accepted holding payload-retention expiry deterministically transition
+    to `terminal-retired` before `replayUntil`, with `idempotency-expired` only
+    after `replayUntil`.
+  - Made PR 12 the single final owner for `ChatThread`, `ThreadMessage`, and chat
+    `ThreadLink`, with PR 01 limited to core substrate plus a provisional bridge.
+  - Softened the historical PR00 P0A-P0G stack entry so it is clearly a
+    then-current provisional snapshot, not the live status table.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

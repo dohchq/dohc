@@ -412,8 +412,11 @@ extends reconstructible payload retention; `operatorDispositionDueAt` and
 `overdue_disposition`; `retentionUntil` and
 `maxRecoverableHoldingPayloadMs` control reconstructible payload retention, with
 the earlier effective payload-retention deadline winning. If payload retention
-expires before `replayUntil`, retries keep replaying a minimal
-`terminal-retired` or `idempotency-expired` result without reconstructible bytes.
+expires before `replayUntil`, the record transitions exactly once to
+`terminal-retired` with reason
+`auto_retired_payload_retention_expired`; retries before `replayUntil` replay
+that minimal terminal result without reconstructible bytes. Only retries after
+`replayUntil` may return `idempotency-expired`.
 No accepted holding record may remain recoverable forever: if no
 workspace-specific recovery-retention policy is configured, the engine's default
 finite `maxRecoverableHoldingPayloadMs` applies, and workspaces may only choose
