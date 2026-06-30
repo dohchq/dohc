@@ -244,8 +244,12 @@ Phase 0 should use a normal folder plus reconciliation:
    - Walk the materialized workspace tree.
    - Apply file policy.
    - Assign stable object IDs.
-   - Store `workspaceId`, source mount binding, path, file identity where
-     available, size, mtime, content hash, and version/base metadata.
+   - Store `workspaceId`, source mount binding, and either a canonical path for
+     ordinary entries or an opaque/redacted path token for protected,
+     secret-backed, or engine-managed entries. File identity where available,
+     size, mtime, content hash, and version/base metadata are stored with that
+     redacted form; the real protected path remains only inside the authorization
+     envelope.
 
 2. **While dohc is running**
    - Use OS file watching for create/modify/delete/rename events.

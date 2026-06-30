@@ -3494,6 +3494,28 @@ Hundred-sixty-seventh pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-sixty-eighth pass:
+
+- Fixed CodeRabbit's three follow-up findings:
+  - Clarified `retryable-failure` commit state semantics for guaranteed no-op
+    versus commit-unknown retry handling.
+  - Added the `dohc Workspace Engine Docs, Specs, and CI` cohort alias to docs
+    discovery.
+  - Redacted protected, secret-backed, and engine-managed paths during first
+    open/import metadata storage.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an
