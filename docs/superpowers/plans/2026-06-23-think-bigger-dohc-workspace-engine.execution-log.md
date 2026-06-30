@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: see Current PR Snapshot below.
+Status: see the canonical live-status block in the latest PR00 pass below.
 Created: 2026-06-23
 
 Plan:
@@ -13,20 +13,12 @@ Source specs:
 - [dohc Native Filesystem Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
 - [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
 
-## Current PR Snapshot
+## Current PR Pointer
 
-- **Authoritative live status:** `Hundred-seventy-second pass` below owns live
-  CodeRabbit status, test evidence, open overrides, and completion state for
-  PR00.
-- **Snapshot role:** this block is derived from `Hundred-seventy-second pass` and
-  does not own mutable review state.
-- **CodeRabbit status:** derive from `Hundred-seventy-second pass`.
-- **Test evidence:** derive from the `Hundred-seventy-second pass` validation block.
-- **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
-  remains pending human approval.
-- **Completion state:** derive from `Hundred-seventy-second pass`; not complete or
-  merge-ready until CodeRabbit is clean and the docs-only local-agent-CLI
-  exception is approved.
+- **Canonical live status block:** `Hundred-seventy-third pass` below owns PR00
+  CodeRabbit status, test evidence, open overrides, and completion state.
+- **Pointer role:** this header is not a mutable status summary; update the
+  canonical pass block instead of restating live state here.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
@@ -3626,11 +3618,39 @@ Hundred-seventy-second pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-seventy-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two follow-up findings:
+  - Added the current `Think Bigger dohc Workspace Engine` cohort alias to docs
+    discovery.
+  - Collapsed duplicated mutable PR00 status into this canonical live-status
+    block, leaving the header and unresolved-findings section as pointers only.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
-Mutable active blockers live in the newest PR00 pass entry. This section is an
-append-only derived summary for historical unresolved-finding categories; there
-are no additional historical categories beyond the pass log above.
+This section is a historical category index only. Live unresolved blockers and
+decisions are not restated here; read the canonical live-status block in the
+latest PR00 pass above.
 
 ### Subagent Reviews
 
