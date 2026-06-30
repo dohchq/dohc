@@ -15,15 +15,10 @@ Source specs:
 
 ## Current PR Snapshot
 
-- **Last updated:** see the newest owning PR00 pass entry below.
-- **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
+- **PR00 source of truth:** see the newest owning PR00 pass entry below for
+  CodeRabbit status, test evidence, open overrides, and completion state.
+- **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** see the newest owning PR00 pass entry below.
-- **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
-  guard are required before each push; latest evidence belongs in the newest
-  pass entry below.
-- **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
-  CodeRabbit clean rerun is required before completion or merge-readiness.
 
 ## How To Use This Log
 
@@ -157,7 +152,7 @@ Date completed:
 
 - `DOHC_TEST_AGENT_CLI`:
 - Local agent result:
-- Claude result, if available:
+- Alternative local-agent result, if available:
 - Transcript/artifact path:
 - Secret redaction notes:
 
@@ -1009,10 +1004,10 @@ Fifty-fifth pass:
   P0D-P0G are now restacked on the latest P0C line, and P0G local validation
   passed on the integrated proof arc.
 - Recorded the current local-agent evidence boundary: PR00 remains docs-only,
-  while P0G proves the real Codex child-process file edit in a disposable
-  workspace using `DOHC_CODEX_SANDBOX=danger-full-access` as a one-off temporary
-  QA exception. Default safe-sandbox validation remains the intended path and is
-  blocked locally by the missing sandbox helper.
+  while P0G proves the real provider child-process file edit in a disposable
+  workspace using a provider-specific danger-full-access sandbox override as a
+  one-off temporary QA exception. Default safe-sandbox validation remains the
+  intended path and is blocked locally by the missing sandbox helper.
 
 Fifty-sixth pass:
 
@@ -1789,7 +1784,7 @@ Ninety-eighth pass:
   - Added mandatory policy-review evaluation to the actor-neutral write decision
     tree before immediate canonical save.
   - Replaced the PR00 lane inventory worktree placeholder with
-    `/home/ice/dev/dohc`.
+    `<repo-root>`.
   - Added PR 21R to the Collaboration Expansion milestone list.
   - Aligned shared substrate vocabulary with `WorkspaceObject`, `VersionRef`,
     `Projection`, `WorkspaceEvent`, `DurabilityEvent`, `FilePolicy`, and
@@ -2096,7 +2091,7 @@ Hundred-thirteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`, confirming repo-root-stable path resolution.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2123,7 +2118,7 @@ Hundred-fourteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`, confirming repo-root-stable path resolution and
     root containment.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
@@ -2147,7 +2142,7 @@ Hundred-fifteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2171,7 +2166,7 @@ Hundred-sixteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2192,7 +2187,7 @@ Hundred-seventeenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2219,7 +2214,7 @@ Hundred-eighteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2245,7 +2240,7 @@ Hundred-nineteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2266,7 +2261,7 @@ Hundred-twentieth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2295,7 +2290,7 @@ Hundred-twenty-first pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2320,7 +2315,7 @@ Hundred-twenty-second pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2348,7 +2343,7 @@ Hundred-twenty-third pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2374,7 +2369,7 @@ Hundred-twenty-fourth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2392,7 +2387,7 @@ Hundred-twenty-fifth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2417,7 +2412,7 @@ Hundred-twenty-sixth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 files from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2441,7 +2436,7 @@ Hundred-twenty-seventh pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2464,7 +2459,7 @@ Hundred-twenty-eighth pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2492,7 +2487,7 @@ Hundred-twenty-ninth pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2519,7 +2514,7 @@ Hundred-thirtieth pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2544,7 +2539,7 @@ Hundred-thirty-first pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2570,7 +2565,7 @@ Hundred-thirty-second pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2593,7 +2588,27 @@ Hundred-thirty-third pass:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs.
-  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirty-fourth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest two-issue rerun:
+  - Collapsed the Current PR Snapshot into a pointer to the newest owning PR00
+    pass entry plus the stable draft PR link.
+  - Replaced a machine-specific checker evidence path with the portable
+    `<repo-root>` placeholder.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -2695,8 +2710,8 @@ Gate evidence:
 - [ ] Phase 0 performance budgets pass or budget misses have explicit user
       approval and follow-up.
 - [ ] No renderer-blocking whole-workspace scan ships in Phase 0.
-- [ ] Local agent CLI QA passes with `DOHC_TEST_AGENT_CLI=codex`.
-- [ ] Claude local agent CLI compatibility is run or unavailable status is
+- [ ] Local agent CLI QA passes with the configured `DOHC_TEST_AGENT_CLI`.
+- [ ] Alternative local agent CLI compatibility is run or unavailable status is
       recorded.
 - [ ] Local agent file edits are captured without requiring agent-specific file
       attribution.
