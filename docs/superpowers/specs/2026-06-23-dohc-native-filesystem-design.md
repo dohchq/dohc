@@ -423,8 +423,12 @@ examples below use explicit `workspaceId` and required version identifiers. A
 `etag`, and `versionId` needed by mutation preconditions. `contentHash` is
 returned only for non-secret entries or entries explicitly materialized for that
 caller; secret-backed paths omit it or return an opaque authorized hash handle
-unless the caller has materialization permission. `list(...)` entries include
-the same stable `objectId` and freshness metadata for each returned child.
+unless the caller has materialization permission. `list(...)` and `search(...)`
+entries use redacted labels or opaque path tokens for protected or secret-backed
+entries; ordinary filenames and path components are returned only when policy
+allows plaintext disclosure. Redacted entries still include stable `objectId`
+and allowed freshness metadata so authorized mutation preconditions can be built
+without leaking secret directory structure.
 Callers obtain `sourceObjectId`, `targetObjectId`, and `destinationObjectId`
 through `stat(...)`, `read(...)`, or paginated `list(...)` before invoking
 `write(...)`, `delete(...)`, `rename(...)`, `move(...)`, or `replace(...)`.
@@ -847,7 +851,7 @@ type FilePolicyBase = {
 
 type NonSecretFilePolicy = FilePolicyBase & {
   encrypted: false
-  secretProjection?: never
+  secretProjection: 'none'
 }
 
 type SecretBackedFilePolicy = FilePolicyBase & {
@@ -866,9 +870,9 @@ change tracking, versioning, searchability, export behavior, or visibility.
 storage hydration: `opaque` means handles/redacted status only,
 `protectedLocal` means brokered or policy-controlled local projection, and
 `plaintextLocal` means ordinary OS-readable plaintext after an explicit grant.
-Policy validation and builders must emit `SecretBackedFilePolicy` for protected
-secret paths; such entries cannot omit `secretProjection` or use a non-secret
-placeholder value.
+Policy validation and builders must emit `secretProjection: 'none'` for
+non-secret paths and `SecretBackedFilePolicy` for protected secret paths; secret
+entries cannot omit `secretProjection` or use the non-secret placeholder value.
 Status APIs, UI serialization, and agent-readable views must emit both
 `materialized` and `secretProjection` so protected secret material is never
 confused with normal local plaintext.

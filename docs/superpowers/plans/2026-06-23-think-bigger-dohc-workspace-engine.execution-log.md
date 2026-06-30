@@ -15,8 +15,8 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** `Hundred-eightieth pass` below owns PR00
-  CodeRabbit status, test evidence, open overrides, and completion state.
+- **Canonical live status block:** the latest PR00 pass below owns CodeRabbit
+  status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
@@ -3856,6 +3856,40 @@ Hundred-eightieth pass:
     read-state, and notification surfaces.
   - Expanded bridge-auth negative tests to cover missing or wrong authenticated
     local-channel binding.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script comment/nested-link fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-eighty-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Made the Current PR Pointer static so future pass-log updates do not require
+    header edits.
+  - Reordered replay precedence so auth/visibility/policy gates precede causal
+    conflict classification.
+  - Added secret-backed discovery redaction for `read`, `stat`, `list`, and
+    `search` response contracts.
+  - Added `secretProjection: 'none'` for non-secret file policy serialization.
+  - Deduped collected doc links before validation.
+  - Adjusted slug generation so each remaining space becomes one GitHub-style
+    hyphen.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

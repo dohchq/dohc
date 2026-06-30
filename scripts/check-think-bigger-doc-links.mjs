@@ -111,7 +111,7 @@ const slug = (heading) => decodeHtmlEntities(visibleHeadingText(heading))
   .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}~]/g, '')
   .replace(/[\u00a1-\u00bf\u2010-\u2027\u2030-\u205e\u2e00-\u2e7f\u3000-\u303f\ufe10-\ufe1f\ufe30-\ufe4f\uff00-\uff65]/g, '')
   .replace(/[^\S ]+/g, '')
-  .replace(/ +/g, '-')
+  .replace(/ /g, '-')
 
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
 
@@ -335,7 +335,7 @@ const collectLinks = (markdown) => {
     }
   }
 
-  return { links, unresolvedReferences }
+  return { links: [...new Set(links)], unresolvedReferences }
 }
 
 const assertCheckerFixtures = () => {

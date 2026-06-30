@@ -472,17 +472,11 @@ same replay metadata:
 
 Replay evaluation is first-match in this order; once a class matches, later
 checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
-malformed/cross-scope binding, causal base conflict, authorization/permission,
-policy, visibility, protected-path, lock, version-access, skill-turn,
-provenance, attribution, then proof. If multiple server-derived checks fail in
-one replay attempt, the earliest matching class in that order wins.
+malformed/cross-scope binding, authorization/permission, policy, visibility,
+protected-path, lock, version-access, skill-turn, provenance, attribution, proof,
+then causal base conflict. If multiple server-derived checks fail in one replay
+attempt, the earliest matching class in that order wins.
 
-- If the captured causal base still matches and apply-time policy revalidation
-  passes, the record may become canonical.
-- If the causal base is stale, advanced, missing, or otherwise no longer matches
-  the target version state, the retry returns a deterministic `conflict` and
-  preserves the incoming record for manual reconciliation. Stale causal state is
-  not classified as quarantine or rejection.
 - If workspace/version binding metadata is malformed, mismatched, crosses
   workspace scope, or cannot be proven before a holding record exists, return a
   `PublicValidationErrorCode` before holding-area persistence. Only
@@ -500,6 +494,12 @@ one replay attempt, the earliest matching class in that order wins.
   Visibility-boundary failures use `visibility_denied` externally and
   `quarantined_visibility` internally; they must not be collapsed into
   `policy_denied` or `not_authorized`.
+- If the causal base is stale, advanced, missing, or otherwise no longer matches
+  the target version state, the retry returns a deterministic `conflict` and
+  preserves the incoming record for manual reconciliation. Stale causal state is
+  not classified as quarantine or rejection.
+- If the captured causal base still matches and apply-time policy revalidation
+  passes, the record may become canonical.
 
 The same replay metadata cannot move between these classes across attempts
 unless the durable record itself changes state through an explicit operator,
