@@ -30,9 +30,24 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
-    const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
+    const candidatePath = path.resolve(repoRoot, dir, name)
+    let canonicalCandidatePath
+    try {
+      canonicalCandidatePath = fs.realpathSync(candidatePath)
+      const relativeCandidate = path.relative(canonicalRepoRoot, canonicalCandidatePath)
+      if (relativeCandidate.startsWith('..') || path.isAbsolute(relativeCandidate)) {
+        return false
+      }
+      if (!fs.statSync(canonicalCandidatePath).isFile()) {
+        return false
+      }
+    } catch {
+      return false
+    }
+
+    const raw = fs.readFileSync(canonicalCandidatePath, 'utf8')
     return thinkBiggerCohortPattern.test(raw)
   }
   const discoveryRoots = [

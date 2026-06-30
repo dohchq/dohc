@@ -946,7 +946,12 @@ implementation.
   - scan/reconcile a workspace root.
   - return changed path metadata.
   - hash changed candidates.
+  - resolve bridge identity only from the authenticated local-channel binding
+    plus server/engine context.
   - emit structured timing/log events.
+- The local workspace kernel boundary must reject client-supplied actor,
+  workspace, or version metadata; requests missing a valid local-channel binding
+  or bound to the wrong channel fail before scan/hash/reconcile work begins.
 - Compare bridge options:
   - sidecar daemon.
   - IPC/JSON-RPC.
@@ -1603,9 +1608,10 @@ Foundation alpha and the relevant surface proof are complete.
 - Add [the Think Bigger docs workflow](../../../.github/workflows/think-bigger-docs.yml)
   so CI runs the manifest-backed checker for pull requests and pushes to `main`
   when `docs/superpowers/**`, [the checker](../../../scripts/check-think-bigger-doc-links.mjs),
-  or the workflow changes. This path-filtered model covers Think Bigger
-  plan/spec/execution-log edits, manifest updates, superpowers doc renames, and
-  linked target moves under the superpowers docs tree while keeping unrelated
+  or the workflow changes. The workflow path filters only trigger the job; the
+  enforcement point is the checker, which compares the checked-in manifest
+  against repository inventory and link/anchor resolution so renamed targets,
+  moved docs, or manifest drift cannot pass silently. The filters keep unrelated
   app-only PRs out of the docs job.
 - Add the canonical links from this plan to the source specs and execution log.
 
@@ -1616,12 +1622,13 @@ Foundation alpha and the relevant surface proof are complete.
 - docs CI/workflow must run the checker against every Think Bigger
   plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
   the source of truth. [The workflow](../../../.github/workflows/think-bigger-docs.yml)
-  uses path filters for `docs/superpowers/**`,
+  uses path filters only to trigger the job for `docs/superpowers/**`,
   [the checker](../../../scripts/check-think-bigger-doc-links.mjs), and the
-  workflow file itself, so linked target moves under superpowers docs, doc
-  renames, execution-log edits, manifest changes, workflow changes, and checker
-  changes cannot bypass anchor validation. The checker must compare the manifest
-  with repository inventory and fail closed when they diverge.
+  workflow file itself. The checker is the fail-closed enforcement mechanism: it
+  must compare the manifest with repository inventory, validate links/anchors,
+  and fail when linked target moves, doc renames, execution-log edits, manifest
+  changes, workflow changes, checker changes, or discovered-doc drift make the
+  manifest and repository disagree.
 
 **CodeRabbit focus:**
 
