@@ -4779,6 +4779,42 @@ Two-hundred-sixth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Added the `Think Bigger documentation suite` cohort alias to the docs
+    checker discovery regex.
+  - Changed local fragment validation to check Markdown heading anchors only for
+    Markdown targets, with an asset-fragment fixture.
+  - Moved pnpm setup before setup-node caching and bumped the workflow Node
+    version to 24.14.1.
+  - Pinned chat `reactionKey` emoji validation to Unicode 15.1.0/UAX #29 and
+    Unicode Emoji 15.1 RGI tables.
+  - Clarified that `durable-pending` is only the non-canonical holding-record
+    `WriteResult` arm, not a canonical write waiting for read visibility.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and

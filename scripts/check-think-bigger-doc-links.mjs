@@ -40,7 +40,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
+    /^Cohort:\s*(?:Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger documentation suite|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -387,6 +387,8 @@ const collectLinks = (markdown) => {
   return { links, unresolvedReferences }
 }
 
+const isMarkdownPath = (targetPath) => /\.(?:md|markdown)$/i.test(targetPath)
+
 const assertCheckerFixtures = () => {
   const splitQueryTarget = splitLocalTarget('./diagram.svg?raw=1#overview')
   if (splitQueryTarget.targetRaw !== './diagram.svg' || splitQueryTarget.anchorRaw !== 'overview') {
@@ -453,6 +455,9 @@ const assertCheckerFixtures = () => {
   const missingReference = collectLinks('[missing][reference]')
   if (!missingReference.unresolvedReferences.some((entry) => entry.reference === '[missing][reference]' && entry.lineNumber === 1)) {
     throw new Error('missing reference fixture should still report unresolved reference links')
+  }
+  if (!isMarkdownPath('/repo/README.markdown') || isMarkdownPath('/repo/diagram.svg')) {
+    throw new Error('Markdown target fixture should not treat asset fragments as heading anchors')
   }
 }
 
@@ -573,6 +578,10 @@ for (const file of files) {
     }
 
     if (!decodedAnchor) {
+      continue
+    }
+
+    if (!isMarkdownPath(canonicalTargetPath)) {
       continue
     }
 

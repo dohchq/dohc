@@ -98,10 +98,14 @@ for that version. `watch` propagation and search indexing are eventually
 consistent from canonical state and must not gate write acknowledgment. If the
 durability path accepts a non-canonical
 holding record, the response is a distinct durable-pending result, not a
-successful immediate save. UIs may show that pending record only in explicit
-ingest/recovery/status surfaces marked non-canonical. In this spec, "files save
-immediately" means authorized writes that pass protection checks become
-canonical without an extra human apply/review step.
+successful immediate save and not a canonical write that is merely waiting for
+read visibility. The only `durable-pending` response is the non-canonical
+`WriteResult` arm carrying `holdingRecordId`, `acceptedAt`, `replayUntil`,
+`operatorDispositionDueAt`, `pendingState`, and the same idempotency/replay
+metadata used to resume or retire that holding record. UIs may show that pending
+record only in explicit ingest/recovery/status surfaces marked non-canonical.
+In this spec, "files save immediately" means authorized writes that pass
+protection checks become canonical without an extra human apply/review step.
 Write results are explicit:
 
 ```ts

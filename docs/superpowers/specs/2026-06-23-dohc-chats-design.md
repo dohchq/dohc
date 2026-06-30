@@ -999,10 +999,15 @@ type ReactionIdentity =
 
 `reactionKey` is a canonical, case-sensitive Unicode scalar string after NFC
 normalization with leading/trailing ASCII whitespace rejected before persistence.
-Allowed keys are either a single Unicode emoji grapheme cluster or a namespaced
-custom key matching `custom:[a-z0-9][a-z0-9_.-]{0,63}`. Producers, replay,
-export, and import readers must validate and store exactly that canonical form;
-they must not case-fold, alias, trim, or locale-normalize reaction keys.
+Allowed keys are either one Unicode 15.1.0 extended grapheme cluster that is an
+RGI emoji sequence under Unicode Emoji 15.1 data, or a namespaced custom key
+matching `custom:[a-z0-9][a-z0-9_.-]{0,63}`. The emoji `reactionKey` check uses
+Unicode Standard Annex #29 extended grapheme cluster segmentation for Unicode
+15.1.0 plus checked-in Unicode Emoji 15.1 RGI tables; producers, replay, export,
+and import readers must reject keys requiring newer tables until a recorded
+schema/data migration upgrades the accepted version. They must validate and
+store exactly that canonical `reactionKey` form; they must not case-fold, alias,
+trim, or locale-normalize reaction keys.
 
 type ReactionThreadActivity = ThreadActivityBase & ReactionIdentity & {
   messageId: string
