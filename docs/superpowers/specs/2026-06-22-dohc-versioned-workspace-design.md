@@ -133,6 +133,11 @@ type PublicDeniedReasonCode =
 
 type PublicValidationErrorCode =
   | 'invalid_request'
+  | 'malformed_request'
+  | 'missing_precondition'
+  | 'incompatible_precondition'
+  | 'invalid_path'
+  | 'invalid_version'
   | 'replay_metadata_mismatch'
 
 type RetryableWriteFailureCode =
@@ -507,11 +512,12 @@ It should ask only:
 7. Can the system preserve recovery and honest provenance?
 8. Does the change create a conflict or cross a visibility boundary?
 
-If the actor can write and the change does not create a conflict or cross a
-visibility boundary, the change saves immediately to that version. If the change
-creates a conflict or crosses a real visibility boundary, it routes to conflict
-preservation/reconciliation or the relevant review/share flow instead of the
-immediate canonical save path.
+If the actor can write, all required policy/review gates pass, and the change
+does not create a conflict or cross a visibility boundary, the change saves
+immediately to that version. If the change creates a conflict, crosses a real
+visibility boundary, or requires mandatory review before canonicalization, it
+routes to conflict preservation/reconciliation or the relevant review/share flow
+instead of the immediate canonical save path.
 
 For raw passive local file edits observed through the normal OS filesystem,
 dohc does not need to prove whether the process was a user, an external agent

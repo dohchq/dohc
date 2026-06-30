@@ -112,8 +112,16 @@ function* contentLines(markdown) {
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])\s+/)
     const indentedListItem = Boolean(listItem)
     const leadingIndent = indentationWidth(line)
-    const listContinuation = activeListIndent !== null && line.trim() !== '' && leadingIndent > activeListIndent
-    const indentedCode = /^(?: {4}|\t)/.test(line) && !indentedListItem && !listContinuation
+    const listCodeBlock = activeListIndent !== null
+      && line.trim() !== ''
+      && leadingIndent >= activeListIndent + 4
+      && !indentedListItem
+    const listContinuation = activeListIndent !== null
+      && line.trim() !== ''
+      && leadingIndent > activeListIndent
+      && !listCodeBlock
+    const indentedCode = (/^(?: {4}|\t)/.test(line) && !indentedListItem && !listContinuation)
+      || listCodeBlock
 
     if (fence && !inFence) {
       const marker = fence[1][0]

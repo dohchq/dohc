@@ -877,14 +877,14 @@ current-system inventory, storage/filesystem decision note, and unresolved
 blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
-After P0A and P0R, Phase 0 must land a small shared-substrate baseline before
-P0B, P0D, or P0E branch into implementation. That baseline freezes the early
-`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
-`ConflictRecord`, `ThreadLink`, and file/chat link shapes that later Phase 0
-lanes share. It may be provisional, but it must be versioned, tested, and owned
-in one place; P0B/P0D/P0E must not invent parallel shapes that PR 01 later has
-to reconcile. PR 01 formalizes and expands this baseline after P0G, rather than
-being the first place those shared interfaces appear.
+After P0A and P0R, Phase 0 must land a small provisional shared-substrate
+baseline before P0B, P0D, or P0E branch into implementation. That baseline owns
+the early `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID,
+`ConflictRecord`, `ThreadLink`, and file/chat link shapes for Phase 0 lanes
+only. It must be versioned, tested, and owned in one place; P0B/P0D/P0E must not
+invent parallel shapes. PR 01 remains the final schema source and must either
+adopt the provisional shapes unchanged or migrate/backfill them through an
+explicit schema-version boundary after P0G.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -948,6 +948,10 @@ implementation.
 - TypeScript contract tests for request/response shape.
 - fixture-based scan/hash benchmark.
 - failure-mode test for malformed paths and missing workspace roots.
+- negative bridge-auth test that sends forged client-supplied actor, workspace,
+  and version metadata and verifies the bridge rejects or ignores those fields,
+  resolving identity only from the authenticated local channel and server/engine
+  context.
 
 **Acceptance:**
 
@@ -1099,6 +1103,9 @@ history.
 - search returns file and linked chat.
 - unauthorized actor cannot see private file/chat result.
 - `.env` plaintext does not enter search/history/export in Phase 0.
+- forged client-supplied actor, workspace, and version metadata is rejected or
+  ignored by the bridge; search/policy identity comes only from the authenticated
+  local channel and server/engine context.
 - workspace switch/request-token race test for file/search/chat loading.
 
 **E2E:**
@@ -1132,6 +1139,9 @@ history.
 - search across chat/file.
 - local agent CLI edits a file through the normal workspace surface and dohc
   captures history without the agent knowing dohc-specific version control.
+- forged client-supplied actor, workspace, and version metadata is rejected or
+  ignored by the bridge, with identity resolved only from the authenticated local
+  channel and server/engine context.
 - workspace-switch race.
 - `.env` exclusion/redaction smoke.
 
@@ -1535,10 +1545,10 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
-- **Phase 0 baseline freeze:** immediately after P0A/P0R and before P0B, P0D,
-  or P0E proceed, land the minimal shared substrate baseline for
-  `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object IDs, and
-  the provisional conflict/link/chat shapes those lanes consume.
+- **Phase 0 provisional baseline freeze:** immediately after P0A/P0R and before
+  P0B, P0D, or P0E proceed, land the minimal Phase 0 shared substrate baseline
+  for `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object IDs,
+  and the provisional conflict/link/chat shapes those lanes consume.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.

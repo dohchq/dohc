@@ -18,8 +18,9 @@ Source specs:
 - **PR00 source of truth:** see the newest owning PR00 pass entry below for
   CodeRabbit status, test evidence, open overrides, and completion state.
 - **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised workflow, checker, plan-gating, and spec-contract findings that are
-  addressed in the newest pass; a committed rerun is still required.
+  raised workflow drift, checker list-code, snapshot, bridge-gate, schema-owner,
+  and status taxonomy findings that are addressed in the newest pass; a
+  committed rerun is still required.
 - **Test evidence:** the newest pass records `git diff --check`, both Think
   Bigger docs link-check invocations, and the brand guard test passing.
 - **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
@@ -3105,6 +3106,41 @@ Hundred-fifty-third pass:
   - Added one authoritative native-filesystem `WriteResult.kind` outcome map.
   - Extended chat mutation idempotency/replay/outbox semantics to reactions,
     read-state updates, summaries, and worker-owned mutations.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-fourth pass:
+
+- Fixed CodeRabbit's eight follow-up findings:
+  - Changed the Think Bigger docs workflow path filters from fixed document
+    filenames to manifest/checker-aligned patterns for Think Bigger plan docs
+    and spec docs.
+  - Expanded `PublicValidationErrorCode` so malformed requests, missing or
+    incompatible preconditions, invalid paths, invalid versions, and replay
+    metadata mismatches are explicit validation outcomes.
+  - Updated the immediate-save predicate so policy/review gates must pass before
+    the fast path can become canonical.
+  - Taught the docs checker to skip code blocks nested inside list items while
+    still checking normal list-continuation prose.
+  - Updated the Current PR Snapshot to point at the newest pass state.
+  - Extended native-filesystem status projections to include `conflict`,
+    `idempotency-expired`, and canonical status mapping alongside other
+    `WriteResult.kind` outcomes.
+  - Added the forged actor/workspace/version bridge-auth negative test directly
+    to P0R, P0F, and P0G test gates.
+  - Clarified that the Phase 0 shared-substrate baseline is provisional and
+    Phase 0-owned, while PR 01 remains the final schema source with an explicit
+    migration/backfill boundary.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
