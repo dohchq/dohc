@@ -111,15 +111,17 @@ Named versions can appear as their own folders or mounts:
 
 These `.versions/<version>/` roots are valid managed version locations only
 when the engine creates or resolves them as named-version mounts for the active
-workspace. They are not ordinary user-created folders. Generic materialized
-workspace tree walkers skip `.versions/**` by default. Reconciliation must first
-enumerate all engine-bound `.versions/<version>/` mounts for the active
-workspace, then only the engine's workspace/version mount resolver may enter
-each managed root, and only with an explicit workspace/version binding. Ordinary
-user-created `.versions` folders or aliases are not active named-version mounts:
-the reserved-namespace scan classifies them fail-closed into quarantine or
-manual resolution. They are excluded from ordinary content traversal and never
-silently skipped, ignored, or promoted into a named version.
+workspace. They are not ordinary user-created folders. Reconciliation runs the
+reserved-namespace scan before any generic materialized workspace walker applies
+its default `.versions/**` skip rule. That scan enumerates and classifies every
+`.versions` tree: engine-bound `.versions/<version>/` mounts for the active
+workspace are handed to the engine's workspace/version mount resolver, and only
+that resolver may enter each managed root with an explicit workspace/version
+binding. Ordinary user-created `.versions` folders or aliases are not active
+named-version mounts; the reserved-namespace scan classifies them fail-closed
+into quarantine or manual resolution. Only after that classification may the
+ordinary content walker skip `.versions/**`; unmanaged entries are never
+silently ignored, skipped, or promoted into a named version.
 
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.

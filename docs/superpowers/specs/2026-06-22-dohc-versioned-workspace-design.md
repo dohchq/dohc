@@ -25,8 +25,9 @@ Canonical lifecycle term: **`durable-pending holding record`**. This is the
 single prose term for an accepted, non-canonical write held for replay,
 canonicalization, or operator disposition. `WriteResult.kind: 'durable-pending'`,
 `recordKind: 'accepted_holding_record'`, and `pendingState:
-'pending_canonicalization' | 'overdue_disposition'` are wire/schema values for
-that same lifecycle concept, not separate lifecycle names.
+'pending_protection' | 'pending_review' | 'pending_canonicalization' |
+'overdue_disposition'` are wire/schema values for that same lifecycle concept,
+not separate lifecycle names.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -1172,14 +1173,15 @@ secret broker:
 - dohc Cloud KMS.
 - self-hosted secret store.
 
-History, durability logs, diffs, search, exports, and agent logs must not
-capture raw secret values. Secret-backed content may be persisted only as
-encrypted references, redacted forms, or broker-managed metadata while the
-timeline remains crash-safe and recoverable.
+History, durability logs, diffs, search, watch streams, projection caches,
+exports, and agent logs must not capture raw secret values. Secret-backed
+content may be persisted only as encrypted references, redacted forms, or
+broker-managed metadata while the timeline remains crash-safe and recoverable.
 
 Secret reference resolution is workspace-scoped and fail-closed. A reference
 issued for one workspace must not be dereferenced from another workspace,
-version, share, export, capture, search, or agent-log context.
+version, share, export, capture, search, watch stream, projection cache, or
+agent-log context.
 
 ## Interface sketch
 

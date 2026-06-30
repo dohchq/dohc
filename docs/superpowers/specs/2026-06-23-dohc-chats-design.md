@@ -260,18 +260,38 @@ type Channel = {
   displayName: string
   description?: string
   visibility: ChannelVisibility
-  linkedTargets: ChannelLinkedTargetRef[]
+  linkedTargets: ChannelLinkedTargetRef[] // derived projection from ChannelTargetActivity
   createdById: string
   createdAt: UnixMsDecimalString
   updatedAt: UnixMsDecimalString
   archivedAt?: UnixMsDecimalString
 }
+
+type ChannelTargetActivity = {
+  activityId: string
+  workspaceId: string
+  channelId: string
+  kind: 'channel_target_linked' | 'channel_target_unlinked'
+  linkedTarget: ChannelLinkedTargetRef
+  actorId: string
+  createdAt: UnixMsDecimalString
+}
 ```
 
-`linkedTargets` is a server-normalized set, not caller-order-sensitive input.
+`Channel.linkedTargets` is a derived read model/cache, not the authoritative
+mutable record. The canonical source for channel-level linked targets is an
+append-only channel-target ledger, represented in replay/export as
+`ChannelTargetActivity` rows. `ThreadLink` remains the canonical source for
+thread-level linked work on a specific `ChatThread`; channel target activity is
+the canonical source for channel context, ACL expansion, side-rail discovery,
+search, and export at the channel level. If the `Channel.linkedTargets`
+projection disagrees with the channel-target ledger, rebuild the projection from
+the ledger and ignore the stale projection.
+
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
-tuple used by `ThreadLink` creation, including `targetWorkspaceId`,
-`scopeKind`, `shareGrantId`, and `visibilityScope` where applicable. For
+tuple used by channel-target activity and compatible with `ThreadLink` creation,
+including `targetWorkspaceId`, `scopeKind`, `shareGrantId`, and
+`visibilityScope` where applicable. For
 `scopeKind: 'internal'`, `targetWorkspaceId` must equal the channel
 `workspaceId` and shared metadata must be absent. For `scopeKind: 'shared'`, the
 target must carry a server-derived share grant and visibility scope, and every
@@ -430,6 +450,14 @@ type DmChatThread = ChatThreadBase & {
 }
 
 type ChatThread = ChannelChatThread | DmChatThread
+
+// ChatThread creation is append-only provenance, not invisible bootstrap state.
+// The initial ChatThread row and matching chat_created activity are written in
+// the same transaction or serialized unit and become visible together.
+// Replay, export, audit, projection rebuilds, and migration/backfill jobs
+// reconstruct thread origin from chat_created plus the canonical ChatThread row.
+// A thread row without its creation activity is invalid outside explicit repair
+// tooling.
 
 type ThreadLinkTargetType =
   | 'atom'
@@ -941,6 +969,15 @@ type ThreadActivityBase = {
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 
+type ChatCreateThreadActivity = ThreadActivityBase & {
+  kind: 'chat_created'
+  threadKind: 'channel' | 'dm'
+  title?: string
+  channelId?: string
+  channelConversationId?: string
+  dmParticipantIds?: DmParticipantIds
+}
+
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
   kind: 'message_created'
@@ -1145,6 +1182,7 @@ not append duplicate activities, duplicate queue rows, unstable unread/mention
 badges, duplicate notifications, or duplicate export/history records.
 
 type ThreadActivity =
+  | ChatCreateThreadActivity
   | MessageCreateThreadActivity
   | MessageEditThreadActivity
   | MessageDeleteThreadActivity
