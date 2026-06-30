@@ -2456,6 +2456,30 @@ Hundred-twenty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-twenty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest nine-issue rerun:
+  - Added the shared idempotency replay envelope to replayable `WriteResult`
+    variants and removed `canonical_commit_recorded` from retryable failures.
+  - Redacted secret-backed reserved-namespace quarantine and safe-rename records.
+  - Required serialized `chat_thread` cycle checks before `link_added` fanout.
+  - Added `deleteReason` text-safety rules for history/export/projection
+    surfaces.
+  - Reworded the docs CI/workflow requirement around manifest/glob target
+    discovery for Think Bigger docs.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

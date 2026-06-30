@@ -5,13 +5,21 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const files = [
-  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
-  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
-  'docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md',
-  'docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md',
-  'docs/superpowers/specs/2026-06-23-dohc-chats-design.md',
-]
+
+const discoverThinkBiggerDocs = () => {
+  const planDir = 'docs/superpowers/plans'
+  const specDir = 'docs/superpowers/specs'
+  const planDocs = fs.readdirSync(path.resolve(repoRoot, planDir))
+    .filter((name) => name.includes('think-bigger-dohc-workspace-engine') && name.endsWith('.md'))
+    .map((name) => path.join(planDir, name))
+  const specDocs = fs.readdirSync(path.resolve(repoRoot, specDir))
+    .filter((name) => /^2026-06-(22-dohc-versioned-workspace-design|23-dohc-(native-filesystem|chats)-design)\.md$/.test(name))
+    .map((name) => path.join(specDir, name))
+
+  return [...planDocs, ...specDocs].sort()
+}
+
+const files = discoverThinkBiggerDocs()
 
 const visibleHeadingText = (heading) => heading
   .replace(/!\[([^\]\n]*)\]\([^)]*\)/g, '$1')

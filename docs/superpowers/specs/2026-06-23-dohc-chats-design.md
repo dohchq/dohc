@@ -455,8 +455,10 @@ resolver behavior where applicable, and adding authorization, projection, export
 and replay tests for that kind.
 `chat_thread` links must be acyclic. A thread cannot link to itself, and link
 creation must reject any target that would introduce a cycle in the thread-link
-graph before `link_added` is recorded or linked-work projection, search,
-notification, or export fanout runs.
+graph under a graph lock, CAS, serialized transaction, or equivalent
+single-writer critical section. The cycle check must run before `link_added` is
+recorded and before linked-work projection, search, notification, or export
+fanout runs.
 
 Thread create/update paths must ignore or reject client-provided
 `lastActivityAt`. The server updates `ChatThreadBase.lastActivityAt` only from
@@ -706,6 +708,11 @@ payload for the referenced persisted body revision. `tombstoneHash` hashes
 `["chat-tombstone:v1", workspaceId, threadId, messageId, previousBodyRevision,
 previousBody, deleteReasonOrNull]`, where `previousBody` is the canonical
 `ChatBodySnapshot` preserved by the delete activity.
+`deleteReason` is preserved user/agent text and must follow the same text-safety
+rules as message bodies and thread titles: escape by default, sanitize only
+through the allowlisted formatting subset, and redact or omit where the viewer
+lacks access. History, export, projection, search snippet, and notification
+surfaces must not render raw `deleteReason` text.
 Message create, edit, and delete lifecycle activities must populate `bodyHash`
 from this same canonical persisted-body hash used by
 `MentionNotificationThreadActivity`. For create/edit, `bodyHash` is the

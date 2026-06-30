@@ -85,23 +85,27 @@ validation before the captured write can leave quarantine.
 Reserved namespace collisions fail closed. The importer evaluates the explicit
 source-backed policy allowlist before applying reserved-namespace quarantine:
 approved policy inputs such as `.dohc/files.toml`, `.dohc/visibility.toml`, and
-optional workspace-root `.dohcignore` may be tracked as policy files, while all
-other `.dohc/**` content remains reserved engine state. If import, attach,
-sync, or a raw filesystem scan finds unmanaged or out-of-contract
+optional workspace-root `.dohcignore` may be parsed as engine policy inputs,
+while all other `.dohc/**` content remains reserved engine state. If import,
+attach, sync, or a raw filesystem scan finds unmanaged or out-of-contract
 `.versions/**`, non-allowlisted `.dohc/**`, or aliases of those names where
 dohc expects engine state, dohc must not treat the content as normal workspace
 data. Managed `~/dohc/<space>/.versions/<version>/` roots are allowed only when
 they are bound to a known workspace/version by the engine. Other reserved
 namespace content is quarantined with an explainable record, proposed for a
 deterministic collision-proof safe rename outside reserved namespaces, or sent
-to manual resolution before the workspace is activated. Safe rename proposals
-must never overwrite existing user content; destination names are derived from a
-stable sanitized basename plus a workspace-scoped content/id hash, then
-reserved atomically at activation time with create-if-absent, `O_EXCL`, or an
-equivalent exclusive reservation primitive. A non-atomic check-then-create flow
-is not allowed. Activation may proceed only if the reservation succeeds;
-reservation failure is a fail-closed collision that stays in quarantine or
-manual resolution.
+to manual resolution before the workspace is activated. For secret-backed or
+secret-eligible inputs, quarantine records and safe-rename proposals must redact
+sensitive basenames, raw hashes, and path details, using opaque placeholders or
+keyed commitments instead. Safe rename proposals must never overwrite existing
+user content; destination names are derived from a stable sanitized basename
+plus a workspace-scoped content/id hash for ordinary inputs, or from
+non-sensitive opaque identifiers for secret-backed inputs, then reserved
+atomically at activation time with create-if-absent, `O_EXCL`, or an equivalent
+exclusive reservation primitive. A non-atomic check-then-create flow is not
+allowed. Activation may proceed only if the reservation succeeds; reservation
+failure is a fail-closed collision that stays in quarantine or manual
+resolution.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions` content is never silently promoted into a named version.
 

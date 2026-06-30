@@ -158,6 +158,8 @@ type WriteResult =
       workspaceId: string
       versionId: string
       idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
       acceptedAt: UnixMsDecimalString
       replayUntil: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
@@ -172,6 +174,8 @@ type WriteResult =
       workspaceId: string
       versionId: string
       idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
       reasonCode: RetryableWriteFailureCode
       failedAt: UnixMsDecimalString
       retryAfterMs?: UInt64DecimalString
@@ -180,7 +184,6 @@ type WriteResult =
       commitState:
         | 'no_canonical_commit_recorded'
         | 'commit_state_unknown_retry_required'
-        | 'canonical_commit_recorded'
     }
   | {
       kind: 'rejected'
@@ -188,6 +191,8 @@ type WriteResult =
       workspaceId: string
       versionId: string
       idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
       reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
@@ -199,6 +204,8 @@ type WriteResult =
       workspaceId: string
       versionId: string
       idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
       reasonCode: PublicDeniedReasonCode
       acceptedAt: UnixMsDecimalString
       quarantinedAt: UnixMsDecimalString
@@ -211,6 +218,8 @@ type WriteResult =
       workspaceId: string
       versionId: string
       idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
       retiredAt: UnixMsDecimalString
       reasonCode: TerminalRetirementReason
       retainedMetadata: 'minimal_audit_idempotency_and_explanation_only'
@@ -232,6 +241,8 @@ type WriteResult =
       versionId: string
       conflictId: string
       idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
       conflictReplayToken: string
       recordedAt: UnixMsDecimalString
       operationKind: 'write' | 'delete' | 'rename' | 'move' | 'replace' | 'merge' | 'restore'
