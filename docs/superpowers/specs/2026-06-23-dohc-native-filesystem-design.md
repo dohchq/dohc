@@ -1084,9 +1084,9 @@ badges, `.dohc/status.json`, and API status calls must show whether it is
 `durable-pending`, `conflict`, `quarantined`, `rejected`,
 `retryable-failure`, `terminal-retired`, or `idempotency-expired`, and must
 include the relevant `holdingRecordId`, `conflictReplayToken`, or idempotency
-correlation when policy permits. A status projection may additionally mark a
-capture as `canonical` once the same write has promoted into history; it must not
-invent status names outside the shared `WriteResult.kind` vocabulary.
+correlation when policy permits. A status projection must report `canonical`
+once the same write has promoted into history; it must not invent status names
+outside the shared `WriteResult.kind` vocabulary.
 `.dohc/status.json` is an engine status projection, not user content; it follows
 the `.dohc/**` internal-state boundary and must not be re-ingested as a normal
 workspace file.

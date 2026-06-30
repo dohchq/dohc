@@ -3198,6 +3198,27 @@ Hundred-fifty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-fifty-seventh pass:
+
+- Fixed CodeRabbit's two follow-up findings:
+  - Made `canonical` a required status projection once a captured write has
+    promoted into history.
+  - Aligned the PR00 plan with the workflow's path-filtered trigger model and
+    broadened the workflow filter to `docs/superpowers/**` so superpowers doc
+    renames and linked-target moves run the manifest-backed checker.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

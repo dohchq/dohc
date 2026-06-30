@@ -1582,10 +1582,11 @@ Foundation alpha and the relevant surface proof are complete.
 - Add the checked-in Think Bigger docs manifest consumed by
   `scripts/check-think-bigger-doc-links.mjs`.
 - Add `.github/workflows/think-bigger-docs.yml` so CI runs the manifest-backed
-  checker for pull requests and pushes to `main`, without path filters, so
-  Think Bigger plan/spec/execution-log edits, manifest updates, checker changes,
-  doc renames, and linked target moves all run the fail-closed
-  manifest/inventory check with the manifest as the source of truth.
+  checker for pull requests and pushes to `main` when `docs/superpowers/**`,
+  the checker, or the workflow changes. This path-filtered model covers Think
+  Bigger plan/spec/execution-log edits, manifest updates, superpowers doc
+  renames, and linked target moves under the superpowers docs tree while keeping
+  unrelated app-only PRs out of the docs job.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
@@ -1594,10 +1595,12 @@ Foundation alpha and the relevant surface proof are complete.
   `node scripts/check-think-bigger-doc-links.mjs`.
 - docs CI/workflow must run the checker against every Think Bigger
   plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
-  the source of truth. The workflow runs without path filters so linked target
-  moves, doc renames, execution-log edits, manifest changes, workflow changes,
-  and checker changes cannot bypass anchor validation. The checker must compare
-  the manifest with repository inventory and fail closed when they diverge.
+  the source of truth. The workflow uses path filters for `docs/superpowers/**`,
+  `scripts/check-think-bigger-doc-links.mjs`, and the workflow file itself, so
+  linked target moves under superpowers docs, doc renames, execution-log edits,
+  manifest changes, workflow changes, and checker changes cannot bypass anchor
+  validation. The checker must compare the manifest with repository inventory
+  and fail closed when they diverge.
 
 **CodeRabbit focus:**
 
