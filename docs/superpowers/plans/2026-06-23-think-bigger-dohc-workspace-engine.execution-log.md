@@ -2720,6 +2720,30 @@ Hundred-thirty-eighth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-thirty-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest five-issue rerun:
+  - Expanded idempotency replay mismatch checks to every scoped binding, not only
+    payload/operand/precondition fields.
+  - Split malformed replay metadata from already-persisted unresolved records in
+    the holding-area replay matrix.
+  - Added Setext heading and shortcut-reference support to the Think Bigger docs
+    checker.
+  - Redacted protected/secret path values in filesystem durability logs.
+  - Added deterministic timestamp-alias handling for restore checkpoint lookup.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

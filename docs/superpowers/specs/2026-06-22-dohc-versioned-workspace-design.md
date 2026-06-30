@@ -403,9 +403,12 @@ retry outcome matrix is deterministic for the same replay metadata:
   the target version state, the retry returns a deterministic `conflict` and
   preserves the incoming record for manual reconciliation. Stale causal state is
   not classified as quarantine or rejection.
-- If workspace/version binding is ambiguous, crosses workspace scope, or cannot
-  be proven from the replay metadata, the record stays quarantined or manual-only
-  until the binding is resolved.
+- If workspace/version binding metadata is malformed, mismatched, crosses
+  workspace scope, or cannot be proven before a holding record exists, return a
+  `PublicValidationErrorCode` before holding-area persistence. Only
+  already-persisted accepted records with syntactically valid replay metadata but
+  unresolved server-side provenance or binding evidence can stay quarantined or
+  manual-only while resolution proceeds.
 - If server-derived authorization, provenance, permission, visibility,
   protected-path, lock, version-access, or skill-turn checks fail after replay,
   the record resolves to the corresponding durable denial/quarantine state.
@@ -754,15 +757,15 @@ API-originated write-producing operations must carry an idempotency key bound to
 the actor/session, workspace, version context, operation type, target, write
 payload digest or canonical operation payload fingerprint, full operation
 operand tuple, and causal precondition set. If the same idempotency key
-reappears with a different payload digest, operand tuple, or causal precondition
-set, return the non-persistent `replay_metadata_mismatch` validation error before
+reappears with a different actor/session, workspace, version context, operation
+type, target, payload digest, operand tuple, or causal precondition set, return
+the non-persistent `replay_metadata_mismatch` validation error before
 holding-area persistence instead of minting a new idempotency identity. The
-operand tuple includes materially distinguishing values such as
-source/destination paths, sourceVersionId, targetVersionId, versionA/versionB
-identifiers, checkpointId, snapshot ids, merge inputs, and restore targets as
-applicable, so different `merge(...)`, `replace(...)`, or `restore(...)`
-requests cannot collide under one key. Duplicate delivery with the same
-idempotency key must return the
+operand tuple includes materially distinguishing values such as source/destination
+paths, sourceVersionId, targetVersionId, versionA/versionB identifiers,
+checkpointId, snapshot ids, merge inputs, and restore targets as applicable, so
+different `merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide
+under one key. Duplicate delivery with the same idempotency key must return the
 original result or a deterministic equivalent and must not create additional
 canonical mutations, duplicate history events, duplicate projections, or
 repeated notification/search side effects.

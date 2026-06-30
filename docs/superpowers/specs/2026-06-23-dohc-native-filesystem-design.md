@@ -213,8 +213,11 @@ Phase 0 should use a normal folder plus reconciliation:
    - Debounce noisy save sequences.
    - Stat and hash changed candidates.
    - Append captured tracked changes to the durability log with `workspaceId`,
-     source mount binding, path, version/base metadata, capture token, and
-     actor/device/session provenance. Secret-backed writes are included only as
+     source mount binding, version/base metadata, capture token, and
+     actor/device/session provenance. Ordinary paths may include the canonical
+     path. Protected or secret-backed paths must use an opaque/redacted path token
+     or keyed commitment in the durability log; the real path remains only inside
+     the authorization envelope. Secret-backed writes are included only as
      encrypted references/envelopes or broker metadata, never plaintext secret
      content.
    - Coalesce them into meaningful history moments.
@@ -465,7 +468,12 @@ checkpoint in the target version whose content is derived from the selected
 earlier checkpoint, preserving intervening history for audit, compare, and
 recovery. Timestamp-based restore selection is a server-side lookup alias that
 must resolve to a deterministic `checkpointId` before the write-producing
-restore request is admitted.
+restore request is admitted. Implementations may require explicit `checkpointId`
+and reject timestamp aliases. If timestamp aliases are supported, the lookup must
+either resolve to exactly one checkpoint or apply a documented stable ordering
+such as `(checkpointCreatedAt, checkpointId)` with bytewise `checkpointId`
+tie-breaks before selecting; ambiguous matches without that deterministic rule
+fail closed before admission.
 Restore must carry exactly one causal precondition for the target version. If
 the current version state no longer matches that guard, the API returns the
 same deterministic secret-safe conflict envelope as `write(...)`, preserving

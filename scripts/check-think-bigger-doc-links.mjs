@@ -121,14 +121,8 @@ function* contentLines(markdown) {
 const collectAnchors = (markdown) => {
   const anchors = new Set()
   const seen = new Map()
-
-  for (const line of contentLines(markdown)) {
-    const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*$/)
-    if (!heading) {
-      continue
-    }
-
-    const base = slug(heading[1].replace(/[ \t]+#+[ \t]*$/, ''))
+  const addAnchor = (headingText) => {
+    const base = slug(headingText.replace(/[ \t]+#+[ \t]*$/, ''))
     let count = seen.get(base) ?? 0
     let candidate = count === 0 ? base : `${base}-${count}`
     while (anchors.has(candidate)) {
@@ -137,6 +131,25 @@ const collectAnchors = (markdown) => {
     }
     seen.set(base, count + 1)
     anchors.add(candidate)
+  }
+  let previousLine = null
+
+  for (const line of contentLines(markdown)) {
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*$/)
+    if (heading) {
+      addAnchor(heading[1])
+      previousLine = null
+      continue
+    }
+
+    const setext = line.match(/^\s{0,3}(=+|-+)\s*$/)
+    if (setext && previousLine?.trim()) {
+      addAnchor(previousLine.trim())
+      previousLine = null
+      continue
+    }
+
+    previousLine = line
   }
 
   return anchors
@@ -156,6 +169,7 @@ const collectLinks = (markdown) => {
   const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|[^)\s]*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
+  const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
   const autolinkPattern = /<((?:https?:|mailto:|app:|\.{1,2}\/|\/|[A-Za-z0-9_.-]+\/)[^<>\s]*)>/g
 
   for (const line of lines) {
@@ -176,6 +190,12 @@ const collectLinks = (markdown) => {
     for (const match of prose.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
       const destination = referenceDefinitions.get(label)
+      if (destination) {
+        links.push(destination)
+      }
+    }
+    for (const match of prose.matchAll(shortcutReferencePattern)) {
+      const destination = referenceDefinitions.get(normalizeLabel(match[1]))
       if (destination) {
         links.push(destination)
       }
