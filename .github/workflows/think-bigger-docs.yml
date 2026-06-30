@@ -16,6 +16,8 @@ on:
       - scripts/check-think-bigger-doc-links.mjs
       - .github/workflows/think-bigger-docs.yml
   workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * 1'
 
 concurrency:
   group: think-bigger-docs-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
@@ -39,6 +41,14 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.0
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Check Think Bigger docs
         run: node scripts/check-think-bigger-doc-links.mjs

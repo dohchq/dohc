@@ -3,6 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import GithubSlugger from 'github-slugger'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const canonicalRepoRoot = fs.realpathSync(repoRoot)
@@ -127,13 +128,9 @@ const decodeHtmlEntities = (text) => text
   .replace(/&quot;/g, '"')
   .replace(/&#39;/g, "'")
 
-const slug = (heading) => decodeHtmlEntities(visibleHeadingText(heading))
-  .trim()
-  .toLowerCase()
-  .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}~]/g, '')
-  .replace(/[\u00a1-\u00bf\u2010-\u2027\u2030-\u205e\u2e00-\u2e7f\u3000-\u303f\ufe10-\ufe1f\ufe30-\ufe4f\uff00-\uff65]/g, '')
-  .replace(/[^\S ]+/g, '')
-  .replace(/ /g, '-')
+const slug = (heading, slugger = new GithubSlugger()) => slugger.slug(
+  decodeHtmlEntities(visibleHeadingText(heading)).trim(),
+)
 
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
 
@@ -251,17 +248,9 @@ function* contentLines(markdown) {
 
 const collectAnchors = (markdown) => {
   const anchors = new Set()
-  const seen = new Map()
+  const slugger = new GithubSlugger()
   const addAnchor = (headingText) => {
-    const base = slug(headingText.replace(/[ \t]+#+[ \t]*$/, ''))
-    let count = seen.get(base) ?? 0
-    let candidate = count === 0 ? base : `${base}-${count}`
-    while (anchors.has(candidate)) {
-      count += 1
-      candidate = `${base}-${count}`
-    }
-    seen.set(base, count + 1)
-    anchors.add(candidate)
+    anchors.add(slug(headingText.replace(/[ \t]+#+[ \t]*$/, ''), slugger))
   }
   let previousLine = null
 
@@ -383,6 +372,13 @@ const assertCheckerFixtures = () => {
   }
   if (!collectAnchors('## `WriteResult<T>`').has('writeresultt')) {
     throw new Error('generic code-span heading fixture should preserve type text in anchors')
+  }
+  const duplicateWhitespaceAnchors = collectAnchors('## Duplicate   Space\n## Duplicate Space')
+  if (!duplicateWhitespaceAnchors.has('duplicate---space') || !duplicateWhitespaceAnchors.has('duplicate-space')) {
+    throw new Error('GitHub slugger fixture should preserve GitHub-style whitespace behavior')
+  }
+  if (!collectAnchors('## Ship it 🚀').has('ship-it-')) {
+    throw new Error('GitHub slugger fixture should match emoji heading behavior')
   }
 
   const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
