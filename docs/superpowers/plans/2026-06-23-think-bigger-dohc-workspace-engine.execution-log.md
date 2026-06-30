@@ -2914,6 +2914,32 @@ Hundred-forty-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-seventh pass:
+
+- Fixed CodeRabbit's five follow-up findings:
+  - Made the docs checker skip indented Markdown code blocks in addition to
+    fenced code blocks.
+  - Narrowed spec discovery to the explicit Think Bigger source-spec cohort.
+  - Added a shared `VersionRef` definition and canonical serialization rule to
+    chat thread link and link-activity contracts.
+  - Clarified that the Think Bigger docs workflow is manifest-driven and runs for
+    doc path changes, renames, and manifest updates.
+  - Reworded PR 01 so the language-neutral contract/IDL is the single canonical
+    schema source and TypeScript/Rust contracts are generated or
+    conformance-tested consumers.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

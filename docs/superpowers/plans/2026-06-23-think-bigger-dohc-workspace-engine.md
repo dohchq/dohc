@@ -1540,8 +1540,9 @@ Foundation alpha and the relevant surface proof are complete.
   `scripts/check-think-bigger-doc-links.mjs`.
 - Add `.github/workflows/think-bigger-docs.yml` so CI runs the manifest-backed
   checker on Think Bigger plan/spec docs, manifest, workflow, and checker
-  changes, using directory-level doc path filters so new docs trigger the
-  fail-closed manifest/inventory check.
+  changes, using manifest-triggered and Think Bigger doc path filters so doc
+  additions, removals, renames, and manifest updates run the fail-closed
+  manifest/inventory check with the manifest as the source of truth.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
@@ -1568,8 +1569,8 @@ Foundation alpha and the relevant surface proof are complete.
 
 ### PR 01 - Workspace Engine Contracts And Substrate
 
-**Goal:** Define shared TypeScript contracts for the substrate all later work
-must use.
+**Goal:** Define one canonical schema source for the substrate contracts, with
+TypeScript and Rust consumers generated or conformance-tested from it.
 
 **Scope:**
 
@@ -1613,7 +1614,10 @@ must use.
   core substrate. Zod, Rust validation, bridge adapters, and other runtime
   consumers are generated or conformance-tested consumers of that contract, so
   every path validates identical workspace/version/policy boundaries without
-  making one runtime the authority for the others.
+  making one runtime the authority for the others. `WorkspaceObject`,
+  `WorkspaceVersion`, `WorkspaceEvent`, `Projection`, and every other shared
+  boundary type above must be generated from, or conformance-checked against,
+  that single source of truth.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

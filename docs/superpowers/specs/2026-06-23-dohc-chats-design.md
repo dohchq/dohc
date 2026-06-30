@@ -318,6 +318,12 @@ type ThreadLinkScope =
   | { scopeKind: 'internal'; shareGrantId?: never; visibilityScope?: never }
   | { scopeKind: 'shared'; shareGrantId: string; visibilityScope: string }
 
+type VersionRef = {
+  versionId: string
+  versionEtag?: string
+  historyMomentId?: string
+}
+
 type ThreadLinkBase = ThreadLinkScope & {
   id: string
   workspaceId: string
@@ -805,8 +811,10 @@ type LinkThreadActivity = ThreadActivityBase & {
 }
 
 `LinkThreadActivity.linkTarget.targetVersionRef` uses the same canonical
-nullability as `CanonicalThreadLinkKeyParts`: missing version refs are serialized
-as `null`, never omitted. Link activity writers, replay, export, and projection
+`VersionRef | null` representation as `CanonicalThreadLinkKeyParts`: object key
+order is `versionId`, `versionEtag`, then `historyMomentId`; optional absent
+fields are omitted inside the object, and missing version refs are serialized as
+`null`, never omitted. Link activity writers, replay, export, and projection
 rebuilds must read and write that canonical form so the activity payload and
 canonical link key produce the same normalized target tuple.
 

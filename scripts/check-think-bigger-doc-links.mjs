@@ -28,10 +28,11 @@ const discoverThinkBiggerDocs = () => {
     },
     {
       dir: 'docs/superpowers/specs',
-      include: (name) => {
-        const docDate = name.slice(0, 10)
-        return /^2026-\d{2}-\d{2}-dohc-.*-design\.md$/.test(name) && docDate >= '2026-06-22'
-      },
+      include: (name) => [
+        '2026-06-22-dohc-versioned-workspace-design.md',
+        '2026-06-23-dohc-chats-design.md',
+        '2026-06-23-dohc-native-filesystem-design.md',
+      ].includes(name),
     },
   ]
   const safeReadDir = (dir) => {
@@ -100,9 +101,11 @@ function* contentLines(markdown) {
   let inFence = false
   let fenceChar = null
   let fenceLength = 0
+  let inIndentedCode = false
 
   for (const line of markdown.split(/\r?\n/)) {
     const fence = line.match(/^\s{0,3}(```+|~~~+)(.*)$/)
+    const indentedCode = /^(?: {4}|\t)/.test(line)
 
     if (fence && !inFence) {
       const marker = fence[1][0]
@@ -123,6 +126,18 @@ function* contentLines(markdown) {
         fenceLength = 0
       }
       continue
+    }
+
+    if (!inFence && indentedCode) {
+      inIndentedCode = true
+      continue
+    }
+
+    if (inIndentedCode) {
+      if (line.trim() === '') {
+        continue
+      }
+      inIndentedCode = false
     }
 
     if (!inFence) {
