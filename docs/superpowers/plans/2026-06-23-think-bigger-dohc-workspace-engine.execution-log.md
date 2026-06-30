@@ -4360,6 +4360,40 @@ Hundred-ninety-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-ninety-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Clarified pre-persistence binding validation versus post-acceptance
+    quarantine for malformed, cross-workspace, unresolved, and replayed binding
+    evidence.
+  - Added the named PR01 Schema Promotion Checkpoint so downstream code knows
+    when to stop importing `Phase0SharedSubstrateBaseline`.
+  - Added a PR 01 schema-drift test requirement for checked-in canonical schema
+    parity with generated or conformance-tested TypeScript/Rust consumers.
+  - Clarified that async `requestToken` values are opaque server/engine-minted
+    request-stream tokens echoed by watch/status/snapshot/list/search/filesystem
+    loading payloads for stale-response checks.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

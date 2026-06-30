@@ -613,6 +613,15 @@ type WorkspaceAsyncPayload = {
 }
 ```
 
+`requestToken` is an opaque server/engine-minted request-stream token returned
+when the initiating watch/status/snapshot/list/search/filesystem-loading request
+is accepted. Callers may hold and echo the request handle, but they do not choose
+or forge the token. Every async payload for that request stream echoes the exact
+token minted for the initiating request, and stale-response checks compare that
+token together with workspace/version/page identity before applying results.
+Filesystem loading and local reconciliation mint the same kind of token from the
+engine context before emitting progress or result payloads.
+
 `WorkspaceAsyncPayload.sequence` uses `UInt64DecimalString`: ASCII base-10
 digits only, no sign, separators, decimal point, whitespace, locale/non-ASCII
 digits, or leading zeros except the literal `0`, with range

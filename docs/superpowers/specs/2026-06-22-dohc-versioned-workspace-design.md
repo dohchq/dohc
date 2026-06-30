@@ -503,10 +503,11 @@ that order wins.
   `cross_workspace_reference` for syntactically valid metadata that points
   outside the active workspace, including cross-workspace atom, folder, entity,
   share, capture, file-object, version, event, projection, history, holding, or
-  conflict references. Only
-  already-persisted accepted records with syntactically valid replay metadata but
-  unresolved server-side provenance or binding evidence can stay quarantined or
-  while resolution proceeds.
+  conflict references. Syntactically valid but unresolved pre-persistence binding
+  evidence returns `retryable-failure` when an evaluator is unavailable or
+  indeterminate. Only already-persisted accepted records with syntactically valid
+  replay metadata but unresolved server-side provenance or binding evidence can
+  stay in the corresponding quarantined state while resolution proceeds.
 - If server-derived authorization, permission, ownership/review gate, policy,
   visibility, protected-path, lock, version-access, skill-turn, provenance,
   attribution, or proof checks fail after replay, the record resolves to the

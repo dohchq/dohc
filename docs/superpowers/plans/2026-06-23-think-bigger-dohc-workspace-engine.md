@@ -898,6 +898,10 @@ stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
 matrix below, with tests proving consumers import those symbols. After PR 01
 lands, new code must consume the PR 01-owned contracts and
 `Phase0SharedSubstrateBaseline` becomes historical-only.
+The named handoff is the **PR01 Schema Promotion Checkpoint**: the execution log
+must record the commit/PR where PR 01 adopts or migrates each provisional
+symbol, and downstream code must stop importing `Phase0SharedSubstrateBaseline`
+for those symbols after that checkpoint.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 
@@ -1732,6 +1736,9 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 - unit tests for validators and fixtures.
 - type-level compile tests where useful.
 - serialization round-trip tests.
+- schema-drift test that fails when the checked-in canonical schema no longer
+  matches generated or conformance-tested TypeScript and Rust consumers for the
+  workspace/version/policy boundary types.
 - invalid workspace/version/path rejection.
 - stable IDs survive path rename fixture.
 - projection writeability fixture coverage.
