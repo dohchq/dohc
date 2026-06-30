@@ -2798,7 +2798,9 @@ These are the product-level scenarios the full initiative must eventually pass.
 2. User edits files in that version folder.
 3. Main remains unchanged.
 4. User compares Client Version to Main.
-5. dohc shows file/data/chat differences.
+5. dohc shows file/data differences plus any version-linked chat projections;
+   Chats remain live workspace objects and are not restored or compared as
+   versioned chat history.
 
 ### Scenario D - Conflict Preservation
 
