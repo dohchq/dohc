@@ -1532,8 +1532,8 @@ Foundation alpha and the relevant surface proof are complete.
 - mandatory docs link/anchor check:
   `node scripts/check-think-bigger-doc-links.mjs`.
 - docs CI/workflow must run `node scripts/check-think-bigger-doc-links.mjs` for
-  every docs PR so anchor drift is caught automatically, not only by PR00's
-  manual validation loop.
+  the Think Bigger plan/spec docs covered by that checker so anchor drift is
+  caught automatically, not only by PR00's manual validation loop.
 
 **CodeRabbit focus:**
 

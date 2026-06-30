@@ -689,11 +689,14 @@ Exact paths are more specific than globs; longer literal prefixes are more
 specific than shorter prefixes.
 The canonical policy source ordinal is a stable engine-assigned integer for the
 normalized policy source after imports and aliases are resolved. Built-in
-defaults, object hard constraints, version policy, `.dohc/files.toml`,
-`.dohc/visibility.toml`, and authorized user overrides each occupy reserved
-source-order bands; multiple files inside the same band are ordered by canonical
-workspace-relative path using bytewise UTF-8 order. The resolved ordinal is
-recorded with the normalized rule so equal-specificity conflicts are replayable.
+defaults, object hard constraints, version policy, `.dohc/files.toml` and its
+workspace-root `.dohcignore` alias, `.dohc/visibility.toml`, and authorized user
+overrides each occupy reserved source-order bands; multiple files inside the
+same band are ordered by canonical workspace-relative path using bytewise UTF-8
+order. `.dohcignore` does not get a separate precedence band: importer,
+materializer, export, quarantine, and tracking normalize it into the
+`.dohc/files.toml` band before rule resolution. The resolved ordinal is recorded
+with the normalized rule so equal-specificity conflicts are replayable.
 
 Internal policy keys are canonical camelCase. Human-authored policy files may
 use snake_case aliases, but parsers must normalize them into canonical camelCase

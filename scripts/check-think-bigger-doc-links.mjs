@@ -23,7 +23,7 @@ const visibleHeadingText = (heading) => heading
 const slug = (heading) => visibleHeadingText(heading)
   .trim()
   .toLowerCase()
-  .replace(/[^a-z0-9\s-]/g, '')
+  .replace(/[!"#$%&'()*+,./:;<=>?@\[\\\]^`{|}~]/g, '')
   .replace(/\s/g, '-')
 
 function* contentLines(markdown) {

@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-twenty-second pass below.
+- **Last updated:** current through the Hundred-twenty-third pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `743f8cc` reported 6 issues;
-  hundred-twenty-second pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `8298c32` reported 7 issues;
+  hundred-twenty-third pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2363,6 +2363,34 @@ Hundred-twenty-second pass:
   - Added async workspace/request-token gating to the required Phase 0 decision
     note.
   - Updated the Current PR Snapshot to the `743f8cc` six-issue rerun.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twenty-third pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Added canonical idempotency replay envelope fields to `WriteResult.kind:
+    'canonical'`.
+  - Reworked accepted holding-record retention so reconstructable payloads retire
+    only through explicit operator disposition or workspace policy with a
+    documented recovery SLA.
+  - Made `.dohcignore` an alias within the `.dohc/files.toml` source-order band
+    in the canonical policy ordinal list.
+  - Aligned chat create/reply mutation contracts with server-assigned
+    `threadId`/`messageId` idempotency results.
+  - Scoped the docs CI/workflow link check to the Think Bigger docs covered by
+    `scripts/check-think-bigger-doc-links.mjs`.
+  - Updated docs-link slugging to preserve underscores and non-ASCII characters.
+  - Updated the Current PR Snapshot to the `8298c32` seven-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.

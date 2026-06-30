@@ -148,6 +148,9 @@ type WriteResult =
       versionId: string
       historyMomentId: string
       objectId: string
+      idempotencyKey: string
+      idempotencyResultId: string
+      idempotencyReplayToken: string
     }
   | {
       kind: 'durable-pending'
@@ -297,17 +300,17 @@ compacted or moved to colder durable storage according to policy. Garbage
 collection may remove only derived retry/index metadata after the disposition
 deadline while the operator window is open; the reconstructable payload remains
 until canonicalization succeeds, an explicit operator disposition record retires
-it, or the non-overrideable terminal retention bound is reached. The terminal
-bound is derived from `operatorDispositionDueAt` plus
-`AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`. Any shorter global
-safety limit may apply only after the record has already been explicitly
-dispositioned or converted to evidence-only metadata. At that bound, a
-still-unresolved accepted record must be automatically retired with an operator-visible
-`auto_retired_payload_retention_expired` disposition: reconstructable payload
-bytes are deleted, cryptoshredded, or compacted into a non-reconstructable
-evidence record, while minimal metadata needed for audit, idempotency expiry,
-abuse controls, and user-facing explanation is retained. Workspace policy cannot
-extend or disable this terminal payload-retention rule.
+it, or a workspace policy with a documented user-visible recovery SLA reaches
+its explicit `maxRecoverableHoldingPayloadMs` bound. `operatorDispositionDueAt`
+marks the item overdue for operator/status handling; it does not itself
+cryptoshred or compact reconstructable bytes. If no workspace recovery-retention
+policy is configured, still-unresolved accepted records remain recoverable until
+explicit operator disposition. Only the policy-controlled terminal path or an
+explicit operator disposition may retire reconstructable bytes with
+`auto_retired_payload_retention_expired`: payload bytes are deleted,
+cryptoshredded, or compacted into a non-reconstructable evidence record, while
+minimal metadata needed for audit, idempotency expiry, abuse controls, and
+user-facing explanation is retained.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.

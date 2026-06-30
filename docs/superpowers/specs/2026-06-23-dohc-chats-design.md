@@ -891,10 +891,13 @@ Callers must not be able to assert user/workspace identity, widen chat
 visibility, or link a chat to work they cannot access. Agent messages use the
 same authorization model as human messages; the display label is different, not
 the authority model.
-Chat mutation handlers are idempotent by stable request and target identifiers:
+Chat mutation handlers are idempotent by stable request identifiers and
+server-assigned target identifiers:
 
-- `create_chat` requires an `idempotencyKey` and proposed `threadId`.
-- `reply_to_chat` requires an `idempotencyKey` and proposed `messageId`.
+- `create_chat` requires an `idempotencyKey`; the server assigns `threadId` in
+  the idempotency result, and retries return that same `threadId`.
+- `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
+  in the idempotency result, and retries return that same `messageId`.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected
   `bodyRevision`.
 - `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected
@@ -907,7 +910,9 @@ workspace-scoped idempotency record for the same actor, operation, key, and
 canonical operands. A matching retry returns the existing result without
 creating duplicate messages, activities, notifications, links, projection
 invalidations, or fanout jobs. A key reused with different operands fails closed
-with `replay_metadata_mismatch`.
+with `replay_metadata_mismatch`. Client-supplied `threadId` on create or
+`messageId` on reply is rejected; those identifiers are server-owned outputs of
+the idempotency result.
 All chat API and worker mutation paths, including edits, deletes, reactions,
 read-state updates, links, notifications, summaries, and projections, must also
 respect user locks, folder/atom/file sharing boundaries, protected work, and
