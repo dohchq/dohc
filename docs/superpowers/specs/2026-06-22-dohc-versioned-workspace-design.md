@@ -446,16 +446,20 @@ reconstructible payload remains until
 canonicalization succeeds or an explicit operator disposition record retires it.
 `operatorDispositionDueAt` marks the item overdue for operator/status handling;
 it does not itself cryptoshred or compact reconstructible bytes.
-Deadline precedence is fixed when lifecycle fields disagree:
-`replayUntil` controls how long the idempotency result must replay and never
-extends reconstructible payload retention; `operatorDispositionDueAt` and
+`replayUntil` is the single canonical replay-expiry term. It controls how long
+the idempotency result for a `holdingRecordId` must replay and is the only
+deadline that changes write retries to `idempotency-expired`.
+`operatorDispositionDueAt`, `retentionUntil`, and
+`maxPendingCanonicalizationMs` are derived status/escalation deadlines inside
+that replay window; they do not independently expire idempotency replay and do
+not cryptoshred reconstructible bytes. `operatorDispositionDueAt` and
 `maxPendingCanonicalizationMs` control when `pending_canonicalization` becomes
-`overdue_disposition`; `retentionUntil` for accepted records is an
-operator/status deadline, not a payload-deletion deadline. Only explicit
-operator disposition may transition an accepted holding record to
+`overdue_disposition`; `retentionUntil` for durable-pending holding records is
+an operator/status deadline, not a payload-deletion deadline. Only explicit
+operator disposition may transition a durable-pending holding record to
 `terminal-retired` with reason `operator_disposition_retired`; retries before
-`replayUntil` replay that terminal result after disposition. Only retries after
-`replayUntil` may return `idempotency-expired`.
+`replayUntil` replay that terminal result after disposition. Retries after
+`replayUntil` return `idempotency-expired`.
 No accepted holding record may remain unreviewed forever: if no
 workspace-specific disposition policy is configured, the engine's default finite
 operator-escalation window applies, and workspaces may only choose values inside
@@ -476,8 +480,7 @@ not promoted, retry returns `durable-pending` while the
 idempotency/retry horizon allows key reuse. If it has become `rejected`,
 `quarantined`, or `terminal-retired`, retry returns that current state while the
 corresponding retention or retirement metadata is still addressable. Only after
-the holding record's retry horizon or retained idempotency metadata expires does
-the write API return the canonical `idempotency-expired` response for that
+`replayUntil` does the write API return the canonical `idempotency-expired` response for that
 `holdingRecordId`, with `recordKind: 'accepted_holding_record'`,
 `recordKind: 'rejected_record'`, `recordKind: 'quarantined_record'`, or
 `recordKind: 'terminal_retired_record'`.
@@ -635,8 +638,13 @@ If the actor can write, all required policy/review gates pass, and the change
 does not create a conflict or cross a visibility boundary, the change saves
 immediately to that version. If the change creates a conflict, crosses a real
 visibility boundary, or requires mandatory review before canonicalization, it
-routes to conflict preservation/reconciliation or the relevant review/share flow
-instead of the immediate canonical save path.
+routes to the single deterministic non-immediate outcome for that gate:
+conflicts create conflict preservation/reconciliation, real visibility-boundary
+crossings return the mapped denied/quarantined visibility result, and mandatory
+review returns a `durable-pending holding record` with `pendingState:
+'pending_review'` once the change is durably recorded. If durable recording
+cannot be proven, the gate/retry matrix above controls the `retryable-failure`
+or rejection response.
 
 For raw passive local file edits observed through the normal OS filesystem,
 dohc does not need to prove whether the process was a user, an external agent

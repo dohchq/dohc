@@ -5203,6 +5203,39 @@ Two-hundred-eighteenth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-nineteenth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Scoped the workflow install to the root `dohc` package.
+  - Made `replayUntil` the single replay-expiry term for holding-record retries.
+  - Mapped mandatory review to `durable-pending holding record` with
+    `pending_review`.
+  - Removed `exports` from the Phase 0 chat link target list.
+  - Split malformed precondition validation errors from stale-state conflicts.
+  - Chose `idempotency-expired` as the single retired-namespace retry outcome.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and

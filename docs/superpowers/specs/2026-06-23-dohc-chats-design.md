@@ -1463,7 +1463,7 @@ The first engine-backed chat links should target defined Phase 0 identities:
 - agent runs.
 - decisions.
 - tasks.
-- shares/exports with explicit share grants.
+- shares with explicit share grants.
 
 Later substrate identities can add links to:
 

@@ -564,8 +564,8 @@ match the current workspace/version/path state, the API returns a conflict
 response rather than applying the mutation. Exactly one precondition mode may be
 supplied per write. Supplying no causal precondition, omitting `targetObjectId`
 for overwrite, or combining incompatible guards such as `expectedAbsent` with
-`expectedEtag` fails closed with a validation/conflict response and does not
-mutate canonical content. `expectedAbsent` is represented only as that mutually
+`expectedEtag` fails closed with a distinct validation error and does not mutate
+canonical content or reuse the conflict code path. `expectedAbsent` is represented only as that mutually
 exclusive precondition mode, not as a separate boolean field beside another
 precondition.
 
@@ -618,17 +618,15 @@ entries, projections, notifications, or search-index side effects. Idempotency
 records must be persisted through the documented maximum retry horizon for that
 operation type and transport after the operation reaches a terminal result. After
 that horizon, an API retry with the same key must fail closed with an explicit
-`idempotency-expired` response or a deterministic conflict response; it must not
-silently apply as a new mutation.
+`idempotency-expired` response; it must not silently apply as a new mutation.
 Implementations may garbage-collect expired key tombstones only after the same
 maximum retry horizon has passed or the operation namespace is rotated.
 Tombstone garbage collection is not enough by itself: after a namespace is
 rotated or tombstones are compacted, the engine must retain a reject-only
 namespace-version marker, retired-key range, or equivalent durable fence for the
 expired workspace/version/operation namespace. Late retries under that retired
-namespace must resolve to `idempotency-expired` or a deterministic conflict
-instead of being treated as fresh writes; new writes must use a non-retired
-operation namespace.
+namespace must resolve to `idempotency-expired` instead of being treated as fresh
+writes; new writes must use a non-retired operation namespace.
 Retry-horizon values come from the same Phase 0 decision note and PR 01 shared
 `WorkspaceIdempotencyPolicy` contract as the versioned workspace spec:
 `apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
