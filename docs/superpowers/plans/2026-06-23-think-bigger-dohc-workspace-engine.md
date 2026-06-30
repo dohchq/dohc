@@ -770,7 +770,7 @@ Recommended branch naming:
 Phase 0 is the immediate execution target. It is intentionally smaller than the
 full roadmap and must be grounded in the current repository implementation.
 
-Phase 0 proves:
+Phase 0 must-pass gates prove:
 
 ```text
 normal file edit
@@ -787,9 +787,16 @@ generalize to SQLite row merge, app-aware merge, full lazy hydration, external
 channels, or rich chat texture until the proof arc passes.
 
 Phase 0 must also prove the architecture is fast enough to build on. A correct
-but sluggish proof is not acceptable; it must demonstrate native-feeling local
-file edits, startup reconciliation, history display, search, and linked chat UI
+but sluggish proof is not acceptable; the must-pass performance gate covers
+native-feeling local file edits, startup reconciliation, and history display
 under the initial performance budgets.
+
+Phase 0 stretch/follow-up outcomes, useful but not minimum acceptance gates:
+
+- search performance and ranking beyond the proof slice.
+- polished linked-chat UI beyond proving that one chat is linked and visible.
+- local agent CLI validation beyond the approved docs-only PR00 exception.
+- full QA matrix expansion beyond the focused proof-arc gates.
 
 ### Phase 0 Decisions
 
@@ -1514,6 +1521,9 @@ Foundation alpha and the relevant surface proof are complete.
 
 - mandatory docs link/anchor check:
   `node scripts/check-think-bigger-doc-links.mjs`.
+- docs CI/workflow must run `node scripts/check-think-bigger-doc-links.mjs` for
+  every docs PR so anchor drift is caught automatically, not only by PR00's
+  manual validation loop.
 
 **CodeRabbit focus:**
 

@@ -174,7 +174,7 @@ type WriteResult =
       idempotencyResultId: string
       idempotencyReplayToken: string
       commitState: 'no_canonical_commit_recorded' | 'commit_state_unknown_retry_required'
-      recordedAsCanonicalMutation: false
+      recordedAsCanonicalMutation: false | 'unknown'
     }
   | {
       kind: 'rejected'
@@ -245,7 +245,8 @@ server-side and appear only through separately authorized diagnostics.
 Transient infrastructure outages are not public denial reasons and must not be
 represented as terminal `rejected` or `quarantined` outcomes. They return the
 distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a
-later retry while recording that no canonical mutation was acknowledged.
+later retry while preserving commit-state uncertainty when the engine cannot yet
+prove whether a canonical mutation was acknowledged.
 `retryable-failure` participates in the same idempotency-result envelope as
 write, conflict, and durable-pending results: repeated delivery with the same
 operation fingerprint returns the same `idempotencyResultId`,

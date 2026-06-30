@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-nineteenth pass below.
+- **Last updated:** current through the Hundred-twentieth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `2bb5b2d` reported 7 issues;
-  hundred-nineteenth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `40b1ca9` reported 4 issues;
+  hundred-twentieth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2288,6 +2288,27 @@ Hundred-nineteenth pass:
     values for channel chat threads.
   - Added persisted `bodyHash` to message lifecycle activities for replay,
     export, and mention verification.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twentieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest four-issue rerun:
+  - Preserved retryable-failure commit uncertainty by allowing
+    `recordedAsCanonicalMutation: 'unknown'`.
+  - Split Phase 0 into strict must-pass gates and stretch/follow-up outcomes.
+  - Added a docs CI/workflow requirement to run
+    `node scripts/check-think-bigger-doc-links.mjs` on every docs PR.
+  - Updated the Current PR Snapshot to the `40b1ca9` four-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
