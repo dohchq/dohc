@@ -397,8 +397,10 @@ map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and resta
 reconciliation must classify common editor temp-file-then-rename saves this way:
 the temp source provides `sourceObjectId`, the existing destination provides
 `destinationObjectId`, and both sides carry freshness preconditions. If the
-destination identity cannot be proven, the capture resolves to conflict,
-quarantine, or manual reconciliation instead of applying a path-only overwrite.
+destination identity cannot be proven, the capture resolves to `conflict` or
+`quarantined` with manual-follow-up metadata instead of applying a path-only
+overwrite. Manual follow-up is operator workflow metadata, not a
+`WriteResult.kind`.
 
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. The canonical wire
@@ -780,11 +782,14 @@ Resolution order is deterministic:
 6. Intersect with actor permissions.
 7. Intersect with sharing/export context.
 
-Deny/restrictive outcomes win when two rules conflict. For equal specificity,
-rules sort by explicit priority when present, then by canonical policy source
-ordinal, then by explicit rule index within that source, then by lexical rule id.
-Exact paths are more specific than globs; longer literal prefixes are more
-specific than shorter prefixes.
+Deny/restrictive outcomes win when two rules conflict. Authorized explicit user
+overrides can only tighten effective policy unless the rule type explicitly
+permits an exception; permitted exceptions are still intersected with actor
+permissions and sharing/export context. For equal specificity, rules sort by
+explicit priority when present, then by canonical policy source ordinal, then by
+explicit rule index within that source, then by lexical rule id. Exact paths are
+more specific than globs; longer literal prefixes are more specific than shorter
+prefixes.
 The canonical policy source ordinal is a stable engine-assigned integer for the
 normalized policy source after imports and aliases are resolved. Built-in
 defaults, object hard constraints, version policy, `.dohc/files.toml` and its

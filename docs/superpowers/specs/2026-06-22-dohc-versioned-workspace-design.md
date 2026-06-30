@@ -697,16 +697,17 @@ run command
 save
 ```
 
-Normal filesystem saves are translated into the same write contract as
-`write(workspaceId, versionId, path, bytes, ...)`. When a file is read or
-materialized, the engine records exactly one causal token for that path, such
-as the last seen base version, etag, content hash, or absence assertion. When
-the file is saved or captured, the filesystem path must submit exactly one valid
-causal precondition with the incoming bytes. Missing preconditions or multiple
-incompatible guards are malformed request/protocol errors and fail closed before
-the conflict path. A well-formed but stale causal token is a real write conflict
-and returns the same deterministic current-vs-incoming conflict behavior as the
-API write flow instead of blindly overwriting canonical state.
+Normal filesystem saves are translated into the same semantic write contract as
+`write(workspaceId, versionId, path, bytes, ...)`, but they do not require an
+external editor or agent to synthesize a client precondition. When a file is read
+or materialized, the engine records exactly one engine-owned capture/replay token
+for that path, such as the last seen base version, etag, content hash, absence
+assertion, watcher sequence, or session capture id. When the file is saved or
+captured, the filesystem path submits that engine-owned token with the incoming
+bytes. Missing or ambiguous engine capture tokens fail closed through quarantine
+or retryable capture failure; a well-formed but stale capture token is a real
+write conflict and returns the same deterministic current-vs-incoming conflict
+behavior as the API write flow instead of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
@@ -758,6 +759,14 @@ restore(workspaceId, versionId, checkpointId, {
   idempotencyKey
 })
 ```
+
+API writes require exactly one client-supplied causal precondition in the
+`precondition`, `sourcePrecondition`, or `destinationPrecondition` field that
+applies to the operation. Missing preconditions or multiple incompatible API
+guards are malformed request/protocol errors and fail closed before the conflict
+path. Filesystem capture uses the engine-owned capture/replay token described
+above instead; native local edits are not malformed merely because no
+client-supplied precondition exists.
 
 `rename(...)` is the same-directory basename-change operation: `fromPath` and
 `toPath` must share a canonical parent path, and the destination must be absent.
@@ -1120,9 +1129,9 @@ The first proof should be small but real:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
 9. E2E proves fail-closed behavior when authorization, policy, visibility,
-   protected-path, lock, version-access, or skill-turn decisions deny access,
-   and retryable no-mutation behavior when required evaluators are unavailable
-   or indeterminate.
+   protected-path, lock, version-access, skill-turn, provenance, attribution, or
+   proof decisions deny access, and retryable no-mutation behavior when required
+   evaluators are unavailable or indeterminate.
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
 11. E2E proves every persisted atom, folder, entity, share, capture, file,

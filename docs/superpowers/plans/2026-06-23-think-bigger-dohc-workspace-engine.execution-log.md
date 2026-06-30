@@ -18,7 +18,7 @@ Source specs:
 - **Owning PR00 pass:** the newest PR00 pass entry below is the audit trail for
   live CodeRabbit status, test evidence, open overrides, and completion state.
 - **CodeRabbit status:** review loop in progress. The latest completed rerun
-  raised five findings that are addressed in the newest pass; a committed rerun
+  raised seven findings that are addressed in the newest pass; a committed rerun
   is still required.
 - **Test evidence:** the newest pass records `git diff --check`, both Think
   Bigger docs link-check invocations, and the brand guard test passing.
@@ -3303,6 +3303,35 @@ Hundred-sixtieth pass:
   - Aligned the roadmap milestone so the provisional baseline freeze blocks
     P0B, P0C, P0D, P0E, P0F, and P0G until the shared substrate baseline lands.
   - Added `(workspaceId, threadId)` to tuple-mode reaction idempotency keys.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixty-first pass:
+
+- Fixed CodeRabbit's seven follow-up findings:
+  - Separated API write preconditions from engine-owned filesystem
+    capture/replay tokens.
+  - Added provenance, attribution, and proof denial/quarantine coverage to the
+    first-proof E2E checklist.
+  - Clarified that chat `messageId` values are opaque exact persisted strings
+    and must not be Unicode-normalized as text.
+  - Separated mention notification aggregate `notificationId` from per-activity
+    `activityId` lifecycle entries.
+  - Removed manual reconciliation as a native filesystem result state and mapped
+    manual follow-up to metadata on `conflict` or `quarantined`.
+  - Clarified explicit user override precedence in policy resolution.
+  - Extended docs anchor slug normalization to strip common Unicode punctuation
+    ranges.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -124,11 +124,11 @@ file side rails, notification badges, and search result read/unread markers must
 all derive from this workspace-scoped state. Monotonicity is validated against
 the canonical per-thread ordering comparator:
 `(threadSequence, createdAt, messageId)`, where `messageId` compares by bytewise
-UTF-8 order after canonicalization. The canonical `messageId` form is the exact
-persisted message ID string normalized to Unicode NFC, encoded as UTF-8 bytes,
-with non-canonical encodings rejected at API/storage boundaries. Message IDs
-alone are not an ordering contract, and `lastReadAt` is not a valid advancement
-fallback.
+UTF-8 order over the exact persisted ID string. Message IDs are opaque
+identifiers: API/storage boundaries validate that the ID is a canonical UTF-8
+string encoding for the persisted value, but must never Unicode-normalize,
+case-fold, trim, or otherwise treat the ID as human text. Message IDs alone are
+not an ordering contract, and `lastReadAt` is not a valid advancement fallback.
 `ThreadReadState` is unique on `(workspaceId, threadId, actorId)` and writes are
 upserts, not inserts that can duplicate rows. Updating `lastReadCursor` must
 compare against the canonical comparator before advancing. For every read-state
@@ -855,6 +855,12 @@ notifications or unstable history.
 `mention_notification_enqueued` uses `queued`, `sent`, or `suppressed`;
 `mention_notification_resolved` uses `resolved`. Replay, export, and fanout must
 not infer lifecycle state from activity kind alone.
+`ThreadActivityBase.activityId` is the append-only identity for each lifecycle
+event. `notificationId` identifies the underlying mention notification aggregate,
+not the activity row. Resolving a notification appends a distinct
+`mention_notification_resolved` activity with its own `activityId` and the same
+`notificationId`; it must not mutate, overwrite, or dedupe against the earlier
+`mention_notification_enqueued` activity by `notificationId` alone.
 `authzScopeId` is the exact server-issued authorization/redaction context for
 the mention notification projection. It must be derived server-side from the
 same grant/scope resolver used by shared chat and linked-work projections, and
