@@ -5313,7 +5313,7 @@ Two-hundred-twenty-first pass:
 
 Two-hundred-twenty-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5332,6 +5332,43 @@ Two-hundred-twenty-second pass:
   - Added explicit validation-error rows for `invalid_request`/request-shape
     failures, `capture_token_invalid`, and `replay_metadata_mismatch` to the
     normative gate/retry matrix.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-twenty-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Added the Think Bigger docs workflow file to its own path filters.
+  - Added raw HTML `<a href>`, `<a id>`, and `<a name>` handling plus fixtures to
+    the Think Bigger link checker.
+  - Added `replayUntil` to the public `terminal-retired` write result payload.
+  - Moved visibility before policy in replay first-match evaluation.
+  - Reused the canonical `local` vs `virtual` materialization model in native
+    filesystem status projections.
+  - Marked channel `displayName` and `description` as untrusted text for
+    rendering/search/export.
+  - Required `send_channel_message` and thread/conversation reads to return the
+    server-issued `channelConversationId` for deterministic reuse.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

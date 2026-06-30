@@ -1208,8 +1208,9 @@ conflict artifact.
 
 Every status projection must expose:
 
-- materialization state: local vs remote, pinned vs virtual, and hydrated vs
-  placeholder when the path is lazily materialized.
+- materialization state: `local` vs `virtual`, with orthogonal `pinned` and
+  hydrated/placeholder presentation flags when the path is lazily materialized;
+  `remote` is a sync/presentation label, not a persisted materialization state.
 - file-policy state: tracked vs ignored, versioned vs unversioned, and synced vs
   local-only.
 - write state from the durable subset of `WriteResult.kind`: `canonical`,

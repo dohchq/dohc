@@ -259,6 +259,8 @@ type Channel = {
   channelSlug: string
   displayName: string
   description?: string
+  // `displayName` and `description` are user-authored untrusted text. They must
+  // be escaped or sanitized before rendering and handled safely in search/export.
   visibility: ChannelVisibility
   linkedTargets: ChannelLinkedTargetRef[] // derived projection from ChannelTargetActivity
   createdById: string
@@ -652,6 +654,12 @@ does not derive a `linked_work` conversation id from array order; a linked-work
 conversation chooses one normalized target discriminator, while broader
 multi-target discussion uses the default conversation or a server-owned
 `named_subconversation` key.
+Callers obtain the server-issued `channelConversationId` from the
+`send_channel_message` create/read response or from a thread/conversation read
+for the same canonical context tuple. Clients and agents should persist and reuse
+that returned `channelConversationId` with the `threadId` for subsequent sends or
+reads; if they lose it, they must re-resolve it through the same server
+conversation read/get-or-create path rather than reconstructing the id locally.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current
@@ -1355,8 +1363,8 @@ server-assigned target identifiers:
   `(workspaceId, channelId, channelConversationId)` and persists the
   `ThreadMessage` plus the `threadKind: 'channel'` `chat_created` activity when
   this is the first send for that tuple in the same serialized unit. The
-  idempotency result returns both `threadId` and `messageId`, and retries return
-  the same pair.
+  idempotency result returns `threadId`, `channelConversationId`, and `messageId`,
+  and retries return the same triple.
 - `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
   in the idempotency result, and retries return that same `messageId`.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected

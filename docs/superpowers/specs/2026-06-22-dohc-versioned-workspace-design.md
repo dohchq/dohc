@@ -301,6 +301,7 @@ type WriteResult =
       idempotencyResultId: string
       idempotencyReplayToken: string
       retiredAt: UnixMsDecimalString
+      replayUntil: UnixMsDecimalString
       reasonCode: TerminalRetirementReason
       retainedMetadata: 'minimal_audit_idempotency_and_explanation_only'
     }
@@ -517,14 +518,14 @@ Replay from the holding area must be causal and fail-closed. Retry metadata must
 include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
 or equivalent CAS token captured with the original ingest. At apply time, the
 engine revalidates workspace scope plus server-derived authorization,
-ownership/review gate, policy, visibility, protected-path, lock, version-access,
+ownership/review gate, visibility, policy, protected-path, lock, version-access,
 skill-turn, provenance, attribution, and proof checks. The retry outcome matrix
 is deterministic for the same replay metadata:
 
 Replay evaluation is first-match in this order; once a class matches, later
 checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
 malformed/cross-scope binding, authorization/permission, ownership/review gate,
-policy, visibility, protected-path, lock, version-access, skill-turn,
+visibility, policy, protected-path, lock, version-access, skill-turn,
 provenance, attribution, proof, then causal base conflict. If multiple
 server-derived checks fail in one replay attempt, the earliest matching class in
 that order wins.

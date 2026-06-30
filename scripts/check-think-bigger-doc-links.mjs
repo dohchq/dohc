@@ -151,6 +151,14 @@ const splitLocalTarget = (raw) => {
   }
 }
 
+const rawHtmlAnchorTagPattern = /<a\b[^>]*>/gi
+const htmlAttributeValue = (tag, attrName) => {
+  const attributePattern = new RegExp(`\\b${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>=]+))`, 'i')
+  const match = tag.match(attributePattern)
+  const value = match?.[1] ?? match?.[2] ?? match?.[3]
+  return value === undefined ? null : decodeHtmlEntities(value)
+}
+
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
 
 function* contentLines(markdown) {
@@ -278,6 +286,13 @@ const collectAnchors = (markdown) => {
   let previousLine = null
 
   for (const { text: line } of contentLines(markdown)) {
+    for (const match of line.matchAll(rawHtmlAnchorTagPattern)) {
+      const anchor = htmlAttributeValue(match[0], 'id') ?? htmlAttributeValue(match[0], 'name')
+      if (anchor) {
+        anchors.add(anchor)
+      }
+    }
+
     const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*$/)
     if (heading) {
       addAnchor(heading[1])
@@ -349,6 +364,13 @@ const collectLinks = (markdown) => {
     if (referenceDefinitionPattern.test(prose)) {
       continue
     }
+    for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
+      const href = htmlAttributeValue(match[0], 'href')
+      if (href) {
+        addLink(href, lineNumber)
+      }
+    }
+    prose = prose.replace(rawHtmlAnchorTagPattern, ' ')
     for (const match of prose.matchAll(nestedImageLinkPattern)) {
       addLink(normalizeDestination(match[1]), lineNumber)
       addLink(normalizeDestination(match[2]), lineNumber)
@@ -429,6 +451,14 @@ const assertCheckerFixtures = () => {
   }
   if (!collectAnchors('## Ship it 🚀').has('ship-it-')) {
     throw new Error('GitHub slugger fixture should match emoji heading behavior')
+  }
+  const rawHtmlAnchors = collectAnchors('<a id="custom-anchor"></a>\n<a name=\'legacy-anchor\'></a>')
+  if (!rawHtmlAnchors.has('custom-anchor') || !rawHtmlAnchors.has('legacy-anchor')) {
+    throw new Error('raw HTML anchor fixture should collect id and name anchors')
+  }
+  const rawHtmlLink = collectLinks('<a href="./target.md#custom-anchor">target</a>')
+  if (!rawHtmlLink.links.some((link) => link.target === './target.md#custom-anchor')) {
+    throw new Error('raw HTML link fixture should collect href destinations')
   }
 
   const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
