@@ -119,6 +119,8 @@ type PublicDeniedReasonCode =
   | 'locked'
   | 'version_access_denied'
   | 'skill_turn_denied'
+
+type PublicValidationErrorCode =
   | 'invalid_request'
   | 'replay_metadata_mismatch'
 
@@ -258,6 +260,13 @@ type WriteResult =
 Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
 stack details, policy rule names, secret/path internals, and operator notes stay
 server-side and appear only through separately authorized diagnostics.
+Malformed requests, missing or incompatible preconditions, invalid path/version
+shapes, and replay metadata mismatches return non-persistent
+`PublicValidationErrorCode` responses before holding-area persistence. They do
+not become `rejected` or `quarantined` `WriteResult` values, do not allocate
+holding records, and do not consume denied/quarantined-write quota. Only
+authorization, policy, protection, lock, version-access, and skill-turn denials
+can enter the durable denial/quarantine flow.
 Transient infrastructure outages are not public denial reasons and must not be
 represented as terminal `rejected` or `quarantined` outcomes. They return the
 distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a
@@ -714,13 +723,14 @@ the actor/session, workspace, version context, operation type, target, write
 payload digest or canonical operation payload fingerprint, full operation
 operand tuple, and causal precondition set. If the same idempotency key
 reappears with a different payload digest, operand tuple, or causal precondition
-set, reject it with `replay_metadata_mismatch` or an equivalent deterministic
-conflict instead of minting a new idempotency identity. The operand tuple
-includes materially distinguishing values such as source/destination paths,
-sourceVersionId, targetVersionId, versionA/versionB identifiers, checkpointId,
-snapshot ids, merge inputs, and restore targets as applicable, so different
-`merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide under
-one key. Duplicate delivery with the same idempotency key must return the
+set, return the non-persistent `replay_metadata_mismatch` validation error before
+holding-area persistence instead of minting a new idempotency identity. The
+operand tuple includes materially distinguishing values such as
+source/destination paths, sourceVersionId, targetVersionId, versionA/versionB
+identifiers, checkpointId, snapshot ids, merge inputs, and restore targets as
+applicable, so different `merge(...)`, `replace(...)`, or `restore(...)`
+requests cannot collide under one key. Duplicate delivery with the same
+idempotency key must return the
 original result or a deterministic equivalent and must not create additional
 canonical mutations, duplicate history events, duplicate projections, or
 repeated notification/search side effects.

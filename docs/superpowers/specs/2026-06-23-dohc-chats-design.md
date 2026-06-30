@@ -309,6 +309,8 @@ type ThreadLinkTargetType =
   | 'version'
   | 'history_moment'
   | 'agent_run'
+  | 'decision'
+  | 'task'
   | 'share'
   | 'chat_thread'
 
@@ -1080,7 +1082,8 @@ The first engine-backed chat links should target defined Phase 0 identities:
 - versions.
 - history moments.
 - agent runs.
-- decisions/tasks if they already resolve to stable workspace objects.
+- decisions.
+- tasks.
 
 Later substrate identities can add links to:
 

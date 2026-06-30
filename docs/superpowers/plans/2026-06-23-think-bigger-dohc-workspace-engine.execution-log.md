@@ -313,10 +313,9 @@ node scripts/check-think-bigger-doc-links.mjs
 
 ### CodeRabbit
 
-- Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
-  applied below and need a clean rerun. Current live review state is tracked in
-  Current PR Snapshot.
+- Status: see the newest owning PR00 pass entry below.
+- Current findings: see the newest owning PR00 pass entry below; this section is
+  historical and intentionally avoids mutable issue counts.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -2604,6 +2603,34 @@ Hundred-thirty-fourth pass:
     pass entry plus the stable draft PR link.
   - Replaced a machine-specific checker evidence path with the portable
     `<repo-root>` placeholder.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirty-fifth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest five-issue rerun:
+  - Kept `.env` ignored/excluded/redacted by default until PR 08 introduces
+    secret-backed files.
+  - Reworded the shared validation plan so Zod is the current TypeScript source
+    while Rust/bridge consumers use explicit round-trip adapters or schema
+    generators.
+  - Split malformed request/replay metadata errors into non-persistent validation
+    errors instead of durable denied/quarantined write results.
+  - Tightened reserved namespace handling so unmanaged `.dohc/**` and
+    `.versions/**` collisions remain quarantine/manual-resolution only.
+  - Added explicit `decision` and `task` `ThreadLinkTargetType` values.
+  - Removed mutable CodeRabbit issue counts from the historical CodeRabbit
+    section.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

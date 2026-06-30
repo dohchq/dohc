@@ -1592,10 +1592,11 @@ must use.
 - Define one core effective policy input/output type for filesystem, search, and
   export substrate. Chat, notification, secret, and external-share policy
   extensions land with their consuming PRs and must compose with the core type.
-- Add mandatory Zod runtime validation for all shared TypeScript boundary types
-  carrying workspace, version, and policy data across the core substrate. Other
-  runtime targets must use adapters or generated schemas that round-trip against
-  the shared Zod contracts instead of introducing a competing validation stack.
+- Use Zod as the current TypeScript schema source for shared boundary types
+  carrying workspace, version, and policy data across the core substrate. Rust
+  kernel, bridge, and other runtime consumers must use an explicit adapter or
+  schema generator that round-trips against the same shared contract, so TS and
+  Rust paths validate identical workspace/version/policy boundaries.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 
@@ -1718,8 +1719,10 @@ one effective policy resolver used by files, versions, search, and exports.
 **Scope:**
 
 - Add policy parsers for `.dohc/files.toml` and `.dohc/visibility.toml`.
-- Add defaults for source, apps, data, `node_modules`, `dist`, cache, scratch,
-  and `.env`.
+- Add defaults for source, apps, data, `node_modules`, `dist`, cache, and
+  scratch.
+- Keep `.env` ignored/excluded/redacted by default until PR 08 introduces
+  secret-backed files.
 - Resolve tracked/synced/materialized/encrypted/searchable/visibility/export
   policy.
 - Add neutral extension hooks for later object families to provide policy facts

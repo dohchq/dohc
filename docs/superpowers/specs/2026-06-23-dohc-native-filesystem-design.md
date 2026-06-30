@@ -94,9 +94,10 @@ data. Managed `~/dohc/<space>/.versions/<version>/` roots are allowed only when
 they are bound to a known workspace/version by the engine. Non-allowlisted
 `.dohc/**` content and unmanaged `.versions/**` content are quarantined with an
 explainable record or sent to manual resolution; they are not proposed for
-ordinary user-content safe rename. Only non-engine user content that collides
-with a reserved namespace may be proposed for a deterministic collision-proof
-safe rename outside reserved namespaces before the workspace is activated. For
+ordinary user-content safe rename. Only ordinary user content outside
+engine-managed namespaces may be proposed for a deterministic collision-proof
+safe rename before the workspace is activated. `.dohc/**` and `.versions/**`
+collisions remain quarantine-only or manual-resolution-only. For
 secret-backed or secret-eligible inputs, quarantine records and safe-rename
 proposals must redact sensitive basenames, raw hashes, and path details, using
 opaque placeholders or keyed commitments instead. Safe rename proposals must
