@@ -363,14 +363,12 @@ before invoking `write(...)`, `delete(...)`, `rename(...)`, `move(...)`, or
 opaque `nextPageToken`; `pageSize` is capped by the server, an absent
 `pageToken` starts a new query, and a returned `nextPageToken` resumes the exact
 authorized workspace/version/query snapshot or fails closed if that snapshot is
-no longer valid for the caller.
-A
-validated bound session is represented to clients only as opaque session
-material. The server resolves the principal plus workspace/version binding from
-that session material and then dispatches the same explicit workspace/version
-operation shape; browser/client callers never supply trusted identity or
-auth-context fields. Each operation still supplies the version identifiers it
-actually needs: single-version operations such as
+no longer valid for the caller. A validated bound session is represented to
+clients only as opaque session material. The server resolves the principal plus
+workspace/version binding from that session material and then dispatches the
+same explicit workspace/version operation shape; browser/client callers never
+supply trusted identity or auth-context fields. Each operation still supplies
+the version identifiers it actually needs: single-version operations such as
 read/write/list/stat/search/watch/snapshot/restore bind one version, while diff
 and merge bind the required source/target or versionA/versionB pair inside that
 same workspace. Server-side session binding must match those explicit

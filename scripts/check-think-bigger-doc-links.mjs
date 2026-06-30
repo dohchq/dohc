@@ -24,10 +24,17 @@ const discoverThinkBiggerDocs = () => {
     'dohc-chats-design',
     'dohc-native-filesystem-design',
   ]
-  const planDocs = fs.readdirSync(path.resolve(repoRoot, planDir))
+  const safeReadDir = (dir) => {
+    try {
+      return fs.readdirSync(path.resolve(repoRoot, dir))
+    } catch {
+      return []
+    }
+  }
+  const planDocs = safeReadDir(planDir)
     .filter((name) => name.includes('think-bigger-dohc-workspace-engine') && name.endsWith('.md'))
     .map((name) => repoRelativePath(planDir, name))
-  const specDocs = fs.readdirSync(path.resolve(repoRoot, specDir))
+  const specDocs = safeReadDir(specDir)
     .filter((name) => name.endsWith('.md') && specNameFragments.some((fragment) => name.includes(fragment)))
     .map((name) => repoRelativePath(specDir, name))
 

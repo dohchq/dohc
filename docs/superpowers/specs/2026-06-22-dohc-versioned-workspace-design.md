@@ -744,6 +744,7 @@ horizon, an API retry with the same key must fail closed with an explicit
 silently apply as a new mutation. Implementations may garbage-collect expired key
 tombstones only after the same maximum retry horizon has passed or the operation
 namespace is rotated.
+
 ### Idempotency Retry Horizons And WorkspaceIdempotencyPolicy
 
 The canonical retry-horizon values are defined once by this committed PR00

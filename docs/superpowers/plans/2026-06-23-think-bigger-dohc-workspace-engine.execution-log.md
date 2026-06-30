@@ -18,7 +18,7 @@ Source specs:
 - **Last updated:** see the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `6abb501` reported 4 issues;
+- **PR00 CodeRabbit:** latest completed rerun on `da8c1d6` reported 6 issues;
   the newest owning PR00 pass entry records follow-up fixes and pending rerun
   status.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
@@ -2542,6 +2542,32 @@ Hundred-thirty-first pass:
     checks.
   - Replaced the execution-log `Last updated` ordinal with a generic newest-pass
     pointer.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirty-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Added missing Markdown spacing before the
+    `Idempotency Retry Horizons And WorkspaceIdempotencyPolicy` heading.
+  - Made Think Bigger docs discovery tolerate missing directories and report the
+    expected-docs validation failure instead of a raw `ENOENT` stack.
+  - Added baseline machine/CI profile, cold/warm fixture state, measured values,
+    variance/tolerance, and explicit non-sensitive override approval references
+    to required PR/phase execution-log records.
+  - Reflowed the native filesystem bound-session paragraph.
+  - Marked `ThreadActivityBase.actorKind` as readonly server-owned provenance.
+  - Updated the Current PR Snapshot to the `da8c1d6` six-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

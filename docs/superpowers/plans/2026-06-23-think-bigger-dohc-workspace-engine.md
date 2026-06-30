@@ -1298,6 +1298,10 @@ For every PR/phase record:
 - manual QA.
 - remaining risks.
 - follow-up deletion conditions.
+- baseline machine/CI profile.
+- cold/warm fixture state and measured values.
+- variance/tolerance.
+- explicit non-sensitive override or user-approval reference.
 
 ## Testing Standard
 

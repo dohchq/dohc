@@ -669,7 +669,7 @@ type ThreadActivityBase = {
   workspaceId: string
   threadId: string
   readonly actorId: string // server-owned immutable activity actor id
-  actorKind: 'human' | 'agent' | 'system'
+  readonly actorKind: 'human' | 'agent' | 'system'
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 
