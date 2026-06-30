@@ -1,0 +1,48 @@
+name: Think Bigger Docs
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/think-bigger-docs.yml"
+      - "docs/superpowers/plans/2026-06-23-think-bigger-*.md"
+      - "docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json"
+      - "docs/superpowers/specs/2026-06-2*-dohc-*.md"
+      - "scripts/check-think-bigger-doc-links.mjs"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/think-bigger-docs.yml"
+      - "docs/superpowers/plans/2026-06-23-think-bigger-*.md"
+      - "docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json"
+      - "docs/superpowers/specs/2026-06-2*-dohc-*.md"
+      - "scripts/check-think-bigger-doc-links.mjs"
+  workflow_dispatch:
+
+concurrency:
+  group: think-bigger-docs-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: Link And Anchor Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.14.0
+
+      - name: Check Think Bigger docs
+        run: node scripts/check-think-bigger-doc-links.mjs

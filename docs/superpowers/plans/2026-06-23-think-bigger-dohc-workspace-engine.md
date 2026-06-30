@@ -1538,6 +1538,8 @@ Foundation alpha and the relevant surface proof are complete.
   evidence.
 - Add the checked-in Think Bigger docs manifest consumed by
   `scripts/check-think-bigger-doc-links.mjs`.
+- Add `.github/workflows/think-bigger-docs.yml` so CI runs the manifest-backed
+  checker on Think Bigger doc, manifest, workflow, and checker changes.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
