@@ -154,6 +154,7 @@ type PublicValidationErrorCode =
   | 'invalid_path'
   | 'invalid_version'
   | 'cross_workspace_reference'
+  | 'capture_token_invalid'
   | 'replay_metadata_mismatch'
 
 type RetryableWriteFailureCode =
@@ -311,8 +312,6 @@ type WriteResult =
       baseObjectId?: string
       currentObjectId?: string
       incomingObjectId?: string
-      currentContentHash?: string
-      incomingContentHash?: string
       conflictState: 'unresolved' | 'manual_resolution_required'
     }
 ```
@@ -324,7 +323,11 @@ carry `reasonCode: 'visibility_denied'`.
 
 Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
 stack details, policy rule names, secret/path internals, and operator notes stay
-server-side and appear only through separately authorized diagnostics.
+server-side and appear only through separately authorized diagnostics. Conflict
+content hashes are never part of the public conflict shape; authorized
+diagnostics may expose current/incoming hashes for non-secret-backed objects
+only. Secret-backed objects must not expose content hashes or equality/presence
+fingerprints outside the secret broker and redacted reference model.
 Malformed requests, missing or incompatible preconditions, invalid path/version
 shapes, and replay metadata mismatches return non-persistent
 `PublicValidationErrorCode` responses before holding-area persistence. They do
@@ -786,10 +789,11 @@ last seen base version, etag, content hash, absence assertion, watcher sequence,
 or session capture id. First-write bootstrap uses an engine-owned
 `expectedAbsent`-equivalent token for a path with no prior object, not a missing
 token. When the file is saved or captured, the filesystem path submits that
-engine-owned token with the incoming bytes. Missing or ambiguous engine capture
-tokens fail closed through the existing `retryable-failure` result when capture
-infrastructure cannot currently prove commit state, or through a
-`PublicValidationErrorCode` before any holding record, quarantine record, or
+engine-owned token with the incoming bytes. Missing, ambiguous, malformed, or
+wrongly scoped engine capture tokens fail closed through the existing
+`retryable-failure` result when capture infrastructure cannot currently prove
+commit state, or through `PublicValidationErrorCode` value
+`capture_token_invalid` before any holding record, quarantine record, or
 canonical mutation is allocated when the token problem is deterministic.
 Quarantine is reserved for accepted holding records whose well-formed replay
 data reaches server-side policy/protection evaluation. A
@@ -914,11 +918,15 @@ Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
 providing multiple incompatible preconditions is a validation/protocol error that
 fails closed before conflict materialization.
 
-Conflict envelopes return only opaque object/version handles, hashes, operation
-kinds, and minimal conflict status by default. Policy decisions, explanatory
-metadata, redacted previews, and full current/incoming/restored/secret-backed
-bytes are materialized only through the server-side authorization path for that
-caller and resolution session.
+Conflict envelopes return only opaque object/version handles, operation kinds,
+and minimal conflict status by default. Authorized diagnostics may use
+`conflictId` or `conflictReplayToken` to request non-public details, but
+current/incoming content hashes may be revealed only for non-secret-backed
+objects after the server-side authorization path approves that caller and
+resolution session. Policy decisions, explanatory metadata, redacted previews,
+content fingerprints, and full current/incoming/restored/secret-backed bytes
+stay out of the public envelope; secret-backed content never exposes content
+hashes or equality/presence fingerprints through conflicts.
 
 `read(...)`, `list(...)`, `stat(...)`, `search(...)`, `watch(...)`,
 `snapshot(...)`, and `diff(...)` are read-only scoped views. `delete(...)`,

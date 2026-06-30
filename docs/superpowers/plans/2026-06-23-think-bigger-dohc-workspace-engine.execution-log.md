@@ -4394,6 +4394,40 @@ Hundred-ninety-fifth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-ninety-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Removed public current/incoming content hashes from conflict envelopes,
+    kept diagnostics behind the authorized `conflictId`/`conflictReplayToken`
+    path, and stated that diagnostics may expose hashes only for
+    non-secret-backed objects after authorization.
+  - Added `capture_token_invalid` to `PublicValidationErrorCode` and mapped
+    deterministic filesystem capture-token failures to that outcome while
+    keeping indeterminate infrastructure proof failures retryable.
+  - Assigned `ThreadReadState`, `readStateRevision`, and unread/read-state
+    bridge ownership to PR 01 from the Schema Promotion Checkpoint through PR 12
+    with schema version `chat-read-state-bridge-v0`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and
