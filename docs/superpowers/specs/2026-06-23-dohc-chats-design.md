@@ -949,17 +949,25 @@ server-assigned target identifiers:
 Before persisting or emitting side effects, each handler reserves the
 workspace-scoped idempotency record for the same actor, operation, key, and
 canonical operands atomically in the same transaction or serialized unit of work
-as the thread/message/link mutation. The idempotency record is persisted before
-fanout, projection invalidation, notifications, search indexing, or export work
-is emitted. A matching retry returns the existing result without creating
-duplicate messages, activities, notifications, links, projection invalidations,
-or fanout jobs. A key reused with different operands fails closed with
-`replay_metadata_mismatch`. Client-supplied `threadId` on create or `messageId`
-on reply is rejected; those identifiers are server-owned outputs of the
-idempotency result. Chat idempotency records must be retained for the workspace's
-configured mutation retry horizon and no less than the maximum client/offline
-retry window; after expiry, late retries fail closed with an explicit
-idempotency-expired response rather than creating duplicate side effects.
+as the thread/message/link mutation. That same unit also writes a durable outbox
+or replayable side-effect ledger for notification fanout, search indexing,
+export/history fanout, projection invalidation, and any other derived work keyed
+by the same workspace/thread/message/link/idempotency identity. The idempotency
+record and side-effect ledger are persisted before any fanout, projection
+invalidation, notification, search indexing, or export work is emitted. A
+matching retry returns the existing result and replays, completes, or suppresses
+side effects from the committed ledger without creating duplicate messages,
+activities, notifications, links, projection invalidations, or fanout jobs. If
+the mutation commits but a worker crashes, retry/recovery must be able to
+regenerate downstream work from the durable mutation plus ledger; if the ledger
+cannot be committed with the mutation, the handler must not acknowledge success.
+A key reused with different operands fails closed with `replay_metadata_mismatch`.
+Client-supplied `threadId` on create or `messageId` on reply is rejected; those
+identifiers are server-owned outputs of the idempotency result. Chat idempotency
+records must be retained for the workspace's configured mutation retry horizon
+and no less than the maximum client/offline retry window; after expiry, late
+retries fail closed with an explicit idempotency-expired response rather than
+creating duplicate side effects.
 All chat API and worker mutation paths, including edits, deletes, reactions,
 read-state updates, links, notifications, summaries, and projections, must also
 respect user locks, folder/atom/file sharing boundaries, protected work, and

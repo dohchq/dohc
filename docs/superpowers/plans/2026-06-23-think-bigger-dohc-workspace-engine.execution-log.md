@@ -2744,6 +2744,30 @@ Hundred-thirty-ninth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-fortieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest five-issue rerun:
+  - Added provenance/attribution/proof failures to durable denial/quarantine
+    scope while keeping server-side authorization explicit.
+  - Added chat mutation side-effect outbox/ledger requirements for notifications,
+    search, export/history fanout, projection invalidation, and fanout recovery.
+  - Made docs heading slugging strip underscore emphasis markers and made numeric
+    HTML entity decoding tolerate invalid code points.
+  - Hardened `.dohc/**` internal-state denial for export, search, sync,
+    import-as-user-content, generated projections, and durability internals.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

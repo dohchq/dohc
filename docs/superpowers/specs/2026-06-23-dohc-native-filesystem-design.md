@@ -630,14 +630,17 @@ all resolve `.dohcignore` through that same normalized policy source order.
 
 `.dohc/**` is engine-managed internal state and is excluded from normal
 capture/sync ingestion by default. Recursive self-capture is forbidden: history,
-status, conflicts, indexes, caches, and generated projections under `.dohc/`
-must not be exported, searched, synced, or re-ingested as ordinary user files.
-The importer applies the same allowlist-before-quarantine rule here: only a
-small explicit allowlist of source-backed policy inputs such as
-`.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary workspace-root
-`.dohcignore` may be parsed and normalized. Even those allowlisted files are
-interpreted as engine policy inputs outside the normal captured-content pipeline,
-not as ordinary tracked files. All other `.dohc/**` paths are reserved,
+status, conflicts, indexes, caches, generated projections, durability internals,
+and any other internal `.dohc/**` content must be hard-denied from export,
+search, sync, import-as-user-content, and re-ingestion as ordinary files. The
+importer applies the same allowlist-before-quarantine rule here only for
+engine-specific policy parsing: the explicit policy inputs
+`.dohc/files.toml`, `.dohc/visibility.toml`, and temporary workspace-root
+`.dohcignore` may be parsed and normalized as engine policy inputs outside the
+normal captured-content pipeline, not as ordinary tracked files. No user policy
+may opt internal `.dohc/**` history, status, conflicts, indexes, caches,
+generated projections, or durability internals into tracking, export, search,
+sync, or ordinary file re-ingest. All other `.dohc/**` paths are reserved,
 non-user-content inputs that must be quarantined with an explainable record or
 handled through engine-specific recovery rather than captured as ordinary files
 or silently skipped.
@@ -1052,10 +1055,15 @@ Export should produce:
 - redacted/excluded secret files according to policy.
 - enough metadata to re-import and compare.
 
-Generated or internal `.dohc/**` state is excluded from export unless explicitly
-allowlisted. Status projections, conflict projections, indexes, caches, derived
-chat projections, and durability internals are not exported as ordinary user
-files.
+Export must never include `.dohc/**` history, status, conflicts, indexes, caches,
+generated projections, durability internals, or other engine state as ordinary
+workspace files. Only the explicitly allowlisted policy inputs above may cross
+the boundary, and only through the engine policy parsing/export path.
+
+Generated or internal `.dohc/**` state is excluded from export unless it is one
+of the named policy inputs above and crosses through the engine policy export
+path. Status projections, conflict projections, indexes, caches, derived chat
+projections, and durability internals are not exported as ordinary user files.
 
 External VCS export may remain useful for code-heavy projects, but should be an
 integration/export surface rather than dohc's native model.

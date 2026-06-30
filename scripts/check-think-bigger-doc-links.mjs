@@ -66,11 +66,20 @@ const visibleHeadingText = (heading) => heading
   .replace(/\[([^\]\n]+)\]\([^)]*\)/g, '$1')
   .replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1')
   .replace(/`([^`]*)`/g, '$1')
+  .replace(/(^|[^\w])__([^_\n]+)__($|[^\w])/g, '$1$2$3')
+  .replace(/(^|[^\w])_([^_\n]+)_($|[^\w])/g, '$1$2$3')
   .replace(/<[^>]+>/g, '')
 
+const decodeCodePoint = (value, radix, fallback) => {
+  const codePoint = Number.parseInt(value, radix)
+  return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+    ? String.fromCodePoint(codePoint)
+    : fallback
+}
+
 const decodeHtmlEntities = (text) => text
-  .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
-  .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+  .replace(/&#(\d+);/g, (match, code) => decodeCodePoint(code, 10, match))
+  .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeCodePoint(code, 16, match))
   .replace(/&amp;/g, '&')
   .replace(/&lt;/g, '<')
   .replace(/&gt;/g, '>')
