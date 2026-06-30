@@ -1021,7 +1021,8 @@ history.
 - temp-file/rename save sequence if watcher-backed.
 - multiple rapid writes coalesce into a readable moment.
 - restore creates forward history.
-- API and watcher-backed filesystem agree.
+- watcher-backed capture and direct filesystem state agree for the chosen Phase
+  0 surface.
 
 **E2E:**
 

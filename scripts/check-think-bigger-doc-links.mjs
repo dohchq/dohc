@@ -33,8 +33,7 @@ const discoverThinkBiggerDocs = () => {
     /^Cohort:\s*(?:Design specs and mega plan|Architecture specs and mega-plan|Think Bigger dohc Workspace Engine|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/m
   const hasThinkBiggerCohortMetadata = (dir, name) => {
     const raw = fs.readFileSync(path.resolve(repoRoot, dir, name), 'utf8')
-    const header = raw.split(/\r?\n/).slice(0, 12).join('\n')
-    return thinkBiggerCohortPattern.test(header)
+    return thinkBiggerCohortPattern.test(raw)
   }
   const discoveryRoots = [
     {

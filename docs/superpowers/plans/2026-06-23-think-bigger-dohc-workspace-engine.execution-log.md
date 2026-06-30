@@ -4006,6 +4006,41 @@ Hundred-eighty-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-eighty-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Kept PR P0C tests scoped to the chosen Phase 0 watcher-backed/direct
+    filesystem surface instead of requiring API parity before the API surface is
+    explicitly in scope.
+  - Added `review_gate_denied` / `quarantined_review_gate` and wired
+    ownership/review-gate checks into replay revalidation, first-match ordering,
+    durable denial/quarantine mapping, summary text, and E2E criteria.
+  - Defined visibility conflict resolution as an intersection across workspace,
+    version, path/folder, object, projection, moment/change, and shared-export
+    scopes, with `redacted` and active `embargoed` acting as hard caps.
+  - Removed the fixed twelve-line scan cap from Think Bigger cohort metadata
+    discovery so valid specs with later metadata are still discovered.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

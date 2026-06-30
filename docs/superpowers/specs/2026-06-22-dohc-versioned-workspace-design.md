@@ -112,6 +112,7 @@ type DeniedOrQuarantinedStatus =
   | 'rejected_before_acceptance'
   | 'quarantined_authorization'
   | 'quarantined_protection'
+  | 'quarantined_review_gate'
   | 'quarantined_attribution'
   | 'quarantined_policy'
   | 'quarantined_visibility'
@@ -128,6 +129,7 @@ type QuarantinedStatus = Exclude<
 
 type PublicDeniedReasonCode =
   | 'not_authorized'
+  | 'review_gate_denied'
   | 'policy_denied'
   | 'visibility_denied'
   | 'protected_path'
@@ -325,10 +327,11 @@ shapes, and replay metadata mismatches return non-persistent
 `PublicValidationErrorCode` responses before holding-area persistence. They do
 not become `rejected` or `quarantined` `WriteResult` values, do not allocate
 holding records, and do not consume denied/quarantined-write quota. Only
-server-side authorization, policy, visibility, protection, lock, version-access,
-skill-turn, provenance, attribution, and proof failures can enter the durable
-denial/quarantine flow. Visibility failures use `visibility_denied` externally
-and `quarantined_visibility` when accepted into holding storage.
+server-side authorization, ownership/review gate, policy, visibility,
+protection, lock, version-access, skill-turn, provenance, attribution, and proof
+failures can enter the durable denial/quarantine flow. Visibility failures use
+`visibility_denied` externally and `quarantined_visibility` when accepted into
+holding storage.
 Transient infrastructure outages are not public denial reasons and must not be
 represented as terminal `rejected` or `quarantined` outcomes. They return the
 distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a
@@ -470,17 +473,18 @@ read path reconstructs them.
 Replay from the holding area must be causal and fail-closed. Retry metadata must
 include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
 or equivalent CAS token captured with the original ingest. At apply time, the
-engine revalidates workspace scope plus server-derived authorization, policy,
-visibility, protected-path, lock, version-access, skill-turn, provenance,
-attribution, and proof checks. The retry outcome matrix is deterministic for the
-same replay metadata:
+engine revalidates workspace scope plus server-derived authorization,
+ownership/review gate, policy, visibility, protected-path, lock, version-access,
+skill-turn, provenance, attribution, and proof checks. The retry outcome matrix
+is deterministic for the same replay metadata:
 
 Replay evaluation is first-match in this order; once a class matches, later
 checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
-malformed/cross-scope binding, authorization/permission, policy, visibility,
-protected-path, lock, version-access, skill-turn, provenance, attribution, proof,
-then causal base conflict. If multiple server-derived checks fail in one replay
-attempt, the earliest matching class in that order wins.
+malformed/cross-scope binding, authorization/permission, ownership/review gate,
+policy, visibility, protected-path, lock, version-access, skill-turn,
+provenance, attribution, proof, then causal base conflict. If multiple
+server-derived checks fail in one replay attempt, the earliest matching class in
+that order wins.
 
 - If workspace/version binding metadata is malformed, mismatched, crosses
   workspace scope, or cannot be proven before a holding record exists, return a
@@ -488,12 +492,16 @@ attempt, the earliest matching class in that order wins.
   already-persisted accepted records with syntactically valid replay metadata but
   unresolved server-side provenance or binding evidence can stay quarantined or
   manual-only while resolution proceeds.
-- If server-derived authorization, permission, policy, visibility,
-  protected-path, lock, version-access, skill-turn, provenance, attribution, or
-  proof checks fail after replay, the record resolves to the corresponding
-  durable denial/quarantine state.
+- If server-derived authorization, permission, ownership/review gate, policy,
+  visibility, protected-path, lock, version-access, skill-turn, provenance,
+  attribution, or proof checks fail after replay, the record resolves to the
+  corresponding durable denial/quarantine state.
   Authorization and permission failures use `not_authorized` externally and
   `quarantined_authorization` internally.
+  Ownership or review-gate failures use `review_gate_denied` externally and
+  `quarantined_review_gate` internally; replay cannot become canonical until
+  the required server-side review decision is satisfied or the durable record is
+  explicitly disposed.
   Policy failures use `policy_denied` externally and `quarantined_policy`
   internally.
   Protected-path failures use `protected_path` externally and
@@ -1035,6 +1043,34 @@ Possible visibility states:
 - embargoed.
 - redacted.
 
+Visibility is resolved by intersection, not by last-writer-wins. The engine
+evaluates the applicable scopes in this order and each later scope may narrow
+but not silently broaden the effective audience:
+
+1. workspace ceiling.
+2. version ceiling.
+3. path/folder policy.
+4. workspace object policy.
+5. projection/view policy.
+6. moment/change policy.
+7. shared-export grant.
+
+`redacted` is a content-deny cap and wins for the covered payload even when a
+broader scope says `workspace` or `public`; only an authorized placeholder or
+opaque reference may render. Active `embargoed` is a time/condition cap: while
+the embargo is active it behaves as hidden for unauthorized readers, and when
+the embargo expires the engine recomputes visibility from the remaining scopes.
+`private`, `shared with selected people`, `workspace`, and `public` compose as
+increasingly broad audiences, so the effective audience is the intersection of
+all non-redacted, non-embargoed scopes plus server-side authorization. A public
+object inside a private version is not public; a workspace-visible folder inside
+a selected-person shared export is visible only to the selected export
+participants; a public export can include a resource only when the export grant
+explicitly includes it and no workspace/version/path/object/projection/moment
+scope narrows or redacts it for that viewer. Explicit shares and shared exports
+are allowlists over the resolved resource graph, not bypasses around ordinary
+workspace, version, path, object, projection, moment, secret, and policy checks.
+
 This is how dohc supports open work without requiring 100% of all work to be
 visible 100% of the time.
 
@@ -1185,10 +1221,11 @@ The first proof should be small but real:
 8. The engine records honest provenance without changing write rules:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
-9. E2E proves fail-closed behavior when authorization, policy, visibility,
-   protected-path, lock, version-access, skill-turn, provenance, attribution, or
-   proof decisions deny access, and retryable no-mutation behavior when required
-   evaluators are unavailable or indeterminate.
+9. E2E proves fail-closed behavior when authorization, ownership/review gate,
+   policy, visibility, protected-path, lock, version-access, skill-turn,
+   provenance, attribution, or proof decisions deny access, and retryable
+   no-mutation behavior when required evaluators are unavailable or
+   indeterminate.
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
 11. E2E proves every persisted atom, folder, entity, share, capture, file,
