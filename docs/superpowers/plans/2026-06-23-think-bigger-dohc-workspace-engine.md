@@ -1603,11 +1603,16 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
-- **Phase 0 provisional baseline freeze:** immediately after P0A/P0R and before
-  P0B, P0C, P0D, P0E, P0F, or P0G proceed, land the minimal Phase 0 shared
-  substrate baseline for `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`,
-  stable object IDs, and the provisional conflict/link/chat shapes those lanes
-  consume.
+- **P0S - Shared Substrate Freeze:** owned by the main orchestration thread plus
+  the schema-baseline lane. Immediately after P0A/P0R and before P0B, P0C, P0D,
+  P0E, P0F, or P0G proceed, land the minimal Phase 0 shared substrate baseline
+  for `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object IDs,
+  `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord`,
+  `ChatThread`, `ThreadMessage`, `ThreadLink`, `ThreadReadState`, and
+  `AgentRun`/agent-run surrogate symbols. Exit criteria: the shared substrate
+  package exports `Phase0SharedSubstrateBaseline`, consumers import those
+  symbols from that package, and tests prove no lane invented local lookalike
+  types.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.

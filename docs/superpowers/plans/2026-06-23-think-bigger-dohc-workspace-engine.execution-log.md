@@ -19,6 +19,9 @@ Source specs:
   status, test evidence, open overrides, and completion state.
 - **Pointer role:** this header is not a mutable status summary; update the
   canonical pass block instead of restating live state here.
+- **Archive boundary:** earlier PR00 pass entries under
+  `Archived PR00 Pass History` are append-only background. Only the newest PR00
+  pass's `Live PR00 status` block is mutable for current state.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
@@ -214,6 +217,13 @@ Date completed:
 ````
 
 ## Milestone Gates
+
+## Archived PR00 Pass History
+
+The PR00 pass entries below are an append-only archive. Treat older pass blocks
+as read-only background; do not edit them to express current state. The current
+state is only the newest PR00 pass's `Live PR00 status` block, as referenced by
+the Current PR Pointer above.
 
 ## PR 00 - Mega Plan And Readiness Scaffold
 
@@ -4592,6 +4602,35 @@ Two-hundred-first pass:
   - Renamed the reusable execution-log blocker template heading to
     `Live Blockers And Overrides` so it is distinct from the historical
     `Unresolved Findings` category index.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Two-hundred-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Added a uniqueness check for the checked-in Think Bigger docs manifest.
+  - Expanded the Phase 0 roadmap milestone into an explicit **P0S - Shared
+    Substrate Freeze** entry with owner, shared symbols, and exit criteria.
+  - Added an `Archived PR00 Pass History` boundary and clarified that only the
+    newest PR00 pass's `Live PR00 status` block is mutable current state.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

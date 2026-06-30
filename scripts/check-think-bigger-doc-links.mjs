@@ -21,8 +21,12 @@ try {
 }
 const expectedThinkBiggerDocs = manifest?.thinkBiggerDocs
 
-if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((file) => typeof file !== 'string')) {
-  console.error('Think Bigger docs manifest must contain a thinkBiggerDocs string array')
+if (
+  !Array.isArray(expectedThinkBiggerDocs)
+  || expectedThinkBiggerDocs.some((file) => typeof file !== 'string')
+  || new Set(expectedThinkBiggerDocs).size !== expectedThinkBiggerDocs.length
+) {
+  console.error('Think Bigger docs manifest must contain a unique thinkBiggerDocs string array')
   process.exit(1)
 }
 
