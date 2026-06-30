@@ -1648,28 +1648,22 @@ Foundation alpha and the relevant surface proof are complete.
 - Add the checked-in Think Bigger docs manifest consumed by
   [the Think Bigger docs manifest](./2026-06-23-think-bigger-docs.manifest.json).
 - Add [the Think Bigger docs workflow](../../../.github/workflows/think-bigger-docs.yml)
-  so CI runs the manifest-backed checker on every pull request targeting `main`
-  and every push to `main`. The same workflow also runs on `workflow_dispatch`
-  and a scheduled drift check. The enforcement point is the checker, not path
-  filters: it compares the checked-in manifest against repository inventory and
-  link/anchor resolution whenever the job runs, and it must fail PRs whenever
-  docs manifest, link, anchor, or discovered-doc drift is detected.
+  and checker script; the canonical run/fail contract is the PR00 docs-checker
+  contract in **Tests** below.
 - Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
 
-- mandatory docs link/anchor check:
-  `node scripts/check-think-bigger-doc-links.mjs`.
-- docs CI/workflow must run the checker against every Think Bigger
-  plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
-  the source of truth. [The workflow](../../../.github/workflows/think-bigger-docs.yml)
-  must be an always-on required PR validation, not a path-filtered optional docs
-  job. `workflow_dispatch` and the scheduled drift check run the same checker for
-  non-PR drift visibility. The checker is the fail-closed enforcement mechanism:
-  it must compare the manifest with repository inventory, validate links/anchors,
-  and fail when doc renames, execution-log edits, manifest changes,
-  linked-target drift, or discovered-doc drift make the manifest and repository
-  disagree.
+- PR00 docs-checker contract: `node scripts/check-think-bigger-doc-links.mjs`
+  is the single fail-closed enforcement mechanism. It must compare the checked-in
+  Think Bigger docs manifest with repository inventory, validate all discovered
+  Think Bigger doc links/anchors, and fail when doc renames, execution-log edits,
+  manifest changes, linked-target drift, or discovered-doc drift make the
+  manifest and repository disagree.
+- [The workflow](../../../.github/workflows/think-bigger-docs.yml) must run that
+  checker for pull requests and pushes that touch the manifest, Think Bigger
+  docs, checker script, workflow file, or dependency manifests. `workflow_dispatch`
+  and the scheduled drift check run the same checker for non-PR drift visibility.
 
 **CodeRabbit focus:**
 
@@ -1696,26 +1690,11 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   command, wire the TypeScript package entrypoint, and add either the Rust crate
   plus Cargo manifest that consumes it or an explicit Rust conformance fixture
   that blocks generated-consumer claims until the crate exists.
-- Define the canonical IDL/source for the core workspace/version/event/projection
-  substrate here:
-  `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
-  `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
-  `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  `ProjectionValidation`, and `AgentRun`.
-- Formalize and extend the carried-forward `ConflictRecord` contract from
-  `Phase0SharedSubstrateBaseline`, preserving the `ConflictRecord` symbol and the
-  `schemaVersion: 'conflict-record:p0d:v1'` continuity unless an explicit
-  migration/backfill boundary supersedes it.
-- Consume the Phase 0 chat read-state compatibility bridge from
-  `Phase0SharedSubstrateBaseline`, preserving monotonic cursor semantics and
-  server-owned revision tokens only as bridge requirements. PR 01 must not define
-  the authoritative `ThreadReadState` contract; PR 12 owns that final schema.
-- Define the `AgentRun` identity contract and migration/backfill semantics here
-  so PR 01 is the single canonical owner for agent-run identity.
-- Consume provisional chat bridge/read-state-bridge/link symbols exactly as
-  assigned in the
-  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix);
-  this PR must not restate or redefine chat-schema ownership locally.
+- Adopt, migrate, or bridge schema symbols exactly as assigned in the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix).
+  That matrix is the sole source of truth for which symbols PR 01 owns, bridges,
+  or leaves to PR 12; this PR scope must not restate individual symbol ownership
+  locally.
 - Define link dereference shape: source/owning workspace ID, target type, target
   workspace ID, stable target ID, optional `VersionRef`, display path/title at
   link time, ACL degrade behavior.
@@ -1736,12 +1715,9 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   core substrate. Zod, Rust validation, bridge adapters, and other runtime
   consumers are generated or conformance-tested consumers of that contract, so
   every path validates identical workspace/version/policy boundaries without
-  making one runtime the authority for the others. `WorkspaceObject`,
-  `WorkspaceVersion`, `WorkspaceEvent`, `Projection`, `AgentRun`, and every other
-  shared workspace/version/policy boundary type above must be generated from, or
-  conformance-checked against, that single source of truth. Chat read-state
-  compatibility bridges may consume this boundary contract, but the authoritative
-  `ThreadReadState` schema remains reserved for PR 12.
+  making one runtime the authority for the others. The ownership matrix above
+  determines which boundary symbols are generated from, bridged through, or
+  conformance-checked against that single source of truth.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

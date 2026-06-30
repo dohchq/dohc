@@ -297,15 +297,16 @@ type ChannelTargetActivity = {
 }
 ```
 
-`Channel.linkedTargets` is a derived read model/cache, not the authoritative
-mutable record. The canonical source for channel-level linked targets is an
+`Channel.linkedTargets` is only a derived read model/cache, not an authoritative
+mutable record. The sole canonical source for channel-level linked targets is the
 append-only channel-target ledger, represented in replay/export as
 `ChannelTargetActivity` rows. `ThreadLink` remains the canonical source for
-thread-level linked work on a specific `ChatThread`; channel target activity is
+thread-level linked work on a specific `ChatThread`; `ChannelTargetActivity` is
 the canonical source for channel context, ACL expansion, side-rail discovery,
-search, and export at the channel level. If the `Channel.linkedTargets`
-projection disagrees with the channel-target ledger, rebuild the projection from
-the ledger and ignore the stale projection.
+search, and export at the channel level. The server may store the normalized
+`Channel.linkedTargets` projection on the channel row for fast reads, but that
+stored set is rebuilt from the ledger and ignored whenever it disagrees with the
+channel-target ledger.
 
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
 tuple used by channel-target activity and compatible with `ThreadLink` creation,
@@ -317,11 +318,12 @@ target must carry a server-derived share grant and visibility scope, and every
 read, projection, notification, search, export, replay, and linked-work
 side-rail path must re-authorize that grant before exposing the linked target.
 The server rejects unsupported, unauthorized, expired, revoked, or ambiguous
-targets, deduplicates exact duplicates, and persists the set sorted by canonical
-target serialization. General channel context, ACL expansion, side-rail
-projection, search, and export use that normalized set. Array order and
-duplicates must never participate in channel identity, thread identity, or
-conversation-id derivation.
+targets, deduplicates exact duplicates, and writes only the normalized projection
+cache sorted by canonical target serialization after the corresponding
+`ChannelTargetActivity` rows are committed. General channel context, ACL
+expansion, side-rail projection, search, and export use that normalized projection
+only as a cache over the ledger. Array order and duplicates must never
+participate in channel identity, thread identity, or conversation-id derivation.
 
 `channelId` is the durable identity. `channelSlug` is a server-normalized lookup
 alias that may change on rename, but renames must not change `channelId`, fork
@@ -702,9 +704,11 @@ For a `ChannelChatThread`, the same transaction or serialized unit must also run
 `channelId`, and enqueue the same durable outbox identity used for side rails,
 search, export, replay, and projection invalidation. DM threads do not emit
 `ChannelTargetActivity`. If a retry observes an already-active or tombstoned
-`ThreadLink`, it must also observe the matching channel-target activity before
-reporting the idempotent result; otherwise the link mutation is incomplete and
-must repair through the same `channel-target-ledger-sync` step before fanout.
+`ThreadLink`, it must verify the matching `ChannelTargetActivity` for the
+thread's `channelId` exists before reporting the idempotent result. If the
+activity is missing, the retry must repair it in the same transaction or
+serialized unit through `channel-target-ledger-sync`, then return success only
+after the `ThreadLink` and channel-target ledger entry are both durable.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
@@ -741,9 +745,11 @@ release or supersede that active reservation in the same transaction that sets
 conflict is resolved only after re-running the same workspace, thread
 membership, target visibility, share-grant, and link-policy authorization checks
 used by link creation. If those checks still pass, the engine may read the
-existing active `ThreadLink`, return the idempotent result, and skip duplicate
-activity/fanout. If any check fails, the retry fails closed as an authorization
-or visibility denial without revealing whether an active link still exists.
+existing active `ThreadLink`, verify or repair the matching channel-target ledger
+entry when the thread is channel-backed, return the idempotent result, and skip
+duplicate `link_added`/projection fanout. If any check fails, the retry fails
+closed as an authorization or visibility denial without revealing whether an
+active link still exists.
 A retry for the same normalized key must re-run those checks before any
 read/upsert/no-op against the existing active `ThreadLink`, and must not create
 a second active link or duplicate `link_added` fanout.

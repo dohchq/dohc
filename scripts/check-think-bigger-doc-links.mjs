@@ -153,7 +153,7 @@ const splitLocalTarget = (raw) => {
 
 const rawHtmlAnchorTagPattern = /<a\b[^>]*>/gi
 const htmlAttributeValue = (tag, attrName) => {
-  const attributePattern = new RegExp(`\\b${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>=]+))`, 'i')
+  const attributePattern = new RegExp(`(?:^|\\s)${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>=]+))`, 'i')
   const match = tag.match(attributePattern)
   const value = match?.[1] ?? match?.[2] ?? match?.[3]
   return value === undefined ? null : decodeHtmlEntities(value)
@@ -463,6 +463,10 @@ const assertCheckerFixtures = () => {
   const rawHtmlLink = collectLinks('<a href="./target.md#custom-anchor">target</a>')
   if (!rawHtmlLink.links.some((link) => link.target === './target.md#custom-anchor')) {
     throw new Error('raw HTML link fixture should collect href destinations')
+  }
+  const rawHtmlDataAttributes = collectLinks('<a data-href="./hidden.md" data-id="hidden-anchor">target</a>')
+  if (rawHtmlDataAttributes.links.length > 0 || collectAnchors('<a data-id="hidden-anchor"></a>').has('hidden-anchor')) {
+    throw new Error('raw HTML data-* attributes should not count as links or anchors')
   }
   const footnoteBodyLink = collectLinks('[^note]: See [visible](./visible.md)')
   if (!footnoteBodyLink.links.some((link) => link.target === './visible.md')) {

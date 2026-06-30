@@ -524,15 +524,15 @@ read path reconstructs them.
 Replay from the holding area must be causal and fail-closed. Retry metadata must
 include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
 or equivalent CAS token captured with the original ingest. At apply time, the
-engine revalidates workspace scope plus server-derived authorization,
-ownership/review gate, visibility, policy, protected-path, lock, version-access,
+engine revalidates workspace scope plus server-derived visibility,
+authorization, ownership/review gate, policy, protected-path, lock, version-access,
 skill-turn, provenance, attribution, and proof checks. The retry outcome matrix
 is deterministic for the same replay metadata:
 
 Replay evaluation is first-match in this order; once a class matches, later
 checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
-malformed/cross-scope binding, authorization/permission, ownership/review gate,
-visibility, policy, protected-path, lock, version-access, skill-turn,
+malformed/cross-scope binding, visibility, authorization/permission,
+ownership/review gate, policy, protected-path, lock, version-access, skill-turn,
 provenance, attribution, proof, then causal base conflict. If multiple
 server-derived checks fail in one replay attempt, the earliest matching class in
 that order wins.
@@ -839,13 +839,17 @@ Normal filesystem saves are translated into the same semantic write contract as
 `write(workspaceId, versionId, path, bytes, ...)`, but they do not require an
 external editor or agent to synthesize a client precondition. When a file is read
 or materialized, or when a new local path is first created/imported, the engine
-records exactly one engine-owned capture/replay token for that path, such as the
-last seen base version, etag, content hash, absence assertion, watcher sequence,
-or session capture id. First-write bootstrap uses an engine-owned
-`expectedAbsent`-equivalent token for a path with no prior object, not a missing
-token. When the file is saved or captured, the filesystem path submits that
-engine-owned token with the incoming bytes. Missing, ambiguous, malformed, or
-wrongly scoped engine capture tokens fail closed through the existing
+records exactly one authoritative engine-owned capture/replay token for that
+path. That token is the per-path causal guard submitted by normal filesystem
+saves, such as a base-version token, etag, absence assertion, watcher sequence
+token, or session capture id. Broader multi-factor deduplication fingerprints may
+include content hashes, payload digests, or operation fingerprints, but they are
+not the authoritative per-path capture/replay token and cannot substitute for it.
+First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
+a path with no prior object, not a missing token. When the file is saved or
+captured, the filesystem path submits that engine-owned token with the incoming
+bytes. Missing, ambiguous, malformed, or wrongly scoped engine capture tokens
+fail closed through the existing
 `retryable-failure` result when capture infrastructure cannot currently prove
 commit state, or through `PublicValidationErrorCode` value
 `capture_token_invalid` before any holding record, quarantine record, or

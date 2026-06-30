@@ -994,10 +994,25 @@ type NonSecretFilePolicy = FilePolicyBase & {
   secretProjection: 'none'
 }
 
-type SecretBackedFilePolicy = FilePolicyBase & {
+type SecretBackedOpaqueFilePolicy = FilePolicyBase & {
   encrypted: true
-  secretProjection: 'opaque' | 'protectedLocal' | 'plaintextLocal'
+  searchable: false
+  publicExport: 'redact' | 'exclude'
+  materialized: 'virtual'
+  secretProjection: 'opaque'
 }
+
+type SecretBackedLocalFilePolicy = FilePolicyBase & {
+  encrypted: true
+  searchable: false
+  publicExport: 'redact' | 'exclude'
+  materialized: 'local'
+  secretProjection: 'protectedLocal' | 'plaintextLocal'
+}
+
+type SecretBackedFilePolicy =
+  | SecretBackedOpaqueFilePolicy
+  | SecretBackedLocalFilePolicy
 
 type FilePolicy = NonSecretFilePolicy | SecretBackedFilePolicy
 ```
@@ -1013,6 +1028,13 @@ storage hydration: `opaque` means handles/redacted status only,
 Policy validation and builders must emit `secretProjection: 'none'` for
 non-secret paths and `SecretBackedFilePolicy` for protected secret paths; secret
 entries cannot omit `secretProjection` or use the non-secret placeholder value.
+They must reject inconsistent pairs before status/export/access data is produced:
+`secretProjection: 'opaque'` requires `materialized: 'virtual'`, while
+`protectedLocal` and `plaintextLocal` require `materialized: 'local'`.
+Secret-backed policies must also force `searchable: false` and
+`publicExport: 'redact' | 'exclude'`; plaintext export or indexing requires a
+separate future policy with explicit review and must not be expressible through
+this first-proof union.
 Status APIs, UI serialization, and agent-readable views must emit both
 `materialized` and `secretProjection` so protected secret material is never
 confused with normal local plaintext.
