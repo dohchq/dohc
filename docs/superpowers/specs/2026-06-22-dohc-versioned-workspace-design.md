@@ -506,7 +506,7 @@ that order wins.
   conflict references. Only
   already-persisted accepted records with syntactically valid replay metadata but
   unresolved server-side provenance or binding evidence can stay quarantined or
-  manual-only while resolution proceeds.
+  while resolution proceeds.
 - If server-derived authorization, permission, ownership/review gate, policy,
   visibility, protected-path, lock, version-access, skill-turn, provenance,
   attribution, or proof checks fail after replay, the record resolves to the

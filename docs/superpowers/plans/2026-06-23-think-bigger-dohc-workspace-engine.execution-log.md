@@ -4327,6 +4327,39 @@ Hundred-ninety-third pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-ninety-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Removed the unmodeled `manual-only` lifecycle term from replay binding
+    handling so outcomes remain `PublicValidationErrorCode` or quarantine.
+  - Required export/re-import metadata to carry the workspace path-equivalence
+    profile and fail closed if the profile is missing or incompatible.
+  - Updated local agent CLI testing docs to use `codex-app-server` and
+    `claude-acp` with the actual `CODEX` / `CLAUDE_ACP` driver prefixes and
+    `claude-code-acp` fallback.
+  - Replaced plain deterministic deleted-body hashes with keyed digest/MAC
+    evidence verified through authorized replay/export/audit paths.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

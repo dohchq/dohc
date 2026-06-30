@@ -1453,14 +1453,18 @@ that agents can operate the workspace naturally.
 The test harness should support:
 
 ```bash
-DOHC_TEST_AGENT_CLI=codex
+DOHC_TEST_AGENT_CLI=codex-app-server
 ```
 
 Defaults:
 
-- `DOHC_TEST_AGENT_CLI` defaults to `codex`.
-- `codex` should resolve from `DOHC_CODEX_CLI` or `codex` on `PATH`.
-- `claude` should resolve from `DOHC_CLAUDE_CLI` or `claude` on `PATH`.
+- `DOHC_TEST_AGENT_CLI` defaults to `codex-app-server`.
+- `codex-app-server` should resolve from the `CODEX` driver prefix
+  (`DOHC_AGENT_CODEX_COMMAND` / `DOHC_AGENT_CODEX_ARGS_JSON`) or
+  `codex app-server` on `PATH`.
+- `claude-acp` should resolve from the `CLAUDE_ACP` driver prefix
+  (`DOHC_AGENT_CLAUDE_ACP_COMMAND` / `DOHC_AGENT_CLAUDE_ACP_ARGS_JSON`) or
+  `claude-code-acp` on `PATH`.
 
 Required behavior:
 
@@ -1470,9 +1474,9 @@ Required behavior:
 - capture transcripts/artifacts for QA, with secret redaction.
 - test the agent through normal files and normal dohc actions, not privileged
   internals, unless the PR is explicitly testing internal APIs.
-- use `codex` as the required default path.
-- run `claude` as a secondary compatibility path where available, especially
-  before major milestone gates.
+- use `codex-app-server` as the required default path.
+- run `claude-acp` as a secondary compatibility path where available,
+  especially before major milestone gates.
 
 ### Security Regression Matrix
 

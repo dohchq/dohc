@@ -877,22 +877,28 @@ type MessageRestoreThreadActivity = ThreadActivityBase & {
   nextBodyHash: string
 }
 
-`nextBodyHash`, `bodyHash`, and `tombstoneHash` are lowercase hex SHA-256 over a
-canonical JSON payload with sorted object keys, no insignificant whitespace, and
-only user-authored text fields normalized to Unicode NFC before UTF-8 encoding.
-Opaque IDs such as `workspaceId`, `threadId`, and `messageId` are hashed
-byte-for-byte from their canonical stored form. `nextBodyHash` hashes
+`nextBodyHash`, `bodyHash`, and `tombstoneHash` are lowercase hex keyed digests
+over a canonical JSON payload, using a server-held chat history hash/MAC key
+that is not exported with ordinary workspace data. Plain deterministic SHA-256
+over message content is not allowed for deleted-body evidence because purged or
+redacted bodies would be dictionary-attackable. The canonical payload uses
+sorted object keys, no insignificant whitespace, and only user-authored text
+fields normalized to Unicode NFC before UTF-8 encoding. Opaque IDs such as
+`workspaceId`, `threadId`, and `messageId` are digested byte-for-byte from their
+canonical stored form. `nextBodyHash` digests
 `["chat-body:v1", workspaceId, threadId, messageId, bodyRevision,
 nextBodySnapshot]`, where `nextBodySnapshot` is the canonical current
 `ChatBodySnapshot` after create/edit/restore. `bodyHash` uses the same
 `chat-body:v1` payload for the referenced persisted body revision.
-`tombstoneHash` hashes
+`tombstoneHash` digests
 `["chat-tombstone:v1", workspaceId, threadId, messageId, previousBodyRevision,
 previousBodyHash, deleteReasonOrNull]`, where `previousBodyHash` is the
 canonical `bodyHash` of the deleted body revision. `previousBody` may be retained
 as plaintext, encrypted, secret-backed, or redacted audit material according to
 policy, but tombstone verification depends on `previousBodyHash`, not on
-re-reading the body payload.
+re-reading the body payload. Replay, export, and audit jobs verify deletion
+evidence only through the authorized keyed-digest service or a non-exported
+verification capability; export bundles must not include the raw MAC key.
 `deleteReason` is preserved user/agent text and must follow the same text-safety
 rules as message bodies and thread titles: escape by default, sanitize only
 through the allowlisted formatting subset, and redact or omit where the viewer

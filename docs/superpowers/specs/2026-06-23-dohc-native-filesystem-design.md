@@ -1183,7 +1183,9 @@ Export should produce:
 - history/provenance metadata.
 - hashes or commitments for verification.
 - redacted/excluded secret files according to policy.
-- enough metadata to re-import and compare.
+- enough metadata to re-import and compare, including the workspace
+  path-equivalence profile: case sensitivity/folding, Unicode normalization, and
+  mount-compatibility constraints.
 
 Export must never include `.dohc/**` history, status, conflicts, indexes, caches,
 generated projections, durability internals, or other engine state as ordinary
@@ -1192,8 +1194,10 @@ the boundary, and only through the engine policy parsing/export path.
 That engine policy export path is responsible for preserving enough normalized
 policy state to reconstruct secret-backed versus non-secret files on re-import,
 including equal-specificity tie-breaking from the original source ordinal and
-rule index; re-import must fail closed rather than treating an entry with missing
-policy envelope or ordering data as ordinary content.
+rule index plus the workspace path-equivalence profile used during
+canonicalization; re-import must fail closed rather than treating an entry with
+missing policy envelope, ordering data, or a missing/incompatible
+path-equivalence profile as ordinary content.
 
 Generated or internal `.dohc/**` state is excluded from export unless it is one
 of the named policy inputs above and crosses through the engine policy export
