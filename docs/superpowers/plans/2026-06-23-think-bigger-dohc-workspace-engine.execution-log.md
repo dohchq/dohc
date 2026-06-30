@@ -102,7 +102,31 @@ not a standalone lane row.
 
 ## Entry Template
 
-Copy this section for each PR.
+Use the compact pass template for iterative PR00 CodeRabbit passes. Use the full
+implementation template for new implementation PR entries.
+
+```md
+Two-hundred-nth pass:
+
+- Live PR00 status:
+  - CodeRabbit status:
+  - Test evidence:
+  - Open overrides:
+  - Completion state:
+- Fixed CodeRabbit findings:
+  - ...
+- Validation:
+  - `git diff --check`:
+  - `node scripts/check-think-bigger-doc-links.mjs`:
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` from `/tmp`:
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`:
+- Unresolved findings:
+  - ...
+- Overrides:
+  - ...
+```
+
+Copy this section for each implementation PR.
 
 ````md
 ## PR NN - Title
@@ -5348,7 +5372,7 @@ Two-hundred-twenty-second pass:
 
 Two-hundred-twenty-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5369,6 +5393,41 @@ Two-hundred-twenty-third pass:
     rendering/search/export.
   - Required `send_channel_message` and thread/conversation reads to return the
     server-issued `channelConversationId` for deterministic reuse.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-twenty-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Removed the lingering `ThreadReadState` canonical-schema claim from PR 01
+    scope and reserved the authoritative schema for PR 12.
+  - Added a compact PR00 pass template to prevent execution-log copy/paste drift.
+  - Defined retained, tokenized, and redacted actor/device/session provenance for
+    filesystem durability logs and exports.
+  - Made `ChannelLinkedTargetRef` mirror `ThreadLink` versioned/non-versioned
+    target semantics.
+  - Required `linked_work` channel conversations to name exactly one canonical
+    selected target before deriving `channelConversationId`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

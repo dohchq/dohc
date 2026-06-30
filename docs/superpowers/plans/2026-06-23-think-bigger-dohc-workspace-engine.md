@@ -1737,9 +1737,11 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   consumers are generated or conformance-tested consumers of that contract, so
   every path validates identical workspace/version/policy boundaries without
   making one runtime the authority for the others. `WorkspaceObject`,
-  `WorkspaceVersion`, `WorkspaceEvent`, `Projection`, `ThreadReadState`,
-  `AgentRun`, and every other shared boundary type above must be generated from,
-  or conformance-checked against, that single source of truth.
+  `WorkspaceVersion`, `WorkspaceEvent`, `Projection`, `AgentRun`, and every other
+  shared workspace/version/policy boundary type above must be generated from, or
+  conformance-checked against, that single source of truth. Chat read-state
+  compatibility bridges may consume this boundary contract, but the authoritative
+  `ThreadReadState` schema remains reserved for PR 12.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

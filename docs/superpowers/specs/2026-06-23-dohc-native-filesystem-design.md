@@ -300,6 +300,15 @@ Phase 0 should use a normal folder plus reconciliation:
      only inside the authorization envelope. Secret-backed writes are included
      only as encrypted references/envelopes or broker metadata, never plaintext
      secret content.
+     Provenance is stored as a policy-governed envelope: durable internal audit
+     retains actor id, actor kind, authorizing principal, source kind
+     (`human`, `agent`, `import`, `sync`, or `automation`), device id, session id,
+     mount binding, and capture source token when available. Normal status,
+     search, shared views, and ownership exports expose actor kind and permitted
+     display label only; device/session/process identifiers are redacted or
+     replaced with stable opaque tokens unless the viewer has workspace owner/admin
+     audit permission. Public or cross-workspace exports must not reveal
+     unredacted device, session, process, mount, or protected-path provenance.
    - Coalesce them into meaningful history moments.
 
 3. **When dohc starts after being closed**
@@ -1263,7 +1272,10 @@ Export should produce:
 - only allowlisted source-backed policy files such as `.dohc/files.toml` and
   `.dohc/visibility.toml`; `.dohcignore` remains deferred and is not emitted as
   a live policy input in this phase.
-- history/provenance metadata.
+- history/provenance metadata, with actor kind and permitted display labels
+  preserved, device/session/process/mount identifiers tokenized by default, and
+  unredacted provenance available only in owner/admin audit exports governed by
+  the source workspace policy envelope.
 - hashes or commitments for verification.
 - redacted/excluded secret files according to policy.
 - enough metadata to re-import and compare, including the workspace

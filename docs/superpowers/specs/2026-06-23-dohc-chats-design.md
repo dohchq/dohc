@@ -229,29 +229,46 @@ First-class channel contract:
 ```ts
 type ChannelVisibility = 'workspace' | 'private' | 'shared'
 
-type InternalChannelLinkedTargetRef = {
+type ChannelLinkedTargetScope =
+  | { scopeKind: 'internal'; shareGrantId?: never; visibilityScope?: never }
+  | { scopeKind: 'shared'; shareGrantId: string; visibilityScope: string }
+
+type ChannelLinkedTargetBase = ChannelLinkedTargetScope & {
   targetWorkspaceId: string
-  targetType: ThreadLinkTargetType
   targetId: string
-  targetVersionRef?: VersionRef
-  scopeKind: 'internal'
-  shareGrantId?: never
-  visibilityScope?: never
 }
 
-type SharedChannelLinkedTargetRef = {
-  targetWorkspaceId: string
-  targetType: ThreadLinkTargetType
-  targetId: string
+type VersionedChannelLinkedTargetRef =
+  | (ChannelLinkedTargetBase & {
+      targetType: 'atom' | 'file' | 'folder'
+      targetVersionRef: ObjectTargetVersionRef
+    })
+  | (ChannelLinkedTargetBase & {
+      targetType: 'version'
+      targetVersionRef: WorkspaceVersionTargetRef
+    })
+  | (ChannelLinkedTargetBase & {
+      targetType: 'history_moment'
+      targetVersionRef: HistoryMomentTargetVersionRef
+    })
+
+type NonVersionedChannelLinkedTargetRef = ChannelLinkedTargetBase & {
+  targetType: 'agent_run' | 'chat_thread' | 'decision' | 'task'
+  targetVersionRef?: never
+}
+
+type ShareChannelLinkedTargetRef = ChannelLinkedTargetBase & {
+  targetType: 'share'
   targetVersionRef?: VersionRef
-  scopeKind: 'shared'
-  shareGrantId: string
-  visibilityScope: string
 }
 
 type ChannelLinkedTargetRef =
-  | InternalChannelLinkedTargetRef
-  | SharedChannelLinkedTargetRef
+  | VersionedChannelLinkedTargetRef
+  | NonVersionedChannelLinkedTargetRef
+  | ShareChannelLinkedTargetRef
+
+type InternalChannelLinkedTargetRef = Extract<ChannelLinkedTargetRef, { scopeKind: 'internal' }>
+type SharedChannelLinkedTargetRef = Extract<ChannelLinkedTargetRef, { scopeKind: 'shared' }>
 
 type Channel = {
   channelId: string
@@ -654,6 +671,13 @@ does not derive a `linked_work` conversation id from array order; a linked-work
 conversation chooses one normalized target discriminator, while broader
 multi-target discussion uses the default conversation or a server-owned
 `named_subconversation` key.
+For `linked_work`, the request must include the chosen normalized
+`ChannelLinkedTargetRef` or an equivalent server-resolved target handle. If the
+channel has multiple active linked targets and the request does not select
+exactly one canonical target, get-or-create must fail closed as ambiguous instead
+of picking from `Channel.linkedTargets` order. The selected target is the sole
+linked-work discriminator for `channelConversationId` generation, replay,
+export, search, and subsequent thread reads.
 Callers obtain the server-issued `channelConversationId` from the
 `send_channel_message` create/read response or from a thread/conversation read
 for the same canonical context tuple. Clients and agents should persist and reuse
