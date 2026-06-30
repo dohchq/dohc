@@ -224,6 +224,62 @@ Examples:
 #client-acme
 ```
 
+First-class channel contract:
+
+```ts
+type ChannelVisibility = 'workspace' | 'private' | 'shared'
+
+type ChannelLinkedTargetRef = {
+  targetType: ThreadLinkTargetType
+  targetId: string
+  targetVersionRef?: VersionRef
+}
+
+type Channel = {
+  channelId: string
+  workspaceId: string
+  channelSlug: string
+  displayName: string
+  description?: string
+  visibility: ChannelVisibility
+  linkedTargets: ChannelLinkedTargetRef[]
+  createdById: string
+  createdAt: UnixMsDecimalString
+  updatedAt: UnixMsDecimalString
+  archivedAt?: UnixMsDecimalString
+}
+```
+
+`channelId` is the durable identity. `channelSlug` is a server-normalized lookup
+alias that may change on rename, but renames must not change `channelId`, fork
+existing `ChatThread` rows, rewrite message history, or invalidate durable
+links. Active slugs are unique per workspace; old aliases may redirect or expire
+according to product policy, but they are never the durable join key for
+threads, notifications, search, projections, export, replay, or history.
+
+Channel ACL and visibility are server-derived from workspace membership,
+channel membership, explicit linked targets, and shared-channel grants. Every
+channel list/read/write, `ChatThread` resolution, notification, projection,
+search, export, and replay path must authorize against the current channel ACL
+and then against any linked work target ACL. `visibility: 'shared'` requires an
+explicit share grant; internal channel writes cannot silently become external.
+
+Channel creation has two intentional paths:
+
+- `create_channel` creates a new channel with an idempotency key and fails
+  closed on active slug collision, missing ACL authority, invalid linked target,
+  or ambiguous share grant.
+- `get_or_create_channel` is allowed only for server-declared default channels
+  or import/migration flows. It resolves by stable workspace policy plus
+  normalized slug and returns an existing equivalent channel, or creates one in
+  the same serialized unit. If requested metadata, visibility, or linked-target
+  policy conflicts with the existing channel, it fails closed instead of
+  mutating the channel opportunistically.
+
+The channel creation proof slice owns stable `channelId` assignment,
+slug-normalization and collision checks, ACL seed derivation, linked-target
+validation, audit metadata, and concurrent create/get-or-create behavior.
+
 A channel can be a general discussion space or can attach to workspace scope:
 
 - folder.
@@ -1139,6 +1195,7 @@ list_channels
 list_chats
 read_chat
 create_chat
+send_channel_message
 reply_to_chat
 link_chat_to_work
 summarize_chat
@@ -1151,6 +1208,7 @@ enforce workspace scope on every entity and result:
 - `list_channels`
 - `read_chat`
 - `create_chat`
+- `send_channel_message`
 - `reply_to_chat`
 - `edit_chat_message`
 - `delete_chat_message`
@@ -1170,6 +1228,11 @@ server-assigned target identifiers:
 
 - `create_chat` requires an `idempotencyKey`; the server assigns `threadId` in
   the idempotency result, and retries return that same `threadId`.
+- `send_channel_message` requires an `idempotencyKey`; the server atomically
+  resolves or creates the channel-backed `ChatThread` by
+  `(workspaceId, channelId, channelConversationId)` and persists the
+  `ThreadMessage` in the same serialized unit. The idempotency result returns
+  both `threadId` and `messageId`, and retries return the same pair.
 - `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
   in the idempotency result, and retries return that same `messageId`.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected
@@ -1373,11 +1436,17 @@ The channel may support lightweight stream messages, but durable chats should be
 the object that survives and resurfaces. A channel send maps to a
 `ThreadMessage` inside exactly one `ChatThread` for that conversation.
 `channelId` is a container/context identifier, not the durable thread identity.
-Resolving or creating the channel-backed `ChatThread` must be an atomic
-get-or-create by `(workspaceId, channelId, channelConversationId)` before the
-`ThreadMessage` is written, so concurrent sends cannot create duplicate threads
-for the same conversation. There is no separate durable `ChannelMessage` entity
-outside the canonical `ChatThread -> ThreadMessage` model.
+The first send for a channel conversation must be one atomic
+`send_channel_message` mutation: the server resolves or creates the
+channel-backed `ChatThread` by `(workspaceId, channelId, channelConversationId)`
+and persists the initial `ThreadMessage` in the same transaction or serialized
+unit. Callers must not implement the fast path as `create_chat` followed by
+`reply_to_chat`, because that creates a duplicate-thread window and splits the
+durable chat identity proof from the first message proof. Concurrent first sends
+for the same tuple must converge on one `ChatThread`, with distinct
+`ThreadMessage` rows ordered by the canonical per-thread sequence. There is no
+separate durable `ChannelMessage` entity outside the canonical
+`ChatThread -> ThreadMessage` model.
 
 ## Side rail integration
 
