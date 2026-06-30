@@ -2699,6 +2699,27 @@ Hundred-thirty-seventh pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-thirty-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Added a source-file `isFile()` guard before docs checker reads.
+  - Made the Think Bigger docs checker use a checked-in manifest and fail when
+    manifest entries diverge from repository inventory.
+  - Reworded PR00 scope so the execution log is the only status/checklist
+    tracker for progress, blockers, and evidence.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

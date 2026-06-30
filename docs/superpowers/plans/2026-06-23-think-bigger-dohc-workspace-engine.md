@@ -1530,17 +1530,23 @@ Foundation alpha and the relevant surface proof are complete.
 **Scope:**
 
 - Add this mega plan.
-- Add execution-log template.
-- Add a tracking checklist doc or section.
-- Add links from relevant product docs if appropriate.
+- Add execution-log template and checklist section in
+  `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`;
+  that file is the only PR00 status tracker for progress, blockers, and
+  evidence.
+- Add the checked-in Think Bigger docs manifest consumed by
+  `scripts/check-think-bigger-doc-links.mjs`.
+- Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
 
 - mandatory docs link/anchor check:
   `node scripts/check-think-bigger-doc-links.mjs`.
 - docs CI/workflow must run the checker against every Think Bigger plan/spec/
-  execution-log doc, using a manifest or glob-based target source so newly added
-  Think Bigger docs cannot bypass anchor validation.
+  execution-log doc, using the checked-in Think Bigger docs manifest as the
+  source of truth. The checker must compare the manifest with repository
+  inventory and fail closed when they diverge so newly added Think Bigger docs
+  cannot bypass anchor validation.
 
 **CodeRabbit focus:**
 

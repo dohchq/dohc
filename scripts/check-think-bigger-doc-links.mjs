@@ -6,14 +6,18 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const canonicalRepoRoot = fs.realpathSync(repoRoot)
+const manifestPath = path.resolve(
+  repoRoot,
+  'docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json',
+)
 
-const expectedThinkBiggerDocs = [
-  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
-  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
-  'docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md',
-  'docs/superpowers/specs/2026-06-23-dohc-chats-design.md',
-  'docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md',
-]
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const expectedThinkBiggerDocs = manifest.thinkBiggerDocs
+
+if (!Array.isArray(expectedThinkBiggerDocs) || expectedThinkBiggerDocs.some((file) => typeof file !== 'string')) {
+  console.error('Think Bigger docs manifest must contain a thinkBiggerDocs string array')
+  process.exit(1)
+}
 
 const discoverThinkBiggerDocs = () => {
   const planDir = 'docs/superpowers/plans'
@@ -43,9 +47,15 @@ const discoverThinkBiggerDocs = () => {
 
 const discoveredThinkBiggerDocs = discoverThinkBiggerDocs()
 const missingExpectedDocs = expectedThinkBiggerDocs.filter((file) => !discoveredThinkBiggerDocs.includes(file))
+const unexpectedDiscoveredDocs = discoveredThinkBiggerDocs.filter((file) => !expectedThinkBiggerDocs.includes(file))
 
 if (missingExpectedDocs.length > 0) {
   console.error(`Think Bigger docs discovery missed expected files:\n${missingExpectedDocs.join('\n')}`)
+  process.exit(1)
+}
+
+if (unexpectedDiscoveredDocs.length > 0) {
+  console.error(`Think Bigger docs manifest is missing discovered files:\n${unexpectedDiscoveredDocs.join('\n')}`)
   process.exit(1)
 }
 
@@ -209,6 +219,19 @@ for (const file of files) {
   const relativeFile = path.relative(canonicalRepoRoot, canonicalFilePath)
   if (relativeFile.startsWith('..') || path.isAbsolute(relativeFile)) {
     failures.push(`source file escapes repository root ${file}`)
+    continue
+  }
+
+  let sourceStat
+  try {
+    sourceStat = fs.statSync(canonicalFilePath)
+  } catch {
+    failures.push(`missing source file ${file}`)
+    continue
+  }
+
+  if (!sourceStat.isFile()) {
+    failures.push(`source path is not a file ${file}`)
     continue
   }
 
