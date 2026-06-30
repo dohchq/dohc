@@ -384,14 +384,19 @@ after creation. The active uniqueness key is
 `(workspaceId, channelId, channelConversationId)`, with
 `channelConversationId: "default"` for the default channel stream conversation.
 Non-default `channelConversationId` values must be server-issued and
-deterministic for the same channel-conversation context; clients must not invent
-them. The server derives the id from a canonical channel-conversation context
-tuple, such as default stream, linked work target, or explicitly named
-subconversation, after authorization and normalization. The same context tuple
+deterministic for the same canonical channel-conversation context tuple; clients
+must not invent them. That tuple includes `workspaceId`, `channelId`,
+`conversationKind` (`default`, `linked_work`, or `named_subconversation`), and
+the kind-specific immutable discriminator: canonical linked-work target tuple
+for `linked_work`, normalized server-owned conversation key for
+`named_subconversation`, or no extra discriminator for `default`. The same tuple
 must reuse the existing id through atomic get-or-create; a materially different
-context tuple gets a new deterministic id. Atomic get-or-create dedupes
-concurrent creation but does not let clients choose the id. Renaming or moving a
-channel changes channel metadata, not this key. Changing the channel association
+tuple gets a new deterministic id. Atomic get-or-create dedupes concurrent
+creation but does not let clients choose the id. Channel renames, moves, topic
+changes, ordering changes, and other channel metadata updates preserve
+`channelConversationId`. Adding/removing ordinary `ThreadLink` linked-work
+metadata after creation also preserves the id; changing the channel association,
+conversation kind, linked-work discriminator, or named-subconversation key
 requires tombstoning/archiving the old thread and creating a new thread, so one
 conversation cannot fork into multiple active `ChatThread` records for the same
 channel identity.
@@ -467,11 +472,12 @@ target kind requires extending the enum, registering internal and shared
 resolver behavior where applicable, and adding authorization, projection, export,
 and replay tests for that kind.
 `chat_thread` links must be acyclic. A thread cannot link to itself, and link
-creation must reject any target that would introduce a cycle in the thread-link
-graph under a graph lock, CAS, serialized transaction, or equivalent
-single-writer critical section. The cycle check must run before `link_added` is
-recorded and before linked-work projection, search, notification, or export
-fanout runs.
+creation must reject any target that would introduce a cycle in the
+`chat_thread`-to-`chat_thread` graph under a graph lock, CAS, serialized
+transaction, or equivalent single-writer critical section. Non-chat targets such
+as `file`, `version`, `decision`, and `task` are excluded from the traversal and
+rejection logic. The cycle check must run before `link_added` is recorded and
+before linked-work projection, search, notification, or export fanout runs.
 
 Thread create/update paths must ignore or reject client-provided
 `lastActivityAt`. The server updates `ChatThreadBase.lastActivityAt` only from

@@ -373,14 +373,29 @@ history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as
 encrypted references, redacted forms, or broker metadata until an authorized
 read path reconstructs them.
-Replay from the holding area must be causal and fail-closed. Retry metadata
-must include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content
-hash, or equivalent CAS token captured with the original ingest. At
-apply time, the engine revalidates workspace scope plus server-derived
-authorization, policy, visibility, protected-path, lock, version-access, and
-skill-turn checks. If the base advanced, the workspace binding is ambiguous, or
-permissions changed, the retry degrades to conflict/manual reconciliation or
-stays quarantined instead of becoming canonical state.
+Replay from the holding area must be causal and fail-closed. Retry metadata must
+include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
+or equivalent CAS token captured with the original ingest. At apply time, the
+engine revalidates workspace scope plus server-derived authorization, policy,
+visibility, protected-path, lock, version-access, and skill-turn checks. The
+retry outcome matrix is deterministic for the same replay metadata:
+
+- If the captured causal base still matches and apply-time policy revalidation
+  passes, the record may become canonical.
+- If the causal base is stale, advanced, missing, or otherwise no longer matches
+  the target version state, the retry returns a deterministic `conflict` and
+  preserves the incoming record for manual reconciliation. Stale causal state is
+  not classified as quarantine or rejection.
+- If workspace/version binding is ambiguous, crosses workspace scope, or cannot
+  be proven from the replay metadata, the record stays quarantined or manual-only
+  until the binding is resolved.
+- If server-derived authorization, provenance, permission, visibility,
+  protected-path, lock, version-access, or skill-turn checks fail after replay,
+  the record resolves to the corresponding durable denial/quarantine state.
+
+The same replay metadata cannot move between these classes across attempts
+unless the durable record itself changes state through an explicit operator,
+policy, or conflict-resolution action.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,
@@ -743,12 +758,18 @@ idempotency tombstone durably, it must not acknowledge the conflict response.
 Idempotency records must be persisted through the documented maximum retry
 horizon for that operation type and transport after the operation reaches a
 terminal result. The idempotency record/tombstone must be committed in the same
-transactional boundary as the canonical mutation. If an
-implementation cannot share a transaction boundary, it must provide an equivalent
-write-ahead guarantee: reserve the idempotency key durably before applying the
-mutation, make recovery complete either the original mutation or tombstone the
-reserved key deterministically, and never acknowledge success until the
-idempotency result and canonical mutation are durable together. After the retry
+transactional boundary as the canonical mutation. All derived side effects
+including projections, notifications, search indexing, and export/index fanout
+must be recorded in a durable outbox or side-effect ledger committed with the
+same workspace/version/idempotency identity. Retries replay, complete, or
+suppress side effects from that ledger exactly once; duplicate deliveries must
+not emit duplicate projections, notifications, search updates, export records,
+or other derived work. If an implementation cannot share a transaction boundary,
+it must provide an equivalent write-ahead guarantee: reserve the idempotency key
+durably before applying the mutation, make recovery complete either the original
+mutation plus side-effect ledger or tombstone the reserved key deterministically,
+and never acknowledge success until the idempotency result, canonical mutation,
+and required side-effect outbox entries are durable together. After the retry
 horizon, an API retry with the same key must fail closed with an explicit
 `idempotency_expired` response or a deterministic conflict response; it must not
 silently apply as a new mutation. Implementations may garbage-collect expired key
@@ -765,9 +786,11 @@ spec and the native filesystem spec both reference those policy names instead
 of duplicating values:
 `apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
 `filesystemCaptureDedupHorizonMs`, and
-`filesystemCaptureTombstoneRetentionMs`. Any PR that changes the values must
-update the shared contract and execution log before changing implementation
-behavior.
+`filesystemCaptureTombstoneRetentionMs`. Numeric baselines are explicitly
+deferred/TBD until PR 01 publishes the shared `WorkspaceIdempotencyPolicy`
+contract; implementation PRs must not ship independent defaults before that
+contract lands. Any PR that sets or changes the values must update the shared
+contract and execution log before changing implementation behavior.
 
 Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
 Those paths use an engine-generated capture token and engine-side deduplication

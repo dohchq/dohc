@@ -134,11 +134,43 @@ const collectAnchors = (markdown) => {
 
 const collectLinks = (markdown) => {
   const links = []
-  const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
+  const lines = [...contentLines(markdown)]
+  const referenceDefinitions = new Map()
+  const normalizeLabel = (label) => label.trim().replace(/\s+/g, ' ').toLowerCase()
+  const normalizeDestination = (destination) => (
+    destination.startsWith('<') && destination.endsWith('>')
+      ? destination.slice(1, -1)
+      : destination
+  )
+  const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, '')
+  const linkPattern = /!?\[[^\]\n]+\]\((<[^>\n]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g
+  const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
+  const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
+  const autolinkPattern = /<((?:https?:|mailto:|app:|\.{1,2}\/|\/|[A-Za-z0-9_.-]+\/)[^<>\s]*)>/g
 
-  for (const line of contentLines(markdown)) {
-    const prose = line.replace(/(`+)(?:(?!\1).)*\1/g, '')
+  for (const line of lines) {
+    const prose = stripCodeSpans(line)
+    const definition = prose.match(referenceDefinitionPattern)
+    if (definition) {
+      const destination = normalizeDestination(definition[2])
+      referenceDefinitions.set(normalizeLabel(definition[1]), destination)
+      links.push(destination)
+    }
+  }
+
+  for (const line of lines) {
+    const prose = stripCodeSpans(line)
     for (const match of prose.matchAll(linkPattern)) {
+      links.push(normalizeDestination(match[1]))
+    }
+    for (const match of prose.matchAll(referenceUsePattern)) {
+      const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
+      const destination = referenceDefinitions.get(label)
+      if (destination) {
+        links.push(destination)
+      }
+    }
+    for (const match of prose.matchAll(autolinkPattern)) {
       links.push(match[1])
     }
   }

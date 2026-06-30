@@ -5,13 +5,13 @@ Created: 2026-06-23
 
 Plan:
 
-- `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md`
+- [Think Bigger dohc Workspace Engine](./2026-06-23-think-bigger-dohc-workspace-engine.md)
 
 Source specs:
 
-- `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`
-- `docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md`
-- `docs/superpowers/specs/2026-06-23-dohc-chats-design.md`
+- [dohc Versioned Workspace Design](../specs/2026-06-22-dohc-versioned-workspace-design.md)
+- [dohc Native Filesystem Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
+- [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
 
 ## Current PR Snapshot
 
@@ -2631,6 +2631,36 @@ Hundred-thirty-fifth pass:
   - Added explicit `decision` and `task` `ThreadLinkTargetType` values.
   - Removed mutable CodeRabbit issue counts from the historical CodeRabbit
     section.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-thirty-sixth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest eight-issue rerun:
+  - Added a deterministic holding-record replay outcome matrix that treats stale
+    causal state as conflict, not quarantine.
+  - Added durable side-effect outbox/ledger requirements to idempotent write
+    handling.
+  - Marked retry-horizon numeric baselines as deferred/TBD until the PR 01 shared
+    `WorkspaceIdempotencyPolicy` contract lands.
+  - Added native-filesystem late-retry fences that survive tombstone compaction or
+    namespace rotation.
+  - Clarified immutable `ChannelChatThread` context tuples and scoped chat-link
+    acyclicity to `chat_thread` edges only.
+  - Converted execution-log plan/spec references into checker-visible Markdown
+    links.
+  - Extended the Think Bigger docs link checker to collect reference-style links,
+    autolinks, and angle-bracket destinations outside code spans.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

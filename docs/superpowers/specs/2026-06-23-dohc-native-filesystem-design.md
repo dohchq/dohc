@@ -434,12 +434,20 @@ same key must fail closed with an explicit `idempotency_expired` response or a
 deterministic conflict response; it must not silently apply as a new mutation.
 Implementations may garbage-collect expired key tombstones only after the same
 maximum retry horizon has passed or the operation namespace is rotated.
+Tombstone garbage collection is not enough by itself: after a namespace is
+rotated or tombstones are compacted, the engine must retain a reject-only
+namespace-version marker, retired-key range, or equivalent durable fence for the
+expired workspace/version/operation namespace. Late retries under that retired
+namespace must resolve to `idempotency_expired` or a deterministic conflict
+instead of being treated as fresh writes; new writes must use a non-retired
+operation namespace.
 Retry-horizon values come from the same Phase 0 decision note and PR 01 shared
 `WorkspaceIdempotencyPolicy` contract as the versioned workspace spec:
 `apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
 `filesystemCaptureDedupHorizonMs`, and
-`filesystemCaptureTombstoneRetentionMs`. The native filesystem layer must not
-define or copy independent horizon values.
+`filesystemCaptureTombstoneRetentionMs`. Numeric baselines are deferred/TBD until
+that shared contract lands; the native filesystem layer must not define or copy
+independent horizon values.
 
 Mounted-folder and file-watch captured saves cannot rely on caller-generated API
 idempotency keys, because native editors and shell tools do not provide them.
