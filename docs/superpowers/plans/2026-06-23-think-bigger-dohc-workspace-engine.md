@@ -1634,8 +1634,9 @@ Foundation alpha and the relevant surface proof are complete.
 - Add [the Think Bigger docs workflow](../../../.github/workflows/think-bigger-docs.yml)
   so CI runs the manifest-backed checker for pull requests and pushes to `main`
   when `docs/superpowers/**`, [the checker](../../../scripts/check-think-bigger-doc-links.mjs),
-  or the workflow changes. The same workflow also runs on `workflow_dispatch` and
-  a scheduled drift check so the checked-in manifest is compared against
+  `package.json`, `pnpm-lock.yaml`, or the workflow changes. The same workflow
+  also runs on `workflow_dispatch` and a scheduled drift check so the checked-in
+  manifest is compared against
   repository inventory even when no path-filtered pull request or push touched
   the docs cohort. The workflow path filters only trigger pull-request and push
   jobs; the enforcement point is the checker, which compares the checked-in
@@ -1657,12 +1658,13 @@ Foundation alpha and the relevant surface proof are complete.
   plan/spec/execution-log doc, using the checked-in Think Bigger docs manifest as
   the source of truth. [The workflow](../../../.github/workflows/think-bigger-docs.yml)
   uses path filters only to trigger the job for `docs/superpowers/**`,
-  [the checker](../../../scripts/check-think-bigger-doc-links.mjs), and the
-  workflow file itself on pull requests and pushes; `workflow_dispatch` and the
-  scheduled drift check must run the same checker without relying on path
-  filters. The checker is the fail-closed enforcement mechanism: it must compare
-  the manifest with repository inventory, validate links/anchors, and fail when
-  covered doc renames, execution-log edits, manifest changes, workflow changes,
+  [the checker](../../../scripts/check-think-bigger-doc-links.mjs),
+  `package.json`, `pnpm-lock.yaml`, and the workflow file itself on pull requests
+  and pushes; `workflow_dispatch` and the scheduled drift check must run the same
+  checker without relying on path filters. The checker is the fail-closed
+  enforcement mechanism: it must compare the manifest with repository inventory,
+  validate links/anchors, and fail when covered doc renames, execution-log edits,
+  manifest changes, dependency manifest/lockfile changes, workflow changes,
   checker changes, linked-target drift visible during a covered/manual/scheduled
   run, or discovered-doc drift make the manifest and repository disagree.
 

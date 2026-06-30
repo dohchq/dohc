@@ -7,6 +7,8 @@ on:
     paths:
       - docs/superpowers/**
       - scripts/check-think-bigger-doc-links.mjs
+      - package.json
+      - pnpm-lock.yaml
       - .github/workflows/think-bigger-docs.yml
   push:
     branches:
@@ -14,6 +16,8 @@ on:
     paths:
       - docs/superpowers/**
       - scripts/check-think-bigger-doc-links.mjs
+      - package.json
+      - pnpm-lock.yaml
       - .github/workflows/think-bigger-docs.yml
   workflow_dispatch:
   schedule:

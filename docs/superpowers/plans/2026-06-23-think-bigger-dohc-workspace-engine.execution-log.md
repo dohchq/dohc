@@ -4488,6 +4488,44 @@ Hundred-ninety-eighth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-ninety-ninth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Added `package.json` and `pnpm-lock.yaml` to both Think Bigger docs workflow
+    path-filter sets so dependency wiring changes run the checker.
+  - Suppressed ordinary blockquote prose/headings in the docs checker while
+    preserving quoted fenced-code detection, with fixtures for quoted links and
+    headings.
+  - Reworded cross-projection rename/move/replace as staged canonical mutations
+    with compensating projection cleanup instead of distributed atomic file
+    transactions.
+  - Extended shared-channel grant revocation to derived durable outbox/ledger,
+    fanout/replay, audit/history/export emission, and notification materialized
+    context.
+  - Extended shared-channel redaction to presence, typing indicators, and
+    read/seen state before rendering, search, projection, notifications, or
+    export.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 This section is a historical category index only. Live unresolved blockers and

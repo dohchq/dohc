@@ -63,10 +63,13 @@ internal link with a different target workspace is rejected before persistence,
 activity fanout, projection, search, notification, export, or replay.
 Missing, expired, revoked, or ambiguous shared-channel grants fail closed for
 all of those paths. Grant revoke/expiry invalidates server-held derived
-projections, search snippets, notification caches, export staging artifacts, and
-other service-owned materialized chat context for that exception so stale shared
-data does not remain exposed after access changes. Durable audit/history/export
-records stay intact and continue to rely on authorization checks. Thread
+projections, search snippets, notification caches, export staging artifacts,
+queued fanout/replay entries, durable outbox/ledger entries, and other
+service-owned materialized chat context for that exception so stale shared data
+does not remain exposed after access changes. Durable audit/history/export
+records stay intact as records of fact, but any emission, replay,
+materialization, export bundle, or notification derived from them must revalidate
+the current grant and redaction scope before leaving the service boundary. Thread
 activity records are append-only events keyed by
 `(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
 sequence. `activityId` is server-assigned and unique within the
@@ -1505,15 +1508,16 @@ sharing substrate.
 The channel should not grant broad workspace access. Shared channel access must
 compose with normal file/folder/version visibility.
 Every message, thread title, participant list, inbox or side-rail entry, activity
-feed item, unread badge, link, projected reference, and free-text mention inside
-a shared channel must be re-authorized or redacted against normal workspace
-policy before rendering, search, projection, notification materialization, or
-export. An external viewer can see only the chat content and work artifacts
-explicitly shared with them; non-shared files, atoms, versions, app views, agent
-runs, participants, thread subjects, unread state, activity, and unshared links
-remain hidden even if they are mentioned inside an otherwise shared thread.
-Explicitly shared links and work references remain visible only when their
-server-side grant is still valid for that viewer and redaction scope.
+feed item, unread badge, presence signal, typing indicator, read/seen state,
+link, projected reference, and free-text mention inside a shared channel must be
+re-authorized or redacted against normal workspace policy before rendering,
+search, projection, notification materialization, or export. An external viewer
+can see only the chat content and work artifacts explicitly shared with them;
+non-shared files, atoms, versions, app views, agent runs, participants, thread
+subjects, presence, typing state, read/seen state, unread state, activity, and
+unshared links remain hidden even if they are mentioned inside an otherwise
+shared thread. Explicitly shared links and work references remain visible only
+when their server-side grant is still valid for that viewer and redaction scope.
 
 User-facing preview before sharing:
 

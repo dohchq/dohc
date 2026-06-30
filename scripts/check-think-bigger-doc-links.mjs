@@ -175,6 +175,7 @@ function* contentLines(markdown) {
 
   for (const rawLine of markdown.split(/\r?\n/)) {
     const line = inFence ? rawLine : stripHtmlComments(rawLine)
+    const blockquoteLine = !inFence && /^(?:[ \t]*>[ \t]?)+/.test(line)
     const fenceLine = line.replace(/^(?:[ \t]*>[ \t]?)+/, '')
     const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
@@ -219,6 +220,11 @@ function* contentLines(markdown) {
         fenceChar = null
         fenceLength = 0
       }
+      continue
+    }
+
+    if (blockquoteLine) {
+      activeListIndent = null
       continue
     }
 
@@ -384,6 +390,13 @@ const assertCheckerFixtures = () => {
   const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
   if (quotedFence.links.length > 0 || quotedFence.unresolvedReferences.length > 0) {
     throw new Error('blockquote fenced-code fixture should not produce links')
+  }
+  const quotedProse = collectLinks('> [hidden](./missing.md)')
+  if (quotedProse.links.length > 0 || quotedProse.unresolvedReferences.length > 0) {
+    throw new Error('blockquote prose fixture should not produce links')
+  }
+  if (collectAnchors('> ## Hidden').has('hidden')) {
+    throw new Error('blockquote heading fixture should not produce anchors')
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')

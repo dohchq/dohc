@@ -415,21 +415,25 @@ only the basename changes; `move` is the preferred API name when the parent path
 changes. Both require source identity, destination absence, causal
 preconditions, and idempotency, and neither may degrade into delete-plus-create
 semantics. If source and destination resolve to different physical filesystems,
-volumes, or mount projections, `rename(...)` and `move(...)` use an
-engine-atomic cross-projection rebind instead of a raw OS rename: the engine
-verifies `sourceObjectId`, the source freshness precondition, destination
-absence, workspace/version binding, and idempotency, then commits one logical
+volumes, or mount projections, `rename(...)` and `move(...)` use a staged
+canonical rebind plus projection reconciliation instead of a raw OS rename: the
+engine verifies `sourceObjectId`, the source freshness precondition,
+destination absence, workspace/version binding, and idempotency before
+publishing any canonical path change. The canonical store records one logical
 mutation that preserves `sourceObjectId`, creates the new path binding, removes
-the old path binding, appends history, and records the idempotency result in the
-same durable boundary. Materialized filesystem projections may hydrate, evict,
-copy-on-write, or delete local bytes after that commit, but those projection
-chores are not the canonical mutation and must not be exposed as
-delete-plus-create history. If the source identity/freshness or destination-absence proof
-cannot be established, the operation returns a deterministic validation,
-conflict, `rejected`, or `quarantined` result with manual-follow-up metadata
-according to the capture/API path. `conflict` remains reserved for cases where
-the engine can form the base/current/incoming preservation envelope described
-above.
+the old path binding, appends history, and records the idempotency result within
+the backend transaction or serializable unit it actually supports.
+Cross-filesystem projection side effects are not a distributed transaction; any
+required local byte copy, hydration, copy-on-write, eviction, or delete cleanup is
+staged with compensating rollback before the canonical publish where possible and
+best-effort cleanup/repair records after publish where necessary. Those
+projection chores are not the canonical mutation and must not be exposed as
+delete-plus-create history. If the source identity/freshness or
+destination-absence proof cannot be established, the operation returns a
+deterministic validation, conflict, `rejected`, or `quarantined` result with
+manual-follow-up metadata according to the capture/API path. `conflict` remains
+reserved for cases where the engine can form the base/current/incoming
+preservation envelope described above.
 If the destination already exists, the operation is an overwrite-rename and must
 map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart
 reconciliation must classify common editor temp-file-then-rename saves this way:
@@ -438,21 +442,26 @@ the temp source provides `sourceObjectId`, the existing destination provides
 destination identity cannot be proven, the capture resolves to `rejected` or
 `quarantined` with manual-follow-up metadata instead of applying a path-only
 overwrite. When the temp source and existing destination sit on different
-filesystems, volumes, or mount projections, `replace(...)` uses an
-engine-atomic cross-projection replace fallback: verify `sourceObjectId`,
+filesystems, volumes, or mount projections, `replace(...)` uses a staged
+cross-projection replace fallback: verify `sourceObjectId`,
 `destinationObjectId`, the source freshness precondition, the destination
 freshness precondition, workspace/version binding, and idempotency; durably
-ingest the source bytes or content reference, update `destinationObjectId`,
-retire or quarantine the temp source binding, append one replace history moment,
-and persist the idempotency result in a single atomic durable commit that either
-applies all sub-steps or none. The destination object identity is preserved for
-temp-file saves, and the source object remains provenance for the incoming
-bytes. If source bytes cannot be read durably, either freshness precondition
-fails, either identity cannot be proven, or any fallback sub-step cannot commit
-inside that durable boundary, the fallback aborts with no externally visible
-partial state and the operation resolves through the same deterministic
-validation, conflict, `rejected`, `quarantined`, or `retryable-failure` path as
-other write-producing mutations. Manual follow-up is operator workflow metadata,
+ingest the source bytes or content reference before publishing the destination
+update; then record one logical replace history moment and the idempotency result
+in the canonical backend transaction or serializable unit it actually supports.
+Retiring or quarantining the temp source binding and cleaning materialized
+projection bytes use staged copy plus compensating rollback before canonical
+publish where possible and best-effort cleanup/repair records after publish
+where necessary; those cleanup steps must not be presented as a second user
+mutation. The destination object identity is preserved for temp-file saves, and
+the source object remains provenance for the incoming bytes. If source bytes
+cannot be read durably, either freshness precondition fails, either identity
+cannot be proven, or a required pre-publish staging step cannot be made durable,
+the fallback aborts before the canonical mutation and resolves through the same
+deterministic validation, conflict, `rejected`, `quarantined`, or
+`retryable-failure` path as other write-producing mutations. If post-publish
+projection cleanup fails, the engine records repair/quarantine follow-up without
+exposing partial canonical state. Manual follow-up is operator workflow metadata,
 not a `WriteResult.kind`.
 
 This answers the API-native workspace requirement. The file mount and the API
