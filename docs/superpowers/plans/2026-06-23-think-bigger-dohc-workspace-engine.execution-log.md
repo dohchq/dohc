@@ -4918,6 +4918,44 @@ Two-hundred-tenth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-eleventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings handled; committed review rerun
+    is required after this pass is pushed.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Handled CodeRabbit's four follow-up findings:
+  - Restored always-on pull-request and push triggers for the Think Bigger docs
+    workflow by removing path filters again.
+  - Verified the `github-slugger` lockfile finding as stale:
+    `pnpm install --lockfile-only --ignore-scripts` completed with no lockfile
+    diff, and `pnpm-lock.yaml` already records the root importer and package
+    entries.
+  - Deferred workspace-root `.dohcignore` from live allowlisted policy input,
+    source-order, import, and export semantics for this phase.
+  - Narrowed the first filesystem proof slice to `.env` exclusion/redaction
+    smoke rather than tracked-as-secret-backed/private `.env` behavior.
+- Validation:
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm install --lockfile-only --ignore-scripts`
+    completed with no lockfile diff.
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Historical Findings Index
 
 This section is a historical category index only. Live unresolved blockers and

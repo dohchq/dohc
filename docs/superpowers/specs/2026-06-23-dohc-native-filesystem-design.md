@@ -131,7 +131,7 @@ import, attach, sync, and raw filesystem scan is defined by this table:
 
 | Candidate | Import / Attach / Sync / Raw Scan Action |
 | --- | --- |
-| Allowlisted policy inputs: `.dohc/files.toml`, `.dohc/visibility.toml`, optional workspace-root `.dohcignore` | Parse as engine policy input outside the ordinary captured-content pipeline. |
+| Allowlisted policy inputs: `.dohc/files.toml`, `.dohc/visibility.toml` | Parse as engine policy input outside the ordinary captured-content pipeline. |
 | Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Silently skip from import, attach, sync, and raw scan user-content flows; never re-ingest as user content. |
 | Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never propose ordinary user-content safe rename. |
 | Managed `~/dohc/<workspace>/.versions/<version>/` bound to a known workspace/version by the engine | Allow only through the engine workspace/version mount resolver, not generic tree walkers. |
@@ -185,13 +185,15 @@ engine must not merge the paths, alternate between them, or pick a winner
 implicitly. After
 canonicalization, reserved namespace
 handling is defined only by the reserved-namespace collision contract above: the
-allowlisted policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and
-optional workspace-root `.dohcignore`; all other `.dohc/**` content and
-unmanaged `.versions/**` fail closed into rejection, quarantine, or manual
-resolution. Safe rename proposal remains available only for non-engine user
-content that collides with a reserved namespace. Hardlinks are prohibited in
-writable or materialized workspace projections, including same-workspace
-hardlinks, because multiple paths sharing one inode break the path-centric object
+allowlisted policy inputs are `.dohc/files.toml` and `.dohc/visibility.toml`;
+workspace-root `.dohcignore` import, precedence, and source-band semantics are
+deferred to a later PR and must not be parsed as live policy input in this phase.
+All other `.dohc/**` content and unmanaged `.versions/**` fail closed into
+rejection, quarantine, or manual resolution. Safe rename proposal remains
+available only for non-engine user content that collides with a reserved
+namespace. Hardlinks are prohibited in writable or materialized workspace
+projections, including same-workspace hardlinks, because multiple paths sharing
+one inode break the path-centric object
 identity model; capture/API paths reject or quarantine them before treating the
 path as workspace content. Symlinks, junctions, bind mounts, aliases, or any
 equivalent filesystem indirection that resolves outside the active workspace,
@@ -791,14 +793,11 @@ A workspace can define readable policy files such as:
 .dohc/visibility.toml
 ```
 
-Early versions may start with a simpler workspace-root `.dohcignore`, but the
-durable model should support richer rules. `.dohcignore` is normalized into a
-fixed lower-precedence sub-band immediately before `.dohc/files.toml`, so
-`.dohc/files.toml` overrides `.dohcignore` for equal-specificity tracking,
-materialization, export, quarantine, and sync decisions. Importer, materializer,
-export, quarantine, and tracking decisions must all resolve `.dohcignore`
-through that same explicit source order rather than falling back to path-order
-ties.
+Workspace-root `.dohcignore` compatibility is deferred. This phase must not
+parse `.dohcignore` as a live source-backed policy input, must not assign it a
+policy precedence band, and must not import it as ordinary content. The durable
+model can add `.dohcignore` compatibility later through an explicit migration
+that defines source order, import behavior, and conflicts with `.dohc/files.toml`.
 
 `.dohc/**` is engine-managed internal state and is excluded from normal
 capture/sync ingestion by default. Recursive self-capture is forbidden: history,
@@ -807,12 +806,13 @@ and any other internal `.dohc/**` content must be hard-denied from export,
 search, sync, import-as-user-content, and re-ingestion as ordinary files. The
 importer applies the same allowlist-before-quarantine rule here only for
 engine-specific policy parsing: the explicit policy inputs
-`.dohc/files.toml`, `.dohc/visibility.toml`, and temporary workspace-root
-`.dohcignore` may be parsed and normalized as engine policy inputs outside the
-normal captured-content pipeline, not as ordinary tracked files. No user policy
-may opt internal `.dohc/**` history, status, conflicts, indexes, caches,
-generated projections, or durability internals into tracking, export, search,
-sync, or ordinary file re-ingest. All other `.dohc/**` paths are reserved,
+`.dohc/files.toml` and `.dohc/visibility.toml` may be parsed and normalized as
+engine policy inputs outside the normal captured-content pipeline, not as
+ordinary tracked files. Workspace-root `.dohcignore` remains deferred and is not
+part of this allowlist. No user policy may opt internal `.dohc/**` history,
+status, conflicts, indexes, caches, generated projections, or durability
+internals into tracking, export, search, sync, or ordinary file re-ingest. All
+other `.dohc/**` paths are reserved,
 non-user-content inputs that must be quarantined with an explainable record or
 handled through engine-specific recovery rather than captured as ordinary files
 or silently skipped.
@@ -914,14 +914,13 @@ explicit rule index within that source, then by lexical rule id. Exact paths are
 more specific than globs; longer literal prefixes are more specific than shorter
 prefixes.
 The canonical policy source ordinal is a stable engine-assigned integer for the
-normalized policy source after imports and aliases are resolved. The `.dohcignore`
-precedence and banding rule in [Policy Files](#policy-files) is canonical:
-importer, materializer, export, quarantine, tracking, and effective-policy
-resolution all normalize workspace-root `.dohcignore` into the fixed
-lower-precedence sub-band immediately before `.dohc/files.toml`. Built-in
-defaults, object hard constraints, version policy, the `.dohcignore` sub-band,
-`.dohc/files.toml`, `.dohc/visibility.toml`, and authorized user overrides each
-occupy reserved source-order bands; multiple files inside the same band are
+normalized policy source after imports and aliases are resolved. Because
+workspace-root `.dohcignore` is deferred, the live source-order bands in this
+phase are built-in defaults, object hard constraints, version policy,
+`.dohc/files.toml`, `.dohc/visibility.toml`, and authorized user overrides.
+Importer, materializer, export, quarantine, tracking, and effective-policy
+resolution must not synthesize a `.dohcignore` band until a later PR explicitly
+adds that compatibility path. Multiple files inside the same band are
 ordered by canonical workspace-relative path using bytewise UTF-8 order. The
 resolved ordinal is recorded with the normalized rule so equal-specificity
 conflicts are replayable.
@@ -1235,8 +1234,9 @@ Export should produce:
   semantics, including whether each governed entry is secret-backed or
   non-secret plus the effective-policy resolver's normalized source ordinal and
   rule index for each emitted rule.
-- only allowlisted source-backed policy files such as `.dohc/files.toml`,
-  `.dohc/visibility.toml`, and optional workspace-root `.dohcignore`.
+- only allowlisted source-backed policy files such as `.dohc/files.toml` and
+  `.dohc/visibility.toml`; `.dohcignore` remains deferred and is not emitted as
+  a live policy input in this phase.
 - history/provenance metadata.
 - hashes or commitments for verification.
 - redacted/excluded secret files according to policy.
@@ -1305,7 +1305,9 @@ The first proof should demonstrate the whole shape without solving every driver:
    behavior for a few path patterns.
 6. `node_modules/**` and `dist/**` are local materialized but untracked,
    unversioned, and unsynced.
-7. A `.env` file can be tracked as secret-backed and private.
+7. `.env` path patterns get exclusion/redaction smoke coverage through
+   `.dohc/files.toml` policy, without requiring tracked-as-secret-backed/private
+   behavior in the first proof slice.
 8. Unauthorized export redacts or excludes `.env`.
 9. A simple conflict preserves both sides and exposes `.dohc/conflicts/`.
 10. An API can read/write the same version without relying on a real filesystem.
