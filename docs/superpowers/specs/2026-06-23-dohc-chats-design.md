@@ -303,8 +303,6 @@ type DmParticipantIds = readonly string[] & {
   readonly __brand: 'DmParticipantIds2To16'
 }
 
-declare function canonicalizeDmParticipantIds(rawActorIds: string[]): DmParticipantIds
-
 type ChannelChatThread = ChatThreadBase & {
   channelId: string
   channelConversationId: string

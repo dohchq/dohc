@@ -17,6 +17,15 @@ Source specs:
 
 - **PR00 source of truth:** see the newest owning PR00 pass entry below for
   CodeRabbit status, test evidence, open overrides, and completion state.
+- **CodeRabbit status:** review loop in progress. The latest completed rerun
+  raised checker, snapshot, and DM canonicalization findings that are addressed
+  in the newest pass; a committed rerun is still required.
+- **Test evidence:** the newest pass records `git diff --check`, both Think
+  Bigger docs link-check invocations, and the brand guard test passing.
+- **Open overrides:** none approved. The PR00 docs-only local-agent-CLI exception
+  remains pending human approval.
+- **Completion state:** not complete or merge-ready until CodeRabbit is clean and
+  the docs-only local-agent-CLI exception is approved.
 - **PR00 PR:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   [https://github.com/dohc-ai/dohc/pull/46](https://github.com/dohc-ai/dohc/pull/46).
 
@@ -3040,6 +3049,28 @@ Hundred-fifty-first pass:
     with `createdAt` as metadata only.
   - Expanded the historical docs-check evidence to name the exact five PR00 docs,
     including this execution log.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifty-second pass:
+
+- Fixed CodeRabbit's three follow-up findings:
+  - Made unresolved reference-style links produce checker failures instead of
+    being silently skipped.
+  - Made the Current PR Snapshot self-contained with live CodeRabbit, validation,
+    open-override, and completion-state fields.
+  - Removed the duplicate `canonicalizeDmParticipantIds(rawActorIds: string[])`
+    declaration so only the server-aware helper signature remains.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

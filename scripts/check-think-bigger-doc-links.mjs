@@ -187,6 +187,7 @@ const collectAnchors = (markdown) => {
 
 const collectLinks = (markdown) => {
   const links = []
+  const unresolvedReferences = []
   const lines = [...contentLines(markdown)]
   const referenceDefinitions = new Map()
   const normalizeLabel = (label) => label.trim().replace(/\s+/g, ' ').toLowerCase()
@@ -222,6 +223,8 @@ const collectLinks = (markdown) => {
       const destination = referenceDefinitions.get(label)
       if (destination) {
         links.push(destination)
+      } else {
+        unresolvedReferences.push(match[0])
       }
     }
     for (const match of prose.matchAll(shortcutReferencePattern)) {
@@ -238,7 +241,7 @@ const collectLinks = (markdown) => {
     }
   }
 
-  return links
+  return { links, unresolvedReferences }
 }
 
 const failures = []
@@ -290,7 +293,11 @@ for (const file of files) {
 
   const text = fs.readFileSync(canonicalFilePath, 'utf8')
   anchorCache.set(canonicalFilePath, collectAnchors(text))
-  for (const raw of collectLinks(text)) {
+  const { links, unresolvedReferences } = collectLinks(text)
+  for (const raw of unresolvedReferences) {
+    failures.push(`${file}: unresolved reference link ${raw}`)
+  }
+  for (const raw of links) {
     if (/^(https?:|mailto:|app:)/.test(raw)) {
       continue
     }
