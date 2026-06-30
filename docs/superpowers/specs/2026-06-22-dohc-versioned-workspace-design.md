@@ -174,8 +174,10 @@ type WriteResult =
       retryAfterMs?: UInt64DecimalString
       idempotencyResultId: string
       idempotencyReplayToken: string
-      commitState: 'no_canonical_commit_recorded' | 'commit_state_unknown_retry_required'
-      recordedAsCanonicalMutation: true | false | 'unknown'
+      commitState:
+        | 'no_canonical_commit_recorded'
+        | 'commit_state_unknown_retry_required'
+        | 'canonical_commit_recorded'
     }
   | {
       kind: 'rejected'
@@ -253,6 +255,8 @@ write, conflict, and durable-pending results: repeated delivery with the same
 operation fingerprint returns the same `idempotencyResultId`,
 `idempotencyReplayToken`, and `commitState` until retry handling can prove and
 return a canonical/durable result or a deterministic terminal outcome.
+`commitState` is the single source of truth for whether a canonical mutation is
+known absent, unknown and requires retry, or later proven recorded.
 
 Rejected and quarantined ingests must still be durable in a non-canonical
 holding area with enough metadata to retry or explain the decision after
@@ -348,10 +352,11 @@ stays quarantined instead of becoming canonical state.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,
-version, event, chat link, projection, history record, holding record,
-durability-log entry, and idempotency tombstone carries `workspaceId`. Write,
-read, query, search, import, sync, and projection boundaries reject
-cross-workspace references by default, even when an actor is otherwise valid.
+version, event, chat link, projection, history record, holding record, conflict
+envelope, conflict replay token, durability-log entry, idempotency result, and
+idempotency tombstone carries `workspaceId`. Write, read, query, search, import,
+sync, and projection boundaries reject cross-workspace references by default,
+even when an actor is otherwise valid.
 
 Review gates are enforced whenever workspace policy, protected-path rules,
 ownership rules, skill-turn policy, or visibility policy requires them, including

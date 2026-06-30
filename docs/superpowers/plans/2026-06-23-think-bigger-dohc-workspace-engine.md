@@ -843,6 +843,13 @@ covering:
    - Which Phase 0 filesystem/reconciliation workload should Rust benchmark
      against the TypeScript implementation?
 
+7. **Async workspace gating**
+   - Which workspace/request-token, request epoch, or abort-signal mechanism owns
+     stale-response suppression before any workspace-bound UI, cache, store, or
+     projection state is mutated?
+   - How does Phase 0 prevent workspace-switch races for reconciliation,
+     history, linked chat, status, and projection reads?
+
 ### Phase 0 PRs
 
 These PRs precede PR 01 in the expansion roadmap.

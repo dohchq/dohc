@@ -575,7 +575,11 @@ A workspace can define readable policy files such as:
 ```
 
 Early versions may start with a simpler workspace-root `.dohcignore`, but the
-durable model should support richer rules.
+durable model should support richer rules. `.dohcignore` is normalized into the
+same canonical source-order band as `.dohc/files.toml` before effective-policy
+resolution; within that band, canonical workspace-relative path order decides
+ties. Importer, materializer, export, quarantine, and tracking decisions must
+all resolve `.dohcignore` through that same normalized policy source order.
 
 `.dohc/**` is engine-managed internal state and is excluded from normal
 capture/sync ingestion by default. Recursive self-capture is forbidden: history,

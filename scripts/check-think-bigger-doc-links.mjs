@@ -85,7 +85,8 @@ const collectLinks = (markdown) => {
   const linkPattern = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
 
   for (const line of contentLines(markdown)) {
-    for (const match of line.matchAll(linkPattern)) {
+    const prose = line.replace(/`[^`]*`/g, '')
+    for (const match of prose.matchAll(linkPattern)) {
       links.push(match[1])
     }
   }

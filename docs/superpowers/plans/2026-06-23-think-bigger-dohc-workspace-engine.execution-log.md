@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** current through the Hundred-twenty-first pass below.
+- **Last updated:** current through the Hundred-twenty-second pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `230f181` reported 9 issues;
-  hundred-twenty-first pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `743f8cc` reported 6 issues;
+  hundred-twenty-second pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2338,6 +2338,31 @@ Hundred-twenty-first pass:
   - Added Unicode NFC normalization before reserved namespace checks in
     filesystem path canonicalization.
   - Added the required `.env.team` `secret_projection` example field.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `node /home/ice/dev/dohc/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 files from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twenty-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Made `commitState` the single source of truth for retryable-failure canonical
+    commit state.
+  - Added conflict envelopes, conflict replay tokens, and idempotency results to
+    the workspace-scoping invariant.
+  - Skipped inline code spans during docs link collection.
+  - Defined `.dohcignore` policy precedence by normalizing it into the
+    `.dohc/files.toml` source-order band.
+  - Added async workspace/request-token gating to the required Phase 0 decision
+    note.
+  - Updated the Current PR Snapshot to the `743f8cc` six-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
