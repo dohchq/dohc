@@ -1048,6 +1048,9 @@ dohc must preserve the user's ownership of their work.
 Export should produce:
 
 - readable files.
+- the full policy envelope required to re-import without changing file
+  semantics, including whether each governed entry is secret-backed or
+  non-secret.
 - only allowlisted source-backed policy files such as `.dohc/files.toml`,
   `.dohc/visibility.toml`, and optional workspace-root `.dohcignore`.
 - history/provenance metadata.
@@ -1059,6 +1062,10 @@ Export must never include `.dohc/**` history, status, conflicts, indexes, caches
 generated projections, durability internals, or other engine state as ordinary
 workspace files. Only the explicitly allowlisted policy inputs above may cross
 the boundary, and only through the engine policy parsing/export path.
+That engine policy export path is responsible for preserving enough normalized
+policy state to reconstruct secret-backed versus non-secret files on re-import;
+re-import must fail closed rather than treating an entry with missing policy
+envelope data as ordinary content.
 
 Generated or internal `.dohc/**` state is excluded from export unless it is one
 of the named policy inputs above and crosses through the engine policy export

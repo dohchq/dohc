@@ -106,6 +106,7 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_protection'
   | 'quarantined_attribution'
   | 'quarantined_policy'
+  | 'quarantined_visibility'
   | 'quarantined_provenance'
   | 'quarantined_proof'
 
@@ -117,6 +118,7 @@ type QuarantinedStatus = Exclude<
 type PublicDeniedReasonCode =
   | 'not_authorized'
   | 'policy_denied'
+  | 'visibility_denied'
   | 'protected_path'
   | 'locked'
   | 'version_access_denied'
@@ -418,6 +420,9 @@ retry outcome matrix is deterministic for the same replay metadata:
 - If server-derived authorization, provenance, permission, visibility,
   protected-path, lock, version-access, or skill-turn checks fail after replay,
   the record resolves to the corresponding durable denial/quarantine state.
+  Visibility-boundary failures use `visibility_denied` externally and
+  `quarantined_visibility` internally; they must not be collapsed into
+  `policy_denied` or `not_authorized`.
 
 The same replay metadata cannot move between these classes across attempts
 unless the durable record itself changes state through an explicit operator,
@@ -510,6 +515,9 @@ become canonical workspace state. If the engine cannot prove the required access
 or policy/skill-turn state because the evaluator is unavailable or
 indeterminate, the ingest returns `retryable-failure`; substantive denial,
 missing proof, or invalid proof is quarantined or rejected rather than trusted.
+Substantive visibility failures use the dedicated `visibility_denied` response
+reason, with the durable record marked as `quarantined_visibility` when the
+payload was accepted into holding storage for recovery or operator disposition.
 Local provenance does not bypass that evaluator when the write is being applied
 through a dohc-controlled agent/tool action.
 Agent-specific authorship is required for social actions like chat replies,

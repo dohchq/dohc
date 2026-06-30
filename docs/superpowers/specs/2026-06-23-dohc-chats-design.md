@@ -666,6 +666,14 @@ and minimal audit metadata. Secret-backed references, encrypted payloads, or
 redacted forms replace plaintext wherever audit/history access would otherwise
 have retained the original body.
 
+`message_edited` is valid only for non-deleted `ThreadMessage` rows. Once
+`deletedAt` is present or `tombstone` is true, tombstone state is terminal for
+the edit path: edit attempts must fail closed before commit, with no new
+`ThreadActivity`, body revision, current-body mutation, projection update, search
+update, notification update, or summary update. Restoring a deleted message, if
+allowed by policy, requires a dedicated restore activity that preserves the
+delete/edit audit trail instead of rewriting the tombstone in place.
+
 Edits must append immutable activity and replace the current message body in the
 same transaction or serialized unit of work, with the activity written first
 inside that atomic unit. The write must verify the current
@@ -1219,9 +1227,11 @@ Search should cover:
 - channels.
 - DMs.
 - files.
+- folders.
 - versions.
 - history moments.
 - decisions.
+- tasks.
 - agent runs.
 - apps/data.
 
@@ -1243,9 +1253,10 @@ Agent run: <User Name>'s agent forecast pass
 This is a major advantage over standalone chat: search can understand the
 relationship between the conversation and the work.
 The search pipeline must classify or redact secrets before indexing or rendering
-results across chats, messages, files, versions, history moments, agent runs,
-apps/data, and source-context snippets. Search snippets must never expose
-plaintext secrets that are not visible through the same policy-aware read path.
+results across chats, messages, files, folders, versions, history moments,
+decisions, tasks, agent runs, apps/data, and source-context snippets. Search
+snippets must never expose plaintext secrets that are not visible through the
+same policy-aware read path.
 
 ## External and shared channels
 

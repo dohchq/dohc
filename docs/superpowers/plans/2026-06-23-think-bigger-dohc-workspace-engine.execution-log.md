@@ -2788,6 +2788,33 @@ Hundred-forty-first pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-forty-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Added explicit `visibility_denied`/`quarantined_visibility` outcomes to the
+    versioned workspace write and replay contracts.
+  - Made chat tombstones terminal for `message_edited`, with no body revision,
+    activity, projection, search, notification, or summary update after delete.
+  - Aligned chat search coverage with Phase 0 linked-work identities by including
+    folders and tasks in the search target list and search pipeline contract.
+  - Required native filesystem export to preserve the policy envelope needed to
+    re-import secret-backed versus non-secret files without changing semantics.
+  - Added the explicit Phase 0 gate before Foundation alpha PR 01-04 work.
+  - Replaced the remaining Zod-authority wording with a language-neutral
+    contract/IDL source of truth and generated/conformance-tested consumers.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry. This section is an

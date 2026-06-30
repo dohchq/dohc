@@ -1511,6 +1511,8 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
+- **Phase 0 gate:** P0A-P0G must complete and update the plan with proof-arc
+  evidence before PR 01-04 begin Foundation alpha implementation work.
 - **Foundation alpha:** PR 01-04 prove shared contracts, stable IDs, typed
   events, versions, and effective policy.
 - **Filesystem/version proof:** PR 05-11 prove normal files, versions,
@@ -1598,11 +1600,12 @@ must use.
 - Define one core effective policy input/output type for filesystem, search, and
   export substrate. Chat, notification, secret, and external-share policy
   extensions land with their consuming PRs and must compose with the core type.
-- Use Zod as the current TypeScript schema source for shared boundary types
-  carrying workspace, version, and policy data across the core substrate. Rust
-  kernel, bridge, and other runtime consumers must use an explicit adapter or
-  schema generator that round-trips against the same shared contract, so TS and
-  Rust paths validate identical workspace/version/policy boundaries.
+- Define one language-neutral contract/IDL as the canonical schema source for
+  shared boundary types carrying workspace, version, and policy data across the
+  core substrate. Zod, Rust validation, bridge adapters, and other runtime
+  consumers are generated or conformance-tested consumers of that contract, so
+  every path validates identical workspace/version/policy boundaries without
+  making one runtime the authority for the others.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 
