@@ -900,8 +900,8 @@ is `Phase0SharedSubstrateBaseline` in the shared substrate package scaffold. It
 must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and
 P0G must import these provisional symbols from the baseline package rather than
 invent parallel shapes, ad hoc copies, or local lookalike types or depend on
-PR 01-owned contracts too early. PR01 Schema Promotion Checkpoint acceptance
-requires the baseline package to export the provisional `WorkspaceObject`,
+PR 01-owned contracts too early. For the checkpoint's pre-PR01 freeze, the
+baseline package must export the provisional `WorkspaceObject`,
 `WorkspaceVersion`, `VersionRef`,
 stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
 `ConflictRecord`, `ChatThread`, `ThreadMessage`, `ThreadLink`,
@@ -1613,13 +1613,12 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
-- **P0S - Shared Substrate Freeze:** owned by the main orchestration thread plus
-  the schema-baseline lane. Use the canonical **PR01 Schema Promotion
-  Checkpoint** definition in [Phase 0 PRs](#phase-0-prs) for the freeze/handoff
-  symbol list, import-enforcement gate, execution-log evidence, and
-  `Phase0SharedSubstrateBaseline` exit criteria. This milestone is only the
-  roadmap pointer: it runs immediately after P0A/P0R and before P0B, P0C, P0D,
-  P0E, P0F, or P0G proceed.
+- **Schema-promotion checkpoint pointer:** immediately after P0A/P0R, the main
+  orchestration thread plus the schema-baseline lane must use the canonical
+  **PR01 Schema Promotion Checkpoint** definition in [Phase 0 PRs](#phase-0-prs)
+  for the freeze/handoff symbol list, import-enforcement gate, execution-log
+  evidence, and `Phase0SharedSubstrateBaseline` exit criteria. The `P0S` alias is
+  pointer-only; it is not a standalone milestone, lane, or source of truth.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.
@@ -1712,17 +1711,9 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   server-owned revision tokens until PR 12 owns the final read-state schema.
 - Define the `AgentRun` identity contract and migration/backfill semantics here
   so PR 01 is the single canonical owner for agent-run identity.
-- Consume the `Phase0SharedSubstrateBaseline` `ChatThread`, `ThreadMessage`, and
-  `ThreadLink` scaffold exactly as assigned in the Phase 0 / PR 01 / PR 12
-  Schema Ownership Matrix; PR 01 must not introduce a parallel chat schema or
-  claim final chat ownership.
-- Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
-  `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
-  that consume them: P0E may introduce minimal provisional chat/link contracts
-  for the proof slice, PR 12 formalizes full chat contracts, PR 08 owns
-  secret-reference contracts, and PR 18 owns share/external-channel contracts.
-  Those PRs must extend the same shared package instead of defining local-only
-  shapes.
+- Consume provisional chat/read-state/link symbols exactly as assigned in the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix);
+  this PR must not restate or redefine chat-schema ownership locally.
 - Define link dereference shape: source/owning workspace ID, target type, target
   workspace ID, stable target ID, optional `VersionRef`, display path/title at
   link time, ACL degrade behavior.

@@ -5103,7 +5103,7 @@ Two-hundred-fifteenth pass:
 
 Two-hundred-sixteenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5138,7 +5138,7 @@ Two-hundred-sixteenth pass:
 
 Two-hundred-seventeenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5173,7 +5173,7 @@ Two-hundred-seventeenth pass:
 
 Two-hundred-eighteenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5205,7 +5205,7 @@ Two-hundred-eighteenth pass:
 
 Two-hundred-nineteenth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below must pass for this patch set before
@@ -5238,7 +5238,7 @@ Two-hundred-nineteenth pass:
 
 Two-hundred-twentieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5258,6 +5258,45 @@ Two-hundred-twentieth pass:
     `WriteResult.kind` terminology.
   - Added an explicit `.env` secret-backed read/write/status/conflict/export
     proof slice.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-twenty-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Renamed remaining archived PR00 pass headings from `Live PR00 status` to
+    `Historical PR00 status`.
+  - Folded the `P0S` roadmap entry into a pointer-only reference to the canonical
+    **PR01 Schema Promotion Checkpoint**.
+  - Removed duplicated PR01 chat-schema ownership rules and pointed PR01 scope
+    back to the single schema ownership matrix.
+  - Required first channel sends to persist the matching `chat_created`
+    `ThreadActivity` with the initial `ThreadMessage`.
+  - Added `recordKind: 'accepted_holding_record'` to the public
+    `durable-pending` `WriteResult` arm.
+  - Restricted accepted holding-record retries to canonical, durable-pending,
+    quarantined, terminal-retired, or expired outcomes, reserving
+    `rejected_record` for pre-acceptance rejection records.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

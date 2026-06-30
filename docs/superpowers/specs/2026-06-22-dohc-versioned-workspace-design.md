@@ -231,6 +231,7 @@ type WriteResult =
     }
   | {
       kind: 'durable-pending'
+      recordKind: 'accepted_holding_record'
       holdingRecordId: string
       workspaceId: string
       versionId: string
@@ -471,19 +472,22 @@ evidence without that explicit disposition record.
 Status APIs and retry tooling represent that state as a `terminal-retired`
 `WriteResult` for the same `holdingRecordId`; they must not collapse it into
 `rejected`, `quarantined`, conflict, or generic expiration.
-Durable-pending holding-record retries apply only when a real `holdingRecordId` exists. Retries
-using the same idempotency key, `holdingRecordId`, and matching replay metadata
-derive the response from the holding record's current durable state, not only
-from the original `replayUntil` window. If the durable-pending holding record has promoted,
-retry returns the canonical result or deterministic equivalent. If it is still
-not promoted, retry returns `durable-pending` while the
-idempotency/retry horizon allows key reuse. If it has become `rejected`,
-`quarantined`, or `terminal-retired`, retry returns that current state while the
-corresponding retention or retirement metadata is still addressable. Only after
-`replayUntil` does the write API return the canonical `idempotency-expired` response for that
-`holdingRecordId`, with `recordKind: 'accepted_holding_record'`,
-`recordKind: 'rejected_record'`, `recordKind: 'quarantined_record'`, or
-`recordKind: 'terminal_retired_record'`.
+Durable-pending holding-record retries apply only when a real `holdingRecordId`
+exists for an accepted holding record. Retries using the same idempotency key,
+`holdingRecordId`, and matching replay metadata derive the response from the
+holding record's current durable state, not only from the original `replayUntil`
+window. If the durable-pending holding record has promoted, retry returns the
+canonical result or deterministic equivalent. If it is still not promoted, retry
+returns `durable-pending` with `recordKind: 'accepted_holding_record'` while the
+idempotency/retry horizon allows key reuse. If it has become `quarantined` or
+`terminal-retired`, retry returns that current state while the corresponding
+retention or retirement metadata is still addressable. Only after `replayUntil`
+does the write API return the canonical `idempotency-expired` response for that
+accepted holding record, with `recordKind: 'accepted_holding_record'`,
+`recordKind: 'quarantined_record'`, or
+`recordKind: 'terminal_retired_record'`. The `recordKind: 'rejected_record'`
+path is reserved for records rejected before acceptance; it must not be replayed
+from an accepted durable-pending holding record.
 Canonical writes, retryable failures, and conflicts without holding records use
 the terminal idempotency replay path with the persisted `idempotencyResultId`
 and `idempotencyReplayToken` only; they do not require or accept
