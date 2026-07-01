@@ -402,7 +402,9 @@ persist that idempotency result state for the same workspace, version,
 idempotency key, operation fingerprint, `idempotencyResultId`,
 `idempotencyReplayToken`, and `commitState`. If the retryable-failure result
 state itself cannot be persisted, the engine must not acknowledge a replayable
-`WriteResult`; the caller must retry until the engine can durably record and
+`WriteResult`. The request fails at the transport layer, or through an explicitly
+documented timeout path, without claiming durable acceptance; the caller must
+retry with the same idempotency key until the engine can durably record and
 replay the outcome or prove a canonical/durable result.
 `commitState` on `retryable-failure` is the single source of truth for whether a
 canonical mutation is known absent (`no_canonical_commit_recorded`) or unknown

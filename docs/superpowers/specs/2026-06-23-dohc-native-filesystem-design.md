@@ -831,6 +831,9 @@ type VersionsNamespaceActivationFence =
   | {
       state: 'activating' | 'committing' | 'rolling_back'
       fenceId: string
+      migrationGeneration: UInt64DecimalString
+      decision: 'activate' | 'rollback'
+      plannedLegacyPathOutcomes: Record<string, 'move' | 'reclassify' | 'preserve' | 'quarantine'>
       fromMode: 'legacy_unmanaged' | 'managed_versions'
       toMode: 'legacy_unmanaged' | 'managed_versions'
       startedAt: UnixMsDecimalString

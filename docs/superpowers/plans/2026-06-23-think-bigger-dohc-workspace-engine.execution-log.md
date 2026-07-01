@@ -7303,7 +7303,7 @@ Two-hundred-seventy-fifth pass:
 
 Two-hundred-seventy-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five major findings, one minor finding, and one trivial
     finding fixed; committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7328,6 +7328,39 @@ Two-hundred-seventy-sixth pass:
     `targetVersionRef: null`.
   - Split public `read_channel_conversation` provenance from internal
     `ChannelConversationProvenance`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three major findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three major findings:
+  - Added migration generation, activation decision, and planned legacy-path
+    outcomes to `VersionsNamespaceActivationFence`.
+  - Clarified that failed persistence of retryable-failure idempotency state
+    must surface as a non-acknowledged transport/timeout failure, not a
+    replayable `WriteResult`.
+  - Aligned `share` link request, shared-target, stored-link, and activity
+    handling around `targetVersionRef: null`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
