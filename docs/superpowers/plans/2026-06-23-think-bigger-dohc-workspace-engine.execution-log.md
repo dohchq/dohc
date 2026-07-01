@@ -7920,7 +7920,7 @@ Two-hundred-ninety-second pass:
 
 Two-hundred-ninety-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three major findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7940,6 +7940,39 @@ Two-hundred-ninety-third pass:
   - Added `shareGrantHandle` to thread-link share creation requests and required
     fail-closed server resolution before creating links, fanout, projections,
     search edges, or export references.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: one major finding fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's one major finding:
+  - Aligned restore replay identity with the API sketch by keeping
+    `requestedVersionIds` limited to the restore target version and binding the
+    stable `checkpointId` in the operation operand tuple instead of using a
+    `restoredFromVersionId` alias.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

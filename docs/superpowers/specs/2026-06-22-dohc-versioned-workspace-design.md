@@ -366,17 +366,21 @@ initiating write-producing request, not merely the version that eventually owns 
 record. The array is ordered by semantic request role, not lexical id order:
 single-version `write`, `delete`, `rename`, and `move` operations serialize
 `[targetVersionId]`; `replace` serializes `[targetVersionId, sourceVersionId]`;
-`restore` serializes `[targetVersionId, restoredFromVersionId]`; `merge`
-serializes `[targetVersionId, baseVersionId, currentVersionId,
-incomingVersionId]`; future multi-source operations serialize
+`restore` serializes `[targetVersionId]` here and binds the stable
+`checkpointId` in the operation operand tuple because the checkpoint is not a
+version id; `merge` serializes `[targetVersionId, baseVersionId,
+currentVersionId, incomingVersionId]`; future multi-source operations serialize
 `[targetVersionId, baseVersionId?, currentVersionId?, incomingVersionId?,
 ...sourceVersionIds]`, with optional roles omitted only when that operation does
 not define the role and `sourceVersionIds` kept in request order after server
-canonicalization. Duplicated version ids remain duplicated when two roles point
-at the same version, because the operation fingerprint compares positions, not a
-deduplicated set. Delayed acknowledgements and replayed idempotency results must
-match the full `requestedVersionIds` array before clearing in-flight state or
-applying UI/cache updates.
+canonicalization. If a restore implementation materializes a checkpoint through
+an internal source version, replay identity must still serialize the same
+`checkpointId` in the operand tuple and must not substitute a
+`restoredFromVersionId` alias. Duplicated version ids remain duplicated when two
+roles point at the same version, because the operation fingerprint compares
+positions, not a deduplicated set. Delayed acknowledgements and replayed
+idempotency results must match the full `requestedVersionIds` array before
+clearing in-flight state or applying UI/cache updates.
 
 `recordKind` is a public response field only on `durable-pending` and
 `idempotency-expired` variants. Canonical, retryable-failure, and conflict
