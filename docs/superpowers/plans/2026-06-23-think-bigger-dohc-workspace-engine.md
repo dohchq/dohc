@@ -1,7 +1,7 @@
 # Think Bigger: dohc Workspace Engine Mega Plan
 
 > **For agentic workers:** This is an orchestration plan, not a single coding
-> task. Use subagents, CodeRabbit review loops, phase execution logs, and
+> task. Use subagents, CodeRabbit gate reviews, phase execution logs, and
 > comprehensive automated plus manual QA. Do not start implementation until the
 > user approves the overall direction and branch/PR strategy.
 
@@ -197,8 +197,9 @@ than skipped.
 - No giant unreviewable implementation PR.
 - Every PR must have targeted tests, regression tests, and relevant E2E for its
   implemented, shipped, or in-scope surfaces.
-- Every PR must go through the canonical CodeRabbit loop until approval or an
-  explicitly approved non-sensitive override.
+- Every PR must have fresh local validation before review. CodeRabbit runs at
+  major readiness gates, security-sensitive diffs, architecture pivots, and
+  final merge readiness, not after every small fix.
 - Every security-sensitive PR must use subagent review.
 - Every UI PR must include Playwright/visual QA where applicable.
 - No weakening assertions or skipping tests to move forward.
@@ -813,7 +814,8 @@ Each PR must:
 5. Run required integration/E2E/security regressions.
 6. Update the execution log.
 7. Open a PR.
-8. Run the canonical CodeRabbit loop defined below.
+8. Run the canonical CodeRabbit gate when the PR reaches a major readiness
+   checkpoint or touches risky architecture/security/data-loss behavior.
 
 Recommended branch naming:
 
@@ -1230,7 +1232,7 @@ history.
 **Scope:**
 
 - Full Phase 0 test matrix.
-- CodeRabbit loop for every Phase 0 PR.
+- CodeRabbit gates at Phase 0 readiness checkpoints and risky changes.
 - Architecture/security/performance/migration/QA subagent reviews.
 - Manual QA script.
 - Performance smoke.
@@ -1388,19 +1390,36 @@ checklist before merging a milestone PR.
 
 ### CodeRabbit Loop
 
-For every implementation PR:
+CodeRabbit is a major-gate reviewer, not a per-commit tax. Local validation,
+targeted tests, required E2E, security checks, and subagent review stay
+mandatory on every meaningful implementation step. CodeRabbit is reserved for:
+
+- PR readiness before requesting human merge review.
+- architecture pivots or primitive contract changes.
+- security, authorization, ownership, privacy, secrets, migration, sync, or
+  data-loss-sensitive diffs.
+- final milestone gates such as Phase 0 proof-arc acceptance.
+- user-requested focused audits.
+
+At a CodeRabbit gate:
 
 ```text
-Open PR
-  -> wait for CodeRabbit review
+Reach major readiness checkpoint
+  -> run local validation first
+  -> run/wait for CodeRabbit review
   -> triage every finding
   -> fix valid findings
   -> document rejected findings with reason
   -> rerun targeted/full tests
-  -> request/re-run review if needed
+  -> request/re-run review only for material fixes or final readiness
   -> repeat until CodeRabbit approves or the user explicitly approves a
      documented non-sensitive override
 ```
+
+If CodeRabbit is rate-limited or slow at a non-final checkpoint, continue with
+local tests, subagent review, and documented risk tracking. Do not burn a new
+CodeRabbit review after each narrow follow-up commit. Re-run CodeRabbit only
+when the accumulated changes are ready for a meaningful gate decision.
 
 CodeRabbit findings must not be "resolved" by:
 
@@ -2826,7 +2845,8 @@ turning dohc Cloud into the source of truth.
 
 - no skipped critical E2E.
 - no unresolved P0/P1 findings.
-- CodeRabbit approved or user explicitly overrides documented non-blockers.
+- CodeRabbit approved at the current major gate or user explicitly overrides
+  documented non-blockers.
 - execution log complete.
 
 ## Workflow Loops
@@ -2842,7 +2862,7 @@ Plan PR scope
   -> run required E2E/security/perf
   -> update execution log
   -> open PR
-  -> run the canonical CodeRabbit loop
+  -> run CodeRabbit at major readiness gates
   -> merge only after acceptance criteria
 ```
 
@@ -2857,7 +2877,7 @@ Unit pass
   -> performance budget
   -> manual smoke
   -> subagent QA review
-  -> CodeRabbit
+  -> CodeRabbit gate when readiness or risk warrants it
 ```
 
 ### Conflict/Failure Loop
@@ -2959,8 +2979,8 @@ An implementing agent may stop only when:
 - the same blocker remains after three concrete attempts.
 - continuing would violate a non-negotiable.
 - an external secret/service/user decision is genuinely required.
-- required CI or CodeRabbit service is unavailable and no local equivalent can
-  provide useful progress.
+- required CI is unavailable and no local equivalent can provide useful
+  progress.
 
 Do not stop because:
 
@@ -2987,7 +3007,7 @@ Do not claim the initiative is complete until:
 
 - every PR is merged or explicitly deferred by user decision.
 - all execution-log entries are complete.
-- CodeRabbit loops are complete for every PR.
+- required CodeRabbit gates are complete for each major readiness checkpoint.
 - subagent review loops are complete for major milestones.
 - no P0/P1 issues remain.
 - unit, integration, security, E2E, visual, migration, and performance checks

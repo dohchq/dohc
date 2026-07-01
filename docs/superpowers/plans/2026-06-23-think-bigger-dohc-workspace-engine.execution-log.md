@@ -4789,7 +4789,7 @@ Two-hundred-sixth pass:
 - Historical PR00 status:
   - CodeRabbit status: six follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
-  - Test evidence: validation block below must pass for this patch set before
+  - Test evidence: validation block below passed for this patch set before
     commit.
   - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
     remains pending human approval.
@@ -8247,11 +8247,11 @@ Historical status snapshot.
 
 Three-hundred-first pass:
 
-### Live PR00 Status
+### Historical PR00 Status - Pass 301
 
 Mutable status symbol: `LivePR00Status`.
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one major finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -8282,9 +8282,52 @@ Mutable status symbol: `LivePR00Status`.
 - Overrides:
   - None approved.
 
+Three-hundred-second pass:
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: per 2026-06-29 user direction, CodeRabbit is now a
+    major-gate reviewer rather than a per-fix rerun. The in-flight committed
+    review was cancelled after a prior rate-limit wait; the next CodeRabbit run
+    is deferred until PR00 final readiness or another material risk gate.
+  - Test evidence: validation block below must pass for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: no new CodeRabbit findings are being solicited for
+    this narrow policy/log patch; the PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until the required major-gate
+    review/approval policy is satisfied and the docs-only local-agent-CLI
+    exception is approved.
+
+- Updated review policy:
+  - Changed the mega plan from per-fix/per-PR CodeRabbit reruns to local
+    validation on every meaningful change plus CodeRabbit at major readiness,
+    security, architecture, data-loss, and final merge gates.
+  - Recorded that CodeRabbit rate limits should not stall useful local progress
+    at non-final checkpoints.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Unresolved Findings
 
-- CodeRabbit committed review rerun remains pending.
+- CodeRabbit is deferred to the next major PR00 readiness gate under the
+  updated review policy.
 - The PR00 docs-only local-agent-CLI exception remains pending human approval
   before completion or merge-readiness.
 
@@ -8297,8 +8340,8 @@ Mutable status symbol: `LivePR00Status`.
   native-filesystem, and chats specs' authorization, policy, secret, and
   visibility-gate contracts.
 - QA: 2026-06-23 PR00 QA review incorporated into this execution log's
-  validation template, Phase 0 gate checklist, and repeated CodeRabbit evidence
-  blocks.
+  validation template, Phase 0 gate checklist, and CodeRabbit major-gate
+  evidence blocks.
 - Accessibility: N/A for PR00 docs-only scaffold beyond the accessibility gate,
   reviewer slot, and future evidence template already added to the plan/log.
 - Other: 2026-06-23 external architecture review incorporated into the Rust
@@ -8405,8 +8448,8 @@ Gate evidence:
 - [ ] Local agent file edits are captured without requiring agent-specific file
       attribution.
 - [ ] Agent chat replies display as `<User Name>'s agent`.
-- [ ] CodeRabbit approved every Phase 0 PR or user approved documented
-      non-critical documentation-only exceptions.
+- [ ] Required Phase 0 CodeRabbit major gates are complete or user approved
+      documented non-critical documentation-only exceptions.
 - [ ] Architecture/security/QA subagent reviews complete.
 - [ ] Expansion roadmap has been revised with Phase 0 findings.
 
@@ -8426,8 +8469,8 @@ Gate evidence:
 - [ ] Typed events are workspace-scoped.
 - [ ] Effective policy resolver covers files, versions, search, and export
       substrate.
-- [ ] CodeRabbit approved every PR or user approved documented non-sensitive
-      non-blocker overrides.
+- [ ] Required CodeRabbit major gates are complete or user approved documented
+      non-sensitive non-blocker overrides.
 - [ ] Security subagent review complete.
 
 ### Filesystem / Version Proof
