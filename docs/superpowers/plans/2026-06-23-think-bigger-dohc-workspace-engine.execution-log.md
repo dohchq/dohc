@@ -7231,7 +7231,7 @@ Two-hundred-seventy-third pass:
 
 Two-hundred-seventy-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two major findings and two minor findings fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7250,6 +7250,43 @@ Two-hundred-seventy-fourth pass:
     punctuation such as `\)`, with inline and reference fixtures.
   - Restricted heading HTML stripping to actual raw HTML tags so literal
     comparison text such as `A < B > C` survives slug generation.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four major findings and one minor finding fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four major findings and one minor finding:
+  - Split PR 01 into separate reviewable slices for canonical schema/IDL, wire
+    format/runtime conformance, link/projection contracts, and core effective
+    policy.
+  - Defined one shared first-match gate order for fresh writes and replay
+    attempts.
+  - Clarified `expectedAbsent` / `path_absence` as create/destination absence
+    semantics rather than an object freshness proof.
+  - Required shared chat target shapes to serialize absent `targetVersionRef` as
+    explicit `null`.
+  - Added `nextPageToken` to list/search transport payloads so clients can
+    resume the same authorized snapshot.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

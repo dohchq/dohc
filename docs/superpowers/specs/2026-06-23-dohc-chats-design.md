@@ -265,7 +265,7 @@ type ShareChannelLinkedTargetRef = ChannelLinkedTargetBase & {
   shareGrantId: string
   visibilityScope: string
   targetType: 'share'
-  targetVersionRef?: VersionRef
+  targetVersionRef: VersionRef | null
 }
 
 type ChannelLinkedTargetRef =
@@ -297,7 +297,7 @@ type RedactedLinkedWorkProjection = {
   targetWorkspaceId: string
   targetId: string
   targetType: ThreadLinkTargetType
-  targetVersionRef?: VersionRef
+  targetVersionRef: VersionRef | null
   shareGrantId?: never
   visibilityScope?: never
 }
@@ -563,7 +563,7 @@ type ChannelLinkedTargetRequestHandle =
       targetWorkspaceId: string
       targetId: string
       targetType: 'share'
-      targetVersionRef?: VersionRef
+      targetVersionRef: VersionRef | null
       shareGrantId?: never
       visibilityScope?: never
     }
@@ -747,7 +747,7 @@ type ThreadLinkCreateRequest =
     })
   | (SharedThreadLinkCreateRequestBase & {
       targetType: 'share'
-      targetVersionRef?: VersionRef
+      targetVersionRef: VersionRef | null
     })
   | (ThreadLinkCreateRequestBase & {
       targetType: 'decision' | 'task'
@@ -800,7 +800,7 @@ type ShareThreadLink = ThreadLinkBase & {
   scopeKind: 'shared'
   shareGrantId: string
   visibilityScope: string
-  targetVersionRef?: VersionRef
+  targetVersionRef: VersionRef | null
 }
 
 type ChatThreadThreadLink = ThreadLinkBase & {

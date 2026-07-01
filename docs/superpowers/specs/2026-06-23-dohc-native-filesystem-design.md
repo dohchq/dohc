@@ -855,10 +855,12 @@ type WorkspaceStatusTransportPayload = WorkspaceAsyncPayload & {
 
 type WorkspaceListTransportPayload<Entry> = WorkspaceAsyncPayload & {
   entries: Entry[]
+  nextPageToken: string | null
 }
 
 type WorkspaceSearchTransportPayload<Result> = WorkspaceAsyncPayload & {
   results: Result[]
+  nextPageToken: string | null
 }
 
 type WorkspaceSnapshotTransportPayload<Snapshot> = WorkspaceAsyncPayload & {
@@ -902,8 +904,8 @@ Concrete `list(...)`, `search(...)`, `snapshot(...)`, and `watch(...)` responses
 must use `WorkspaceListTransportPayload`, `WorkspaceSearchTransportPayload`,
 `WorkspaceSnapshotTransportPayload`, and `WorkspaceWatchTransportPayload` (or a
 schema-equivalent generated shape) so `workspaceId`, `versionId`, `requestToken`,
-and `sequence` are present before any UI, cache, projection, or renderer state is
-updated.
+`sequence`, and for list/search the opaque `nextPageToken` is present before
+any UI, cache, projection, or renderer state is updated.
 Filesystem loading and local reconciliation mint the same kind of token from the
 engine context before emitting progress or result payloads. The `requestToken`
 parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only

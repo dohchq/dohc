@@ -591,13 +591,14 @@ lock, version-access, skill-turn, provenance, attribution, and proof checks.
 Each replay evaluation attempt is deterministic for the durable record's current
 metadata and the server-side facts visible to that attempt:
 
-Replay evaluation is first-match in this order within a single attempt; once a
-class matches for that attempt, later checks in the same attempt cannot replace
-its `reasonCode`, `quarantineState`, or validation result:
-malformed/cross-scope binding, visibility, authorization/permission,
-ownership/review gate, policy, protected-path, secret-broker/declassification,
+After syntax, workspace scope, capture token, idempotency, and malformed
+cross-scope binding checks pass, fresh writes and replay attempts share the same
+canonical first-match evaluation order: visibility, authorization/permission,
+ownership, review gate, policy, protected-path, secret-broker/declassification,
 lock, version-access, skill-turn, provenance, attribution, proof, then causal
-base conflict. If multiple
+base conflict. Once a class matches for that attempt, later checks in the same
+attempt cannot replace its `reasonCode`, `quarantineState`, or validation
+result. If multiple
 server-derived checks fail in one replay attempt, the earliest matching class in
 that order wins. Review approval, policy revalidation, protection evidence, or
 causal-base changes do not change a replay result by themselves. Later retries
@@ -741,14 +742,15 @@ It should ask only:
 9. Can the system preserve recovery and honest provenance?
 10. Does the change create a conflict or cross a visibility boundary?
 
-Immediate write evaluation is first-match, matching replay's deterministic
-routing style. After syntax, workspace scope, capture token, and idempotency
-checks pass, the write path resolves outcomes in this order:
+Immediate write evaluation is first-match using the same canonical order as
+replay evaluation. After syntax, workspace scope, capture token, idempotency, and
+malformed cross-scope binding checks pass, the write path resolves outcomes in
+that shared order:
 
-1. authorization, ownership, version-access, protected-path, lock, skill-turn,
-   policy, provenance, attribution, proof, and secret-broker/declassification
-   denials return their mapped `rejected` or `quarantined_*` result before any
-   content comparison.
+1. visibility, authorization/permission, ownership, review gate, policy,
+   protected-path, secret-broker/declassification, lock, version-access,
+   skill-turn, provenance, attribution, and proof denials return their mapped
+   `rejected` or `quarantined_*` result before any content comparison.
 2. unavailable or indeterminate required evaluators return
    `retryable-failure` with no canonical mutation.
 3. real visibility-boundary crossings return the mapped denied/quarantined
@@ -1039,8 +1041,9 @@ restore(workspaceId, versionId, checkpointId, {
 ```
 
 Precondition names are normalized before validation. Fields in the same
-normalized guard class are equivalent freshness proofs, not separate guards that
-can be combined:
+normalized guard class are equivalent guards, not separate checks that can be
+combined. `expectedAbsent` is a create/destination-absence guard, not a
+freshness proof:
 
 | Normalized guard | Accepted API fields | Applies to | Meaning |
 | --- | --- | --- | --- |
@@ -1051,10 +1054,13 @@ can be combined:
 | `restore_version_freshness` | `expectedCurrentCheckpoint`, `expectedVersionEtag`, `expectedSnapshotId` | `restore(...)` target version | The version being restored is still at the observed checkpoint, etag, or snapshot. |
 
 Each guarded operand must provide exactly one field from its normalized guard
-class. Supplying two aliases for the same guard, omitting the required guard, or
-treating aliases such as `expectedBaseVersion` and `expectedEtag` as independent
-freshness checks is a malformed request/protocol error before conflict
-materialization.
+class. `write(...)` create and `rename(...)` / `move(...)` destination operands
+use `path_absence`; overwrite, delete, source, replace, merge, and restore
+operands use their respective freshness guard classes. Supplying two aliases for
+the same guard, omitting the required guard, treating `expectedAbsent` as a
+freshness proof, or treating aliases such as `expectedBaseVersion` and
+`expectedEtag` as independent freshness checks is a malformed request/protocol
+error before conflict materialization.
 Idempotency and replay identity use the normalized guard class plus the
 server-normalized guard value, not the raw request field name. Equivalent aliases
 such as `expectedBaseVersion` and `expectedEtag` must be resolved into the same

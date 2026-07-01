@@ -1727,60 +1727,46 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 
 **Scope:**
 
-- Add or extend shared package for workspace engine contracts.
-- Bootstrap the canonical schema source before claiming generated consumers:
-  choose the checked-in IDL/schema location, define the generator or conformance
-  command, wire the TypeScript package entrypoint, and add either the Rust crate
-  plus Cargo manifest that consumes it or an explicit Rust conformance fixture
-  that blocks generated-consumer claims until the crate exists.
-- Adopt, migrate, or bridge schema symbols exactly as assigned in the
-  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix).
-  That matrix is the sole source of truth for which symbols PR 01 owns, bridges,
-  or leaves to PR 12; this PR scope must not restate individual symbol ownership
-  locally.
-- Define the canonical `WorkspaceLinkRef` dereference shape: source/owning
-  workspace ID, target type, target workspace ID, stable target ID, optional
-  tagged `VersionRef`, display path/title at link time, and ACL/degrade
-  behavior. This is the single source of truth for common link target fields.
-- Keep chat-specific link storage outside the common shape: stable link ID,
-  source thread ID, read-state/search projection hooks, and chat-specific
-  ordering live in the chat `ThreadLink` schema layer.
+- Split PR 01 into separate reviewable PRs; do not submit one omnibus contracts
+  PR. Each slice must be independently reviewable by CodeRabbit and can merge
+  only after its own validation passes:
+  - **PR 01A - Canonical Schema / IDL Core:** add or extend the shared package
+    for workspace engine contracts; choose the checked-in IDL/schema location;
+    define the generator or conformance command; wire the TypeScript package
+    entrypoint; add either the Rust crate plus Cargo manifest that consumes it
+    or an explicit Rust conformance fixture that blocks generated-consumer
+    claims until the crate exists; and adopt, migrate, or bridge schema symbols
+    exactly as assigned in the
+    [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix).
+    The matrix is the sole source of truth for which symbols PR 01 owns,
+    bridges, or leaves to PR 12.
+  - **PR 01B - Wire Format And Runtime Conformance:** define canonical field
+    casing, enum encoding, explicit `null` vs absent-field rules,
+    backwards/forwards schema-version rules, strict unknown-field behavior, and
+    declared `extensions` preservation. The TypeScript package entrypoint owns
+    `serializeWorkspaceEngineWire` and `parseWorkspaceEngineWireStrict`; the Rust
+    crate/conformance fixture owns `encode_workspace_engine_wire` and
+    `decode_workspace_engine_wire_strict`. This slice owns runtime round-trip
+    fixtures only; it must not introduce link, projection, share, or policy model
+    decisions.
+  - **PR 01C - Link And Projection Contracts:** define `WorkspaceLinkRef`,
+    projection writeability values (`canonical`, `writable`, `readOnly`,
+    `lossy`, `redacted`), and projection validation values (`none`,
+    `sourceValidated`, `policyValidated`, `internalOnly`). Chat-specific link
+    storage stays in the chat `ThreadLink` layer: stable link ID, source thread
+    ID, read-state/search projection hooks, and chat-specific ordering are not
+    part of `WorkspaceLinkRef`.
+  - **PR 01D - Core Effective Policy Boundary:** define one core effective policy
+    input/output type for filesystem, search, and export substrate. Chat,
+    notification, secret, and external-share policy extensions land with their
+    consuming PRs and must compose with the core type.
 - Defer the canonical share/external-channel shape with stable share ID, grant
   ID, owning workspace, target resource identity, visibility scope, participant
   boundary, expiry/revocation state, and policy/export/search/notification fields
   to PR 18. Export, search, notifications, and shared channels must consume that
-  validated shape instead of inventing local share models.
-- Define projection writeability values: `canonical`, `writable`, `readOnly`,
-  `lossy`, `redacted`.
-- Define projection validation values: `none`, `sourceValidated`,
-  `policyValidated`, `internalOnly`.
-- Define one core effective policy input/output type for filesystem, search, and
-  export substrate. Chat, notification, secret, and external-share policy
-  extensions land with their consuming PRs and must compose with the core type.
-- Define one language-neutral contract/IDL as the canonical schema source for
-  shared boundary types carrying workspace, version, and policy data across the
-  core substrate. Zod, Rust validation, bridge adapters, and other runtime
-  consumers are generated or conformance-tested consumers of that contract, so
-  every path validates identical workspace/version/policy boundaries without
-  making one runtime the authority for the others. The ownership matrix above
-  determines which boundary symbols are generated from, bridged through, or
-  conformance-checked against that single source of truth.
-- Define the wire-format contract beside the canonical schema source: canonical
-  field casing, enum encoding, explicit `null` vs absent-field rules,
-  backwards/forwards schema-version rules, and strict unknown-field behavior.
-  Canonical schema handling rejects unknown fields at trust boundaries by
-  default; forward-compatible data is accepted only when it is carried in an
-  explicit `extensions` map declared by that schema version, and that map must be
-  preserved byte-for-byte through round trips. The TypeScript package entrypoint
-  must expose `serializeWorkspaceEngineWire` and `parseWorkspaceEngineWireStrict`,
-  and the Rust crate/conformance fixture must expose
-  `encode_workspace_engine_wire` and `decode_workspace_engine_wire_strict`; both
-  paths must reject unknown canonical fields, preserve declared `extensions`, and
-  round-trip fixtures against those exact wire-format rules. Neither runtime may
-  assume local serializer defaults for casing, enums, optional fields, unknown
-  fields, extensions, or version tags.
-- Add fixtures for personal, team, and agent-authored core cases. External shared
-  fixtures land with PR 18.
+  validated PR 18 shape instead of inventing local share models.
+- Add fixtures for personal, team, and agent-authored core cases in PR 01A/01B
+  as appropriate. External shared fixtures land with PR 18.
 
 **Tests:**
 
