@@ -776,10 +776,13 @@ that shared order:
    leaked through conflict envelopes or review queues.
 4. preserved base/current/incoming divergence, stale causal bases, or semantic
    merge uncertainty create conflict preservation/reconciliation.
-5. mandatory review for an otherwise clean write creates a durable-pending
-   holding record with `pendingState: 'pending_review'` once the accepted record
-   is durable.
-6. a clean write that passes all gates saves immediately to that version.
+5. mandatory review for an otherwise clean write creates a `durable-pending`
+   holding record with `pendingState: 'pending_review'` only after the accepted
+   write-intent record and idempotency result are durable; no canonical file
+   content is mutated yet.
+6. a clean write that passes all synchronous gates and does not require
+   deferred review or deferred canonicalization saves immediately to that
+   version.
 
 If the outcome requires a conflict record, holding record, idempotency tombstone,
 or canonical append and durable recording cannot be proven, the gate/retry matrix
@@ -1235,12 +1238,21 @@ records describing required derived work are committed together. The derived sid
 effects themselves remain asynchronous; completion of watch propagation,
 projection rebuilds, notifications, search indexing, or export fanout is outside
 the synchronous acknowledgement boundary once their durable ledger records exist.
-After the retry
-horizon, an API retry with the same key must fail closed with an explicit
-`kind: 'idempotency-expired'` response; it must not silently apply as a new
-mutation and must not convert the expired key into a conflict response.
-Implementations may garbage-collect expired key tombstones only after the same
-maximum retry horizon has passed or the operation namespace is rotated.
+After the retry horizon, an API retry with the same key must fail closed with an
+explicit `kind: 'idempotency-expired'` response; it must not silently apply as a
+new mutation and must not convert the expired key into a conflict response.
+Before compacting a terminal idempotency record or tombstone, the engine must
+retain a durable expiry sentinel, namespace watermark, or equivalent lookup
+artifact keyed by the same workspace/version/operation namespace and
+idempotency identity. Retry lookup order is: active idempotency record, terminal
+tombstone/result record, expiry sentinel or namespace watermark, then new key
+reservation. A key covered by an expiry marker returns
+`kind: 'idempotency-expired'` and cannot be reserved as fresh work. Namespace
+rotation is allowed only if retries for the retired namespace are rejected or
+resolved through that retained expiry marker before any mutation path can
+allocate the key. Implementations may garbage-collect full expired key
+tombstones only after the expiry sentinel/watermark is durable and sufficient to
+distinguish a late retry from a new namespace key.
 
 ### Idempotency Retry Horizons And WorkspaceIdempotencyPolicy
 

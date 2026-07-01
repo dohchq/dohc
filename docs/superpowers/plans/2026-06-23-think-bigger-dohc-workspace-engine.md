@@ -1711,9 +1711,11 @@ Foundation alpha and the relevant surface proof are complete.
 - PR00 docs-checker contract: `node scripts/check-think-bigger-doc-links.mjs`
   is the single fail-closed enforcement mechanism. It must compare the checked-in
   Think Bigger docs manifest with repository inventory, validate all discovered
-  Think Bigger doc links/anchors, and fail when doc renames, execution-log edits,
-  manifest changes, linked-target drift, or discovered-doc drift make the
-  manifest and repository disagree.
+  Think Bigger doc links/anchors, validate the canonical execution-log structure
+  and required evidence/status sections by name, and fail when doc renames,
+  execution-log edits, manifest changes, linked-target drift, required
+  execution-log section drift, or discovered-doc drift make the manifest,
+  execution-log contract, and repository disagree.
 - [The workflow](../../../.github/workflows/think-bigger-docs.yml) must run that
   checker for pull requests and pushes that touch the manifest, source specs,
   execution log, Think Bigger plan docs, checker script, workflow file, or

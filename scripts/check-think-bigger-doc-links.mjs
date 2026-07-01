@@ -25,6 +25,71 @@ try {
   process.exit(1)
 }
 const expectedThinkBiggerDocs = manifest?.thinkBiggerDocs
+const executionLogContract = {
+  file: 'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
+  topLevelMarkers: [
+    '# Think Bigger dohc Workspace Engine Execution Log',
+    'Plan:',
+    'Source specs:',
+    '## Current PR Pointer',
+    '## How To Use This Log',
+    'Required evidence:',
+    '## Phase 0 Decision Note',
+    '## PR Lane Inventory',
+    '## Entry Template',
+    '### Phase 0 Decision Note Entry Template',
+    '### Live Blockers And Overrides',
+    '## Archived PR00 Pass History',
+    '## PR 00 - Mega Plan And Readiness Scaffold',
+  ],
+  pr00SectionMarkers: [
+    '### Scope',
+    '### Files Changed',
+    '### Tests Added Or Updated',
+    '### Commands Run',
+    '### E2E / Visual / Manual QA',
+    '### Local Agent CLI QA',
+    '### CodeRabbit',
+    '### Unresolved Findings',
+    '### Subagent Reviews',
+    '### Security / Privacy Notes',
+    '### Performance Notes',
+    '### Migration Notes',
+    '### Remaining Risk',
+    '### Follow-Up / Deletion Conditions',
+  ],
+  requiredEvidenceItems: [
+    'branch name',
+    'worktree path',
+    'implementation workstream, if used',
+    'PR link',
+    'scope completed',
+    'files changed',
+    'tests added',
+    'commands run',
+    'E2E/visual/manual QA evidence',
+    'local agent CLI QA evidence',
+    'CodeRabbit status',
+    'subagent reviews',
+    'unresolved findings',
+    'security/privacy notes',
+    'performance notes',
+    'performance measurements and budget status',
+    'migration notes',
+    'follow-up deletion conditions',
+  ],
+  currentPointerMarkers: [
+    '- **Single mutable status block:**',
+    '- **Derived summaries:**',
+    '- **Archive boundary:**',
+  ],
+  liveStatusFields: [
+    '  - CodeRabbit status:',
+    '  - Test evidence:',
+    '  - Open overrides:',
+    '  - Completion state:',
+  ],
+}
 
 if (
   !Array.isArray(expectedThinkBiggerDocs)
@@ -55,9 +120,8 @@ const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
   const hasThinkBiggerSpecMarker = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
-    let canonicalCandidatePath
     try {
-      canonicalCandidatePath = fs.realpathSync(candidatePath)
+      const canonicalCandidatePath = fs.realpathSync(candidatePath)
       const relativeCandidate = path.relative(canonicalRepoRoot, canonicalCandidatePath)
       if (escapesRepoRoot(relativeCandidate)) {
         return false
@@ -65,12 +129,11 @@ const discoverThinkBiggerDocs = () => {
       if (!fs.statSync(canonicalCandidatePath).isFile()) {
         return false
       }
+      const raw = fs.readFileSync(canonicalCandidatePath, 'utf8')
+      return thinkBiggerSpecMarkerPattern.test(thinkBiggerMetadataHeader(raw))
     } catch {
       return false
     }
-
-    const raw = fs.readFileSync(canonicalCandidatePath, 'utf8')
-    return thinkBiggerSpecMarkerPattern.test(thinkBiggerMetadataHeader(raw))
   }
   const discoveryRoots = [
     {
@@ -958,6 +1021,85 @@ assertCheckerFixtures()
 const failures = []
 const anchorCache = new Map()
 
+const lineOccurrenceCount = (raw, exactLine) => raw
+  .split(/\r?\n/)
+  .filter((line) => line === exactLine)
+  .length
+
+const requireOrderedMarkers = (raw, markers, label, startIndex = 0) => {
+  let cursor = startIndex
+  for (const marker of markers) {
+    const index = raw.indexOf(marker, cursor)
+    if (index === -1) {
+      failures.push(`${executionLogContract.file}: missing ${label} marker ${marker}`)
+      return -1
+    }
+    cursor = index + marker.length
+  }
+  return cursor
+}
+
+const assertExecutionLogContract = () => {
+  const filePath = path.resolve(repoRoot, executionLogContract.file)
+  let raw
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch (error) {
+    failures.push(`${executionLogContract.file}: unable to read execution log contract: ${error.message}`)
+    return
+  }
+
+  requireOrderedMarkers(raw, executionLogContract.topLevelMarkers, 'execution-log top-level')
+
+  const pr00Index = raw.indexOf('## PR 00 - Mega Plan And Readiness Scaffold')
+  if (pr00Index !== -1) {
+    requireOrderedMarkers(raw, executionLogContract.pr00SectionMarkers, 'execution-log PR00 section', pr00Index)
+  }
+
+  const pointerIndex = raw.indexOf('## Current PR Pointer')
+  if (pointerIndex !== -1) {
+    requireOrderedMarkers(raw, executionLogContract.currentPointerMarkers, 'execution-log current pointer', pointerIndex)
+  }
+
+  for (const item of executionLogContract.requiredEvidenceItems) {
+    if (!raw.includes(`- ${item}.`)) {
+      failures.push(`${executionLogContract.file}: missing required evidence checklist item ${item}`)
+    }
+  }
+
+  const liveStatusCount = lineOccurrenceCount(raw, '- Live PR00 status:')
+  if (liveStatusCount !== 1) {
+    failures.push(`${executionLogContract.file}: expected exactly one writable - Live PR00 status: block, found ${liveStatusCount}`)
+  }
+
+  const historicalStatusCount = lineOccurrenceCount(raw, '- Historical PR00 status:')
+  if (historicalStatusCount < 1) {
+    failures.push(`${executionLogContract.file}: expected archived - Historical PR00 status: blocks`)
+  }
+
+  const latestLiveStatusIndex = raw.lastIndexOf('\n- Live PR00 status:')
+  const archivedHistoryIndex = raw.indexOf('## Archived PR00 Pass History')
+  if (
+    latestLiveStatusIndex === -1
+    || archivedHistoryIndex === -1
+    || latestLiveStatusIndex < archivedHistoryIndex
+  ) {
+    failures.push(`${executionLogContract.file}: writable Live PR00 status block must appear under archived PR00 pass history`)
+    return
+  }
+
+  const liveBlockEndIndex = raw.indexOf('\n### Subagent Reviews', latestLiveStatusIndex)
+  const liveBlock = raw.slice(
+    latestLiveStatusIndex,
+    liveBlockEndIndex === -1 ? raw.length : liveBlockEndIndex,
+  )
+  for (const field of executionLogContract.liveStatusFields) {
+    if (!liveBlock.includes(field)) {
+      failures.push(`${executionLogContract.file}: live PR00 status block missing field ${field.trim()}`)
+    }
+  }
+}
+
 const anchorsFor = (targetPath) => {
   let anchors = anchorCache.get(targetPath)
   if (!anchors) {
@@ -966,6 +1108,8 @@ const anchorsFor = (targetPath) => {
   }
   return anchors
 }
+
+assertExecutionLogContract()
 
 for (const file of files) {
   const filePath = path.resolve(repoRoot, file)

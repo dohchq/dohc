@@ -530,14 +530,17 @@ type ReadChannelConversationPublicProvenance =
   | {
       conversationKind: 'default'
       displayLabel?: never
+      namedSubconversationLabelRevision?: never
     }
   | {
       conversationKind: 'linked_work'
       displayLabel: string | null
+      namedSubconversationLabelRevision?: never
     }
   | {
       conversationKind: 'named_subconversation'
       displayLabel: string
+      namedSubconversationLabelRevision: UInt64DecimalString
     }
 
 type ChannelLinkedTargetRequestHandle =
@@ -1739,11 +1742,13 @@ returns the existing `threadId`, `channelConversationId`, and
 `ReadChannelConversationPublicProvenance` for that authorized channel thread.
 The server derives this redacted public provenance from internal
 `ChannelConversationProvenance`; `linkedWorkTarget`, `namedSubconversationKey`,
-`namedSubconversationKeyVersion`, and label revision metadata remain
-server-side-only. Unauthorized, revoked, absent, and ambiguous
-channel-conversation lookups must all produce the same observable
-`conversation_unavailable` result; callers must not be able to distinguish
-whether a tuple exists outside their authorization scope.
+and `namedSubconversationKeyVersion` remain server-side-only. For
+`named_subconversation`, the read result includes both `displayLabel` and
+`namedSubconversationLabelRevision` so clients can perform safe optimistic
+renames without exposing the internal normalized key. Unauthorized, revoked,
+absent, and ambiguous channel-conversation lookups must all produce the same
+observable `conversation_unavailable` result; callers must not be able to
+distinguish whether a tuple exists outside their authorization scope.
 `needs_first_send` is an internal `send_channel_message` resolver state, not a
 public `read_channel_conversation` result. If no authorized channel-backed
 thread is returned for the canonical tuple, the handler must not create or
@@ -1797,9 +1802,11 @@ server-assigned target identifiers:
   `ChatThread` must not duplicate `chat_created` or the winning message's
   `message_created` activity. The idempotency result returns `threadId`,
   `channelConversationId`, and `messageId`, and retries return the same triple.
-- `reply_to_chat` requires an `idempotencyKey` and target `threadId`; the server
-  assigns `messageId` in the idempotency result, and retries return that same
-  `(threadId, messageId)` pair.
+- `reply_to_chat` requires an `idempotencyKey`, target `threadId`, and optional
+  `parentMessageId`; when present, the server verifies the parent message belongs
+  to the same authorized thread and persists the new reply under that parent.
+  The server assigns `messageId` in the idempotency result, and retries return
+  that same `(threadId, messageId)` pair without reparenting the message.
 - `rename_channel_conversation_label` requires an `idempotencyKey`, `channelId`,
   server-issued `channelConversationId`, expected conversation/display-label
   revision, and the next user-entered label. It applies only to an existing

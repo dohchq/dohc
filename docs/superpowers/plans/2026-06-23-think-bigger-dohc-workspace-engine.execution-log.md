@@ -1,7 +1,7 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: derived from the single mutable `Live PR00 status` block in the latest
-PR00 pass below.
+Read-only summary: current state derives from the single mutable
+`Live PR00 status` block in the latest PR00 pass below.
 Created: 2026-06-23
 
 Plan:
@@ -19,7 +19,7 @@ Source specs:
 - **Single mutable status block:** only the newest PR00 pass's
   `Live PR00 status` block owns CodeRabbit status, test evidence, open
   overrides, and completion state.
-- **Derived summaries:** this header, `Status:`, and any other summaries are
+- **Derived summaries:** this header and any other summaries are
   read-only pointers to that newest live-status block.
 - **Archive boundary:** earlier `Historical PR00 status` entries under
   `Archived PR00 Pass History` are append-only background.
@@ -7551,7 +7551,7 @@ Two-hundred-eighty-second pass:
 
 Two-hundred-eighty-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three minor findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7567,6 +7567,44 @@ Two-hundred-eighty-third pass:
     `readonly`.
   - Marked immutable `ThreadMessageBase` message identity, ancestry, sequence,
     and creation timestamp fields as `readonly`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-eighty-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five major findings, one minor finding, and one trivial
+    finding fixed; committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five major findings, one minor finding, and one trivial
+  finding:
+  - Added execution-log structure validation to the Think Bigger docs checker and
+    PR00 checker contract.
+  - Moved Think Bigger spec-marker file reads into the guarded discovery block.
+  - Required retained idempotency expiry sentinels or namespace watermarks before
+    compacting terminal tombstones.
+  - Clarified deferred-review holding records versus immediate-save eligibility.
+  - Added public `namedSubconversationLabelRevision` provenance for safe channel
+    conversation label renames.
+  - Added optional `parentMessageId` targeting to `reply_to_chat`.
+  - Reworded derived status summaries so `Live PR00 status` is the only writable
+    status source of truth.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
