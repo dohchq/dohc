@@ -558,9 +558,10 @@ are peer views over the same versioned workspace engine. The canonical wire
 examples below use explicit `workspaceId` and required version identifiers. A
 `read(...)` or `stat(...)` response includes the stable `objectId`, current
 `etag`, and `versionId` needed by mutation preconditions. `contentHash` is
-returned only for non-secret entries or entries explicitly materialized for that
-caller; secret-backed paths omit it or return an opaque authorized hash handle
-unless the caller has materialization permission. `list(...)` and `search(...)`
+returned only for non-secret entries. Secret-backed paths never expose reusable
+raw `contentHash` values through read/stat responses, even when plaintext is
+materialized for that caller; they omit the hash or return an opaque authorized
+hash handle suitable for mutation preconditions. `list(...)` and `search(...)`
 entries use redacted labels or opaque path tokens for protected or secret-backed
 entries; ordinary filenames and path components are returned only when policy
 allows plaintext disclosure. Redacted entries still include stable `objectId`

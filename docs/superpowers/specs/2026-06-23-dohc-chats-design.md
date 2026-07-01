@@ -452,7 +452,7 @@ type ChatThreadBase = {
 }
 
 type ChatThreadProjection = ChatThread & {
-  linkedWork: ActiveThreadLink[]
+  readonly linkedWork: readonly ActiveThreadLink[]
 }
 
 type DmParticipantIds = readonly string[] & {
@@ -562,11 +562,23 @@ type ThreadLinkCreateRequest =
       targetType: 'atom' | 'file' | 'folder'
       targetVersionRef: ObjectTargetVersionRef
     })
+  | (SharedThreadLinkCreateRequestBase & {
+      targetType: 'atom' | 'file' | 'folder'
+      targetVersionRef: ObjectTargetVersionRef
+    })
   | (ThreadLinkCreateRequestBase & {
       targetType: 'version'
       targetVersionRef: WorkspaceVersionTargetRef
     })
+  | (SharedThreadLinkCreateRequestBase & {
+      targetType: 'version'
+      targetVersionRef: WorkspaceVersionTargetRef
+    })
   | (ThreadLinkCreateRequestBase & {
+      targetType: 'history_moment'
+      targetVersionRef: HistoryMomentTargetVersionRef
+    })
+  | (SharedThreadLinkCreateRequestBase & {
       targetType: 'history_moment'
       targetVersionRef: HistoryMomentTargetVersionRef
     })

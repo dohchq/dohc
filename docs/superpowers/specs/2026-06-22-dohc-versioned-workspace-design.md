@@ -881,27 +881,36 @@ and materialization do not create durable capture/replay tokens. When a
 workspace/version/path becomes edit-capable, or when a first write, create, or
 import attempt targets it, the engine records or refreshes exactly one
 authoritative engine-owned capture/replay token for that
-`(workspaceId, versionId, path)` tuple. That token is the workspace/version/path
-causal guard submitted by normal filesystem saves, such as a base-version token,
-etag, absence assertion, watcher sequence token, or session capture id. Broader
-multi-factor deduplication fingerprints may include content hashes, payload
-digests, or operation fingerprints, but they are not the authoritative
-workspace/version/path capture/replay token and cannot substitute for it.
+`(workspaceId, versionId, path, targetObjectId | expectedAbsent)` tuple. That
+token is stable across auth refreshes, editor restarts, and session rotation; it
+is not a transient session handle. The token is the causal guard submitted by
+normal filesystem saves, such as a base-version token, etag, absence assertion,
+watcher sequence token, or engine capture token. Broader multi-factor
+deduplication fingerprints may include content hashes, payload digests, or
+operation fingerprints, but they are not the authoritative capture/replay token
+and cannot substitute for it.
 First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
-a path with no prior object in that workspace/version, not a missing token. When
-the file is saved or captured, the filesystem path submits that engine-owned
-token with the incoming bytes. Missing, ambiguous, malformed, or wrongly scoped
-workspace/version/path capture tokens deterministically fail closed with
+a path with no prior object in that workspace/version and carries no
+`targetObjectId`; it is not a missing token. Overwrite capture/replay must carry
+the intended `targetObjectId` obtained from the engine's read/stat/list state and
+must validate that object identity before any canonical mutation, holding record,
+or quarantine allocation. When the file is saved or captured, the filesystem path
+submits that engine-owned token, the intended object identity or expected-absent
+guard, and the incoming bytes. Missing, ambiguous, malformed, or wrongly scoped
+capture tokens, missing overwrite `targetObjectId`, or object-identity evidence
+that cannot be validated deterministically fail closed with
 `PublicValidationErrorCode` value `capture_token_invalid` before any holding
 record, quarantine record, or canonical mutation is allocated. If the capture
-infrastructure cannot currently prove token validity or commit state because an
-evaluator or service is unavailable or indeterminate, the write returns
-`retryable-failure` with the appropriate `commitState` from the gate/retry
-matrix. Quarantine is reserved for accepted holding records whose well-formed
-replay data reaches server-side policy/protection evaluation. A well-formed but
-stale capture token is a real write conflict and returns the same deterministic
-current-vs-incoming conflict behavior as the API write flow instead of blindly
-overwriting canonical state.
+infrastructure cannot currently prove token/object validity or commit state
+because an evaluator or service is unavailable or indeterminate, the write
+returns `retryable-failure` with the appropriate `commitState` from the
+gate/retry matrix. Quarantine is reserved for accepted holding records whose
+well-formed replay data reaches server-side policy/protection evaluation. A
+well-formed but stale capture token, including a token whose `targetObjectId` no
+longer matches the object currently at the path because of delete/recreate,
+rename, or replacement, is a real write conflict and returns the same
+deterministic current-vs-incoming conflict behavior as the API write flow instead
+of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
