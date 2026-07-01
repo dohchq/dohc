@@ -581,6 +581,7 @@ type ChannelLinkedTargetRequestHandle =
       targetId: string
       targetType: 'share'
       targetVersionRef: null
+      shareGrantHandle: string
       shareGrantId?: never
       visibilityScope?: never
     }
@@ -617,11 +618,15 @@ type SendChannelMessageConversationSelector =
 For `linked_work`, public create requests carry only
 `ChannelLinkedTargetRequestHandle`, the user-selected target handle. They never
 carry server-managed `scopeKind`, `shareGrantId`, or `visibilityScope` values.
-The server resolves the handle against the actor, channel, workspace, share, and
-target policy, derives the authorized `ChannelLinkedTargetRef`, and stores that
-canonical ref on `ChannelConversationProvenance`. If the request cannot resolve
-to exactly one authorized internal or shared target, creation fails closed before
-deriving `channelConversationId`.
+For `targetType: 'share'`, the request must include a server-issued
+`shareGrantHandle` that selects one candidate grant for resolution without
+letting the caller assert the stored `shareGrantId`; missing, expired, revoked,
+forged, mismatched, or ambiguous handles fail closed. The server resolves the
+handle against the actor, channel, workspace, share, and target policy, derives
+the authorized `ChannelLinkedTargetRef`, and stores that canonical ref on
+`ChannelConversationProvenance`. If the request cannot resolve to exactly one
+authorized internal or shared target, creation fails closed before deriving
+`channelConversationId`.
 
 For `named_subconversation`, the server derives `namedSubconversationKey` from
 the submitted `namedSubconversationName` in
@@ -1462,8 +1467,8 @@ type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }
   | { reactionId?: never; reactionKey: string; reactionActorId?: never }
 
-`reactionKey` is a canonical, case-sensitive Unicode scalar string after NFC
-normalization with leading/trailing ASCII whitespace rejected before persistence.
+`reactionKey` is canonical, case-sensitive reaction text after NFC normalization
+with leading/trailing ASCII whitespace rejected before persistence.
 Allowed keys are either one Unicode 15.1.0 extended grapheme cluster that is an
 RGI emoji sequence under Unicode Emoji 15.1 data, or a namespaced custom key
 matching `custom:[a-z0-9][a-z0-9_.-]{0,63}`. The emoji `reactionKey` check uses

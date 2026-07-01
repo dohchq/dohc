@@ -925,16 +925,18 @@ current-system inventory, storage/filesystem decision note, and unresolved
 blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
-After P0A and P0R, Phase 0 has exactly one canonical ownership handoff: the
-**PR01 Schema Promotion Checkpoint**. The checkpoint includes the pre-PR01 freeze
-of `Phase0SharedSubstrateBaseline`; that freeze is not a separate lane,
-milestone, or source of truth. The main orchestration thread plus P0B own the
-provisional baseline only until PR 01 adopts it; PR 01 is the sole canonical
-owner after handoff. During the freeze, P0B owns the shared substrate package
-scaffold and `Phase0SharedSubstrateBaseline` is the only provisional source for
-the symbols listed in the matrix below. P0B, P0C, P0D, P0E, P0F, and P0G must
-import those provisional symbols from that baseline package rather than invent
-parallel shapes, ad hoc copies, local lookalike types, or early dependencies on
+Phase 0 ends with one canonical ownership handoff recorded in the
+**PR01 Schema Promotion Checkpoint**. `Phase0SharedSubstrateBaseline` remains the
+provisional source for P0B-P0G only during the freeze and only until PR 01
+formally adopts each symbol. The checkpoint includes the pre-PR01 freeze of
+`Phase0SharedSubstrateBaseline`; that freeze is not a separate lane, milestone,
+or source of truth. The main orchestration thread plus P0B own the provisional
+baseline only pre-adoption; PR 01 is the sole canonical owner after handoff.
+During the freeze, P0B owns the shared substrate package scaffold and
+`Phase0SharedSubstrateBaseline` is the only provisional source for the symbols
+listed in the matrix below. P0B, P0C, P0D, P0E, P0F, and P0G must import those
+provisional symbols from that baseline package rather than invent parallel
+shapes, ad hoc copies, local lookalike types, or early dependencies on
 PR 01-owned contracts. The baseline package must export every Phase 0 baseline
 symbol in the matrix below, with tests proving consumers import those symbols
 from the baseline package.
@@ -942,14 +944,16 @@ from the baseline package.
 The PR 01 completion step of the same checkpoint must record in the execution
 log the commit/PR where PR 01 adopts or migrates each provisional symbol. After
 that checkpoint, new code must consume the PR 01-owned contracts and
-`Phase0SharedSubstrateBaseline` becomes historical-only for adopted symbols. PR
-01 must add a mechanical lint/test gate for this checkpoint: after each symbol is
-adopted or migrated by its owning PR lane, the check scans downstream code for
-imports of `Phase0SharedSubstrateBaseline` for that specific symbol and fails
-until consumers import the owning contract instead. The gate is symbol-specific,
-not a blanket removal of every baseline import on PR 01 merge: `ChatThread`,
-`ThreadMessage`, and chat `ThreadLink` remain allowed through the PR 01 bridge
-until the PR 12 chat ownership boundary explicitly adopts or migrates them.
+`Phase0SharedSubstrateBaseline` becomes historical-only for each adopted symbol.
+Downstream lanes may keep importing the provisional baseline only for symbols not
+yet migrated. PR 01 must add a mechanical lint/test gate for this checkpoint:
+after each symbol is adopted or migrated by its owning PR lane, the check scans
+downstream code for imports of `Phase0SharedSubstrateBaseline` for that specific
+symbol and fails until consumers import the owning contract instead. The gate is
+symbol-specific, not a blanket removal of every baseline import on PR 01 merge:
+`ChatThread`, `ThreadMessage`, and chat `ThreadLink` remain allowed through the
+PR 01 bridge until the PR 12 chat ownership boundary explicitly adopts or
+migrates them.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 
@@ -1722,8 +1726,8 @@ Foundation alpha and the relevant surface proof are complete.
 - [The workflow](../../../.github/workflows/think-bigger-docs.yml) must run that
   checker for pull requests and pushes that touch the manifest, source specs,
   execution log, Think Bigger plan docs, checker script, workflow file, or
-  dependency manifests. `workflow_dispatch` and the scheduled drift check run the
-  same checker for non-PR drift visibility.
+  dependency manifests and lockfiles. `workflow_dispatch` and the scheduled drift
+  check run the same checker for non-PR drift visibility.
 
 **CodeRabbit focus:**
 

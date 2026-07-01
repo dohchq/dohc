@@ -508,13 +508,14 @@ deadline that changes write retries to `idempotency-expired`.
 The immutable replay tuple for an accepted holding record is not compactable
 derived state. It includes `holdingRecordId`, `workspaceId`, `versionId`,
 `idempotencyKey`, `idempotencyResultId`, `idempotencyReplayToken`,
-`replayUntil`, the operation fingerprint, the normalized causal precondition
-tuple, and the accepted record's durable timestamp. These fields must remain
-addressable until the record is no longer replayable: canonicalization succeeds,
-an explicit terminal disposition is durably recorded, or `replayUntil` produces
-the canonical `idempotency-expired` result. Compaction may rebuild indexes,
-summaries, and retry acceleration caches, but it must not remove the immutable
-replay tuple required for same-key retries.
+`replayUntil`, `requestedVersionIds`, the accepted record's canonical version
+binding when one exists, the operation fingerprint, the normalized causal
+precondition tuple, and the accepted record's durable timestamp. These fields
+must remain addressable until the record is no longer replayable:
+canonicalization succeeds, an explicit terminal disposition is durably recorded,
+or `replayUntil` produces the canonical `idempotency-expired` result. Compaction
+may rebuild indexes, summaries, and retry acceleration caches, but it must not
+remove the immutable replay tuple required for same-key retries.
 For `accepted_holding_record`, `operatorDispositionDueAt` and
 `maxPendingCanonicalizationMs` are the only operator/status escalation deadlines
 inside that replay window; they do not independently expire idempotency replay
@@ -559,9 +560,9 @@ status APIs:
 
 | `pendingState` | Entry condition | Exit conditions |
 | --- | --- | --- |
-| `pending_protection` | The accepted holding record is durable, but protected-path, visibility, secret-broker/declassification, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. A denied protected-path gate moves to `quarantined_protection`; a denied secret-broker/declassification gate moves to `quarantined_secret_declassification`; other denied gates move to their matching `quarantined_*` state. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
-| `pending_review` | All protection checks needed to ask for review have passed, including secret-broker/declassification checks when the write touches protected secret material, and policy requires human or authorized workflow review before canonicalization. | Approval moves to `pending_canonicalization`; denial moves to `quarantined_review_gate`; explicit operator retirement moves to `terminal-retired`; reaching `operatorDispositionDueAt` without a decision moves to `overdue_disposition`. |
-| `pending_canonicalization` | All currently required gates have passed and the engine is durably queued or actively replaying the accepted record into canonical workspace state. | Successful canonicalization returns the canonical write result. Apply-time protected-path denial moves to `quarantined_protection`; apply-time secret-broker/declassification denial moves to `quarantined_secret_declassification`; other apply-time gate denials move to the matching `quarantined_*` state. Preserved base/current/incoming divergence creates a conflict record. Reaching `operatorDispositionDueAt` before resolution moves to `overdue_disposition`. |
+| `pending_protection` | The accepted holding record is durable, but protected-path, policy, visibility, secret-broker/declassification, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. Denials map one-to-one: protected-path -> `quarantined_protection`; policy -> `quarantined_policy`; visibility -> `quarantined_visibility`; secret-broker/declassification -> `quarantined_secret_declassification`; provenance -> `quarantined_provenance`; attribution -> `quarantined_attribution`; proof -> `quarantined_proof`; lock -> `quarantined_locked`; version access -> `quarantined_version_access`; skill-turn -> `quarantined_skill_turn`. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
+| `pending_review` | All protection checks needed to ask for review have passed, including policy, visibility, provenance, attribution, proof, lock, version-access, skill-turn, and secret-broker/declassification checks when they apply, and policy requires human or authorized workflow review before canonicalization. | Approval moves to `pending_canonicalization`; review denial moves to `quarantined_review_gate`; any evaluator recheck denial uses the same one-to-one `quarantined_*` mapping as `pending_protection`; explicit operator retirement moves to `terminal-retired`; reaching `operatorDispositionDueAt` without a decision moves to `overdue_disposition`. |
+| `pending_canonicalization` | All currently required gates have passed and the engine is durably queued or actively replaying the accepted record into canonical workspace state. | Successful canonicalization returns the canonical write result. Apply-time denials use the same one-to-one `quarantined_*` mapping as `pending_protection`. Preserved base/current/incoming divergence creates a conflict record. Reaching `operatorDispositionDueAt` before resolution moves to `overdue_disposition`. |
 | `overdue_disposition` | Any pending state exceeded the effective `operatorDispositionDueAt` or maximum pending-canonicalization window. | It remains operator-visible until canonicalization succeeds, an authorized review/policy/protection/secret revalidation moves it back to a concrete pending state with a new due time, a gate denial quarantines it under the same mapping, or explicit operator disposition retires it as `terminal-retired`. |
 
 After explicit operator disposition retires the record, status APIs and
