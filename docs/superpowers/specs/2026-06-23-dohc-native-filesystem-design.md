@@ -473,14 +473,14 @@ materialization state.
 API-originated `hydrate(...)` and `setPinned(...)` requests are mutating
 control-plane operations and require an `idempotencyKey`. The handler records the
 key with the workspace/version/path/runtime identity, the full operation tuple
-(`hydrate` versus `setPinned`, `recursive`, and `pinned` for `setPinned`), and
-the server-derived actor/session equivalence class before applying workspace
-state changes. Authorization and actor/session identity are derived only
-server-side; callers cannot widen authority by choosing request fields. Retries
-with the same expanded key must replay the original result or deduplicate the
-already-enqueued hydration/pin side effects instead of applying them again, while
-different recursive, pinned, runtime, actor, or session operations remain
-distinct.
+(`hydrate` versus `setPinned`, with `recursive` included for both and `pinned`
+only for `setPinned`), and the server-derived actor/session equivalence class
+before applying workspace state changes. Authorization and actor/session
+identity are derived only server-side; callers cannot widen authority by
+choosing request fields. Retries with the same expanded key must replay the
+original result or deduplicate the already-enqueued hydration/pin side effects
+instead of applying them again, while different recursive, pinned, runtime,
+actor, or session operations remain distinct.
 
 ## API-native access
 
@@ -1494,10 +1494,12 @@ Export should produce:
 
 - readable files.
 - the full policy envelope required to re-import without changing file
-  semantics, including whether each governed entry is secret-backed or
-  non-secret, its `secretProjection` variant (`opaque`, `protectedLocal`, or
-  `plaintextLocal`), its `materialized` state, plus the effective-policy
-  resolver's normalized source ordinal and rule index for each emitted rule.
+  semantics, including the full `FilePolicyBase` tuple (`tracked`, `versioned`,
+  `synced`, `pinned`, `searchable`, `visibility`, `publicExport`,
+  `agentAccess`, and `materialized`), whether each governed entry is
+  secret-backed or non-secret, its `secretProjection` variant (`opaque`,
+  `protectedLocal`, or `plaintextLocal`), plus the effective-policy resolver's
+  normalized source ordinal and rule index for each emitted rule.
 - only allowlisted source-backed policy files such as `.dohc/files.toml` and
   `.dohc/visibility.toml`; `.dohcignore` remains deferred and is not emitted as
   a live policy input in this phase.
