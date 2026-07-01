@@ -773,8 +773,8 @@ routing style. After syntax, workspace scope, capture token, and idempotency
 checks pass, the write path resolves outcomes in this order:
 
 1. authorization, ownership, version-access, protected-path, lock, skill-turn,
-   provenance, attribution, proof, and secret/declassification denials return
-   their mapped `rejected` or `quarantined_*` result before any content
+   policy, provenance, attribution, proof, and secret/declassification denials
+   return their mapped `rejected` or `quarantined_*` result before any content
    comparison.
 2. unavailable or indeterminate required evaluators return
    `retryable-failure` with no canonical mutation.
