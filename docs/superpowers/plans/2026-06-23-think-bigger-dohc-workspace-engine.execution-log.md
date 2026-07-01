@@ -9152,7 +9152,7 @@ Status: restacked on P0B; not approved
 Branch: codex/think-bigger-p0c-file-history
 Worktree: `/home/ice/dev/dohc-p0c-file-history`
 Implementation workstream, if used: main orchestration thread
-PR Link: not opened/TBD
+PR Link: [#50](https://github.com/dohc-ai/dohc/pull/50)
 Date started: 2026-06-24
 Date completed:
 
