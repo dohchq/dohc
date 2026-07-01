@@ -6492,7 +6492,7 @@ Two-hundred-fifty-third pass:
 
 Two-hundred-fifty-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6510,6 +6510,44 @@ Two-hundred-fifty-fourth pass:
   - Updated the Think Bigger docs link checker to recognize reference-style empty
     angle targets like `[ref]: <>` and report them through the normal empty link
     target validation path.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Broadened the Phase 0 E2E workspace-scope proof to include holding records,
+    conflict envelopes, idempotency results/tombstones, and durability-log
+    entries.
+  - Split chat linked-work read projections into redacted shapes while keeping
+    full `ChannelLinkedTargetRef` and `ActiveThreadLink` records internal to
+    re-authorized mutation, repair, audit, and replay paths.
+  - Made `ThreadLink` the only authoritative repair source for linked-work
+    rebuilds; `ChannelTargetActivity` and projections are regenerated output.
+  - Converted the secret-backed policy example to TOML to match the
+    `.dohc/files.toml` policy section.
+  - Expanded `hydrate(...)`/`setPinned(...)` idempotency to bind the full
+    operation tuple plus server-derived actor/session identity.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

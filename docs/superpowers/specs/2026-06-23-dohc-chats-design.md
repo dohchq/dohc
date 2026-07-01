@@ -291,9 +291,22 @@ type Channel = {
   archivedAt?: UnixMsDecimalString
 }
 
+type RedactedLinkedWorkProjection = {
+  readonly sourceThreadLinkId: string
+  scopeKind: 'internal' | 'shared'
+  targetWorkspaceId: string
+  targetId: string
+  targetType: ThreadLinkTargetType
+  targetVersionRef?: VersionRef
+  shareGrantId?: never
+  visibilityScope?: never
+}
+
+type RedactedChannelLinkedTargetRef = RedactedLinkedWorkProjection
+
 type ChannelProjection = Channel & {
-  // Derived from active ThreadLink rows; ChannelTargetActivity is repair/output.
-  readonly linkedTargets: readonly ChannelLinkedTargetRef[]
+  // Redacted read-side projection derived from active ThreadLink rows.
+  readonly linkedTargets: readonly RedactedChannelLinkedTargetRef[]
 }
 
 type ChannelTargetActivity = {
@@ -318,13 +331,19 @@ threads, `ChannelTargetActivity` is a derived append-only channel aggregation
 ledger emitted from `ThreadLink` mutations for a specific `(channelId, threadId)`
 pair; it is not an independent write authority.
 `ChannelProjection.linkedTargets` and `ChatThreadProjection.linkedWork` are
-read-only projections/caches rebuilt from active `ThreadLink` plus repaired
-`ChannelTargetActivity` output; neither field is an authoritative mutable
-record. If `ThreadLink`, `ChannelTargetActivity`,
+redacted read-only projections/caches rebuilt from active `ThreadLink` rows
+only; neither field is an authoritative mutable record, and neither exposes raw
+`shareGrantId` or `visibilityScope`. `ChannelTargetActivity` is derived output
+regenerated from the same `ThreadLink` source after repair, not a co-equal input
+to the repair loop. If `ThreadLink`, `ChannelTargetActivity`,
 `ChannelProjection.linkedTargets`, and `ChatThreadProjection.linkedWork`
 disagree, `ThreadLink` wins, the derived ledger/projections are marked stale, and
-the engine repairs or rebuilds them before using them for authorization-sensitive
-read, replay, retry, export, search, notification, or side-rail behavior.
+the engine rebuilds or repairs the ledger and projections from active
+`ThreadLink` rows before using them for authorization-sensitive read, replay,
+retry, export, search, notification, or side-rail behavior. Full
+`ChannelLinkedTargetRef` and `ActiveThreadLink` records remain internal to
+authorized mutation, repair, audit, and replay paths; shared rendering, export,
+search, and side rails receive only the redacted projection shapes.
 
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
 tuple used by channel-target activity and compatible with `ThreadLink` creation,
@@ -471,7 +490,7 @@ type ChatThreadBase = {
 }
 
 type ChatThreadProjection = ChatThread & {
-  readonly linkedWork: readonly ActiveThreadLink[]
+  readonly linkedWork: readonly RedactedLinkedWorkProjection[]
 }
 
 type DmParticipantIds = readonly string[] & {

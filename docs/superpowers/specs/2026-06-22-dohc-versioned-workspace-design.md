@@ -1486,9 +1486,10 @@ The first proof should be small but real:
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
 11. E2E proves every persisted atom, folder, entity, share, capture, file,
-    version, event, chat link, projection, and history record is
-    workspace-scoped, and that cross-workspace references are rejected by
-    default.
+    version, event, chat link, projection, history record, holding record,
+    conflict envelope, idempotency result, idempotency tombstone, and
+    durability-log entry is workspace-scoped, and that cross-workspace
+    references are rejected by default.
 12. E2E proves holding-area replay is causal: stale base/CAS tokens degrade to
     conflict/manual reconciliation, while malformed or cross-scope
     workspace/version bindings fail validation before holding storage.

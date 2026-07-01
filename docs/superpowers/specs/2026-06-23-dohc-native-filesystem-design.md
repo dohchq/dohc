@@ -469,10 +469,15 @@ orthogonal `pinned` boolean and does not by itself invent a third
 materialization state.
 API-originated `hydrate(...)` and `setPinned(...)` requests are mutating
 control-plane operations and require an `idempotencyKey`. The handler records the
-key with the workspace/version/path/runtime identity before applying workspace
-state changes, and retries with the same key must replay the original result or
-deduplicate the already-enqueued hydration/pin side effects instead of applying
-them again.
+key with the workspace/version/path/runtime identity, the full operation tuple
+(`hydrate` versus `setPinned`, `recursive`, and `pinned` for `setPinned`), and
+the server-derived actor/session equivalence class before applying workspace
+state changes. Authorization and actor/session identity are derived only
+server-side; callers cannot widen authority by choosing request fields. Retries
+with the same expanded key must replay the original result or deduplicate the
+already-enqueued hydration/pin side effects instead of applying them again, while
+different recursive, pinned, runtime, actor, or session operations remain
+distinct.
 
 ## API-native access
 
@@ -1239,17 +1244,18 @@ files with stricter policy.
 
 Example opt-in policy for an already-authorized protected local projection:
 
-```yaml
-path: ".env"
-tracked: true
-versioned: true
-encrypted: true
-searchable: false
-visibility: private
-publicExport: redact
-agentAccess: explicit
-materialized: local # protected/explicit local projection, not default exposure
-secretProjection: protectedLocal
+```toml
+[[rule]]
+match = ".env"
+tracked = true
+versioned = true
+encrypted = true
+searchable = false
+visibility = "private"
+public_export = "redact"
+agent_access = "explicit"
+materialized = "local" # protected/explicit local projection, not default exposure
+secret_projection = "protectedLocal"
 ```
 
 For an authorized user on their own machine, `.env` can look like a normal file
