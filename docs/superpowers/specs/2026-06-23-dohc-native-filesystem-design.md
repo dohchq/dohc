@@ -580,16 +580,16 @@ best-effort cleanup/repair records after publish where necessary. Those
 projection chores are not the canonical mutation and must not be exposed as
 delete-plus-create history. If the source identity/freshness or
 destination-absence proof cannot be established, the operation returns a
-deterministic validation, `rejected`, `quarantined`, or `retryable-failure`
-result with manual-follow-up metadata according to the capture/API path.
+`rejected`, `quarantined`, or `retryable-failure` result with manual-follow-up
+metadata according to the capture/API path.
 `conflict` remains reserved for cases where the engine can form the
 base/current/incoming preservation envelope described above.
 If canonical source and destination paths are identical after path-equivalence
 normalization, `rename(...)` or `move(...)` returns a deterministic no-op only
 after verifying `sourceObjectId`, source freshness, workspace/version binding,
 and idempotency identity. If any guard fails, the operation returns the normal
-validation, `rejected`, `quarantined`, `retryable-failure`, or `conflict`
-outcome required by that failed guard. A same-path operation must never be
+`rejected`, `quarantined`, `retryable-failure`, or `conflict` outcome required by
+that failed guard. A same-path operation must never be
 represented as delete-plus-create history.
 If the destination already exists, the operation is an overwrite-rename and must
 map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart

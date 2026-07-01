@@ -508,12 +508,14 @@ type ChannelConversationProvenance =
       linkedWorkTarget?: never
       namedSubconversationKey?: never
       namedSubconversationDisplayLabel?: never
+      namedSubconversationLabelRevision?: never
     }
   | {
       conversationKind: 'linked_work'
       linkedWorkTarget: ChannelLinkedTargetRef
       namedSubconversationKey?: never
       namedSubconversationDisplayLabel?: never
+      namedSubconversationLabelRevision?: never
     }
   | {
       conversationKind: 'named_subconversation'
@@ -521,6 +523,7 @@ type ChannelConversationProvenance =
       namedSubconversationKey: string
       namedSubconversationKeyVersion: string
       namedSubconversationDisplayLabel: string
+      namedSubconversationLabelRevision: UInt64DecimalString
     }
 
 type ChannelLinkedTargetRequestHandle =
@@ -615,7 +618,8 @@ after normalization. Internal whitespace is preserved exactly after NFC/case
 folding; the server does not collapse or rewrite it. The server stores both the
 versioned normalized value as `(namedSubconversationKey,
 namedSubconversationKeyVersion)` and a durable
-`namedSubconversationDisplayLabel` on `ChannelConversationProvenance`. The
+`namedSubconversationDisplayLabel` plus
+`namedSubconversationLabelRevision: "1"` on `ChannelConversationProvenance`. The
 display label is the accepted user-entered label after decode, trim, NFC, and
 display-safety validation but before case folding; UI, export, rename, and
 history surfaces read that label instead of rendering the normalized key.
@@ -625,8 +629,9 @@ label. A later label change must use an explicit rename/history action rather
 than a second create request: `rename_channel_conversation_label` validates the
 existing `channelConversationId` is a `named_subconversation`, keeps the stored
 `(namedSubconversationKey, namedSubconversationKeyVersion)` and
-`channelConversationId` unchanged, stores the next
-`namedSubconversationDisplayLabel`, and appends
+`channelConversationId` unchanged, verifies the caller's expected
+`namedSubconversationLabelRevision`, stores the next
+`namedSubconversationDisplayLabel` with the next revision, and appends
 `NamedSubconversationLabelRenamedThreadActivity` in the same serialized unit. If
 the normalizer changes later, migration must create a new versioned value
 explicitly rather than silently reinterpreting old keys.
@@ -1307,6 +1312,8 @@ type NamedSubconversationLabelRenamedThreadActivity = ThreadActivityBase & {
   channelConversationId: string
   namedSubconversationKey: string
   namedSubconversationKeyVersion: string
+  previousNamedSubconversationLabelRevision: UInt64DecimalString
+  nextNamedSubconversationLabelRevision: UInt64DecimalString
   previousNamedSubconversationDisplayLabel: string
   nextNamedSubconversationDisplayLabel: string
 }
@@ -1525,8 +1532,9 @@ For `message_created`, `message_edited`, `message_deleted`, `message_restored`,
 and `createdAt` are required. For `message_created`, `parentMessageId` is the
 immutable reply parent captured from `ThreadMessage.parentMessageId` when present.
 For `named_subconversation_label_renamed`, previous/next display labels,
-`channelConversationId`, and the stored named-subconversation key pair are
-required. For `message_edited`, `previousBody` and `previousBodyRevision` are
+previous/next label revisions, `channelConversationId`, and the stored
+named-subconversation key pair are required. For `message_edited`, `previousBody`
+and `previousBodyRevision` are
 also required. For in-system `message_deleted` events,
 `previousBody` and `previousBodyRevision` are required and must preserve the
 deleted body as plaintext, redacted, or secret-backed snapshot according to
@@ -1698,10 +1706,12 @@ server-assigned target identifiers:
   `named_subconversation` thread the actor can administer, derives the next
   display label with the same display-safety validation used by creation, keeps
   `namedSubconversationKey`, `namedSubconversationKeyVersion`, and
-  `channelConversationId` unchanged, and appends
-  `NamedSubconversationLabelRenamedThreadActivity` with previous/next labels in
-  the same serialized unit. Retries replay the same activity and display label;
-  callers must not recreate the conversation to rename it.
+  `channelConversationId` unchanged, verifies the expected
+  `namedSubconversationLabelRevision` before mutation, advances that revision by
+  exactly one, and appends `NamedSubconversationLabelRenamedThreadActivity` with
+  previous/next labels and revisions in the same serialized unit. Retries replay
+  the same activity, revision, and display label; callers must not recreate the
+  conversation to rename it.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected
   `bodyRevision`.
 - `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected
@@ -1955,6 +1965,60 @@ Required lightweight features:
 - simple acknowledgements.
 - message edit/delete with history through the `ThreadMessage` edit and
   tombstone fields.
+
+Presence and typing are ephemeral signals, not durable message history:
+
+```ts
+type ChatPresenceState = 'online' | 'away' | 'offline'
+
+type ChatPresenceSignal = {
+  kind: 'presence_updated'
+  workspaceId: string
+  channelId?: string
+  threadId?: string
+  readonly actorId: string // server-derived
+  readonly actorKind: 'human' | 'agent' | 'system'
+  readonly actorDisplayLabel: string // redacted or omitted when policy requires
+  sessionId: string // server-issued session/device/agent-run session
+  presence: ChatPresenceState
+  issuedAt: UnixMsDecimalString
+  expiresAt: UnixMsDecimalString
+}
+
+type ChatTypingSignal = {
+  kind: 'typing_started' | 'typing_refreshed' | 'typing_stopped'
+  workspaceId: string
+  threadId: string
+  parentMessageId?: string
+  readonly actorId: string // server-derived
+  readonly actorKind: 'human' | 'agent' | 'system'
+  readonly actorDisplayLabel: string // redacted or omitted when policy requires
+  sessionId: string
+  issuedAt: UnixMsDecimalString
+  expiresAt: UnixMsDecimalString
+}
+```
+
+The server owns `actorId`, `actorKind`, `actorDisplayLabel`, `sessionId`,
+`issuedAt`, and `expiresAt`; browser/client callers may request a state change
+but cannot assert identity, timestamps, or expiry. Presence signals expire after
+at most 120 seconds and must refresh no less often than halfway through the TTL
+while the session remains active. Typing signals expire after at most 8 seconds,
+refresh while input continues, and stop immediately when the composer is sent,
+cleared, hidden by policy, or the session disconnects. Expired signals are
+dropped from live views and are not written to `ThreadActivity`, search, export,
+history, notifications, or unread counts.
+
+Presence/typing fanout re-authorizes each recipient against the current channel,
+thread, linked-work, and share grant policy at delivery time. In shared channels,
+the server may redact `actorDisplayLabel`, omit `parentMessageId`, or suppress the
+signal entirely when a recipient can see the channel but not the actor, thread, or
+reply parent. Typing against a `parentMessageId` must recheck the same
+`ThreadMessage` visibility used by message reads; if the parent message is edited,
+deleted, tombstoned, or hidden before delivery, the typing signal degrades to
+thread-level typing or is suppressed without exposing deleted body metadata.
+Lightweight reactions remain durable `ReactionThreadActivity` records, while
+presence and typing remain best-effort live state.
 
 Keep reactions lightweight. They should make collaboration feel alive without
 turning work into noise.

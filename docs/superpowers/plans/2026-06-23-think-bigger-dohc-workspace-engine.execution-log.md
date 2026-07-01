@@ -6564,7 +6564,7 @@ Two-hundred-fifty-fifth pass:
 
 Two-hundred-fifty-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6583,6 +6583,57 @@ Two-hundred-fifty-sixth pass:
     can reconstruct reply topology.
   - Replaced non-copy-pasteable execution-log template validation commands with
     repo-relative commands.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: eight follow-up findings fixed and one lockfile finding
+    verified already satisfied; committed review rerun is required after this
+    pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed or verified CodeRabbit's nine follow-up findings:
+  - Verified `github-slugger` is already present in `pnpm-lock.yaml` with importer,
+    package, and snapshot entries; `pnpm install --lockfile-only --ignore-scripts`
+    produced no lockfile diff, aside from the local Node engine warning.
+  - Mapped the PR01 Schema Promotion Checkpoint's schema-baseline responsibility
+    to P0B and made `Phase0SharedSubstrateBaseline` ownership explicit.
+  - Assigned P0E as the single Phase 0 provisional writer for chat thread,
+    message, link, and read-state rows, with PR 01 bridge versions and PR 12 final
+    ownership boundaries.
+  - Made canonical wire-format unknown-field behavior strict: unknown fields are
+    rejected unless carried in a declared `extensions` map preserved by the TS and
+    Rust conformance paths.
+  - Updated the Think Bigger docs checker to ignore backslash-escaped Markdown
+    links, autolinks, and raw HTML anchors/links, with regression fixtures.
+  - Clarified holding-area replay changes require a durable replay-state mutation
+    or attached validation evidence; changing server-side facts alone does not
+    alter the replay result.
+  - Replaced the undefined native filesystem `deterministic validation` result
+    wording with concrete `rejected`, `quarantined`, or `retryable-failure`
+    outcomes.
+  - Added `namedSubconversationLabelRevision` to named-subconversation provenance
+    and rename activities so rename CAS and retries are deterministic.
+  - Added a concrete presence/typing signal contract with TTL, refresh, expiry,
+    redaction, shared-channel reauthorization, and ThreadMessage tombstone/edit
+    degradation rules.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

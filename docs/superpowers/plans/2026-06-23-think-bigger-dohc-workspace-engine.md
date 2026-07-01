@@ -901,13 +901,14 @@ After P0A and P0R, Phase 0 must enter one canonical ownership handoff: the
 **PR01 Schema Promotion Checkpoint**. The short alias `P0S` may be used only for
 the pre-PR01 freeze work inside that same checkpoint; it is not a separate
 ownership step, lane, or source of truth. The main orchestration thread plus the
-schema-baseline lane own this checkpoint. The named provisional source of truth
-is `Phase0SharedSubstrateBaseline` in the shared substrate package scaffold. It
-must be versioned, tested, and owned in one place; P0B, P0C, P0D, P0E, P0F, and
-P0G must import these provisional symbols from the baseline package rather than
-invent parallel shapes, ad hoc copies, or local lookalike types or depend on
-PR 01-owned contracts too early. For the checkpoint's pre-PR01 freeze, the
-baseline package must export the provisional `WorkspaceObject`,
+P0B lane own this checkpoint. P0B is the named schema-baseline workstream for
+Phase 0 and owns the shared substrate package scaffold until PR 01 adopts it.
+The named provisional source of truth is `Phase0SharedSubstrateBaseline` in that
+scaffold. It must be versioned, tested, and owned in one place; P0B, P0C, P0D,
+P0E, P0F, and P0G must import these provisional symbols from the baseline package
+rather than invent parallel shapes, ad hoc copies, or local lookalike types or
+depend on PR 01-owned contracts too early. For the checkpoint's pre-PR01 freeze,
+the baseline package must export the provisional `WorkspaceObject`,
 `WorkspaceVersion`, `VersionRef`,
 stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
 `ConflictRecord`, `ChatThread`, `ThreadMessage`, `ThreadLink`,
@@ -933,8 +934,8 @@ migrates them.
 | Symbols | Phase 0 baseline | PR 01 | PR 12 |
 | --- | --- | --- | --- |
 | `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
-| `ChatThread`, `ThreadMessage`, chat `ThreadLink` | Provisional proof-slice owner for P0E linked chat behavior and persisted thread/message/link rows; PR 12 remains the final ownership boundary. | Versioned bridge only so file/history/search proof code can compile; owns migration metadata for provisional proof rows but not final chat storage. | Single final owner; explicitly adopts, migrates, or backfills from the Phase 0/PR 01 bridge, then owns durable channels, DMs, linked-work behavior, and full chat storage. |
-| `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | Provisional fixture owner only when needed for Phase 0 chat bridge tests; must use monotonic cursor semantics and server-owned revision tokens. | Explicit bridge owner from the **PR01 Schema Promotion Checkpoint** until PR 12 lands, using schema version `chat-read-state-bridge-v0`. PR 01 owns rebuild/invalidation of bridge read-state projections and the migration boundary from Phase 0 fixtures, but does not own final cursor semantics beyond monotonic cursor plus server-owned revision/CAS compatibility. | Single final owner; migrates/backfills from `chat-read-state-bridge-v0`, owns cursor semantics, server-owned revision/CAS token behavior, projection rebuild/invalidation, and compatibility for legacy read-state rows. |
+| `ChatThread`, `ThreadMessage`, chat `ThreadLink` | P0E is the only provisional writer for linked-chat proof rows before PR 01; other Phase 0 lanes may read the baseline symbols but must not mutate these records. | Bridge writer only under schema version `chat-core-bridge-v0` so file/history/search proof code can compile; owns migration metadata and import compatibility for P0E rows, but must not extend final chat storage semantics. | Single final writer; explicitly adopts, migrates, or backfills from `chat-core-bridge-v0`, then owns durable channels, DMs, linked-work behavior, and full chat storage. |
+| `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | P0E is the only provisional writer when read-state rows are needed for Phase 0 chat bridge tests; other lanes may read fixtures only. The provisional rows must use monotonic cursor semantics and server-owned revision tokens. | Explicit bridge writer from the **PR01 Schema Promotion Checkpoint** until PR 12 lands, using schema version `chat-read-state-bridge-v0`. PR 01 owns rebuild/invalidation of bridge read-state projections and the migration boundary from Phase 0 fixtures, but does not own final cursor semantics beyond monotonic cursor plus server-owned revision/CAS compatibility. | Single final writer; migrates/backfills from `chat-read-state-bridge-v0`, owns cursor semantics, server-owned revision/CAS token behavior, projection rebuild/invalidation, and compatibility for legacy read-state rows. |
 | `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
 
 The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
@@ -1625,11 +1626,12 @@ Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
 - **Schema-promotion checkpoint pointer:** immediately after P0A/P0R, the main
-  orchestration thread plus the schema-baseline lane must use the canonical
-  **PR01 Schema Promotion Checkpoint** definition in [Phase 0 PRs](#phase-0-prs)
-  for the freeze/handoff symbol list, import-enforcement gate, execution-log
-  evidence, and `Phase0SharedSubstrateBaseline` exit criteria. The `P0S` alias is
-  pointer-only; it is not a standalone milestone, lane, or source of truth.
+  orchestration thread plus P0B's schema-baseline responsibility must use the
+  canonical **PR01 Schema Promotion Checkpoint** definition in
+  [Phase 0 PRs](#phase-0-prs) for the freeze/handoff symbol list,
+  import-enforcement gate, execution-log evidence, and
+  `Phase0SharedSubstrateBaseline` exit criteria. The `P0S` alias is pointer-only;
+  it is not a standalone milestone, lane, or source of truth.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.
@@ -1735,11 +1737,18 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   conformance-checked against that single source of truth.
 - Define the wire-format contract beside the canonical schema source: canonical
   field casing, enum encoding, explicit `null` vs absent-field rules,
-  backwards/forwards schema-version rules, and how unknown fields are preserved,
-  rejected, or ignored. The TypeScript package entrypoint and Rust crate or
-  conformance fixture must round-trip fixtures against those exact wire-format
-  rules; neither runtime may assume local serializer defaults for casing,
-  enums, optional fields, or version tags.
+  backwards/forwards schema-version rules, and strict unknown-field behavior.
+  Canonical schema handling rejects unknown fields at trust boundaries by
+  default; forward-compatible data is accepted only when it is carried in an
+  explicit `extensions` map declared by that schema version, and that map must be
+  preserved byte-for-byte through round trips. The TypeScript package entrypoint
+  must expose `serializeWorkspaceEngineWire` and `parseWorkspaceEngineWireStrict`,
+  and the Rust crate/conformance fixture must expose
+  `encode_workspace_engine_wire` and `decode_workspace_engine_wire_strict`; both
+  paths must reject unknown canonical fields, preserve declared `extensions`, and
+  round-trip fixtures against those exact wire-format rules. Neither runtime may
+  assume local serializer defaults for casing, enums, optional fields, unknown
+  fields, extensions, or version tags.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

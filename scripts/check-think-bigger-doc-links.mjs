@@ -324,9 +324,10 @@ const collectAnchors = (markdown) => {
   }
   let previousLine = null
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
+  const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]()#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
 
   for (const { text: line } of contentLines(markdown)) {
-    const prose = stripCodeSpans(line)
+    const prose = stripBackslashEscapes(stripCodeSpans(line))
     for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
       const anchor = htmlAttributeValue(match[0], 'id') ?? htmlAttributeValue(match[0], 'name')
       if (anchor) {
@@ -370,6 +371,7 @@ const collectLinks = (markdown) => {
       : destination
   )
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
+  const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]()#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
   const nestedImageLinkPattern = /\[!\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)/
@@ -389,7 +391,7 @@ const collectLinks = (markdown) => {
   }
 
   for (const { text: line, lineNumber } of lines) {
-    const prose = stripCodeSpans(line)
+    const prose = stripBackslashEscapes(stripCodeSpans(line))
     const definition = prose.match(referenceDefinitionPattern)
     if (definition) {
       if (isFootnoteLabel(definition[1])) {
@@ -405,7 +407,7 @@ const collectLinks = (markdown) => {
   }
 
   for (const { text: line, lineNumber } of lines) {
-    let prose = stripCodeSpans(line)
+    let prose = stripBackslashEscapes(stripCodeSpans(line))
     const footnoteDefinition = prose.match(footnoteDefinitionPattern)
     if (footnoteDefinition) {
       prose = prose.slice(footnoteDefinition[0].length)
@@ -517,9 +519,16 @@ const assertCheckerFixtures = () => {
   if (!rawHtmlAnchors.has('custom-anchor') || !rawHtmlAnchors.has('legacy-anchor')) {
     throw new Error('raw HTML anchor fixture should collect id and name anchors')
   }
+  if (collectAnchors('\\<a id="escaped-anchor"></a>').has('escaped-anchor')) {
+    throw new Error('escaped raw HTML anchor fixture should not collect anchors')
+  }
   const rawHtmlLink = collectLinks('<a href="./target.md#custom-anchor">target</a>')
   if (!rawHtmlLink.links.some((link) => link.target === './target.md#custom-anchor')) {
     throw new Error('raw HTML link fixture should collect href destinations')
+  }
+  const escapedRawHtmlLink = collectLinks('\\<a href="./missing.md">target</a>')
+  if (escapedRawHtmlLink.links.length > 0) {
+    throw new Error('escaped raw HTML link fixture should not collect href destinations')
   }
   const rawHtmlEmptyHref = collectLinks('<a href="">empty</a>')
   if (!rawHtmlEmptyHref.links.some((link) => link.target === '')) {
@@ -577,6 +586,20 @@ const assertCheckerFixtures = () => {
   const missingReference = collectLinks('[missing][reference]')
   if (!missingReference.unresolvedReferences.some((entry) => entry.reference === '[missing][reference]' && entry.lineNumber === 1)) {
     throw new Error('missing reference fixture should still report unresolved reference links')
+  }
+  const escapedMarkdownLink = collectLinks('\\[hidden](./missing.md)\n[visible](./visible.md)')
+  if (
+    escapedMarkdownLink.links.some((link) => link.target === './missing.md')
+    || !escapedMarkdownLink.links.some((link) => link.target === './visible.md')
+  ) {
+    throw new Error('escaped Markdown link fixture should ignore escaped links only')
+  }
+  const escapedAutolink = collectLinks('\\<https://example.com>\n<app://workspace/thread>')
+  if (
+    escapedAutolink.links.some((link) => link.target === 'https://example.com')
+    || !escapedAutolink.links.some((link) => link.target === 'app://workspace/thread')
+  ) {
+    throw new Error('escaped autolink fixture should ignore escaped autolinks only')
   }
   const referenceLinks = collectLinks('[ref]: ./target.md\n[ref]\n[full][ref]')
   const referenceTargetCount = referenceLinks.links.filter((link) => link.target === './target.md').length

@@ -615,10 +615,13 @@ malformed/cross-scope binding, visibility, authorization/permission,
 ownership/review gate, policy, protected-path, lock, version-access, skill-turn,
 provenance, attribution, proof, then causal base conflict. If multiple
 server-derived checks fail in one replay attempt, the earliest matching class in
-that order wins. Later retries may produce a different authoritative replay
-outcome when review approval, policy revalidation, protection evidence, or
-causal-base state has changed; the replay metadata identity remains frozen, but
-the record's current durable state is re-evaluated.
+that order wins. Review approval, policy revalidation, protection evidence, or
+causal-base changes do not change a replay result by themselves. Later retries
+may produce a different authoritative replay outcome only after the replay-state
+helper has durably mutated the holding record, attached new validation evidence,
+or transitioned the record's durable state for the same replay metadata identity.
+The replay metadata identity remains frozen; each retry re-evaluates the record's
+current durable state through the same ordered rules.
 
 - If workspace/version binding metadata is malformed, mismatched, crosses
   workspace scope, or cannot be proven before a holding record exists, return a
