@@ -8030,7 +8030,7 @@ Two-hundred-ninety-sixth pass:
 
 <a id="historical-pr00-status-296"></a>
 
-### Historical PR00 Status
+### Historical PR00 Status - Pass 296
 
 Historical status snapshot.
 
@@ -8077,7 +8077,7 @@ Historical status snapshot.
 
 Two-hundred-ninety-seventh pass:
 
-### Historical PR00 Status
+### Historical PR00 Status - Pass 297
 
 Historical status snapshot.
 
@@ -8123,7 +8123,7 @@ Historical status snapshot.
 
 Two-hundred-ninety-eighth pass:
 
-### Historical PR00 Status
+### Historical PR00 Status - Pass 298
 
 Historical status snapshot.
 
@@ -8169,11 +8169,11 @@ Historical status snapshot.
 
 Two-hundred-ninety-ninth pass:
 
-### Live PR00 Status
+### Historical PR00 Status - Pass 299
 
-Mutable status symbol: `LivePR00Status`.
+Historical status snapshot.
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one major finding and one trivial finding fixed; committed
     review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -8192,6 +8192,44 @@ Mutable status symbol: `LivePR00Status`.
   - Split the dense `ThreadReadState` ownership matrix row into separate
     read-state and projection rows that distinguish P0E provisional fixtures,
     PR 01 `chat-read-state-bridge-v0` responsibility, and PR 12 final ownership.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Three-hundredth pass:
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: two minor findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+
+- Fixed CodeRabbit's two minor findings:
+  - Made archived historical-status headings unique by pass number to avoid
+    duplicate generated anchors.
+  - Reworded mandatory-review pending writes to say no canonical
+    workspace/object state is mutated before review approval.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

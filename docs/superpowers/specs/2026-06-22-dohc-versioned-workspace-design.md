@@ -837,8 +837,8 @@ that shared order:
    merge uncertainty create conflict preservation/reconciliation.
 6. mandatory review for an otherwise clean write creates a `durable-pending`
    holding record with `lifecycleState: 'pending_review'` only after the accepted
-   write-intent record and idempotency result are durable; no canonical file
-   content is mutated yet.
+   write-intent record and idempotency result are durable; no canonical
+   workspace/object state is mutated yet.
 7. a clean write that passes all synchronous gates and does not require
    deferred review or deferred canonicalization saves immediately to that
    version.
