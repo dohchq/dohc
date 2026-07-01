@@ -793,11 +793,11 @@ the target `channelId`: either an existing server-issued
 derive the stored `(namedSubconversationKey,
 namedSubconversationKeyVersion)` pair. Callers obtain the server-issued
 `channelConversationId` from the `send_channel_message` create/read response or
-from a thread/conversation read for the same canonical context tuple. Clients and
-agents should persist and reuse that returned `channelConversationId` with the
-`threadId` for subsequent sends or reads; if they lose it, they must re-resolve
-it through the same server conversation read/get-or-create path rather than
-reconstructing the id locally.
+from `read_channel_conversation` for the same canonical context tuple. Clients
+and agents should persist and reuse that returned `channelConversationId` with
+the `threadId` for subsequent sends or reads; if they lose it, they must
+re-resolve it through `read_channel_conversation` rather than reconstructing the
+id locally.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current
@@ -1516,6 +1516,7 @@ Core actions:
 list_channels
 list_chats
 read_chat
+read_channel_conversation
 create_chat
 send_channel_message
 reply_to_chat
@@ -1529,6 +1530,7 @@ enforce workspace scope on every entity and result:
 - `list_chats`
 - `list_channels`
 - `read_chat`
+- `read_channel_conversation`
 - `create_chat`
 - `send_channel_message`
 - `reply_to_chat`
@@ -1545,6 +1547,18 @@ Callers must not be able to assert user/workspace identity, widen chat
 visibility, or link a chat to work they cannot access. Agent messages use the
 same authorization model as human messages; the display label is different, not
 the authority model.
+
+`read_channel_conversation` accepts a target `channelId` plus either an existing
+server-issued `channelConversationId` or a `ChannelConversationCreateRequest`.
+It runs the same canonical conversation resolver as `send_channel_message` and
+returns the existing `threadId`, `channelConversationId`, and
+`ChannelConversationProvenance` for that authorized channel thread. If no
+channel-backed thread exists for the canonical tuple, it returns
+`needs_first_send`/`not_found` and must not create or reserve a `ChatThread`,
+emit `chat_created`, or reserve a message id. Clients and agents use this action
+to recover a lost `channelConversationId` together with its `threadId`; they must
+not reconstruct channel conversation ids locally.
+
 Chat mutation handlers are idempotent by stable request identifiers and
 server-assigned target identifiers:
 
@@ -1553,8 +1567,9 @@ server-assigned target identifiers:
   idempotency result, and retries return that same `threadId`. Channel-backed
   threads must not be created through `create_chat`.
 - `send_channel_message` requires an `idempotencyKey` and a
-  `SendChannelMessageConversationSelector`; the server atomically resolves or
-  creates the channel-backed `ChatThread` by
+  `SendChannelMessageConversationSelector`; the server applies the same canonical
+  conversation resolution rules as `read_channel_conversation`, then atomically
+  resolves or creates the channel-backed `ChatThread` by
   `(workspaceId, channelId, channelConversationId)` and persists the
   `ThreadMessage` plus the `threadKind: 'channel'` `chat_created` activity when
   this is the first send for that tuple in the same serialized unit. The
