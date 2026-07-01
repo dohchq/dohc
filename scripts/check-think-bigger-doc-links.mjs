@@ -155,6 +155,7 @@ const htmlAttributeValue = (tag, attrName) => {
 }
 
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
+const markerWidth = (text) => text.replace(/\t/g, '    ').length
 
 const inlineCodeRanges = (line) => {
   const ranges = []
@@ -248,7 +249,7 @@ function* contentLines(markdown) {
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
     const leadingIndent = indentationWidth(line)
-    const listContentIndent = listItem ? indentationWidth(listItem[0]) : null
+    const listContentIndent = listItem ? markerWidth(listItem[0]) : null
     const fenceIndent = rawFence ? indentationWidth(rawFence[1]) : null
     const fence = rawFence && (
       fenceIndent <= 3
@@ -294,7 +295,9 @@ function* contentLines(markdown) {
 
     if (!inFence && indentedCode) {
       inIndentedCode = true
-      activeListIndent = null
+      if (!listCodeBlock) {
+        activeListIndent = null
+      }
       continue
     }
 
@@ -571,6 +574,10 @@ const assertCheckerFixtures = () => {
   const indentedBlockquoteMarkerCode = collectLinks('    > [hidden](./missing.md)')
   if (indentedBlockquoteMarkerCode.links.length > 0 || indentedBlockquoteMarkerCode.unresolvedReferences.length > 0) {
     throw new Error('indented code starting with a blockquote marker should not produce links')
+  }
+  const listContinuationAfterCode = collectLinks('- item\n      code block\n    [visible](./visible.md)')
+  if (!listContinuationAfterCode.links.some((link) => link.target === './visible.md')) {
+    throw new Error('list continuation after an indented list code block should produce links')
   }
 
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')

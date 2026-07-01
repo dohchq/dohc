@@ -655,9 +655,10 @@ workspace/version binding from that session material and then dispatches the
 same explicit workspace/version operation shape; browser/client callers never
 supply trusted identity or auth-context fields. Each operation still supplies
 the version identifiers it actually needs: single-version operations such as
-read/write/list/stat/search/watch/snapshot/restore bind one version, while diff
-and merge bind the required source/target or versionA/versionB pair inside that
-same workspace. Server-side session binding must match those explicit
+read/write/list/stat/status/hydrate/setPinned/search/watch/snapshot/restore bind
+one version, while diff and merge bind the required source/target or
+versionA/versionB pair inside that same workspace. Server-side session binding
+must match those explicit
 identifiers or fail closed before filesystem or storage access. Cross-workspace
 path or version references fail closed before filesystem or storage access.
 
@@ -1503,6 +1504,12 @@ Export should produce:
 - the persisted `versionsNamespaceMode` for the workspace so re-import uses the
   same reserved-namespace scan, materialized workspace walker, and
   workspace/version mount resolver behavior for `.versions/**` on every machine.
+- no in-flight `versionsNamespaceActivationFence`: default ownership export must
+  fail closed while the fence is active. Authorized operator migration export may
+  serialize the fence metadata alongside `versionsNamespaceMode` only as
+  engine-managed migration state, never as ordinary content, and re-import must
+  restore or complete/roll back that fence before ordinary `.versions/**`
+  walking or managed version mount resolution proceeds.
 
 Default ownership export operates on a clean canonical snapshot. If the selected
 workspace scope contains unresolved `durable-pending`, `quarantined`, or
@@ -1525,7 +1532,11 @@ rule index plus the workspace path-equivalence profile used during
 canonicalization and the persisted `versionsNamespaceMode`; re-import must fail
 closed rather than treating an entry with missing policy envelope, ordering data,
 a missing/incompatible path-equivalence profile, or a missing/incompatible
-versions-namespace mode as ordinary content. Legacy exports that predate
+versions-namespace mode as ordinary content. If an export declares an active
+`versionsNamespaceActivationFence`, re-import treats the fence as required
+migration state and must resume/complete or roll back the cutover before
+ordinary content import continues; if that fence metadata is missing or
+incompatible, import fails closed. Legacy exports that predate
 `versionsNamespaceMode` require an explicit import-time migration choice before
 activation.
 

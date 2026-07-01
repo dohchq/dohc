@@ -1323,6 +1323,7 @@ type MessageEditThreadActivity = ThreadActivityBase & {
   kind: 'message_edited'
   previousBody: ChatBodySnapshot
   previousBodyRevision: UInt64DecimalString
+  nextBodyRevision: UInt64DecimalString
   bodyHash: string
   nextBodyHash: string
 }
@@ -1534,8 +1535,9 @@ immutable reply parent captured from `ThreadMessage.parentMessageId` when presen
 For `named_subconversation_label_renamed`, previous/next display labels,
 previous/next label revisions, `channelConversationId`, and the stored
 named-subconversation key pair are required. For `message_edited`, `previousBody`
-and `previousBodyRevision` are
-also required. For in-system `message_deleted` events,
+`previousBodyRevision`, and `nextBodyRevision` are also required so
+replay/export can reconstruct the post-edit revision without reading mutable row
+state. For in-system `message_deleted` events,
 `previousBody` and `previousBodyRevision` are required and must preserve the
 deleted body as plaintext, redacted, or secret-backed snapshot according to
 policy. `message_restored` must create a new current body revision from
@@ -1978,7 +1980,8 @@ type ChatPresenceSignal = {
   threadId?: string
   readonly actorId: string // server-derived
   readonly actorKind: 'human' | 'agent' | 'system'
-  readonly actorDisplayLabel: string // redacted or omitted when policy requires
+  readonly actorDisplayLabel?: string // omitted when policy requires
+  readonly actorDisplayLabelRedacted?: true
   sessionId: string // server-issued session/device/agent-run session
   presence: ChatPresenceState
   issuedAt: UnixMsDecimalString
@@ -1992,17 +1995,19 @@ type ChatTypingSignal = {
   parentMessageId?: string
   readonly actorId: string // server-derived
   readonly actorKind: 'human' | 'agent' | 'system'
-  readonly actorDisplayLabel: string // redacted or omitted when policy requires
+  readonly actorDisplayLabel?: string // omitted when policy requires
+  readonly actorDisplayLabelRedacted?: true
   sessionId: string
   issuedAt: UnixMsDecimalString
   expiresAt: UnixMsDecimalString
 }
 ```
 
-The server owns `actorId`, `actorKind`, `actorDisplayLabel`, `sessionId`,
-`issuedAt`, and `expiresAt`; browser/client callers may request a state change
-but cannot assert identity, timestamps, or expiry. Presence signals expire after
-at most 120 seconds and must refresh no less often than halfway through the TTL
+The server owns `actorId`, `actorKind`, `actorDisplayLabel`,
+`actorDisplayLabelRedacted`, `sessionId`, `issuedAt`, and `expiresAt`;
+browser/client callers may request a state change but cannot assert identity,
+timestamps, display labels, redaction state, or expiry. Presence signals expire
+after at most 120 seconds and must refresh no less often than halfway through the TTL
 while the session remains active. Typing signals expire after at most 8 seconds,
 refresh while input continues, and stop immediately when the composer is sent,
 cleared, hidden by policy, or the session disconnects. Expired signals are

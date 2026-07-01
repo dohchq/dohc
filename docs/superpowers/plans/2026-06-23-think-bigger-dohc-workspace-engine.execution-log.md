@@ -6653,7 +6653,7 @@ Two-hundred-fifty-seventh pass:
 
 Two-hundred-fifty-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6675,6 +6675,47 @@ Two-hundred-fifty-eighth pass:
   - Reworded the historical `secretProjection` note to use current `local` /
     `virtual` materialization vocabulary and mark the old phrasing as legacy
     history.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-ninth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Preserved list indentation across list-item indented code blocks in the
+    Think Bigger docs checker and added a regression fixture.
+  - Added `status`, `hydrate`, and `setPinned` to single-version
+    workspace/version filesystem binding examples.
+  - Required active `versionsNamespaceActivationFence` state to fail closed for
+    default ownership export, with operator migration export/import handling as
+    engine-managed migration state.
+  - Explicitly mapped secret-broker/declassification gate failures to
+    `quarantined_protection` across pending write states.
+  - Expanded review approval canonicalization to require the full enforcement
+    matrix before commit.
+  - Added `nextBodyRevision` to `MessageEditThreadActivity` so replay/export can
+    reconstruct post-edit message revision without mutable row state.
+  - Made chat presence and typing display labels optional/redactable and
+    server-owned.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
