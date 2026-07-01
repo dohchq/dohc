@@ -807,6 +807,14 @@ type WorkspaceAsyncPayload = {
   pageToken?: string
 }
 
+type DurableSubsetOfSharedWriteResultKind = string & {
+  readonly __brand: 'DurableSubsetOfSharedWriteResultKind'
+}
+type WorkspaceWriteState = DurableSubsetOfSharedWriteResultKind
+// The concrete allowed values are derived from the authoritative
+// native-filesystem write-result vocabulary above. This subset excludes
+// retry-only `idempotency-expired`.
+
 type WorkspaceStatusPayload = {
   workspaceId: string
   versionId: string
@@ -825,14 +833,7 @@ type WorkspaceStatusPayload = {
   exportState: 'included' | 'redacted' | 'excluded' | 'not_exportable'
   secretProjection: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
   conflictState: 'none' | 'preserved' | 'resolution_pending' | 'resolved'
-  writeState:
-    | 'canonical'
-    | 'durable-pending'
-    | 'conflict'
-    | 'quarantined'
-    | 'rejected'
-    | 'retryable-failure'
-    | 'terminal-retired'
+  writeState: WorkspaceWriteState
   holdingRecordId?: string
   conflictProjectionPath?: string
   conflictReplayToken?: string
@@ -1445,9 +1446,8 @@ Every status projection must expose:
   `remote` is a sync/presentation label, not a persisted materialization state.
 - file-policy state: tracked vs ignored, versioned vs unversioned, and synced vs
   local-only.
-- write state from the durable subset of `WriteResult.kind`: `canonical`,
-  `durable-pending`, `conflict`, `quarantined`, `rejected`,
-  `retryable-failure`, or `terminal-retired`.
+- write state from `WorkspaceWriteState`, the durable subset derived from the
+  authoritative native-filesystem write-result vocabulary above.
 - secret state: secret-backed vs non-secret, explicit `secretProjection`
   (`none`, `opaque`, `protectedLocal`, or `plaintextLocal`), whether plaintext is
   materialized for this actor/session, and whether the path is excluded or

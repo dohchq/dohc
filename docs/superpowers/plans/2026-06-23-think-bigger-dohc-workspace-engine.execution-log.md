@@ -6882,7 +6882,7 @@ Two-hundred-sixty-third pass:
 
 Two-hundred-sixty-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6898,6 +6898,40 @@ Two-hundred-sixty-fourth pass:
     `quarantined_record` transitions into `terminal-retired`.
   - Required chat message mutations to resolve messages by
     `(workspaceId, threadId, messageId)` instead of `messageId` alone.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixty-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two trivial findings and one minor finding fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two trivial findings and one minor finding:
+  - Updated the Think Bigger docs workflow checkout pin to
+    `actions/checkout` v6.0.3.
+  - Consolidated native-filesystem status write state through
+    `WorkspaceWriteState`, a durable subset derived from the canonical
+    write-result vocabulary.
+  - Extended request-token/workspace/version stale-response guards to delayed
+    write-producing acknowledgements for `write(...)`, `merge(...)`, and
+    `restore(...)`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

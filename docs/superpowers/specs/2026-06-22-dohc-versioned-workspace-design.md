@@ -1128,6 +1128,16 @@ ignore late responses defensively. `watch(...)` events must carry the same
 binding and must stop or no-op after abort, workspace switch, or version switch.
 A stale read or watch event from one workspace or version set must never repaint
 or leak data into a newer workspace context.
+Write-producing API responses use the same request-correlation rule.
+`write(...)`, `merge(...)`, `restore(...)`, and other write-producing mutations
+that can complete after workspace/version UI context changes must bind their
+acknowledgement to the initiating `workspaceId`, every requested version
+identifier, and request token/epoch. Late `canonical`, `durable-pending`,
+`retryable-failure`, `conflict`, `rejected`, `quarantined`, or
+`terminal-retired` responses must be ignored by callers, and aborted or dropped
+by servers where possible, unless the token, workspace, and requested version set
+still match the active request. A delayed write acknowledgement must never
+repaint a newer workspace/version context or clear a newer in-flight write state.
 
 API writes are never unconditional overwrites. Create and overwrite modes are
 explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.
