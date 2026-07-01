@@ -1190,9 +1190,9 @@ history.
 - search returns file and linked chat.
 - unauthorized actor cannot see private file/chat result.
 - `.env` plaintext does not enter search/history/export in Phase 0.
-- forged client-supplied actor, workspace, and version metadata is rejected or
-  ignored by the bridge; search/policy identity comes only from the authenticated
-  local channel and server/engine context.
+- forged client-supplied actor, workspace, or version metadata is hard-rejected
+  by the bridge; search/policy identity comes only from the authenticated local
+  channel and server/engine context.
 - workspace switch/request-token race test for file/search/chat loading.
 
 **E2E:**

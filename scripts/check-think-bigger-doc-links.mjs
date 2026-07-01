@@ -499,7 +499,13 @@ const collectLinks = (markdown) => {
         titleParenDepth += 1
       } else if (char === ')') {
         if (titleParenDepth === 0) {
-          return { target: normalizeDestination(destination), start, end: cursor + 1 }
+          return {
+            target: normalizeDestination(destination),
+            start,
+            end: cursor + 1,
+            labelStart: openBracketIndex + 1,
+            labelEnd: closeBracketIndex,
+          }
         }
         titleParenDepth -= 1
       }
@@ -508,12 +514,17 @@ const collectLinks = (markdown) => {
   }
   const extractInlineLinks = (value) => {
     const inlineLinks = []
-    for (let index = 0; index < value.length; index += 1) {
-      const parsed = parseInlineLinkAt(value, index)
-      if (parsed) {
-        inlineLinks.push(parsed)
+    const visitRange = (start, end) => {
+      for (let index = start; index < end; index += 1) {
+        const parsed = parseInlineLinkAt(value, index)
+        if (parsed && parsed.end <= end) {
+          inlineLinks.push(parsed)
+          visitRange(parsed.labelStart, parsed.labelEnd)
+          index = parsed.end - 1
+        }
       }
     }
+    visitRange(0, value.length)
     return inlineLinks
   }
   const eraseRanges = (value, ranges) => {
@@ -746,6 +757,13 @@ const assertCheckerFixtures = () => {
   const nestedBracketLabel = collectLinks('[See [details]](./details.md)')
   if (!nestedBracketLabel.links.some((link) => link.target === './details.md')) {
     throw new Error('nested bracket link label fixture should include the destination')
+  }
+  const linkLikeTitle = collectLinks('[visible](./visible.md "[hidden](./missing.md)")')
+  if (
+    !linkLikeTitle.links.some((link) => link.target === './visible.md')
+    || linkLikeTitle.links.some((link) => link.target === './missing.md')
+  ) {
+    throw new Error('inline link title fixture should not parse title text as a link')
   }
 
   const bracketIndexing = collectLinks('Matrix M[i][j] and coordinates [1][2] are notation, not links.')

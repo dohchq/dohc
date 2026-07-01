@@ -471,16 +471,20 @@ authorized runtime or mount that can hold bytes; `setPinned(...)` changes the
 orthogonal `pinned` boolean and does not by itself invent a third
 materialization state.
 API-originated `hydrate(...)` and `setPinned(...)` requests are mutating
-control-plane operations and require an `idempotencyKey`. The handler records the
-key with the workspace/version/path/runtime identity, the full operation tuple
-(`hydrate` versus `setPinned`, with `recursive` included for both and `pinned`
-only for `setPinned`), and the server-derived actor/session equivalence class
-before applying workspace state changes. Authorization and actor/session
-identity are derived only server-side; callers cannot widen authority by
-choosing request fields. Retries with the same expanded key must replay the
-original result or deduplicate the already-enqueued hydration/pin side effects
-instead of applying them again, while different recursive, pinned, runtime,
-actor, or session operations remain distinct.
+control-plane operations and require a caller-provided `idempotencyKey` for
+request dedupe. `requestToken` is a server-issued transport/correlation token:
+the first accepted call mints it, responses echo it, and callers may echo it only
+to correlate follow-up transport state; it is not caller authority and is not the
+replay identity. The handler records the idempotency key with the
+workspace/version/path/runtime identity, the full operation tuple (`hydrate`
+versus `setPinned`, with `recursive` included for both and `pinned` only for
+`setPinned`), and the server-derived actor/session equivalence class before
+applying workspace state changes. Authorization and actor/session identity are
+derived only server-side; callers cannot widen authority by choosing request
+fields. Retries with the same expanded idempotency key must replay the original
+result or deduplicate the already-enqueued hydration/pin side effects instead of
+applying them again, while different recursive, pinned, runtime, actor, or
+session operations remain distinct.
 
 ## API-native access
 
@@ -848,6 +852,22 @@ type WorkspaceStatusPayload = {
 type WorkspaceStatusTransportPayload = WorkspaceAsyncPayload & {
   status: WorkspaceStatusPayload
 }
+
+type WorkspaceListTransportPayload<Entry> = WorkspaceAsyncPayload & {
+  entries: Entry[]
+}
+
+type WorkspaceSearchTransportPayload<Result> = WorkspaceAsyncPayload & {
+  results: Result[]
+}
+
+type WorkspaceSnapshotTransportPayload<Snapshot> = WorkspaceAsyncPayload & {
+  snapshot: Snapshot
+}
+
+type WorkspaceWatchTransportPayload<Event> = WorkspaceAsyncPayload & {
+  event: Event
+}
 ```
 
 `WorkspaceStatusPayload` carries durable policy and legibility axes directly; it
@@ -878,6 +898,12 @@ handle, but they do not choose or forge the token. Every async transport payload
 for that request stream, including `WorkspaceStatusTransportPayload`, echoes the
 exact token minted for the initiating request, and stale-response checks compare
 that token together with workspace/version/page identity before applying results.
+Concrete `list(...)`, `search(...)`, `snapshot(...)`, and `watch(...)` responses
+must use `WorkspaceListTransportPayload`, `WorkspaceSearchTransportPayload`,
+`WorkspaceSnapshotTransportPayload`, and `WorkspaceWatchTransportPayload` (or a
+schema-equivalent generated shape) so `workspaceId`, `versionId`, `requestToken`,
+and `sequence` are present before any UI, cache, projection, or renderer state is
+updated.
 Filesystem loading and local reconciliation mint the same kind of token from the
 engine context before emitting progress or result payloads. The `requestToken`
 parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only

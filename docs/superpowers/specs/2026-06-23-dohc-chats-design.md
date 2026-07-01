@@ -1034,6 +1034,10 @@ except through an explicit trusted migration that preserves original provenance
 evidence. `ChatThreadBase.createdById` is the audit/replay identity;
 `ChatThreadBase.createdBy` is a presentation label only and must not be used for
 authorization, replay, export identity, or dedupe.
+Treat `createdBy`, `actorDisplayLabel`, and related identity labels as untrusted
+text. Renderers, projections, notifications, search snippets, summaries, and
+exports must escape them by default or sanitize them through the same allowlisted
+formatting subset used for message bodies.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same
@@ -1684,12 +1688,15 @@ the authority model.
 server-issued `channelConversationId` or a `ChannelConversationCreateRequest`.
 It runs the same canonical conversation resolver as `send_channel_message` and
 returns the existing `threadId`, `channelConversationId`, and
-`ChannelConversationProvenance` for that authorized channel thread. If no
-channel-backed thread exists for the canonical tuple, it returns
-`needs_first_send`/`not_found` and must not create or reserve a `ChatThread`,
-emit `chat_created`, or reserve a message id. Clients and agents use this action
-to recover a lost `channelConversationId` together with its `threadId`; they must
-not reconstruct channel conversation ids locally.
+`ChannelConversationProvenance` for that authorized channel thread. Absent,
+unauthorized, revoked, and ambiguous channel-conversation lookups must produce
+the same observable `needs_first_send`/`not_found` result; callers must not be
+able to distinguish whether a tuple exists outside their authorization scope. If
+no authorized channel-backed thread is returned for the canonical tuple, the
+handler must not create or reserve a `ChatThread`, emit `chat_created`, or
+reserve a message id. Clients and agents use this action to recover a lost
+`channelConversationId` together with its `threadId`; they must not reconstruct
+channel conversation ids locally.
 
 Chat mutation handlers are idempotent by stable request identifiers and
 server-assigned target identifiers:
@@ -2037,10 +2044,13 @@ The server owns `actorId`, `actorKind`, `actorDisplayLabel`,
 `actorDisplayLabelRedacted`, `sessionId`, `issuedAt`, and `expiresAt`;
 browser/client callers may request a state change but cannot assert identity,
 timestamps, display labels, redaction state, or expiry. Presence signals expire
-after at most 120 seconds and must refresh no less often than halfway through the TTL
-while the session remains active. Typing signals expire after at most 8 seconds,
-refresh while input continues, and stop immediately when the composer is sent,
-cleared, hidden by policy, or the session disconnects. Expired signals are
+after at most 120 seconds and must refresh no less often than halfway through the
+TTL while the session remains active. `actorDisplayLabel` is untrusted display
+text and must be escaped by default or sanitized through the message-body
+allowlist before rendering, notification fanout, projection, or export. Typing
+signals expire after at most 8 seconds, refresh while input continues, and stop
+immediately when the composer is sent, cleared, hidden by policy, or the session
+disconnects. Expired signals are
 dropped from live views and are not written to `ThreadActivity`, search, export,
 history, notifications, or unread counts.
 

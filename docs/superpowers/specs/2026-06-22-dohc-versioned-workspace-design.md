@@ -1262,13 +1262,14 @@ behavior.
 
 Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
 Those paths use an engine-generated capture token and engine-side deduplication
-bound to the watcher/session id, workspace, version, path, observed filesystem
-event sequence when available, file size/mtime where trustworthy, either a
-non-secret content hash or a secret-safe keyed commitment / opaque fingerprint
-for protected paths, and causal base token. Deduplication may collapse duplicate
-native events into one canonical mutation, but it must not be exposed as the API
-idempotency-key contract and must still preserve conflicts when the causal base
-no longer matches.
+bound to workspace, version, path, the engine-generated capture token, observed
+filesystem event sequence when available, file size/mtime where trustworthy,
+either a non-secret content hash or a secret-safe keyed commitment / opaque
+fingerprint for protected paths, and causal base token. Watcher/session ids may
+be recorded only as trace/log correlation metadata, not dedupe or replay
+identity. Deduplication may collapse duplicate native events into one canonical
+mutation, but it must not be exposed as the API idempotency-key contract and must
+still preserve conflicts when the causal base no longer matches.
 
 ## Conflict behavior
 

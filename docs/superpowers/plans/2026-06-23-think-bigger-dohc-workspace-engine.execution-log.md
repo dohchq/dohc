@@ -7007,7 +7007,7 @@ Two-hundred-sixty-seventh pass:
 
 Two-hundred-sixty-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four major findings and three minor findings fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7036,6 +7036,52 @@ Two-hundred-sixty-eighth pass:
     Think Bigger docs and the in-script fixtures.
   - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
     passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixty-ninth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: eight follow-up findings handled; seven fixed and one
+    lockfile warning verified stale. A committed review rerun is required after
+    this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven still-valid findings:
+  - Made forged actor/workspace/version metadata a hard bridge reject in the
+    Phase 0 search/policy tests.
+  - Updated inline-link extraction to ignore link-like text inside already
+    parsed link titles and added fixture coverage.
+  - Removed watcher/session ids from filesystem-captured save dedupe identity.
+  - Split `hydrate(...)`/`setPinned(...)` idempotency identity from server-issued
+    `requestToken` transport correlation.
+  - Added async transport wrappers for list/search/snapshot/watch payloads using
+    `WorkspaceAsyncPayload`.
+  - Made absent, unauthorized, revoked, and ambiguous channel conversation reads
+    share the same observable `needs_first_send`/`not_found` outcome.
+  - Required `createdBy` and `actorDisplayLabel` identity labels to be treated as
+    untrusted text across rendering, projection, notification, and export.
+- Verified stale CodeRabbit finding:
+  - `package.json` and `pnpm-lock.yaml` remain synchronized for `github-slugger`;
+    `pnpm install --lockfile-only --ignore-scripts` produced no package or
+    lockfile diff.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --lockfile-only --ignore-scripts`
+    passed with no package or lockfile diff.
   - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Unresolved findings:
