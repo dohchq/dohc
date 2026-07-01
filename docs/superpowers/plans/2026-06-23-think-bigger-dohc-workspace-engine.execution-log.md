@@ -12688,7 +12688,7 @@ Status: restacked on P0E; not approved
 Branch: codex/think-bigger-p0f-search-policy
 Worktree: `/home/ice/dev/dohc-p0f-search-policy`
 Implementation workstream, if used: main orchestration thread
-PR Link: not opened/TBD
+PR Link: [#53](https://github.com/dohc-ai/dohc/pull/53)
 Date started: 2026-06-24
 Date completed:
 
