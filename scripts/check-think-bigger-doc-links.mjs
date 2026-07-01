@@ -1039,6 +1039,19 @@ const requireOrderedMarkers = (raw, markers, label, startIndex = 0) => {
   return cursor
 }
 
+const sectionSlice = (raw, heading) => {
+  const start = raw.indexOf(heading)
+  if (start === -1) {
+    return null
+  }
+  const rest = raw.slice(start + heading.length)
+  const nextPeerHeading = rest.search(/\n##\s+/)
+  return raw.slice(
+    start,
+    nextPeerHeading === -1 ? raw.length : start + heading.length + nextPeerHeading,
+  )
+}
+
 const assertExecutionLogContract = () => {
   const filePath = path.resolve(repoRoot, executionLogContract.file)
   let raw
@@ -1051,18 +1064,19 @@ const assertExecutionLogContract = () => {
 
   requireOrderedMarkers(raw, executionLogContract.topLevelMarkers, 'execution-log top-level')
 
-  const pr00Index = raw.indexOf('## PR 00 - Mega Plan And Readiness Scaffold')
-  if (pr00Index !== -1) {
-    requireOrderedMarkers(raw, executionLogContract.pr00SectionMarkers, 'execution-log PR00 section', pr00Index)
+  const pr00Section = sectionSlice(raw, '## PR 00 - Mega Plan And Readiness Scaffold')
+  if (pr00Section !== null) {
+    requireOrderedMarkers(pr00Section, executionLogContract.pr00SectionMarkers, 'execution-log PR00 section')
   }
 
-  const pointerIndex = raw.indexOf('## Current PR Pointer')
-  if (pointerIndex !== -1) {
-    requireOrderedMarkers(raw, executionLogContract.currentPointerMarkers, 'execution-log current pointer', pointerIndex)
+  const currentPointerSection = sectionSlice(raw, '## Current PR Pointer')
+  if (currentPointerSection !== null) {
+    requireOrderedMarkers(currentPointerSection, executionLogContract.currentPointerMarkers, 'execution-log current pointer')
   }
 
+  const howToUseSection = sectionSlice(raw, '## How To Use This Log')
   for (const item of executionLogContract.requiredEvidenceItems) {
-    if (!raw.includes(`- ${item}.`)) {
+    if (!howToUseSection?.includes(`- ${item}.`)) {
       failures.push(`${executionLogContract.file}: missing required evidence checklist item ${item}`)
     }
   }

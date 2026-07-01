@@ -787,13 +787,14 @@ independent horizon values.
 Mounted-folder and file-watch captured saves cannot rely on caller-generated API
 idempotency keys, because native editors and shell tools do not provide them.
 Those paths use engine-side capture deduplication instead: bind the capture to
-the watcher/session id, workspace, version, path, observed filesystem event
-sequence when available, file size/mtime where trustworthy, and either a
-non-secret content hash or a secret-safe keyed commitment / opaque fingerprint
-for protected paths, plus the causal base token. Deduplication may collapse
-duplicate native events into one canonical mutation, but it must not be exposed
-as the API idempotency-key contract and must still preserve conflicts when the
-causal base no longer matches.
+the watcher/session id, workspace, version, source mount binding, resolved
+object/file identity when available, path, observed filesystem event sequence
+when available, file size/mtime where trustworthy, and either a non-secret
+content hash or a secret-safe keyed commitment / opaque fingerprint for
+protected paths, plus the causal base token. Deduplication may collapse duplicate
+native events into one canonical mutation only for that specific mount binding,
+but it must not be exposed as the API idempotency-key contract and must still
+preserve conflicts when the causal base no longer matches.
 
 `restore(workspaceId, versionId, checkpointId, ...)` is also write-producing, but
 it is never a destructive rollback. A successful restore records a new

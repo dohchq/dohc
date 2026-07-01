@@ -7583,7 +7583,7 @@ Two-hundred-eighty-third pass:
 
 Two-hundred-eighty-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five major findings, one minor finding, and one trivial
     finding fixed; committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7605,6 +7605,41 @@ Two-hundred-eighty-fourth pass:
   - Added optional `parentMessageId` targeting to `reply_to_chat`.
   - Reworded derived status summaries so `Live PR00 status` is the only writable
     status source of truth.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-eighty-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four major findings and one trivial finding fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four major findings and one trivial finding:
+  - Bounded execution-log structure checks to the intended `Current PR Pointer`,
+    `How To Use This Log`, and PR00 section slices.
+  - Added source mount binding to native file-watch capture deduplication.
+  - Split `write(...)` request preconditions into mutually exclusive create and
+    overwrite variants.
+  - Added conflict-envelope persistence retry handling to the normative
+    gate/retry matrix.
+  - Restored the `actions/checkout` `v6.0.3` comment after verifying the pinned
+    SHA resolves to `refs/tags/v6.0.3^{}`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

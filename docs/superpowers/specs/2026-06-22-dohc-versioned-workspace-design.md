@@ -121,19 +121,20 @@ Normative gate/retry matrix:
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state and `replayUntil`. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | Durable retryable idempotency result with `commitState: 'no_canonical_commit_recorded'`; no holding record, quarantine record, or canonical commit is allocated. Retry with the same idempotency key. |
 | Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'`; canonical commit state is not trusted until retry proves the final durable result. Retry with the same idempotency key. |
+| Conflict envelope cannot be durably written or replayed safely | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'` after persisting conflict-state evidence; no partial conflict acknowledgement. Retry with the same idempotency key. |
 | Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
 | Preserved base/current/incoming divergence exists | `conflict` | Conflict record; no silent last-writer-wins. |
 
 Write, replay, conflict, and proof-slice sections in this spec use this matrix
 as the source of truth for gate, retry, and `WriteResult` semantics.
-The two `retryable-failure` rows above are the acknowledged evaluator/service
-and unknown-acknowledgement modes: both require a durable idempotency result
-before the engine responds, and their `commitState` value is the canonical
-statement of whether no canonical commit was recorded or the commit state is
-unknown. Conflict-envelope persistence has its own later path: when a conflict
-record cannot be durably written or replayed safely, the engine returns a
-retryable failure only after durably recording the matching idempotency result
-and commit-state evidence instead of acknowledging a partial conflict.
+The evaluator/service, unknown-acknowledgement, and conflict-envelope
+`retryable-failure` rows above all require a durable idempotency result before
+the engine responds, and their `commitState` value is the canonical statement of
+whether no canonical commit was recorded or the commit state is unknown. When a
+conflict record cannot be durably written or replayed safely, the engine returns
+a retryable failure only after durably recording the matching idempotency result
+and conflict-state/commit-state evidence instead of acknowledging a partial
+conflict.
 Canonical save success is acknowledged only after the mutation is durably
 committed to canonical workspace state and is visible to normal `read` semantics
 for that version. `watch` propagation and search indexing are eventually
@@ -1015,11 +1016,21 @@ in-memory, browser, and agent runtimes:
 
 ```text
 read(workspaceId, versionId, path)
-write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
-  targetObjectId: required for overwrite; omit only when expectedAbsent is used,
-  idempotencyKey
-})
+write(workspaceId, versionId, path, bytes,
+  | {
+      mode: create,
+      precondition: expectedAbsent,
+      targetObjectId?: never,
+      idempotencyKey
+    }
+  | {
+      mode: overwrite,
+      precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+      targetObjectId,
+      expectedAbsent?: never,
+      idempotencyKey
+    }
+)
 delete(workspaceId, versionId, path, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
   targetObjectId,
