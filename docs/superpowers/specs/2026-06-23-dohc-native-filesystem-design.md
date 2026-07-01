@@ -900,6 +900,7 @@ type WorkspaceStatusPayload = {
   materialized: 'local' | 'virtual'
   materializationPresentation: 'hydrated' | 'placeholder'
   pinned: boolean
+  encrypted: boolean
   searchable: boolean
   visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
   publicExport: 'include' | 'redact' | 'exclude'
@@ -951,11 +952,12 @@ type WorkspaceWatchTransportPayload<Event> = WorkspaceAsyncPayload & {
 does not persist request-stream freshness metadata such as `requestToken`,
 `sequence`, or `pageToken`. Status clients must not infer `tracked`,
 `versioned`, `synced`, `pinned`, `searchable`, `visibility`, `publicExport`,
-`agentAccess`, export handling, or conflict location by scraping path
-conventions, policy files, or conflict views. Status/export serializers and
-re-import deserializers preserve the full resolved `FilePolicyBase` tuple:
-`tracked`, `versioned`, `synced`, `pinned`, `searchable`, `visibility`,
-`publicExport`, and `agentAccess`.
+`agentAccess`, export handling, secret state, or conflict location by scraping
+path conventions, policy files, or conflict views. Status/export serializers and
+re-import deserializers preserve the full resolved `FilePolicy` shape, including
+the base tuple (`tracked`, `versioned`, `synced`, `pinned`, `searchable`,
+`visibility`, `publicExport`, and `agentAccess`) plus the secret-backed
+discriminants (`encrypted`, `secretProjection`, and the secret-backed variant).
 `versionsNamespaceMode` is persisted workspace status, not a per-client guess:
 `legacy_unmanaged` means pre-opt-in `.versions/**` content is ordinary content
 classified by the compatibility path, while `managed_versions` means

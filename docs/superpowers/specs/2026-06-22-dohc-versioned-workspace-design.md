@@ -457,7 +457,8 @@ protection gate before canonical acceptance, after the engine allocated a durabl
 `rejected_record`, and stores `holdingRecordId`, `rejectedAt`, `retentionUntil`,
 `replayUntil`, and replay/idempotency metadata; `quarantined` means the write
 was accepted into the holding area but could not become canonical and stores
-`acceptedAt`, `quarantinedAt`, and `replayUntil`. `terminal-retired` is the later
+`acceptedAt`, `quarantinedAt`, `operatorDispositionDueAt`, `retentionUntil`,
+`quarantineState`, and `replayUntil`. `terminal-retired` is the later
 retirement state for retained rejected-before-acceptance or accepted holding
 records. These durable results carry `requestedVersionIds` for every version
 named by the initiating request, while the retained holding record separately
@@ -1007,11 +1008,11 @@ must validate that object identity before any canonical mutation, holding record
 or quarantine allocation. When the file is saved or captured, the filesystem path
 submits that engine-owned token, the intended object identity or expected-absent
 guard, and the incoming bytes. Missing, ambiguous, malformed, syntactically
-invalid, unparseably scoped, or deterministically object-mismatched capture
-tokens fail closed with `PublicValidationErrorCode` value
-`capture_token_invalid` before any holding record, quarantine record, or
-canonical mutation is allocated. Missing overwrite `targetObjectId` fails closed
-with `missing_precondition` or `invalid_request`. A well-formed capture token
+invalid, or unparseably scoped capture tokens fail closed with
+`PublicValidationErrorCode` value `capture_token_invalid` before any holding
+record, quarantine record, or canonical mutation is allocated. Missing overwrite
+`targetObjectId` fails closed with `missing_precondition` or `invalid_request`.
+A well-formed capture token
 that resolves to a different workspace is not
 `capture_token_invalid`; it fails before persistence as
 `cross_workspace_reference` under the workspace-scoping rules. If token/object
@@ -1020,8 +1021,9 @@ storage lookup, or service is unavailable or indeterminate, the write returns
 `retryable-failure` with the appropriate `commitState` from the gate/retry matrix
 instead of pretending the token is invalid. Quarantine is reserved for accepted
 holding records whose well-formed replay data reaches server-side
-policy/protection evaluation. A
-well-formed but stale capture token, including a token whose `targetObjectId` no
+policy/protection evaluation. Well-formed but stale capture tokens that still
+resolve to an old object identity return `conflict`. A well-formed but stale
+capture token, including a token whose `targetObjectId` no
 longer matches the object currently at the path because of delete/recreate,
 rename, or replacement, is a real write conflict and returns the same
 deterministic current-vs-incoming `conflict` behavior as the API write flow,

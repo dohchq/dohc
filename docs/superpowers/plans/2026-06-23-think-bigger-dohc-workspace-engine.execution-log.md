@@ -68,8 +68,8 @@ unattended Phase 0 execution on 2026-06-24; P0B-P0G remain queued behind the
 shared-substrate baseline freeze. Current live state is recorded only in the
 canonical live-status block in the latest PR00 pass below. This table records
 static lane ownership, branch, worktree, and planned validation shape. The
-PR01 Schema Promotion Checkpoint is a handoff checkpoint, not a standalone lane
-row.
+Phase 0 Schema Promotion Checkpoint is a handoff checkpoint, not a standalone
+lane row.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -118,6 +118,7 @@ implementation template for new implementation PR entries.
   - CodeRabbit status:
   - Test evidence:
   - Open overrides:
+  - Unresolved findings:
   - Completion state:
 - Fixed CodeRabbit findings:
   - ...
@@ -3681,6 +3682,8 @@ Hundred-seventy-third pass:
   - Test evidence: validation block below.
   - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
     remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
   - Completion state: not complete or merge-ready until CodeRabbit is clean and
     the docs-only local-agent-CLI exception is approved.
 - Fixed CodeRabbit's two follow-up findings:
@@ -7804,7 +7807,7 @@ Two-hundred-eighty-ninth pass:
 
 Two-hundred-ninetieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four major findings and two minor findings fixed; committed
     review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7825,6 +7828,45 @@ Two-hundred-ninetieth pass:
     `shareGrantId` server-derived.
   - Reworded `reactionKey` as canonical reaction text instead of a Unicode scalar
     string.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four major findings and two minor findings fixed; committed
+    review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four major findings and two minor findings:
+  - Renamed the live handoff to **Phase 0 Schema Promotion Checkpoint** so it is
+    distinct from PR 01.
+  - Added PR 01C ownership for `WorkspaceLinkRef` and projection
+    writeability/validation values.
+  - Added PR 01D ownership for the core effective-policy boundary.
+  - Expanded status/export policy preservation to the full `FilePolicy` shape,
+    including `encrypted` and `secretProjection`.
+  - Expanded quarantined-record metadata to include `operatorDispositionDueAt`,
+    `retentionUntil`, and `quarantineState`.
+  - Clarified malformed capture tokens versus well-formed stale capture-token
+    conflicts.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -7905,7 +7947,7 @@ PR lanes:
 
 Checkpoint:
 
-- PR01 Schema Promotion Checkpoint, not a standalone lane.
+- Phase 0 Schema Promotion Checkpoint, not a standalone lane.
 
 Gate evidence:
 
