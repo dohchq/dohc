@@ -485,6 +485,18 @@ type ChannelConversationProvenance =
       namedSubconversationKey: string
     }
 
+For `named_subconversation`, the server derives `namedSubconversationKey` from
+the submitted raw name and treats any client-supplied key as advisory. The
+normalization contract is: decode as UTF-8, trim leading and trailing Unicode
+`White_Space`, normalize to Unicode NFC, apply locale-independent Unicode simple
+case folding, reject an empty result, reject ASCII control characters and
+path-like separators (`/`, `\`, NUL), and enforce both a 96 Unicode-scalar limit
+and a 256 UTF-8 byte limit after normalization. Internal whitespace is preserved
+exactly after NFC/case folding; the server does not collapse or rewrite it.
+The server stores the normalized key plus the normalization-version metadata
+used to derive it, and creation retries must compare against that stored value
+instead of reinterpreting an older key with a newer normalizer.
+
 type ChannelChatThread = ChatThreadBase & ChannelConversationProvenance & {
   channelId: string
   channelConversationId: string

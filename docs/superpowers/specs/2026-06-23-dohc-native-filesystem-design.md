@@ -124,11 +124,21 @@ its default `.versions/**` skip rule. That scan enumerates and classifies every
 `.versions` tree: engine-bound `.versions/<version>/` mounts for the active
 workspace are handed to the engine's workspace/version mount resolver, and only
 that resolver may enter each managed root with an explicit workspace/version
-binding. Ordinary user-created `.versions` folders or aliases are not active
-named-version mounts; the reserved-namespace scan classifies them fail-closed
-into quarantine or manual resolution. Only after that classification may the
-ordinary content walker skip `.versions/**`; unmanaged entries are never
-silently ignored, skipped, or promoted into a named version.
+binding. Managed `.versions/<version>/` is opt-in per attached workspace, not a
+retroactive reservation on every existing folder named `.versions`.
+Before a workspace opts into the managed namespace, ordinary user-created
+`.versions/**` content is classified by the reserved-namespace scan as
+`legacy_unmanaged_versions_content`; the materialized workspace walker may then
+ingest it as ordinary user content for that workspace, while the
+workspace/version mount resolver must refuse to treat it as a named-version
+mount. Activation surfaces a user-facing migration choice instead of immediate
+quarantine: move the legacy content to a collision-proof ordinary path, bind
+eligible children as managed versions, keep `.versions/**` unmanaged and choose
+another managed namespace, or cancel activation. Only after the workspace records
+managed-namespace opt-in may the ordinary content walker apply the default
+`.versions/**` skip rule for that workspace; unmanaged entries created after
+opt-in are then fail-closed into quarantine or manual resolution. Unmanaged
+entries are never silently ignored, skipped, or promoted into a named version.
 
 The path is an affordance, not the security boundary. The engine resolves the
 active workspace, immutable version, effective file policy, and
@@ -151,7 +161,8 @@ import, attach, sync, and raw filesystem scan is defined by this table:
 | Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Silently skip from import, attach, sync, and raw scan user-content flows; never re-ingest as user content. |
 | Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never propose ordinary user-content safe rename. |
 | Managed `~/dohc/<workspace>/.versions/<version>/` bound to a known workspace/version by the engine | Allow only through the engine workspace/version mount resolver, not generic tree walkers. |
-| Unmanaged or out-of-contract `.versions/**` or aliases of `.versions` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never silently promote into a named version. |
+| Pre-opt-in ordinary `.versions/**` content in an existing attached workspace | Classify as `legacy_unmanaged_versions_content`; allow ordinary-content ingest only through the materialized workspace walker, never through the workspace/version mount resolver, and surface the explicit migration choices before managed namespace activation. |
+| Unmanaged or out-of-contract `.versions/**` or aliases of `.versions` after managed namespace opt-in, or where dohc already expects engine state | Quarantine with an explainable record or send to manual resolution; never silently promote into a named version. |
 | Ordinary user content outside engine-managed namespaces that collides with a reserved namespace | May receive a deterministic collision-proof safe-rename proposal before activation. |
 
 Only ordinary user content outside engine-managed namespaces may be proposed for
@@ -177,7 +188,9 @@ they do not consume collision disposition or become safe-rename quarantine
 records unless a real namespace collision is proven.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions/**` content is never silently promoted into a named
-version.
+version. Pre-opt-in legacy `.versions/**` content that the reserved-namespace
+scan classified as `legacy_unmanaged_versions_content` remains ordinary user
+content until the user completes one of the explicit migration choices.
 
 Path canonicalization must happen before API path handling, import, attach,
 sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and
@@ -204,10 +217,13 @@ handling is defined only by the reserved-namespace collision contract above: the
 allowlisted policy inputs are `.dohc/files.toml` and `.dohc/visibility.toml`;
 workspace-root `.dohcignore` import, precedence, and source-band semantics are
 deferred to a later PR and must not be parsed as live policy input in this phase.
-All other `.dohc/**` content and unmanaged `.versions/**` fail closed into
-rejection, quarantine, or manual resolution. Safe rename proposal remains
-available only for non-engine user content that collides with a reserved
-namespace. Hardlinks are prohibited in writable or materialized workspace
+All other `.dohc/**` content and post-opt-in unmanaged `.versions/**` fail
+closed into rejection, quarantine, or manual resolution. Pre-opt-in legacy
+`.versions/**` content follows the compatibility path defined by the
+reserved-namespace scan, materialized workspace walker, and workspace/version
+mount resolver above. Safe rename proposal remains available only for non-engine
+user content that collides with a reserved namespace. Hardlinks are prohibited in
+writable or materialized workspace
 projections, including same-workspace hardlinks, because multiple paths sharing
 one inode break the path-centric object
 identity model; capture/API paths reject or quarantine them before treating the

@@ -6021,7 +6021,7 @@ Two-hundred-fortieth pass:
 
 Two-hundred-forty-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: eight follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6046,6 +6046,38 @@ Two-hundred-forty-first pass:
     of delete-plus-create history.
   - Split export verification material between non-secret hashes and
     secret-backed opaque commitments or authorized handles.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-forty-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two follow-up findings:
+  - Defined deterministic server normalization for
+    `namedSubconversationKey`, including Unicode normalization, trimming,
+    casing, validation, and length bounds.
+  - Added a pre-opt-in migration path for existing `.versions/**` content, tied
+    to the reserved-namespace scan, materialized workspace walker, and
+    workspace/version mount resolver.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
