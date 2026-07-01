@@ -133,12 +133,17 @@ ingest it as ordinary user content for that workspace, while the
 workspace/version mount resolver must refuse to treat it as a named-version
 mount. Activation surfaces a user-facing migration choice instead of immediate
 quarantine: move the legacy content to a collision-proof ordinary path, bind
-eligible children as managed versions, keep `.versions/**` unmanaged and choose
-another managed namespace, or cancel activation. Only after the workspace records
-managed-namespace opt-in may the ordinary content walker apply the default
-`.versions/**` skip rule for that workspace; unmanaged entries created after
-opt-in are then fail-closed into quarantine or manual resolution. Unmanaged
-entries are never silently ignored, skipped, or promoted into a named version.
+eligible children as managed versions, preserve the legacy content outside the
+future skipped namespace while choosing another managed namespace, or cancel
+activation. Managed-namespace opt-in cannot be finalized while legacy unmanaged
+entries still live under a `.versions/**` path that the ordinary walker will skip.
+Only after every legacy entry has been moved, explicitly reclassified as a
+managed version, or otherwise preserved outside the skipped namespace may the
+workspace record managed-namespace opt-in and let the ordinary content walker
+apply the default `.versions/**` skip rule for that workspace. Unmanaged entries
+created after opt-in are then fail-closed into quarantine or manual resolution.
+Unmanaged entries are never silently ignored, skipped, or promoted into a named
+version.
 
 The path is an affordance, not the security boundary. The engine resolves the
 active workspace, immutable version, effective file policy, and

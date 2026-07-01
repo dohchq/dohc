@@ -6162,7 +6162,7 @@ Two-hundred-forty-fourth pass:
 
 Two-hundred-forty-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: eight follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6187,6 +6187,40 @@ Two-hundred-forty-fifth pass:
     `Phase 0 Decision Note` anchor.
   - Split P0S out of the Phase 0 proof-arc PR lane list into a checkpoint
     subsection.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-forty-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Tracked whether a fenced code block opened inside a blockquote so
+    blockquote-looking fence markers inside normal fences stay code, with an
+    in-script fixture.
+  - Clarified that legacy unmanaged `.versions/**` entries must be moved,
+    reclassified, or preserved outside the skipped namespace before managed
+    namespace opt-in finalizes.
+  - Added `replayUntil` to `rejected` and `quarantined` write-result arms and
+    aligned the surrounding rejection/quarantine prose.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

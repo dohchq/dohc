@@ -194,6 +194,7 @@ function* contentLines(markdown) {
   let inFence = false
   let fenceChar = null
   let fenceLength = 0
+  let fenceOpenedInBlockquote = false
   let inIndentedCode = false
   let activeListIndent = null
   let inHtmlComment = false
@@ -240,7 +241,9 @@ function* contentLines(markdown) {
     const rawVisibleLine = inFence ? rawLine : stripHtmlComments(rawLine)
     const stripBlockquoteMarkers = (value) => value.replace(/^(?: {0,3}>[ \t]?)+/, '')
     const line = inFence ? rawVisibleLine : stripBlockquoteMarkers(rawVisibleLine)
-    const fenceLine = stripBlockquoteMarkers(rawVisibleLine)
+    const fenceLine = inFence && !fenceOpenedInBlockquote
+      ? rawVisibleLine
+      : stripBlockquoteMarkers(rawVisibleLine)
     const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
@@ -272,6 +275,7 @@ function* contentLines(markdown) {
       inFence = true
       fenceChar = marker
       fenceLength = markerLength
+      fenceOpenedInBlockquote = /^(?: {0,3}>[ \t]?)+/.test(rawVisibleLine)
       continue
     }
 
@@ -283,6 +287,7 @@ function* contentLines(markdown) {
         inFence = false
         fenceChar = null
         fenceLength = 0
+        fenceOpenedInBlockquote = false
       }
       continue
     }
@@ -534,6 +539,13 @@ const assertCheckerFixtures = () => {
   const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
   if (quotedFence.links.length > 0 || quotedFence.unresolvedReferences.length > 0) {
     throw new Error('blockquote fenced-code fixture should not produce links')
+  }
+  const normalFenceWithLiteralBlockquoteFence = collectLinks('```\n> ```\n[hidden](./missing.md)\n```')
+  if (
+    normalFenceWithLiteralBlockquoteFence.links.length > 0
+    || normalFenceWithLiteralBlockquoteFence.unresolvedReferences.length > 0
+  ) {
+    throw new Error('regular fenced-code fixture should treat literal blockquote fences as code')
   }
   const quotedProse = collectLinks('> [visible](./visible.md)')
   if (!quotedProse.links.some((link) => link.target === './visible.md') || quotedProse.unresolvedReferences.length > 0) {

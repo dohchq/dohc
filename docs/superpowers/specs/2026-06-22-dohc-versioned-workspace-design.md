@@ -111,8 +111,8 @@ Normative gate/retry matrix:
 | Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Replayed idempotency key with mismatched stable actor identity, session-equivalence class when policy requires it, workspace, version context, operation type, target, secret-safe operand fingerprint, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
-| Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
-| Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
+| Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `replayUntil`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
+| Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state and `replayUntil`. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
 | Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
 | Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
@@ -280,6 +280,7 @@ type WriteResult =
       idempotencyKey: string
       idempotencyResultId: string
       idempotencyReplayToken: string
+      replayUntil: UnixMsDecimalString
       reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
@@ -293,6 +294,7 @@ type WriteResult =
       idempotencyKey: string
       idempotencyResultId: string
       idempotencyReplayToken: string
+      replayUntil: UnixMsDecimalString
       reasonCode: PublicDeniedReasonCode
       acceptedAt: UnixMsDecimalString
       quarantinedAt: UnixMsDecimalString
@@ -446,9 +448,9 @@ with enough metadata to explain the decision, retry where allowed, or audit the
 outcome after evaluators recover. `rejected` means the write failed a protection
 gate before canonical acceptance, after the engine allocated a durable
 `rejected_record`, and stores `holdingRecordId`, `rejectedAt`, `retentionUntil`,
-and replay/idempotency metadata; `quarantined` means the write was accepted into
-the holding area but could not become canonical and stores `acceptedAt` plus
-`quarantinedAt`. `terminal-retired` is the later
+`replayUntil`, and replay/idempotency metadata; `quarantined` means the write
+was accepted into the holding area but could not become canonical and stores
+`acceptedAt`, `quarantinedAt`, and `replayUntil`. `terminal-retired` is the later
 retirement state for retained rejected-before-acceptance or accepted holding
 records. These durable results carry the required `versionId` for the requested
 or accepted version bound to the holding record. `rejected`, `quarantined`, and
