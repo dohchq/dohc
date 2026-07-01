@@ -1116,10 +1116,10 @@ mutation plus side-effect ledger or tombstone the reserved key deterministically
 and never acknowledge success until the idempotency result, canonical mutation,
 and required side-effect outbox entries are durable together. After the retry
 horizon, an API retry with the same key must fail closed with an explicit
-`idempotency_expired` response or a deterministic conflict response; it must not
-silently apply as a new mutation. Implementations may garbage-collect expired key
-tombstones only after the same maximum retry horizon has passed or the operation
-namespace is rotated.
+`kind: 'idempotency-expired'` response; it must not silently apply as a new
+mutation and must not convert the expired key into a conflict response.
+Implementations may garbage-collect expired key tombstones only after the same
+maximum retry horizon has passed or the operation namespace is rotated.
 
 ### Idempotency Retry Horizons And WorkspaceIdempotencyPolicy
 
