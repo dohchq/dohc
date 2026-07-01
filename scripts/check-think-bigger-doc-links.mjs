@@ -648,6 +648,18 @@ const collectLinks = (markdown) => {
       addLink(link.target, lineNumber)
     }
     prose = eraseRanges(prose, inlineLinks)
+    const autolinkRanges = []
+    for (const match of prose.matchAll(autolinkPattern)) {
+      if (match.index > 0 && prose[match.index - 1] === '\\') {
+        continue
+      }
+      if (/^<\/?[A-Za-z][A-Za-z0-9-]*\s*\/?>$/.test(match[0])) {
+        continue
+      }
+      addLink(match[1], lineNumber)
+      autolinkRanges.push({ start: match.index, end: match.index + match[0].length })
+    }
+    prose = eraseRanges(prose, autolinkRanges)
     let referenceProse = stripBackslashEscapes(prose)
     for (const match of referenceProse.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
@@ -673,15 +685,6 @@ const collectLinks = (markdown) => {
         const destination = referenceDefinitions.get(label)
         addLink(destination, lineNumber)
       }
-    }
-    for (const match of prose.matchAll(autolinkPattern)) {
-      if (match.index > 0 && prose[match.index - 1] === '\\') {
-        continue
-      }
-      if (/^<\/?[A-Za-z][A-Za-z0-9-]*\s*\/?>$/.test(match[0])) {
-        continue
-      }
-      addLink(match[1], lineNumber)
     }
   }
 
@@ -910,6 +913,13 @@ const assertCheckerFixtures = () => {
     || !escapedAutolink.links.some((link) => link.target === 'app://workspace/thread')
   ) {
     throw new Error('escaped autolink fixture should ignore escaped autolinks only')
+  }
+  const bracketedAutolink = collectLinks('<app://workspace/[not-a-reference]>')
+  if (
+    !bracketedAutolink.links.some((link) => link.target === 'app://workspace/[not-a-reference]')
+    || bracketedAutolink.unresolvedReferences.length > 0
+  ) {
+    throw new Error('autolink fixture should not parse bracket text as references')
   }
   const referenceLinks = collectLinks('[ref]: ./target.md\n[ref]\n[full][ref]')
   const referenceTargetCount = referenceLinks.links.filter((link) => link.target === './target.md').length

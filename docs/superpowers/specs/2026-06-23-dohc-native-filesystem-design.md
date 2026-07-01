@@ -92,6 +92,20 @@ workspace state. They serialize the current lifecycle state, such as
 `terminal-retired`, and return `idempotency-expired` only from retry-flow APIs for
 late attempts against an expired idempotency/replay horizon.
 
+Native write/status lifecycle transitions are constrained to this state machine:
+
+| Current state | Allowed next state or retry outcome |
+| --- | --- |
+| request not yet accepted | `canonical`, `durable-pending`, `rejected`, `quarantined`, `conflict`, or `retryable-failure` |
+| `durable-pending` | `canonical`, `quarantined`, `conflict`, `retryable-failure`, or `terminal-retired` through explicit disposition |
+| `quarantined` | `durable-pending` after successful revalidation, `canonical` after successful replay/promotion, or `terminal-retired` through explicit disposition |
+| `rejected` | retained as rejected until retention/disposition metadata is compacted into `terminal-retired`; late retries after the replay horizon return `idempotency-expired` |
+| `conflict` | remains conflict until manual resolution records a new write result; late retries after the replay horizon return `idempotency-expired` |
+| `retryable-failure` | retry with the same idempotency identity returns the durable result once known, or another `retryable-failure` if infrastructure/evaluator state remains indeterminate |
+| `canonical` | terminal for that write result; later edits create new write results |
+| `terminal-retired` | retained lifecycle/retention state only; late retries after the replay horizon return `idempotency-expired` |
+| `idempotency-expired` | retry-flow outcome only; never persisted as durable workspace status |
+
 ## Filesystem shape
 
 A dohc workspace should have a normal, obvious folder shape:
@@ -551,6 +565,11 @@ materialize them only through the secret-aware authorization path. Before any
 output leaves the engine boundary, secret-backed path and content fields are
 redacted, omitted, or replaced with authorized opaque tokens according to the
 effective file policy and viewer authorization.
+`diff(workspaceId, versionAId, versionBId)` returns a
+`WorkspaceDiffTransportPayload` or schema-equivalent generated shape whose diff
+headers, hunks, labels, and nested metadata obey the same redaction/default
+projection rules and request-token freshness checks as watch, snapshot, list, and
+search.
 
 In every API shape above, `expectedContentHash` is accepted only for
 non-secret-backed object operands. Secret-backed overwrite, delete,
@@ -901,6 +920,12 @@ type WorkspaceSnapshotTransportPayload<Snapshot> = WorkspaceAsyncPayload & {
   snapshot: Snapshot
 }
 
+type WorkspaceDiffTransportPayload<Diff> = Omit<WorkspaceAsyncPayload, 'versionId'> & {
+  versionAId: string
+  versionBId: string
+  diff: Diff
+}
+
 type WorkspaceWatchTransportPayload<Event> = WorkspaceAsyncPayload & {
   event: Event
 }
@@ -942,12 +967,13 @@ handle, but they do not choose or forge the token. Every async transport payload
 for that request stream, including `WorkspaceStatusTransportPayload`, echoes the
 exact token minted for the initiating request, and stale-response checks compare
 that token together with workspace/version/page identity before applying results.
-Concrete `list(...)`, `search(...)`, `snapshot(...)`, and `watch(...)` responses
-must use `WorkspaceListTransportPayload`, `WorkspaceSearchTransportPayload`,
-`WorkspaceSnapshotTransportPayload`, and `WorkspaceWatchTransportPayload` (or a
-schema-equivalent generated shape) so `workspaceId`, `versionId`, `requestToken`,
-`sequence`, and for list/search the opaque `nextPageToken` is present before
-any UI, cache, projection, or renderer state is updated.
+Concrete `list(...)`, `search(...)`, `snapshot(...)`, `diff(...)`, and
+`watch(...)` responses must use `WorkspaceListTransportPayload`,
+`WorkspaceSearchTransportPayload`, `WorkspaceSnapshotTransportPayload`,
+`WorkspaceDiffTransportPayload`, and `WorkspaceWatchTransportPayload` (or a
+schema-equivalent generated shape) so workspace/version identity, `requestToken`,
+`sequence`, and for list/search the opaque `nextPageToken` is present before any
+UI, cache, projection, or renderer state is updated.
 Filesystem loading and local reconciliation mint the same kind of token from the
 engine context before emitting progress or result payloads. The `requestToken`
 parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only

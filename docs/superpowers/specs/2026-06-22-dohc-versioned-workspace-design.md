@@ -146,8 +146,10 @@ read visibility. The only `durable-pending` response is the non-canonical
 `operatorDispositionDueAt`, `pendingState`, and the same idempotency/replay
 metadata used to resume or retire that holding record. UIs may show that pending
 record only in explicit ingest/recovery/status surfaces marked non-canonical.
-In this spec, "files save immediately" means authorized writes that pass
-protection checks become canonical without an extra human apply/review step.
+In this spec, "files save immediately" means authorized writes become canonical
+without an extra human apply/review step once all synchronous protection and
+policy gates pass; async review or canonicalization can still return
+`durable-pending`.
 Write results are explicit:
 
 ```ts
@@ -1549,6 +1551,8 @@ The first proof should be small but real:
     fail closed when required causal preconditions are missing or incompatible,
     and only proceed when the operation-specific guard set is supplied and each
     guard is individually valid.
+15. E2E proves `rename(...)` and `move(...)` enforce source identity and
+    destination-absence guards before mutating canonical state.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.
