@@ -8783,7 +8783,7 @@ Status: restacked on P0A; not approved
 Branch: codex/think-bigger-p0r-rust-kernel
 Worktree: `/home/ice/dev/dohc-p0r-rust-kernel`
 Implementation workstream, if used: main orchestration thread
-PR Link: not opened
+PR Link: [#48](https://github.com/dohc-ai/dohc/pull/48)
 Date started: 2026-06-24
 Date completed:
 
