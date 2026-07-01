@@ -55,6 +55,12 @@ non-critical documentation-only exceptions may be overridden by explicit user
 approval, and never for authorization, ownership, workspace-scope,
 secret-handling, data-loss, or review-gate blockers.
 
+## Phase 0 Decision Note
+
+Phase 0 decision-note entries are recorded in the PR00 pass history below. This
+heading is the stable machine-checkable anchor for specs that cite the execution
+log as the decision-note source of truth.
+
 ## PR Lane Inventory
 
 P0A and P0R are provisional throughput work started after user approval for
@@ -290,11 +296,11 @@ Date completed:
 
 ### Tests Added Or Updated
 
-- Added executable docs-checker coverage through in-script fixtures for HTML
+- Recorded docs-checker fixture coverage for HTML
   comment stripping, nested image links, generic code-span heading anchors,
   bracket-index notation, missing reference links, and blockquote fenced-code
   parsing.
-- Added the Think Bigger docs workflow so CI runs the manifest/link/anchor
+- Recorded the Think Bigger docs workflow so CI runs the manifest/link/anchor
   checker when covered docs, the checker, or the workflow change.
 - Planning/docs-only validation runs are recorded below.
 
@@ -5915,7 +5921,7 @@ Two-hundred-thirty-seventh pass:
 
 Two-hundred-thirty-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5930,6 +5936,45 @@ Two-hundred-thirty-eighth pass:
   - Added API-native `hydrate(...)` and `setPinned(...)` control-plane operations
     for browser/runtime/sandbox clients, preserving `virtual` as the canonical
     non-materialized label and `pinned` as an orthogonal boolean.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-thirty-ninth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Updated the Think Bigger docs workflow to the current `pnpm/action-setup`
+    v6 commit while keeping the existing pnpm version and install settings.
+  - Reworded the early execution-log validation section so it records validation
+    evidence instead of implying new tests were added.
+  - Added `materializationPresentation` to `WorkspaceStatusPayload` so status can
+    distinguish hydrated bytes/projections from placeholders without inventing a
+    third persisted materialization state.
+  - Scoped `targetObjectId` lookup guidance to overwrite-oriented flows and
+    clarified that create-only writes with `expectedAbsent` omit it.
+  - Removed `ThreadReadState.readStateRevision` from read-state idempotency
+    identity and kept it as a server-owned CAS/stale-write token only.
+  - Added a real `Phase 0 Decision Note` execution-log anchor and linked the
+    versioned workspace spec to it.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

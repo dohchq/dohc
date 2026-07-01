@@ -480,8 +480,9 @@ sync processes all get the same guarantee: an accepted change is not silently
 lost while it awaits canonicalization or disposition, but it also does not become
 canonical workspace state until protection checks pass.
 Accepted records still have a bounded operator-visible lifecycle. The Phase 0
-decision note defines
-`AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`,
+decision note in the
+[execution log](../plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md#phase-0-decision-note)
+defines `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`,
 `operatorDispositionDueAt`, and an operator escalation policy; when the
 canonicalization deadline is reached, the record must be escalated into an
 explicit disposition queue, marked overdue in status APIs, and only derived

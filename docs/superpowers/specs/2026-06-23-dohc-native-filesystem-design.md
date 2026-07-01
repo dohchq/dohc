@@ -580,7 +580,9 @@ and allowed freshness metadata so authorized mutation preconditions can be built
 without leaking secret directory structure.
 Callers obtain `sourceObjectId`, `targetObjectId`, and `destinationObjectId`
 through `stat(...)`, `read(...)`, or paginated `list(...)` before invoking
-`write(...)`, `delete(...)`, `rename(...)`, `move(...)`, or `replace(...)`.
+overwrite-oriented flows: `write(...)` when overwriting, `delete(...)`,
+`rename(...)`, `move(...)`, or `replace(...)`. Create-only `write(...)` calls
+with `expectedAbsent` omit `targetObjectId`.
 `list(...)` and `search(...)` return bounded pages with an
 opaque `nextPageToken`; `pageSize` is capped by the server, an absent
 `pageToken` starts a new query, and a returned `nextPageToken` resumes the exact
@@ -744,6 +746,7 @@ type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
   versioned: boolean
   synced: boolean
   materialized: 'local' | 'virtual'
+  materializationPresentation: 'hydrated' | 'placeholder'
   pinned: boolean
   publicExport: 'include' | 'redact' | 'exclude'
   exportState: 'included' | 'redacted' | 'excluded' | 'not_exportable'
@@ -768,6 +771,9 @@ type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
 `WorkspaceStatusPayload` carries policy and legibility axes directly. Status
 clients must not infer `tracked`, `versioned`, `synced`, export handling, or
 conflict location by scraping path conventions, policy files, or conflict views.
+`materializationPresentation` is a UI/status hint for whether the current actor
+sees hydrated bytes/projection or a placeholder for a virtual/lazy path; it does
+not create a third persisted `materialized` value.
 `conflictProjectionPath` points at the policy-safe `.dohc/conflicts/` projection
 when one may be shown; secret-backed or unauthorized conflicts still report
 `conflictState` without leaking a projection path.

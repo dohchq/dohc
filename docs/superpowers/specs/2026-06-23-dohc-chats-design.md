@@ -171,9 +171,11 @@ It is server-owned, scoped to `(workspaceId, threadId, actorId)`, assigned by
 the canonical read-state store, and advanced exactly when the persisted
 `lastReadCursor` advances. Idempotent equal-cursor updates return the existing
 revision without advancing it. `mark_thread_read` and `update_read_state`
-derive their stable idempotency identity from actor, thread, read cursor, and
-this persisted `readStateRevision` CAS token; callers may pass an expected
-revision for stale-write detection but may never set or mint the next revision.
+derive their stable idempotency identity from actor, thread, and read cursor.
+Callers may pass an expected revision for stale-write detection, but
+`readStateRevision` is not part of the dedupe key and callers may never set or
+mint the next revision. Equal-cursor retries must dedupe even if the live
+revision has changed since the original response.
 
 `ThreadMessage.threadSequence` is the authoritative per-thread monotonic
 sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
@@ -1462,7 +1464,8 @@ server-assigned target identifiers:
   or any equivalent edit state.
 - `mark_thread_read` and `update_read_state` require an `idempotencyKey` or a
   server-derived stable read-state idempotency identity bound to actor, thread,
-  read cursor, and the causal `ThreadReadState.readStateRevision` CAS token.
+  and read cursor. Callers may pass the causal `ThreadReadState.readStateRevision`
+  CAS token only for stale-write detection.
 - `link_chat_to_work` requires an `idempotencyKey` plus the target link request
   fields. The handler derives `CanonicalThreadLinkKey` server-side from the
   authorized, policy-normalized target, grant, and visibility fields; callers
