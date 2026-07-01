@@ -1721,8 +1721,9 @@ server-assigned target identifiers:
   `ChatThread` must not duplicate `chat_created` or the winning message's
   `message_created` activity. The idempotency result returns `threadId`,
   `channelConversationId`, and `messageId`, and retries return the same triple.
-- `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
-  in the idempotency result, and retries return that same `messageId`.
+- `reply_to_chat` requires an `idempotencyKey` and target `threadId`; the server
+  assigns `messageId` in the idempotency result, and retries return that same
+  `(threadId, messageId)` pair.
 - `rename_channel_conversation_label` requires an `idempotencyKey`, `channelId`,
   server-issued `channelConversationId`, expected conversation/display-label
   revision, and the next user-entered label. It applies only to an existing
@@ -1735,15 +1736,15 @@ server-assigned target identifiers:
   previous/next labels and revisions in the same serialized unit. Retries replay
   the same activity, revision, and display label; callers must not recreate the
   conversation to rename it.
-- `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected
-  `bodyRevision`.
-- `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected
-  `bodyRevision`.
-- `add_reaction` and `remove_reaction` require an `idempotencyKey`, `messageId`,
-  and reaction key; idempotency and lookup are keyed only by the stable reaction
-  identity `(workspaceId, threadId, messageId, actorId, reactionKey)` or the
-  stable `reactionId`, not by the message body revision, reaction-set revision,
-  or any equivalent edit state.
+- `edit_chat_message` requires an `idempotencyKey`, `threadId`, `messageId`, and
+  expected `bodyRevision`.
+- `delete_chat_message` requires an `idempotencyKey`, `threadId`, `messageId`,
+  and expected `bodyRevision`.
+- `add_reaction` and `remove_reaction` require an `idempotencyKey`, `threadId`,
+  `messageId`, and reaction key; idempotency and lookup are keyed only by the
+  stable reaction identity `(workspaceId, threadId, messageId, actorId,
+  reactionKey)` or the stable `reactionId`, not by the message body revision,
+  reaction-set revision, or any equivalent edit state.
 - `mark_thread_read` and `update_read_state` require an `idempotencyKey` or a
   server-derived stable read-state idempotency identity bound to actor, thread,
   and read cursor. Callers may pass the causal `ThreadReadState.readStateRevision`
@@ -1755,6 +1756,14 @@ server-assigned target identifiers:
 - `summarize_chat` requires an `idempotencyKey` or worker request id bound to
   thread, visible message range, summary target, model/config fingerprint, and
   authorization scope.
+
+Message mutation handlers must never resolve a `ThreadMessage` by `messageId`
+alone. The server derives `workspaceId` from the authenticated workspace context
+and resolves edit, delete, reply-parent, reaction, mention, and read-state
+message references by the composite `(workspaceId, threadId, messageId)` key
+before authorization, body-revision CAS, idempotency replay, or activity
+emission. If the supplied `threadId` does not match the message's stored thread,
+the mutation fails closed without probing other threads.
 
 Before persisting or emitting side effects, each handler reserves the
 workspace-scoped idempotency record for the same actor, operation, key, and

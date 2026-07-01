@@ -533,6 +533,20 @@ audit/replay/explanation retention horizon. For `quarantined_record`, it is the
 disposition/audit retention horizon. Payload retention for accepted holding
 records is controlled by canonicalization or explicit operator disposition, not
 by time alone.
+`rejected_record` may transition to `terminal-retired` only by a recorded
+retention-expiry job or explicit operator disposition, preserving source
+`recordKind: 'rejected_record'`, `holdingRecordId`, rejection reason,
+`rejectedAt`, and replay/idempotency metadata until replay expiry. Before
+`replayUntil`, retries replay the current `rejected` or `terminal-retired`
+state; after `replayUntil`, retries return `idempotency-expired`.
+`quarantined_record` may transition to `terminal-retired` only by explicit
+operator disposition or a recorded retention-expiry disposition after the
+quarantine's disposition/audit horizon closes. That retirement preserves source
+`recordKind: 'quarantined_record'`, quarantine state, `acceptedAt`,
+`quarantinedAt`, `holdingRecordId`, and replay/idempotency metadata until replay
+expiry. Before `replayUntil`, retries replay the current `quarantined` or
+`terminal-retired` state; after `replayUntil`, retries return
+`idempotency-expired`.
 No accepted holding record may remain unreviewed forever: if no
 workspace-specific disposition policy is configured, the engine's default finite
 operator-escalation window applies, and workspaces may only choose values inside

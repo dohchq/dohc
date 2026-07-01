@@ -6850,7 +6850,7 @@ Two-hundred-sixty-second pass:
 
 Two-hundred-sixty-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6866,6 +6866,38 @@ Two-hundred-sixty-third pass:
     object-mismatched capture-token conflicts.
   - Routed legacy chat-delete redacted fallback evidence through the server-held
     keyed digest/MAC service instead of a deterministic plaintext hash.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixty-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three major findings:
+  - Replaced regex-only inline Markdown link/image extraction with a balanced
+    bracket scanner and added nested-label fixture coverage.
+  - Added explicit retirement/retry rules for `rejected_record` and
+    `quarantined_record` transitions into `terminal-retired`.
+  - Required chat message mutations to resolve messages by
+    `(workspaceId, threadId, messageId)` instead of `messageId` alone.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

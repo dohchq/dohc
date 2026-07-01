@@ -388,8 +388,6 @@ const collectLinks = (markdown) => {
   )
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
   const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]()#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
-  const nestedImageLinkPattern = /\[!\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
-  const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)/
   const footnoteDefinitionPattern = /^\s{0,3}\[\^[^\]\n]+\]:\s*/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
@@ -404,6 +402,123 @@ const collectLinks = (markdown) => {
     const bothIndexTokens = bracketIndexTokenPattern.test(left) && bracketIndexTokenPattern.test(right)
     const bothNumeric = /^\d+$/.test(left) && /^\d+$/.test(right)
     return bothIndexTokens && (bothNumeric || /[A-Za-z0-9_$)\]]/.test(before))
+  }
+  const matchingLabelEnd = (value, openBracketIndex) => {
+    let depth = 0
+    for (let index = openBracketIndex + 1; index < value.length; index += 1) {
+      const char = value[index]
+      if (char === '\n') {
+        return -1
+      }
+      if (char === '[') {
+        depth += 1
+      } else if (char === ']') {
+        if (depth === 0) {
+          return index
+        }
+        depth -= 1
+      }
+    }
+    return -1
+  }
+  const parseInlineLinkAt = (value, start) => {
+    const isImage = value[start] === '!' && value[start + 1] === '['
+    if (!isImage && value[start] !== '[') {
+      return null
+    }
+    if (!isImage && value[start - 1] === '!') {
+      return null
+    }
+
+    const openBracketIndex = isImage ? start + 1 : start
+    const closeBracketIndex = matchingLabelEnd(value, openBracketIndex)
+    if (closeBracketIndex === -1 || value[closeBracketIndex + 1] !== '(') {
+      return null
+    }
+
+    let cursor = closeBracketIndex + 2
+    let destination
+    if (value[cursor] === '<') {
+      const closeDestinationIndex = value.indexOf('>', cursor + 1)
+      if (closeDestinationIndex === -1 || value.slice(cursor, closeDestinationIndex).includes('\n')) {
+        return null
+      }
+      destination = value.slice(cursor, closeDestinationIndex + 1)
+      cursor = closeDestinationIndex + 1
+    } else {
+      const destinationStart = cursor
+      let parenDepth = 0
+      while (cursor < value.length) {
+        const char = value[cursor]
+        if (char === '\n') {
+          return null
+        }
+        if (char === '(') {
+          parenDepth += 1
+        } else if (char === ')') {
+          if (parenDepth === 0) {
+            break
+          }
+          parenDepth -= 1
+        } else if (/\s/.test(char) && parenDepth === 0) {
+          break
+        }
+        cursor += 1
+      }
+      destination = value.slice(destinationStart, cursor)
+      if (destination === '') {
+        return null
+      }
+    }
+
+    let quote = null
+    let titleParenDepth = 0
+    for (; cursor < value.length; cursor += 1) {
+      const char = value[cursor]
+      if (char === '\n') {
+        return null
+      }
+      if (quote !== null) {
+        if (char === quote) {
+          quote = null
+        }
+      } else if (char === '"' || char === "'") {
+        quote = char
+      } else if (char === '(') {
+        titleParenDepth += 1
+      } else if (char === ')') {
+        if (titleParenDepth === 0) {
+          return { target: normalizeDestination(destination), start, end: cursor + 1 }
+        }
+        titleParenDepth -= 1
+      }
+    }
+    return null
+  }
+  const extractInlineLinks = (value) => {
+    const inlineLinks = []
+    for (let index = 0; index < value.length; index += 1) {
+      const parsed = parseInlineLinkAt(value, index)
+      if (parsed) {
+        inlineLinks.push(parsed)
+      }
+    }
+    return inlineLinks
+  }
+  const eraseRanges = (value, ranges) => {
+    const sortedRanges = [...ranges].sort((left, right) => left.start - right.start || right.end - left.end)
+    let cursor = 0
+    let result = ''
+    for (const range of sortedRanges) {
+      if (range.end <= cursor) {
+        continue
+      }
+      const start = Math.max(range.start, cursor)
+      result += value.slice(cursor, start)
+      result += ' '.repeat(range.end - start)
+      cursor = range.end
+    }
+    return result + value.slice(cursor)
   }
 
   for (const { text: line, lineNumber } of lines) {
@@ -437,15 +552,11 @@ const collectLinks = (markdown) => {
       }
     }
     prose = prose.replace(rawHtmlAnchorTagPattern, ' ')
-    for (const match of prose.matchAll(nestedImageLinkPattern)) {
-      addLink(normalizeDestination(match[1]), lineNumber)
-      addLink(normalizeDestination(match[2]), lineNumber)
+    const inlineLinks = extractInlineLinks(prose)
+    for (const link of inlineLinks) {
+      addLink(link.target, lineNumber)
     }
-    prose = prose.replace(nestedImageLinkPattern, '')
-    for (const match of prose.matchAll(linkPattern)) {
-      addLink(normalizeDestination(match[1]), lineNumber)
-    }
-    prose = prose.replace(linkPattern, '')
+    prose = eraseRanges(prose, inlineLinks)
     for (const match of prose.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
       if (isFootnoteLabel(label)) {
@@ -612,6 +723,10 @@ const assertCheckerFixtures = () => {
   const nested = collectLinks('[![diagram](./inner.png)](./outer.md)')
   if (!nested.links.some((link) => link.target === './inner.png') || !nested.links.some((link) => link.target === './outer.md')) {
     throw new Error('nested image link fixture should include inner and outer destinations')
+  }
+  const nestedBracketLabel = collectLinks('[See [details]](./details.md)')
+  if (!nestedBracketLabel.links.some((link) => link.target === './details.md')) {
+    throw new Error('nested bracket link label fixture should include the destination')
   }
 
   const bracketIndexing = collectLinks('Matrix M[i][j] and coordinates [1][2] are notation, not links.')
