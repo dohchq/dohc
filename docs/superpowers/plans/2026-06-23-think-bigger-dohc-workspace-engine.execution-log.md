@@ -7957,7 +7957,7 @@ Two-hundred-ninety-third pass:
 
 Two-hundred-ninety-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one major finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7973,6 +7973,44 @@ Two-hundred-ninety-fourth pass:
     `requestedVersionIds` limited to the restore target version and binding the
     stable `checkpointId` in the operation operand tuple instead of using a
     `restoredFromVersionId` alias.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four major findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four major findings:
+  - Scoped the no-time-only-retirement guarantee to still-`durable-pending`
+    accepted holding records while preserving retention-expiry retirement for
+    rejected and quarantined records.
+  - Replaced mixed merge/restore replay wording with one API-derived stable
+    operand tuple per operation before validation.
+  - Added definitive captured-write rejection transitions to the native
+    filesystem lifecycle table and kept `idempotency-expired` as retry-only.
+  - Split redacted linked-work projections from internal/audit projections so
+    shared/public channel and thread reads expose only opaque handles.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

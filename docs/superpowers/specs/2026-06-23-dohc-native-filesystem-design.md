@@ -97,9 +97,9 @@ Native write/status lifecycle transitions are constrained to this state machine:
 | Current state | Allowed next state or retry outcome |
 | --- | --- |
 | request not yet accepted | `canonical`, `durable-pending`, `rejected`, `quarantined`, `conflict`, or `retryable-failure` |
-| `durable-pending` | `canonical`, `quarantined`, `conflict`, `retryable-failure`, or `terminal-retired` through explicit disposition |
-| `quarantined` | `durable-pending` after successful revalidation, `canonical` after successful replay/promotion, or `terminal-retired` through explicit disposition |
-| `rejected` | retained as rejected until retention/disposition metadata is compacted into `terminal-retired`; late retries after the replay horizon return `idempotency-expired` |
+| `durable-pending` | `canonical`, `quarantined`, `conflict`, `rejected` for definitive auth/policy denial after capture, `retryable-failure`, or `terminal-retired` through explicit disposition |
+| `quarantined` | `durable-pending` after successful revalidation, `canonical` after successful replay/promotion, `rejected` for definitive denial, or `terminal-retired` through explicit disposition |
+| `rejected` | terminal denied state retained until retention/disposition metadata is compacted into `terminal-retired`; late retries after the replay horizon return `idempotency-expired` |
 | `conflict` | remains conflict until manual resolution records a new write result; late retries after the replay horizon return `idempotency-expired` |
 | `retryable-failure` | retry with the same idempotency identity returns the durable result once known, or another `retryable-failure` if infrastructure/evaluator state remains indeterminate |
 | `canonical` | terminal for that write result; later edits create new write results |

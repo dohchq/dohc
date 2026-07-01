@@ -364,23 +364,27 @@ type WriteResult =
 `requestedVersionIds` is the complete canonical version role vector named by the
 initiating write-producing request, not merely the version that eventually owns a
 record. The array is ordered by semantic request role, not lexical id order:
-single-version `write`, `delete`, `rename`, and `move` operations serialize
-`[targetVersionId]`; `replace` serializes `[targetVersionId, sourceVersionId]`;
-`restore` serializes `[targetVersionId]` here and binds the stable
-`checkpointId` in the operation operand tuple because the checkpoint is not a
-version id; `merge` serializes `[targetVersionId, baseVersionId,
-currentVersionId, incomingVersionId]`; future multi-source operations serialize
-`[targetVersionId, baseVersionId?, currentVersionId?, incomingVersionId?,
-...sourceVersionIds]`, with optional roles omitted only when that operation does
-not define the role and `sourceVersionIds` kept in request order after server
-canonicalization. If a restore implementation materializes a checkpoint through
-an internal source version, replay identity must still serialize the same
-`checkpointId` in the operand tuple and must not substitute a
-`restoredFromVersionId` alias. Duplicated version ids remain duplicated when two
-roles point at the same version, because the operation fingerprint compares
-positions, not a deduplicated set. Delayed acknowledgements and replayed
-idempotency results must match the full `requestedVersionIds` array before
-clearing in-flight state or applying UI/cache updates.
+single-version `write`, `delete`, `rename`, `move`, `replace`, and `restore`
+operations serialize `[targetVersionId]`; `merge` serializes
+`[targetVersionId, sourceVersionId]`; future multi-source operations serialize
+`[targetVersionId, ...sourceVersionIds]`, with `sourceVersionIds` kept in
+request order after server canonicalization. Duplicated version ids remain
+duplicated when two roles point at the same version, because the operation
+fingerprint compares positions, not a deduplicated set.
+
+Replay identity freezes one API-derived operand tuple before validation and uses
+that same tuple for writers, retries, status lookup, and conflict repair:
+
+| Operation | `requestedVersionIds` | Stable operand tuple additions |
+| --- | --- | --- |
+| `write`, `delete`, `rename`, `move` | `[targetVersionId]` | Target path/object handles, normalized path/object preconditions, and operation-specific source/destination paths. |
+| `replace(workspaceId, versionId, fromPath, toPath, ...)` | `[targetVersionId: versionId]` | `fromPath`, `toPath`, `sourceObjectId`, `destinationObjectId`, normalized source precondition, and normalized destination precondition. |
+| `merge(workspaceId, sourceVersionId, targetVersionId, ...)` | `[targetVersionId, sourceVersionId]` | Normalized source-version freshness guard and normalized target-version freshness guard. Internal base/current/incoming conflict handles are derived later and are not substituted into replay identity. |
+| `restore(workspaceId, versionId, checkpointId, ...)` | `[targetVersionId: versionId]` | Stable `checkpointId` plus the normalized restore freshness guard. If restore materializes a checkpoint through an internal source version, replay identity must still serialize the same `checkpointId` and must not substitute a `restoredFromVersionId` alias. |
+
+Delayed acknowledgements and replayed idempotency results must match the full
+`requestedVersionIds` array and the stable operand tuple before clearing
+in-flight state or applying UI/cache updates.
 
 `recordKind` is a public response field only on `durable-pending` and
 `idempotency-expired` variants. Canonical, retryable-failure, and conflict
@@ -504,8 +508,11 @@ compaction, or colder-storage policy may throttle retries, compact derived
 retry/index metadata, or move accepted payload bytes to colder durable storage,
 but it must preserve reconstructible payload bytes until canonicalization
 completes or explicit operator disposition retires the record. Time alone must
-not transition an accepted holding record to `terminal-retired`. If a
-rejected-before-acceptance item expires, or if an accepted record is retired
+not transition a still-`durable-pending` accepted holding record to
+`terminal-retired`; this protection does not prevent already rejected or
+quarantined records from retiring through their recorded retention/disposition
+paths. If a rejected-before-acceptance item expires, if a quarantined record
+retires after its disposition/audit horizon, or if an accepted record is retired
 through explicit disposition, the engine preserves durable rejection,
 disposition, retirement, or expiration evidence. Humans, agents, imports, and
 sync processes all get the same guarantee: an accepted change is not silently

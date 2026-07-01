@@ -276,6 +276,12 @@ type ChannelLinkedTargetRef =
 type InternalChannelLinkedTargetRef = Extract<ChannelLinkedTargetRef, { scopeKind: 'internal' }>
 type SharedChannelLinkedTargetRef = Extract<ChannelLinkedTargetRef, { scopeKind: 'shared' }>
 
+type RedactedTargetVersionRef = {
+  versionRefKind: 'object_version' | 'workspace_version' | 'history_moment'
+  opaqueVersionHandle: string
+  opaqueHistoryMomentHandle?: string
+}
+
 type Channel = {
   channelId: string
   workspaceId: string
@@ -292,21 +298,33 @@ type Channel = {
 }
 
 type RedactedLinkedWorkProjection = {
-  readonly sourceThreadLinkId: string
+  readonly linkedWorkHandle: string
   scopeKind: 'internal' | 'shared'
-  targetWorkspaceId: string
-  targetId: string
   targetType: ThreadLinkTargetType
-  targetVersionRef: VersionRef | null
+  targetVersionRef: RedactedTargetVersionRef | null
+  displayName?: string
+  redactionReason?: 'not_authorized' | 'shared_boundary' | 'secret_backed'
+  sourceThreadLinkId?: never
+  targetWorkspaceId?: never
+  targetId?: never
   shareGrantId?: never
   visibilityScope?: never
 }
 
 type RedactedChannelLinkedTargetRef = RedactedLinkedWorkProjection
 
+type InternalLinkedWorkProjection = ChannelLinkedTargetRef & {
+  readonly sourceThreadLinkId: string
+}
+
 type ChannelProjection = Channel & {
   // Redacted read-side projection derived from active ThreadLink rows.
   readonly linkedTargets: readonly RedactedChannelLinkedTargetRef[]
+}
+
+type InternalChannelProjection = Channel & {
+  // Internal/audit-only projection; never returned by shared/public reads.
+  readonly linkedTargets: readonly InternalLinkedWorkProjection[]
 }
 
 type ChannelTargetActivity = {
@@ -333,9 +351,12 @@ pair; it is not an independent write authority.
 `ChannelProjection.linkedTargets` and `ChatThreadProjection.linkedWork` are
 redacted read-only projections/caches rebuilt from active `ThreadLink` rows
 only; neither field is an authoritative mutable record, and neither exposes raw
-`shareGrantId` or `visibilityScope`. `ChannelTargetActivity` is derived output
-regenerated from the same `ThreadLink` source after repair, not a co-equal input
-to the repair loop. If `ThreadLink`, `ChannelTargetActivity`,
+`sourceThreadLinkId`, `targetWorkspaceId`, `targetId`, `shareGrantId`, or
+`visibilityScope`. `InternalChannelProjection`, `ChannelTargetActivity`, and
+full `ThreadLink` rows carry those raw identifiers only for authorized internal,
+repair, audit, replay, and non-redacted mutation paths. `ChannelTargetActivity`
+is derived output regenerated from the same `ThreadLink` source after repair,
+not a co-equal input to the repair loop. If `ThreadLink`, `ChannelTargetActivity`,
 `ChannelProjection.linkedTargets`, and `ChatThreadProjection.linkedWork`
 disagree, `ThreadLink` wins, the derived ledger/projections are marked stale, and
 the engine rebuilds or repairs the ledger and projections from active
