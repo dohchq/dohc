@@ -8333,9 +8333,11 @@ Mutable status symbol: `LivePR00Status`.
 - Live PR00 status:
   - CodeRabbit status: deferred to the next PR00 major readiness/material-risk
     gate under the 2026-06-29 user-directed review policy.
-  - Test evidence: local validation remains green; GitHub Actions did not start
-    runners because the GitHub billing/spending limit gate blocked jobs before
-    any workflow step ran.
+  - Test evidence: PR00 docs-only local validation remains green; the pushed
+    P0A-P0G proof stack is locally validated through
+    `codex/think-bigger-p0g-proof-qa` at commit `090702d7`. GitHub Actions did
+    not start runners because the GitHub billing/spending limit gate blocked
+    jobs before any workflow step ran.
   - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
     remains pending human approval.
   - Unresolved findings: GitHub Actions billing/spending-limit blocker prevents
@@ -8343,8 +8345,9 @@ Mutable status symbol: `LivePR00Status`.
     pending human approval.
   - Completion state: not complete or merge-ready until remote CI can run or the
     user explicitly accepts the external CI blocker for PR00, the required
-    major-gate review policy is satisfied, and the docs-only local-agent-CLI
-    exception is approved.
+    major-gate review policy is satisfied, the P0A-P0G draft lane PRs are
+    approved or explicitly accepted, and the docs-only local-agent-CLI exception
+    is approved.
 
 - CI investigation:
   - `gh run view 28526764674 --verbose` for `Think Bigger Docs / Link And Anchor Check`
@@ -8362,6 +8365,28 @@ Mutable status symbol: `LivePR00Status`.
     passed for 5 discovered Think Bigger docs and the in-script fixtures.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
+- P0 proof stack status:
+  - P0A, P0R, P0B, P0C, P0D, P0E, P0F, and P0G branches are pushed and
+    stacked in order through `codex/think-bigger-p0g-proof-qa` commit
+    `090702d7`.
+  - Draft stacked lane PRs are open:
+    P0A [#47](https://github.com/dohc-ai/dohc/pull/47),
+    P0R [#48](https://github.com/dohc-ai/dohc/pull/48),
+    P0B [#49](https://github.com/dohc-ai/dohc/pull/49),
+    P0C [#50](https://github.com/dohc-ai/dohc/pull/50),
+    P0D [#51](https://github.com/dohc-ai/dohc/pull/51),
+    P0E [#52](https://github.com/dohc-ai/dohc/pull/52),
+    P0F [#53](https://github.com/dohc-ai/dohc/pull/53), and
+    P0G [#54](https://github.com/dohc-ai/dohc/pull/54).
+  - Latest P0G local validation passed: docs link checks, workspace-engine
+    177 tests, workspace-history 47 tests, workspace-fs 40 tests,
+    workspace-core 108 tests, MCP 58 tests, workspace-api share-revocation
+    18 tests, workspace-postgres schema 2 tests, Rust fmt/test/bench smoke,
+    package typechecks, Codex local-agent smoke, and Claude Sonnet local-agent
+    compatibility smoke.
+  - Live-pg `shares.test.ts` remains externally blocked in this local WSL
+    environment by `ECONNREFUSED 127.0.0.1:54329`; Docker is not installed in
+    the distro, so the local Postgres service cannot be started here.
 - Unresolved findings:
   - External GitHub Actions billing/spending-limit blocker prevents remote CI.
   - The PR00 docs-only local-agent-CLI exception remains pending human approval
@@ -8375,6 +8400,8 @@ Mutable status symbol: `LivePR00Status`.
   on PR00.
 - CodeRabbit is deferred to the next major PR00 readiness gate under the
   updated review policy.
+- P0A-P0G draft lane PRs are open; no lane CodeRabbit major-gate review has
+  been run under the updated rate-limit-conscious policy.
 - The PR00 docs-only local-agent-CLI exception remains pending human approval
   before completion or merge-readiness.
 
@@ -8421,9 +8448,11 @@ Mutable status symbol: `LivePR00Status`.
 
 ### Remaining Risk
 
-- Phase 0 scope is large and must be split into lane PRs before implementation.
-- P0 lanes are provisionally assigned, but final staffing/approval and
-  lane-specific CodeRabbit major gates are still pending.
+- Phase 0 scope is large and should still be reviewed as stacked lane PRs
+  before merge.
+- P0A-P0G branches are pushed, draft lane PRs are open, and the stack is locally
+  validated through P0G, but final lane PR approval and CodeRabbit major-gate
+  reviews are still pending.
 
 ### Follow-Up / Deletion Conditions
 
@@ -8435,7 +8464,7 @@ Status: restacked on current PR00; not approved
 Branch: codex/think-bigger-p0a-inventory
 Worktree: `/home/ice/dev/dohc-p0a-inventory`
 Implementation chat/thread: main orchestration thread + explorer subagents
-PR: not opened
+PR Link: [#47](https://github.com/dohc-ai/dohc/pull/47)
 Date started: 2026-06-24
 Date completed:
 
@@ -8754,7 +8783,7 @@ Status: restacked on P0A; not approved
 Branch: codex/think-bigger-p0r-rust-kernel
 Worktree: `/home/ice/dev/dohc-p0r-rust-kernel`
 Implementation workstream, if used: main orchestration thread
-PR Link: not opened
+PR Link: [#48](https://github.com/dohc-ai/dohc/pull/48)
 Date started: 2026-06-24
 Date completed:
 
@@ -9116,6 +9145,10 @@ Latest stack-refresh validation on 2026-07-01:
 
 ### Phase 0 Proof Arc
 
+PR00 remains a docs-only orchestration PR. The checked proof items below refer
+to the pushed P0A-P0G lane branches, not to implementation code merged into
+PR00 itself.
+
 PR lanes:
 
 - P0A
@@ -9134,17 +9167,17 @@ Schema milestones:
 
 Gate evidence:
 
-- [ ] Current codebase inventory and storage/interposition decisions are
+- [x] Current codebase inventory and storage/interposition decisions are
       recorded.
-- [ ] Phase 0 branch/worktree/chat ownership is recorded for each PR lane.
-- [ ] Rust workspace kernel spike completed or explicitly deferred by user.
-- [ ] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded by
+- [x] Phase 0 branch/worktree/chat ownership is recorded for each PR lane.
+- [x] Rust workspace kernel spike completed or explicitly deferred by user.
+- [x] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded by
       P0R, or explicitly deferred by user with a dated note.
-- [ ] Rust bridge/packaging/CI recommendation is recorded by P0R, or explicitly
+- [x] Rust bridge/packaging/CI recommendation is recorded by P0R, or explicitly
       deferred by user with a dated note.
-- [ ] Main plus one named version works for one text/file driver.
+- [x] Main plus one named version works for one text/file driver.
 - [ ] `Phase0SharedSubstrateBaseline` is finalized before P0B-P0G start.
-- [ ] File/API writes durably capture immediately and produce recoverable
+- [x] File/API writes durably capture immediately and produce recoverable
       history, with canonical promotion gated by policy, review, and validation.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
@@ -9160,13 +9193,13 @@ Gate evidence:
 - [ ] External editor/process edits are detected while dohc is running.
 - [ ] External editor/process edits made while dohc is stopped reconcile on
       next launch.
-- [ ] Restore works.
-- [ ] Clean merge works.
-- [ ] Conflict preserves base/current/incoming.
+- [x] Restore works.
+- [x] Clean merge works.
+- [x] Conflict preserves base/current/incoming.
 - [ ] One chat can link to a file and appear beside the file.
-- [ ] Chat projection is read-only.
-- [ ] Search returns linked chat/file context without policy leaks.
-- [ ] `.env` is excluded/redacted/ignored until secret-backed files exist.
+- [x] Chat projection is read-only.
+- [x] Search returns linked chat/file context without policy leaks.
+- [x] `.env` is excluded/redacted/ignored until secret-backed files exist.
 - [ ] Workspace-switch async race E2E passes.
 - [ ] P0R and later implementation lanes record performance measurements for
       startup, reconciliation, watcher capture, history restore, search, and
@@ -9174,15 +9207,15 @@ Gate evidence:
 - [ ] Phase 0 implementation performance budgets pass or budget misses have
       explicit user approval and follow-up.
 - [ ] No renderer-blocking whole-workspace scan ships in Phase 0.
-- [ ] Local agent CLI QA passes with the configured `DOHC_TEST_AGENT_CLI`.
-- [ ] Alternative local agent CLI compatibility is run or unavailable status is
+- [x] Local agent CLI QA passes with the configured `DOHC_TEST_AGENT_CLI`.
+- [x] Alternative local agent CLI compatibility is run or unavailable status is
       recorded.
-- [ ] Local agent file edits are captured without requiring agent-specific file
+- [x] Local agent file edits are captured without requiring agent-specific file
       attribution.
 - [ ] Agent chat replies display as `<User Name>'s agent`.
 - [ ] Required Phase 0 CodeRabbit major gates are complete or user approved
       documented non-critical documentation-only exceptions.
-- [ ] Architecture/security/QA subagent reviews complete.
+- [x] Architecture/security/QA subagent reviews complete.
 - [ ] Expansion roadmap has been revised with Phase 0 findings.
 
 ### Foundation Alpha
