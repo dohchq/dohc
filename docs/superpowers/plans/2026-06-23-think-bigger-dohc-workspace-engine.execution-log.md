@@ -4825,7 +4825,7 @@ Two-hundred-seventh pass:
 - Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
-  - Test evidence: validation block below must pass for this patch set before
+  - Test evidence: validation block below passed for this patch set before
     commit.
   - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
     remains pending human approval.
