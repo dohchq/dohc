@@ -7517,7 +7517,7 @@ Two-hundred-eighty-first pass:
 
 Two-hundred-eighty-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two major findings, one minor finding, and two trivial
     findings fixed; committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7535,6 +7535,38 @@ Two-hundred-eighty-second pass:
   - Clarified that immediate file saves become canonical only after synchronous
     gates pass, while async review/canonicalization may return `durable-pending`.
   - Added rename/move guard coverage to the versioned-workspace E2E proof slice.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-eighty-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three minor findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three minor findings:
+  - Replaced the stale `actions/checkout` version note in the Think Bigger docs
+    workflow with a neutral pinned-SHA note.
+  - Marked `ThreadReadState` workspace/thread/actor identity fields as
+    `readonly`.
+  - Marked immutable `ThreadMessageBase` message identity, ancestry, sequence,
+    and creation timestamp fields as `readonly`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

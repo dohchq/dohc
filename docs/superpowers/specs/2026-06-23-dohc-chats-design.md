@@ -96,9 +96,9 @@ type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
 type UnixMsDecimalString = string // canonical base-10 Unix epoch milliseconds
 
 type ThreadReadState = {
-  workspaceId: string
-  threadId: string
-  actorId: string
+  readonly workspaceId: string
+  readonly threadId: string
+  readonly actorId: string
   lastReadCursor: {
     threadSequence: UInt64DecimalString
     createdAt: UnixMsDecimalString
@@ -1138,16 +1138,16 @@ Fields:
 
 ```ts
 type ThreadMessageBase = {
-  id: string // server-issued; unique within (workspaceId, threadId)
-  workspaceId: string
-  threadId: string
-  threadSequence: UInt64DecimalString
-  parentMessageId?: string
+  readonly id: string // server-issued; unique within (workspaceId, threadId)
+  readonly workspaceId: string
+  readonly threadId: string
+  readonly threadSequence: UInt64DecimalString
+  readonly parentMessageId?: string
   readonly authorId: string // server-owned immutable author actor id
   readonly authorKind: 'human' | 'agent' | 'system' // server-assigned from authenticated identity
   body: string
   bodyRevision: UInt64DecimalString
-  createdAt: UnixMsDecimalString // server-assigned; client values rejected
+  readonly createdAt: UnixMsDecimalString // server-assigned; client values rejected
   editedAt?: UnixMsDecimalString // server-assigned; client values rejected
   readonly editedById?: string // server-assigned immutable edit actor id
 }
