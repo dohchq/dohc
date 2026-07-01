@@ -1434,7 +1434,14 @@ For every PR/phase record:
 
 ### Required Test Types
 
-Each relevant PR must include:
+Each PR must test the feature area, schema, migration, UI, policy surface, or
+infrastructure it actually changes. "Relevant" means the PR introduces,
+modifies, or claims readiness for that surface in the Phase 0 proof arc or the
+expansion roadmap. Docs-only and narrow infra PRs must still run doc/link,
+format, brand, and impacted contract checks, but they are not blocked by E2E
+areas for product surfaces they do not touch or ship.
+
+For changed surfaces, include the applicable subset of:
 
 - unit tests.
 - integration tests.
@@ -1458,7 +1465,9 @@ Each relevant PR must include:
 These E2E requirements apply to surfaces that are implemented, shipped, or in
 scope for the PR/milestone under review. Deferred Phase 0 areas do not require
 their E2E before they exist, but once a surface is introduced its listed E2E is
-mandatory for that PR and future release gates.
+mandatory for that PR and future release gates. A PR that only edits docs,
+workflow plumbing, or an unrelated substrate slice records that the E2E area is
+not touched instead of skipping a required test for a shipped surface.
 
 - workspace creation/open.
 - file editing and automatic save.

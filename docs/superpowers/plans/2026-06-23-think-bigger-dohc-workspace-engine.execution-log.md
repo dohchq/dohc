@@ -6732,7 +6732,7 @@ Two-hundred-fifty-ninth pass:
 
 Two-hundred-sixtieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6759,6 +6759,40 @@ Two-hundred-sixtieth pass:
     envelopes.
   - Added deterministic first-match write-path precedence for authorization,
     visibility, conflict, review, and canonical save outcomes.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixty-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two major findings and one trivial finding:
+  - Scoped the Think Bigger test matrix to the PR's changed or shipped surface so
+    docs-only and unrelated infra PRs are not blocked by future product E2E
+    lanes.
+  - Added `searchable`, `visibility`, and `agentAccess` to
+    `WorkspaceStatusPayload` and required status/export/import to preserve the
+    full resolved `FilePolicyBase` tuple.
+  - Split `MessageDeleteLegacyThreadActivity` into a tagged shape where
+    `imported_body` requires `previousBody` and `redacted_fallback` may omit it.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

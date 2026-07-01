@@ -815,7 +815,10 @@ type WorkspaceStatusPayload = {
   materialized: 'local' | 'virtual'
   materializationPresentation: 'hydrated' | 'placeholder'
   pinned: boolean
+  searchable: boolean
+  visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
   publicExport: 'include' | 'redact' | 'exclude'
+  agentAccess: 'allow' | 'ask' | 'explicit' | 'deny'
   exportState: 'included' | 'redacted' | 'excluded' | 'not_exportable'
   secretProjection: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
   conflictState: 'none' | 'preserved' | 'resolution_pending' | 'resolved'
@@ -842,8 +845,12 @@ type WorkspaceStatusTransportPayload = WorkspaceAsyncPayload & {
 `WorkspaceStatusPayload` carries durable policy and legibility axes directly; it
 does not persist request-stream freshness metadata such as `requestToken`,
 `sequence`, or `pageToken`. Status clients must not infer `tracked`,
-`versioned`, `synced`, export handling, or conflict location by scraping path
-conventions, policy files, or conflict views.
+`versioned`, `synced`, `pinned`, `searchable`, `visibility`, `publicExport`,
+`agentAccess`, export handling, or conflict location by scraping path
+conventions, policy files, or conflict views. Status/export serializers and
+re-import deserializers preserve the full resolved `FilePolicyBase` tuple:
+`tracked`, `versioned`, `synced`, `pinned`, `searchable`, `visibility`,
+`publicExport`, `agentAccess`, and `materialized`.
 `versionsNamespaceMode` is persisted workspace status, not a per-client guess:
 `legacy_unmanaged` means pre-opt-in `.versions/**` content is ordinary content
 classified by the compatibility path, while `managed_versions` means
@@ -1528,12 +1535,15 @@ workspace files. Only the explicitly allowlisted policy inputs above may cross
 the boundary, and only through the engine policy parsing/export path.
 That engine policy export path is responsible for preserving enough normalized
 policy state to reconstruct secret-backed versus non-secret files on re-import,
-including equal-specificity tie-breaking from the original source ordinal and
-rule index plus the workspace path-equivalence profile used during
+including the full resolved `FilePolicyBase` tuple (`tracked`, `versioned`,
+`synced`, `pinned`, `searchable`, `visibility`, `publicExport`, `agentAccess`,
+and `materialized`), equal-specificity tie-breaking from the original source
+ordinal and rule index plus the workspace path-equivalence profile used during
 canonicalization and the persisted `versionsNamespaceMode`; re-import must fail
-closed rather than treating an entry with missing policy envelope, ordering data,
-a missing/incompatible path-equivalence profile, or a missing/incompatible
-versions-namespace mode as ordinary content. If an export declares an active
+closed rather than treating an entry with missing policy envelope, missing
+resolved policy tuple, ordering data, a missing/incompatible path-equivalence
+profile, or a missing/incompatible versions-namespace mode as ordinary content.
+If an export declares an active
 `versionsNamespaceActivationFence`, re-import treats the fence as required
 migration state and must resume/complete or roll back the cutover before
 ordinary content import continues; if that fence metadata is missing or

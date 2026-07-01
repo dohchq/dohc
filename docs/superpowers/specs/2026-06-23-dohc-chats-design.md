@@ -1338,16 +1338,24 @@ type MessageDeleteThreadActivity = ThreadActivityBase & {
   tombstoneHash: string
 }
 
-type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
+type MessageDeleteLegacyThreadActivityBase = ThreadActivityBase & {
   messageId: string
   kind: 'message_deleted_legacy'
   legacyImportId: string
-  previousBody?: ChatBodySnapshot
   deleteReason?: string
   bodyHash: string
   tombstoneHash: string
-  legacyHashSource: 'imported_body' | 'redacted_fallback'
 }
+
+type MessageDeleteLegacyThreadActivity =
+  | (MessageDeleteLegacyThreadActivityBase & {
+      legacyHashSource: 'imported_body'
+      previousBody: ChatBodySnapshot
+    })
+  | (MessageDeleteLegacyThreadActivityBase & {
+      legacyHashSource: 'redacted_fallback'
+      previousBody?: ChatBodySnapshot
+    })
 
 type MessageRestoreThreadActivity = ThreadActivityBase & {
   messageId: string
