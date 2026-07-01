@@ -2,6 +2,7 @@
 
 Status: exploratory architecture direction
 Cohort: dohc Think Bigger Workspace Engine
+Think Bigger Spec: true
 Date: 2026-06-23
 
 Companion: `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`
@@ -702,9 +703,15 @@ type WorkspaceAsyncPayload = {
 
 type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
   path?: string
+  tracked: boolean
+  versioned: boolean
+  synced: boolean
   materialized: 'local' | 'virtual'
   pinned: boolean
+  publicExport: 'include' | 'redact' | 'exclude'
+  exportState: 'included' | 'redacted' | 'excluded' | 'not_exportable'
   secretProjection: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
+  conflictState: 'none' | 'preserved' | 'resolution_pending' | 'resolved'
   writeState:
     | 'canonical'
     | 'durable-pending'
@@ -714,11 +721,19 @@ type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
     | 'retryable-failure'
     | 'terminal-retired'
   holdingRecordId?: string
+  conflictProjectionPath?: string
   conflictReplayToken?: string
   idempotencyResultId?: string
   idempotencyReplayToken?: string
 }
 ```
+
+`WorkspaceStatusPayload` carries policy and legibility axes directly. Status
+clients must not infer `tracked`, `versioned`, `synced`, export handling, or
+conflict location by scraping path conventions, policy files, or conflict views.
+`conflictProjectionPath` points at the policy-safe `.dohc/conflicts/` projection
+when one may be shown; secret-backed or unauthorized conflicts still report
+`conflictState` without leaking a projection path.
 
 `requestToken` is an opaque server/engine-minted request-stream token returned
 when the initiating watch/status/snapshot/list/search/filesystem-loading request

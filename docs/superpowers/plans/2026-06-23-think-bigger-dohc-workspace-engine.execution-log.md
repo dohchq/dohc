@@ -57,12 +57,12 @@ secret-handling, data-loss, or review-gate blockers.
 
 ## PR Lane Inventory
 
-P0A-P0G branches plus the P0R spike are provisional throughput work started
-after user approval for unattended Phase 0 execution on 2026-06-24. Current live
-state is recorded only in the canonical live-status block in the latest PR00
-pass below. This table records static lane ownership, branch, worktree, and
-planned validation shape. P0S is a consolidated PR01 Schema Promotion Checkpoint,
-not a standalone lane row.
+P0A and P0R are provisional throughput work started after user approval for
+unattended Phase 0 execution on 2026-06-24; P0B-P0G remain queued behind the
+shared-substrate baseline freeze. Current live state is recorded only in the
+canonical live-status block in the latest PR00 pass below. This table records
+static lane ownership, branch, worktree, and planned validation shape. P0S is a
+consolidated PR01 Schema Promotion Checkpoint, not a standalone lane row.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -5620,7 +5620,7 @@ Two-hundred-twenty-ninth pass:
 
 Two-hundred-thirtieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5641,6 +5641,42 @@ Two-hundred-thirtieth pass:
     `send_channel_message` creation provenance are distinct.
   - Reworded channel/thread linked-work ownership so ledgers are authoritative and
     projections are read-only caches.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-thirty-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Replaced duplicated P0E/PR 12 chat schema ownership text with references to
+    the canonical Phase 0 / PR 01 / PR 12 Schema Ownership Matrix.
+  - Added tracked/versioned/synced, export-state, and conflict-location fields to
+    `WorkspaceStatusPayload`.
+  - Replaced brittle Think Bigger spec discovery cohort matching with a stable
+    `Think Bigger Spec: true` marker.
+  - Clarified the PR lane inventory so only P0A and P0R are marked as started;
+    P0B-P0G remain queued behind the shared-substrate baseline freeze.
+  - Added persisted channel conversation provenance to `ChannelChatThread` and
+    channel thread-created activity records.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

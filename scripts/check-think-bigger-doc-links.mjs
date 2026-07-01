@@ -39,9 +39,8 @@ const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
-  const thinkBiggerCohortPattern =
-    /^Cohort:\s*(?:Think Bigger planning and design documentation|Think Bigger documentation and tooling|Think Bigger dohc documentation and link-check tooling|Core Architecture Specs|Architecture Specifications|Design specs and mega plan|Design specs for versioning, chats, and filesystem|Architecture specs and mega-plan|Architecture specifications and mega-plan|Think Bigger documentation suite|Think Bigger dohc Workspace Engine(?: Documentation and CI| docs and CI enforcement)?|dohc Workspace Engine documentation and CI infrastructure|dohc\s+Think Bigger Workspace Engine|dohc Workspace Engine Docs, Specs, and CI)$/im
-  const hasThinkBiggerCohortMetadata = (dir, name) => {
+  const thinkBiggerSpecMarkerPattern = /^Think Bigger Spec:\s*true\s*$/im
+  const hasThinkBiggerSpecMarker = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
     try {
@@ -58,7 +57,7 @@ const discoverThinkBiggerDocs = () => {
     }
 
     const raw = fs.readFileSync(canonicalCandidatePath, 'utf8')
-    return thinkBiggerCohortPattern.test(raw)
+    return thinkBiggerSpecMarkerPattern.test(raw)
   }
   const discoveryRoots = [
     {
@@ -69,7 +68,7 @@ const discoverThinkBiggerDocs = () => {
       dir: 'docs/superpowers/specs',
       include: (name) => {
         const file = repoRelativePath('docs/superpowers/specs', name)
-        return expectedSpecDocs.has(file) || hasThinkBiggerCohortMetadata('docs/superpowers/specs', name)
+        return expectedSpecDocs.has(file) || hasThinkBiggerSpecMarker('docs/superpowers/specs', name)
       },
     },
   ]

@@ -1113,15 +1113,11 @@ history.
 - Minimal workspace-local chat thread.
 - One chat thread linked to a stable file object ID.
 - Message send.
-- Use the provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
-  from `Phase0SharedSubstrateBaseline`; P0E may add acceptance notes but must not
-  define a second chat/link ownership source before PR 12 extends those symbols
-  for channels, DMs, and full chat schema.
-  These provisional shapes must remain forward-compatible with PR 12, or PR 12
-  must include a migration/backfill step that preserves existing chat data.
-  PR 01 consumes this Phase 0 baseline contract as part of the shared substrate and
-  must not introduce parallel chat shapes; temporary fields must either carry a
-  schema version or have an explicit migration/backfill boundary.
+- Follow the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+  for chat/thread/link/read-state ownership and migration boundaries. P0E may add
+  acceptance notes for the linked-chat proof, but it must not restate or redefine
+  those schema ownership contracts locally.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
 
@@ -2188,10 +2184,11 @@ links, activity, read state, and reactions.
   source workspace/thread, target type, target workspace, stable target id,
   optional `VersionRef`, display path/title captured at link time,
   ACL/degraded-render state.
-- Own the final `ChatThread`, `ThreadMessage`, chat `ThreadLink`, and
-  `ThreadReadState` schemas as assigned in the Phase 0 / PR 01 / PR 12 Schema
-  Ownership Matrix, including read-state migration/backfill and projection
-  rebuild/invalidation.
+- Follow the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+  for chat/thread/link/read-state ownership, migration/backfill, and projection
+  rebuild/invalidation boundaries instead of restating individual symbol
+  ownership here.
 - Model live chats as workspace objects, not as files that automatically fork
   with versions.
 

@@ -2,6 +2,7 @@
 
 Status: exploratory architecture direction
 Cohort: dohc Think Bigger Workspace Engine
+Think Bigger Spec: true
 Date: 2026-06-22
 
 ## Core thesis

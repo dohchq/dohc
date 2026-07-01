@@ -2,6 +2,7 @@
 
 Status: exploratory architecture direction
 Cohort: dohc Think Bigger Workspace Engine
+Think Bigger Spec: true
 Date: 2026-06-23
 
 Companions:
@@ -458,7 +459,29 @@ type DmParticipantIds = readonly string[] & {
   readonly __brand: 'DmParticipantIds2To16'
 }
 
-type ChannelChatThread = ChatThreadBase & {
+type ChannelConversationKind =
+  | 'default'
+  | 'linked_work'
+  | 'named_subconversation'
+
+type ChannelConversationProvenance =
+  | {
+      conversationKind: 'default'
+      linkedWorkTarget?: never
+      namedSubconversationKey?: never
+    }
+  | {
+      conversationKind: 'linked_work'
+      linkedWorkTarget: ChannelLinkedTargetRef
+      namedSubconversationKey?: never
+    }
+  | {
+      conversationKind: 'named_subconversation'
+      linkedWorkTarget?: never
+      namedSubconversationKey: string
+    }
+
+type ChannelChatThread = ChatThreadBase & ChannelConversationProvenance & {
   channelId: string
   channelConversationId: string
   dmParticipantIds?: never
@@ -652,6 +675,12 @@ For `ChannelChatThread`, `channelId` and `channelConversationId` are immutable
 after creation. The active uniqueness key is
 `(workspaceId, channelId, channelConversationId)`, with
 `channelConversationId: "default"` for the default channel stream conversation.
+The persisted thread row also stores the canonical conversation provenance:
+`conversationKind` plus the selected `linkedWorkTarget` for `linked_work`, the
+server-normalized `namedSubconversationKey` for `named_subconversation`, or
+neither field for `default`. Reads, replay, export, search, idempotent retries,
+and migration jobs must use that stored provenance instead of reverse-engineering
+intent from `channelConversationId`.
 Non-default `channelConversationId` values must be server-issued and
 deterministic from one canonical channel-conversation context tuple; clients must
 not invent them. That tuple includes `workspaceId`, `channelId`,
@@ -1020,7 +1049,7 @@ type ThreadActivityBase = {
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 
-type SendChannelMessageThreadCreatedActivity = ThreadActivityBase & {
+type SendChannelMessageThreadCreatedActivity = ThreadActivityBase & ChannelConversationProvenance & {
   kind: 'chat_created'
   threadKind: 'channel'
   title?: string
