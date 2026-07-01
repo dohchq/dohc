@@ -450,6 +450,12 @@ current runtime/mount cache or an equivalent streamable projection, and
 authorized runtime or mount that can hold bytes; `setPinned(...)` changes the
 orthogonal `pinned` boolean and does not by itself invent a third
 materialization state.
+API-originated `hydrate(...)` and `setPinned(...)` requests are mutating
+control-plane operations and require an `idempotencyKey`. The handler records the
+key with the workspace/version/path/runtime identity before applying workspace
+state changes, and retries with the same key must replay the original result or
+deduplicate the already-enqueued hydration/pin side effects instead of applying
+them again.
 
 ## API-native access
 
@@ -492,8 +498,8 @@ replace(workspaceId, versionId, fromPath, toPath, {
 list(workspaceId, versionId, path, { pageToken, pageSize })
 stat(workspaceId, versionId, path)
 status(workspaceId, versionId, path?, { requestToken?: ServerIssuedRequestToken })
-hydrate(workspaceId, versionId, path, { recursive?, requestToken?: ServerIssuedRequestToken })
-setPinned(workspaceId, versionId, path, { pinned, recursive?, requestToken?: ServerIssuedRequestToken })
+hydrate(workspaceId, versionId, path, { recursive?, idempotencyKey, requestToken?: ServerIssuedRequestToken })
+setPinned(workspaceId, versionId, path, { pinned, recursive?, idempotencyKey, requestToken?: ServerIssuedRequestToken })
 search(workspaceId, versionId, query, { pageToken, pageSize })
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)

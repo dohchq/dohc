@@ -1003,9 +1003,9 @@ move(workspaceId, versionId, fromPath, toPath, {
   idempotencyKey
 })
 replace(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash, // expectedContentHash is non-secret-backed only
   sourceObjectId,
-  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash, // expectedContentHash is non-secret-backed only
   destinationObjectId,
   idempotencyKey
 })

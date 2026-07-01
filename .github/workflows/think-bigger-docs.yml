@@ -54,7 +54,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm --filter dohc install --frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Check Think Bigger docs
         run: node scripts/check-think-bigger-doc-links.mjs

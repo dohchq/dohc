@@ -111,7 +111,7 @@ Use the compact pass template for iterative PR00 CodeRabbit passes. Use the full
 implementation template for new implementation PR entries.
 
 ```md
-Two-hundred-nth pass:
+<pass-label>:
 
 - Historical PR00 status:
   - CodeRabbit status:
@@ -6415,7 +6415,7 @@ Two-hundred-fifty-first pass:
 
 Two-hundred-fifty-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6436,6 +6436,46 @@ Two-hundred-fifty-second pass:
     plus durable side-effect ledger/outbox records, while derived side effects
     execute asynchronously.
   - Narrowed `ShareChannelLinkedTargetRef` to shared-scope targets only.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six follow-up findings:
+  - Added a request-only `ChannelLinkedTargetRequestHandle` for linked-work
+    channel conversation creation so clients do not submit server-managed share
+    grant metadata.
+  - Stored `namedSubconversationDisplayLabel` beside the normalized
+    named-subconversation key/version for UI, export, rename, and history
+    surfaces.
+  - Added idempotency requirements for API-originated `hydrate(...)` and
+    `setPinned(...)` control-plane writes.
+  - Annotated `replace(...)` source and destination `expectedContentHash`
+    preconditions as non-secret-backed only.
+  - Removed the unnecessary `pnpm --filter dohc` install scope from the Think
+    Bigger docs workflow.
+  - Replaced the reusable execution-log template pass label with a neutral
+    placeholder.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -488,17 +488,62 @@ type ChannelConversationProvenance =
       conversationKind: 'default'
       linkedWorkTarget?: never
       namedSubconversationKey?: never
+      namedSubconversationDisplayLabel?: never
     }
   | {
       conversationKind: 'linked_work'
       linkedWorkTarget: ChannelLinkedTargetRef
       namedSubconversationKey?: never
+      namedSubconversationDisplayLabel?: never
     }
   | {
       conversationKind: 'named_subconversation'
       linkedWorkTarget?: never
       namedSubconversationKey: string
       namedSubconversationKeyVersion: string
+      namedSubconversationDisplayLabel: string
+    }
+
+type ChannelLinkedTargetRequestHandle =
+  | {
+      targetWorkspaceId: string
+      targetId: string
+      targetType: 'atom' | 'file' | 'folder'
+      targetVersionRef: ObjectTargetVersionRef
+      shareGrantId?: never
+      visibilityScope?: never
+    }
+  | {
+      targetWorkspaceId: string
+      targetId: string
+      targetType: 'version'
+      targetVersionRef: WorkspaceVersionTargetRef
+      shareGrantId?: never
+      visibilityScope?: never
+    }
+  | {
+      targetWorkspaceId: string
+      targetId: string
+      targetType: 'history_moment'
+      targetVersionRef: HistoryMomentTargetVersionRef
+      shareGrantId?: never
+      visibilityScope?: never
+    }
+  | {
+      targetWorkspaceId: string
+      targetId: string
+      targetType: 'agent_run' | 'chat_thread' | 'decision' | 'task'
+      targetVersionRef?: never
+      shareGrantId?: never
+      visibilityScope?: never
+    }
+  | {
+      targetWorkspaceId: string
+      targetId: string
+      targetType: 'share'
+      targetVersionRef?: VersionRef
+      shareGrantId?: never
+      visibilityScope?: never
     }
 
 type ChannelConversationCreateRequest =
@@ -509,7 +554,7 @@ type ChannelConversationCreateRequest =
     }
   | {
       conversationKind: 'linked_work'
-      linkedWorkTarget: ChannelLinkedTargetRef
+      linkedWorkTarget: ChannelLinkedTargetRequestHandle
       namedSubconversationName?: never
     }
   | {
@@ -530,6 +575,15 @@ type SendChannelMessageConversationSelector =
       conversation: ChannelConversationCreateRequest
     }
 
+For `linked_work`, public create requests carry only
+`ChannelLinkedTargetRequestHandle`, the user-selected target handle. They never
+carry server-managed `scopeKind`, `shareGrantId`, or `visibilityScope` values.
+The server resolves the handle against the actor, channel, workspace, share, and
+target policy, derives the authorized `ChannelLinkedTargetRef`, and stores that
+canonical ref on `ChannelConversationProvenance`. If the request cannot resolve
+to exactly one authorized internal or shared target, creation fails closed before
+deriving `channelConversationId`.
+
 For `named_subconversation`, the server derives `namedSubconversationKey` from
 the submitted `namedSubconversationName` in
 `ChannelConversationCreateRequest`; persisted `namedSubconversationKey` is
@@ -539,12 +593,19 @@ to Unicode NFC, apply locale-independent Unicode simple case folding, reject an
 empty result, reject ASCII control characters and path-like separators (`/`,
 `\`, NUL), and enforce both a 96 Unicode-scalar limit and a 256 UTF-8 byte limit
 after normalization. Internal whitespace is preserved exactly after NFC/case
-folding; the server does not collapse or rewrite it. The server stores the
+folding; the server does not collapse or rewrite it. The server stores both the
 versioned normalized value as `(namedSubconversationKey,
-namedSubconversationKeyVersion)` on `ChannelConversationProvenance`, and
-creation retries compare against that stored pair instead of re-normalizing with
-the current rules. If the normalizer changes later, migration must create a new
-versioned value explicitly rather than silently reinterpreting old keys.
+namedSubconversationKeyVersion)` and a durable
+`namedSubconversationDisplayLabel` on `ChannelConversationProvenance`. The
+display label is the accepted user-entered label after decode, trim, NFC, and
+display-safety validation but before case folding; UI, export, rename, and
+history surfaces read that label instead of rendering the normalized key.
+Creation retries and identity checks compare against the stored key pair instead
+of re-normalizing with the current rules, and retries replay the stored display
+label. A later label change must use an explicit rename/history action rather
+than a second create request. If the normalizer changes later, migration must
+create a new versioned value explicitly rather than silently reinterpreting old
+keys.
 
 type ChannelChatThread = ChatThreadBase & ChannelConversationProvenance & {
   channelId: string
@@ -782,11 +843,12 @@ changes, ordering changes, and other channel metadata updates preserve
 from array order; a linked-work conversation chooses one normalized target
 discriminator, while broader multi-target discussion uses the default
 conversation or a server-owned `named_subconversation` key.
-For `linked_work`, the request must include the chosen normalized
-`ChannelLinkedTargetRef` or an equivalent server-resolved target handle. If the
-channel has multiple active linked targets and the request does not select
-exactly one canonical target, get-or-create must fail closed as ambiguous instead
-of picking from `ChannelProjection.linkedTargets` order. The selected target is
+For `linked_work`, the request must include a
+`ChannelLinkedTargetRequestHandle` that the server resolves into exactly one
+authorized `ChannelLinkedTargetRef`. If the channel has multiple active linked
+targets and the request does not select exactly one canonical target,
+get-or-create must fail closed as ambiguous instead of picking from
+`ChannelProjection.linkedTargets` order. The selected server-resolved target is
 the sole linked-work discriminator for `channelConversationId` generation,
 replay, export, search, and subsequent thread reads.
 `send_channel_message` accepts a `SendChannelMessageConversationSelector` with
