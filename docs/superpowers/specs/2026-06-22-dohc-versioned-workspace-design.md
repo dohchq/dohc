@@ -253,7 +253,7 @@ type NonHoldingExpiredRetryRecordKind = Extract<
 
 type WriteResultEnvelope = {
   workspaceId: string
-  versionId: string
+  requestedVersionIds: readonly string[]
   idempotencyKey: string
   idempotencyResultId: string
 }
@@ -351,6 +351,15 @@ type WriteResult =
     })
 ```
 
+`requestedVersionIds` is the complete canonical version set named by the
+initiating write-producing request, not merely the version that eventually owns a
+record. Single-version operations serialize one id in request-role order. Merge,
+replace, restore, or future multi-version operations serialize every requested
+source/target version id in the operation fingerprint's canonical role order.
+Delayed acknowledgements and replayed idempotency results must match the full
+`requestedVersionIds` array before clearing in-flight state or applying UI/cache
+updates.
+
 `recordKind` is a public response field only on `durable-pending` and
 `idempotency-expired` variants. Canonical, retryable-failure, and conflict
 responses do not expose `recordKind`; their backing idempotency-store rows may be
@@ -394,14 +403,16 @@ For every replayable non-canonical `WriteResult` with a `holdingRecordId`
 (`durable-pending`, `rejected`, `quarantined`, and retained `terminal-retired`),
 the holding record and its idempotency result metadata must be committed in the
 same durability boundary. That boundary includes the relevant timestamp
-(`acceptedAt`, `rejectedAt`, `quarantinedAt`, or `retiredAt`), `versionId`,
+(`acceptedAt`, `rejectedAt`, `quarantinedAt`, or `retiredAt`),
+`requestedVersionIds`,
 `idempotencyResultId`, `idempotencyReplayToken`, `replayUntil`, and the operation
 fingerprint. If that atomic durable write cannot complete, the engine must not
 acknowledge a replayable `WriteResult`; the caller retries until both the holding
 record and replay/idempotency metadata are durable together or the engine proves
 a canonical result.
 Before acknowledging `kind: 'retryable-failure'`, the engine must durably
-persist that idempotency result state for the same workspace, version,
+persist that idempotency result state for the same workspace, requested version
+set,
 idempotency key, operation fingerprint, `idempotencyResultId`,
 `idempotencyReplayToken`, and `commitState`. If the retryable-failure result
 state itself cannot be persisted, the engine must not acknowledge a replayable
@@ -448,11 +459,13 @@ protection gate before canonical acceptance, after the engine allocated a durabl
 was accepted into the holding area but could not become canonical and stores
 `acceptedAt`, `quarantinedAt`, and `replayUntil`. `terminal-retired` is the later
 retirement state for retained rejected-before-acceptance or accepted holding
-records. These durable results carry the required `versionId` for the requested
-or accepted version bound to the holding record. `rejected`, `quarantined`, and
-`terminal-retired` are addressable by `holdingRecordId`; operators, status APIs,
-retry tooling, and audit/export jobs use that id to correlate the response with
-the retained rejected-before-acceptance, quarantined, or retired record.
+records. These durable results carry `requestedVersionIds` for every version
+named by the initiating request, while the retained holding record separately
+stores the accepted record's canonical version binding when one exists.
+`rejected`, `quarantined`, and `terminal-retired` are addressable by
+`holdingRecordId`; operators, status APIs, retry tooling, and audit/export jobs
+use that id to correlate the response with the retained
+rejected-before-acceptance, quarantined, or retired record.
 The holding area separates rejected-before-acceptance items from accepted
 holding records. It must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
@@ -599,7 +612,8 @@ explanations, or retry metadata. Secret-bearing ingests are stored only as
 encrypted references, redacted forms, or broker metadata until an authorized
 read path reconstructs them.
 Replay from the holding area must be causal and fail-closed. Retry metadata must
-include `workspaceId`, `versionId`, and the captured causal guard: for
+include `workspaceId`, `requestedVersionIds`, the accepted record's canonical
+version binding when one exists, and the captured causal guard: for
 non-secret-backed objects this may be `expectedBaseVersion`, a non-secret content
 hash, or an equivalent CAS token; for secret-backed objects it must be a
 secret-safe surrogate, keyed commitment, opaque handle, or non-hash CAS token

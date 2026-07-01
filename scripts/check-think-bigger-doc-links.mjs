@@ -464,6 +464,10 @@ const collectAnchors = (markdown) => {
   let previousLine = null
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
   const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
+  const isSetextHeadingText = (line) => {
+    const trimmed = line.trim()
+    return trimmed !== '' && !/^(?:[-+*]|\d+[.)])(?:\s+|$)/.test(trimmed)
+  }
 
   for (const { text: line } of contentLines(markdown)) {
     const prose = stripBackslashEscapes(stripCodeSpans(line))
@@ -489,7 +493,7 @@ const collectAnchors = (markdown) => {
     }
 
     const setext = line.match(/^\s{0,3}(=+|-+)\s*$/)
-    if (setext && previousLine?.trim()) {
+    if (setext && previousLine && isSetextHeadingText(previousLine)) {
       addAnchor(previousLine.trim())
       previousLine = null
       continue
@@ -522,6 +526,13 @@ const collectLinks = (markdown) => {
   }
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
   const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
+  const isEscapedByOddBackslashes = (value, index) => {
+    let count = 0
+    for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
+      count += 1
+    }
+    return count % 2 === 1
+  }
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)/
   const footnoteDefinitionPattern = /^\s{0,3}\[\^[^\]\n]+\]:\s*/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
@@ -557,7 +568,7 @@ const collectLinks = (markdown) => {
   }
   const parseInlineLinkAt = (value, start) => {
     const isImage = value[start] === '!' && value[start + 1] === '['
-    if (value[start - 1] === '\\') {
+    if (isEscapedByOddBackslashes(value, start)) {
       return null
     }
     if (!isImage && value[start] !== '[') {
@@ -696,7 +707,7 @@ const collectLinks = (markdown) => {
     }
     const rawHtmlAnchorRanges = []
     for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
-      if (match.index > 0 && prose[match.index - 1] === '\\') {
+      if (isEscapedByOddBackslashes(prose, match.index)) {
         continue
       }
       const href = htmlAttributeValue(match[0], 'href')
@@ -713,7 +724,7 @@ const collectLinks = (markdown) => {
     prose = eraseRanges(prose, inlineLinks)
     const autolinkRanges = []
     for (const match of prose.matchAll(autolinkPattern)) {
-      if (match.index > 0 && prose[match.index - 1] === '\\') {
+      if (isEscapedByOddBackslashes(prose, match.index)) {
         continue
       }
       if (/^<\/?[A-Za-z][A-Za-z0-9-]*\s*\/?>$/.test(match[0])) {
@@ -855,6 +866,10 @@ const assertCheckerFixtures = () => {
   if (escapedRawHtmlLink.links.length > 0) {
     throw new Error('escaped raw HTML link fixture should not collect href destinations')
   }
+  const doubleEscapedRawHtmlLink = collectLinks('\\\\<a href="./target.md">target</a>')
+  if (!doubleEscapedRawHtmlLink.links.some((link) => link.target === './target.md')) {
+    throw new Error('double-escaped raw HTML link fixture should still collect href destinations')
+  }
   const rawHtmlEmptyHref = collectLinks('<a href="">empty</a>')
   if (!rawHtmlEmptyHref.links.some((link) => link.target === '')) {
     throw new Error('raw HTML empty href fixture should reach empty-target validation')
@@ -970,12 +985,20 @@ const assertCheckerFixtures = () => {
   ) {
     throw new Error('escaped Markdown link fixture should ignore escaped links only')
   }
+  const doubleEscapedMarkdownLink = collectLinks('\\\\[visible](./visible.md)')
+  if (!doubleEscapedMarkdownLink.links.some((link) => link.target === './visible.md')) {
+    throw new Error('double-escaped Markdown link fixture should still collect visible links')
+  }
   const escapedAutolink = collectLinks('\\<https://example.com>\n<app://workspace/thread>')
   if (
     escapedAutolink.links.some((link) => link.target === 'https://example.com')
     || !escapedAutolink.links.some((link) => link.target === 'app://workspace/thread')
   ) {
     throw new Error('escaped autolink fixture should ignore escaped autolinks only')
+  }
+  const doubleEscapedAutolink = collectLinks('\\\\<app://workspace/thread>')
+  if (!doubleEscapedAutolink.links.some((link) => link.target === 'app://workspace/thread')) {
+    throw new Error('double-escaped autolink fixture should still collect supported URI schemes')
   }
   const bracketedAutolink = collectLinks('<app://workspace/[not-a-reference]>')
   if (
@@ -1013,6 +1036,9 @@ const assertCheckerFixtures = () => {
   }
   if (!isMarkdownPath('/repo/README.markdown') || isMarkdownPath('/repo/diagram.svg')) {
     throw new Error('Markdown target fixture should not treat asset fragments as heading anchors')
+  }
+  if (collectAnchors('- list item\n---').has('-list-item')) {
+    throw new Error('setext fixture should not treat list items followed by thematic breaks as headings')
   }
 }
 

@@ -67,8 +67,9 @@ P0A and P0R are provisional throughput work started after user approval for
 unattended Phase 0 execution on 2026-06-24; P0B-P0G remain queued behind the
 shared-substrate baseline freeze. Current live state is recorded only in the
 canonical live-status block in the latest PR00 pass below. This table records
-static lane ownership, branch, worktree, and planned validation shape. P0S is a
-consolidated PR01 Schema Promotion Checkpoint, not a standalone lane row.
+static lane ownership, branch, worktree, and planned validation shape. The
+PR01 Schema Promotion Checkpoint is a handoff checkpoint, not a standalone lane
+row.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -7621,7 +7622,7 @@ Two-hundred-eighty-fourth pass:
 
 Two-hundred-eighty-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four major findings and one trivial finding fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7640,6 +7641,41 @@ Two-hundred-eighty-fifth pass:
     gate/retry matrix.
   - Restored the `actions/checkout` `v6.0.3` comment after verifying the pinned
     SHA resolves to `refs/tags/v6.0.3^{}`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-eighty-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two major findings and three minor findings fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two major findings and three minor findings:
+  - Collapsed the live roadmap/checkpoint wording onto the single
+    **PR01 Schema Promotion Checkpoint** name.
+  - Changed `WriteResultEnvelope` to carry `requestedVersionIds` and documented
+    full-version-set acknowledgement correlation.
+  - Added checker guards and fixtures for list-item setext false positives.
+  - Added odd/even backslash escape handling and fixtures for inline links, raw
+    HTML links, and autolinks.
+  - Added `diffStreamId` to diff transport payloads and async stale-response
+    checks.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -7718,7 +7754,7 @@ PR lanes:
 
 Checkpoint:
 
-- P0S - PR01 Schema Promotion Checkpoint, not a standalone lane.
+- PR01 Schema Promotion Checkpoint, not a standalone lane.
 
 Gate evidence:
 
@@ -7731,7 +7767,7 @@ Gate evidence:
 - [ ] Rust bridge/packaging/CI recommendation is recorded by P0R, or explicitly
       deferred by user with a dated note.
 - [ ] Main plus one named version works for one text/file driver.
-- [ ] Phase0SharedSubstrateBaseline / P0S is finalized before P0B-P0G start.
+- [ ] `Phase0SharedSubstrateBaseline` is finalized before P0B-P0G start.
 - [ ] File/API writes durably capture immediately and produce recoverable
       history, with canonical promotion gated by policy, review, and validation.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers

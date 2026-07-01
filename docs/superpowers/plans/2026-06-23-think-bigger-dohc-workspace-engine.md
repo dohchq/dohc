@@ -1663,13 +1663,12 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
-- **Schema-promotion checkpoint pointer:** immediately after P0A/P0R, the main
+- **PR01 Schema Promotion Checkpoint:** immediately after P0A/P0R, the main
   orchestration thread plus P0B's schema-baseline responsibility must use the
   canonical **PR01 Schema Promotion Checkpoint** definition in
   [Phase 0 PRs](#phase-0-prs) for the freeze/handoff symbol list,
   import-enforcement gate, execution-log evidence, and
-  `Phase0SharedSubstrateBaseline` exit criteria. The `P0S` alias is pointer-only;
-  it is not a standalone milestone, lane, or source of truth.
+  `Phase0SharedSubstrateBaseline` exit criteria.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.

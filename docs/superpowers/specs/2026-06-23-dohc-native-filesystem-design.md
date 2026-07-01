@@ -569,7 +569,10 @@ effective file policy and viewer authorization.
 `WorkspaceDiffTransportPayload` or schema-equivalent generated shape whose diff
 headers, hunks, labels, and nested metadata obey the same redaction/default
 projection rules and request-token freshness checks as watch, snapshot, list, and
-search.
+search. The engine mints a stable `diffStreamId` for the accepted diff request,
+derived from or bound to `workspaceId`, `versionAId`, `versionBId`, and the
+server-issued request stream. Diff results are stale unless that `diffStreamId`
+and both version ids still match the active diff request.
 
 In every API shape above, `expectedContentHash` is accepted only for
 non-secret-backed object operands. Secret-backed overwrite, delete,
@@ -922,6 +925,7 @@ type WorkspaceSnapshotTransportPayload<Snapshot> = WorkspaceAsyncPayload & {
 }
 
 type WorkspaceDiffTransportPayload<Diff> = Omit<WorkspaceAsyncPayload, 'versionId'> & {
+  diffStreamId: string
   versionAId: string
   versionBId: string
   diff: Diff
@@ -973,8 +977,9 @@ Concrete `list(...)`, `search(...)`, `snapshot(...)`, `diff(...)`, and
 `WorkspaceSearchTransportPayload`, `WorkspaceSnapshotTransportPayload`,
 `WorkspaceDiffTransportPayload`, and `WorkspaceWatchTransportPayload` (or a
 schema-equivalent generated shape) so workspace/version identity, `requestToken`,
-`sequence`, and for list/search the opaque `nextPageToken` is present before any
-UI, cache, projection, or renderer state is updated.
+`sequence`, for diff the stable `diffStreamId`, and for list/search the opaque
+`nextPageToken` is present before any UI, cache, projection, or renderer state is
+updated.
 Filesystem loading and local reconciliation mint the same kind of token from the
 engine context before emitting progress or result payloads. The `requestToken`
 parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only
@@ -989,9 +994,12 @@ digits, or leading zeros except the literal `0`, with range
 clients must parse, range-check, and reserialize before freshness comparison.
 Handlers for `watch(workspaceId, versionId, path)`,
 `snapshot(workspaceId, versionId)`, `list(workspaceId, versionId, path, ...)`,
-`search(workspaceId, versionId, query, ...)`, async status transports, and
+`search(workspaceId, versionId, query, ...)`,
+`diff(workspaceId, versionAId, versionBId)`, async status transports, and
 filesystem loading must verify `WorkspaceAsyncPayload` fields before applying
-results. Each handler also compares the transport payload sequence against the
+results. Diff handlers must also compare `diffStreamId`, `versionAId`, and
+`versionBId` against the active diff request before applying hunks or summary
+state. Each handler also compares the transport payload sequence against the
 latest applied value for the same
 workspace/version/request stream using BigInt-safe comparison of canonical
 `UInt64DecimalString` values, never floating-point numbers, locale string
