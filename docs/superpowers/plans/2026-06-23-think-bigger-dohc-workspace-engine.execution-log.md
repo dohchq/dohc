@@ -8331,8 +8331,9 @@ Three-hundred-third pass:
 Mutable status symbol: `LivePR00Status`.
 
 - Live PR00 status:
-  - CodeRabbit status: deferred to the next PR00 major readiness/material-risk
-    gate under the 2026-06-29 user-directed review policy.
+  - CodeRabbit status: PR00 and P0A-P0G draft PR checks currently pass; future
+    manual CodeRabbit reruns remain deferred to major readiness/material-risk
+    gates under the 2026-06-29 user-directed review policy.
   - Test evidence: PR00 docs-only local validation remains green; the pushed
     P0A-P0G proof stack is locally validated through
     `codex/think-bigger-p0g-proof-qa` at commit `090702d7`. GitHub Actions did
@@ -8355,6 +8356,9 @@ Mutable status symbol: `LivePR00Status`.
     failed or your spending limit needs to be increased."
   - `gh run view 28526764899 --verbose` for `Desktop Release / Preflight`
     reported the same GitHub Actions billing/spending-limit annotation.
+  - Latest PR00 reruns `28529507112` (`Think Bigger Docs / Link And Anchor Check`)
+    and `28529507111` (`Desktop Release / Preflight`) reported the same
+    GitHub Actions billing/spending-limit annotation on 2026-07-01.
   - Both failed jobs had empty step lists and no runner assignment, so no
     repository code or workflow command executed before failure.
 - Validation:
@@ -8378,6 +8382,8 @@ Mutable status symbol: `LivePR00Status`.
     P0E [#52](https://github.com/dohc-ai/dohc/pull/52),
     P0F [#53](https://github.com/dohc-ai/dohc/pull/53), and
     P0G [#54](https://github.com/dohc-ai/dohc/pull/54).
+  - `gh pr checks` reports CodeRabbit passing on PR00 [#46] and all draft lane
+    PRs [#47-#54]. No manual per-fix CodeRabbit rerun was invoked.
   - Latest P0G local validation passed: docs link checks, workspace-engine
     177 tests, workspace-history 47 tests, workspace-fs 40 tests,
     workspace-core 108 tests, MCP 58 tests, workspace-api share-revocation
@@ -8398,10 +8404,9 @@ Mutable status symbol: `LivePR00Status`.
 
 - GitHub Actions billing/spending-limit blocker prevents remote CI from running
   on PR00.
-- CodeRabbit is deferred to the next major PR00 readiness gate under the
-  updated review policy.
-- P0A-P0G draft lane PRs are open; no lane CodeRabbit major-gate review has
-  been run under the updated rate-limit-conscious policy.
+- CodeRabbit checks currently pass on PR00 and P0A-P0G draft lane PRs; manual
+  reruns remain deferred to the next major readiness/material-risk gate under
+  the updated review policy.
 - The PR00 docs-only local-agent-CLI exception remains pending human approval
   before completion or merge-readiness.
 
