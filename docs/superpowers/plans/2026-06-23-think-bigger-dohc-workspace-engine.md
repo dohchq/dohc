@@ -169,12 +169,13 @@ than skipped.
   agents, and projections never provide trusted identity claims.
 - Every atom, capture, object, event, projection, file, folder, version, history
   moment, chat, channel, DM, message, share, app, database, secret reference,
-  search index entry, and export is scoped to a workspace.
+  search index entry, agent run, and export is scoped to a workspace.
 - Agent writes must respect user locks, protected paths, folder/file access,
   sharing boundaries, and skill-turn gates.
 - HTML atoms remain sandboxed and sanitized.
-- Canonical Y.Doc state takes precedence over derived Markdown/body caches for
-  rich document content.
+- Canonical Y.Doc state is the only rich document write source; Markdown/body
+  caches such as `atoms.body` are read-through derived caches and are never
+  patched directly.
 - Secret-backed files are allowed, including `.env`, but plaintext secrets must
   not leak into normal history, search, public export, logs, or unauthorized
   projections.
@@ -1526,6 +1527,8 @@ Minimum cases:
   explicit declassification.
 - prompt-injection content in chats cannot expand agent permissions or bypass
   tool policy.
+- HTML atoms remain sandboxed, sanitized, and unable to escape the renderer
+  sandbox.
 
 ### Accessibility Gate
 

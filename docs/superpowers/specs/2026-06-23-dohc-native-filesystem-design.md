@@ -588,22 +588,24 @@ path or version references fail closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
-version, etag, non-secret-backed content hash, or an absence assertion for
-creates. Secret-backed overwrites must use `expectedBaseVersion` or
-`expectedEtag`; hash-based equality is not a valid freshness proof for protected
-paths.
+version, etag, non-secret-backed content hash, opaque authorized hash handle, or
+an absence assertion for creates. Secret-backed overwrites must use
+`expectedBaseVersion`, `expectedEtag`, or `expectedAuthorizedHashHandle`;
+hash-based equality is not a valid freshness proof for protected paths.
 Create and overwrite calls must be explicit: `precondition: expectedAbsent` is
 the create-only precondition token, means "create only if no object exists at
 this path", and must omit `targetObjectId`.
 Overwrite must provide `targetObjectId` for the intended existing object plus
 exactly one causal freshness precondition such as `expectedEtag`,
-`expectedContentHash` (non-secret only), or `expectedBaseVersion`.
+`expectedContentHash` (non-secret only), `expectedAuthorizedHashHandle`
+(secret/protected only), or `expectedBaseVersion`.
 Secret-backed operands must never use `expectedContentHash`; they must use
-`expectedBaseVersion` or `expectedEtag`. `targetObjectId` binds object identity
-so delete/recreate substitution cannot satisfy a path-only overwrite, but it is
-not a freshness guard by itself. If the precondition or target object does not
-match the current workspace/version/path state, the API returns a conflict
-response rather than applying the mutation. Exactly one precondition mode may be
+`expectedBaseVersion`, `expectedEtag`, or `expectedAuthorizedHashHandle`.
+`targetObjectId` binds object identity so delete/recreate substitution cannot
+satisfy a path-only overwrite, but it is not a freshness guard by itself. If the
+precondition or target object does not match the current workspace/version/path
+state, the API returns a conflict response rather than applying the mutation.
+Exactly one precondition mode may be
 supplied per write. Supplying no causal precondition, omitting `targetObjectId`
 for overwrite, or combining incompatible guards such as `expectedAbsent` with
 `expectedEtag` fails closed with a distinct validation error and does not mutate
