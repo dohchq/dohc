@@ -12835,7 +12835,7 @@ Status: restacked on P0F; local validation passed; not approved
 Branch: codex/think-bigger-p0g-proof-qa
 Worktree: `/home/ice/dev/dohc-p0g-proof-qa`
 Implementation workstream, if used: main orchestration thread
-PR Link: not opened/TBD
+PR Link: [#54](https://github.com/dohc-ai/dohc/pull/54)
 Date started: 2026-06-24
 Date completed:
 
