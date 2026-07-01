@@ -5,7 +5,6 @@ on:
     branches:
       - main
     paths:
-      - 'docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json'
       - 'docs/superpowers/**'
       - 'scripts/check-think-bigger-doc-links.mjs'
       - '.github/workflows/think-bigger-docs.yml'
@@ -15,7 +14,6 @@ on:
     branches:
       - main
     paths:
-      - 'docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json'
       - 'docs/superpowers/**'
       - 'scripts/check-think-bigger-doc-links.mjs'
       - '.github/workflows/think-bigger-docs.yml'

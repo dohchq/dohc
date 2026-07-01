@@ -425,37 +425,37 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 ```text
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAbsent,
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAuthorizedHashHandle(secret/protected only) | expectedAbsent,
   targetObjectId: required for overwrite; omit only when expectedAbsent is used,
   idempotencyKey
 })
 delete(workspaceId, versionId, path, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAuthorizedHashHandle(secret/protected only),
   targetObjectId: required,
   idempotencyKey
 })
 rename(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAuthorizedHashHandle(secret/protected only),
   sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
 move(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAuthorizedHashHandle(secret/protected only),
   sourceObjectId,
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
 replace(workspaceId, versionId, fromPath, toPath, {
-  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAuthorizedHashHandle(secret/protected only),
   sourceObjectId,
-  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only),
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash(non-secret only) | expectedAuthorizedHashHandle(secret/protected only),
   destinationObjectId,
   idempotencyKey
 })
 list(workspaceId, versionId, path, { pageToken, pageSize })
 stat(workspaceId, versionId, path)
-status(workspaceId, versionId, path?, { requestToken?, includeInternal? })
+status(workspaceId, versionId, path?, { requestToken? })
 search(workspaceId, versionId, query, { pageToken, pageSize })
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
@@ -484,14 +484,14 @@ non-secret-backed object operands. Secret-backed overwrite, delete,
 rename/move source, and replace source/destination operands must use another
 permitted freshness guard such as `expectedBaseVersion` or `expectedEtag`;
 plaintext or redacted secret hash equality is not a valid precondition.
-For secret-backed operands, `expectedEtag`, `expectedBaseVersion`, and opaque
-authorized hash handles are server-minted freshness tokens, not client-provided
-content hashes. Callers may present only opaque tokens obtained from an
-authorized read/status path; the server re-derives actor identity, authorization,
-workspace/version scope, and token validity before accepting the guard. Browser
-or client-provided payload digests, redacted hashes, or equality claims are
-ignored for secret-backed overwrite, delete, rename/move, replace source, and
-replace destination checks.
+For secret-backed operands, `expectedEtag`, `expectedBaseVersion`, and
+`expectedAuthorizedHashHandle` are server-minted freshness tokens, not
+client-provided content hashes. Callers may present only opaque tokens obtained
+from an authorized read/status path; the server re-derives actor identity,
+authorization, workspace/version scope, and token validity before accepting the
+guard. Browser or client-provided payload digests, redacted hashes, or equality
+claims are ignored for secret-backed overwrite, delete, rename/move, replace
+source, and replace destination checks.
 
 `rename` and `move` use the same atomic path-change primitive and validation
 rules. `rename` is the preferred API name when the parent path is unchanged and
@@ -793,6 +793,11 @@ badges must use `WorkspaceStatusPayload` or an isomorphic shape. A status update
 must be dropped before mutating UI/cache state unless its `workspaceId`,
 `versionId`, `requestToken`, and `sequence` match the currently active
 workspace/version/request stream and advance the canonical per-stream sequence.
+Internal status fields are server-derived only. Browser and client callers do
+not supply `includeInternal`; if they send such a flag through an older client or
+raw transport, the server strips or ignores it. Owner/admin/audit-only internal
+details are included only after server-side authorization checks derive that the
+actor can view internal engine-managed or secret-backed state.
 
 ## File state axes
 

@@ -37,8 +37,6 @@ if (
 
 const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
-  const expectedSpecDocs = new Set(expectedThinkBiggerDocs
-    .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerSpecMarkerPattern = /^Think Bigger Spec:\s*true\s*$/im
   const metadataHeader = (raw) => raw.split(/\r?\n/).slice(0, 12).join('\n')
   const hasThinkBiggerSpecMarker = (dir, name) => {
@@ -67,10 +65,7 @@ const discoverThinkBiggerDocs = () => {
     },
     {
       dir: 'docs/superpowers/specs',
-      include: (name) => {
-        const file = repoRelativePath('docs/superpowers/specs', name)
-        return expectedSpecDocs.has(file) || hasThinkBiggerSpecMarker('docs/superpowers/specs', name)
-      },
+      include: (name) => hasThinkBiggerSpecMarker('docs/superpowers/specs', name),
     },
   ]
   const safeReadDir = (dir) => {
@@ -388,6 +383,7 @@ const collectLinks = (markdown) => {
     for (const match of prose.matchAll(linkPattern)) {
       addLink(normalizeDestination(match[1]), lineNumber)
     }
+    prose = prose.replace(linkPattern, '')
     for (const match of prose.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
       if (isFootnoteLabel(label)) {
@@ -529,6 +525,13 @@ const assertCheckerFixtures = () => {
   const duplicateSecondTargetCount = duplicateReferenceLinks.links.filter((link) => link.target === './second.md').length
   if (duplicateFirstTargetCount !== 2 || duplicateSecondTargetCount !== 0) {
     throw new Error('duplicate reference definitions should preserve the first target and ignore later duplicates')
+  }
+  const inlineTitleReferenceText = collectLinks('[text](./target.md "[missing][ref]")')
+  if (
+    !inlineTitleReferenceText.links.some((link) => link.target === './target.md')
+    || inlineTitleReferenceText.unresolvedReferences.length > 0
+  ) {
+    throw new Error('inline link titles should not produce reference-style links')
   }
   const codeSpanSeparatedLink = collectLinks('[text]`code`(target.md)')
   if (codeSpanSeparatedLink.links.length > 0 || codeSpanSeparatedLink.unresolvedReferences.length > 0) {
