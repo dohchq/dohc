@@ -282,7 +282,8 @@ type Channel = {
   // `displayName` and `description` are user-authored untrusted text. They must
   // be escaped or sanitized before rendering and handled safely in search/export.
   visibility: ChannelVisibility
-  linkedTargets: ChannelLinkedTargetRef[] // derived projection from ChannelTargetActivity
+  // Derived from active ThreadLink rows; ChannelTargetActivity is repair/output.
+  linkedTargets: ChannelLinkedTargetRef[]
   createdById: string
   createdAt: UnixMsDecimalString
   updatedAt: UnixMsDecimalString
@@ -301,16 +302,19 @@ type ChannelTargetActivity = {
 }
 ```
 
-There is one canonical source per linked-work scope. `ThreadLink` is the
-authoritative record for thread-level links on a specific `ChatThread`.
-`ChannelTargetActivity` is the authoritative record for channel-level linked
-targets on a specific `(channelId, threadId)` pair. `Channel.linkedTargets` and
+There is one canonical source for linked work: active `ThreadLink` rows where
+`deletedAt` is absent. `ThreadLink` is the authority for reads, writes, replay,
+retry, authorization, export, search, rebuild, and conflict repair. For channel
+threads, `ChannelTargetActivity` is a derived append-only channel aggregation
+ledger emitted from `ThreadLink` mutations for a specific `(channelId, threadId)`
+pair; it is not an independent write authority. `Channel.linkedTargets` and
 `ChatThreadProjection.linkedWork` are read-only projections/caches rebuilt from
-those ledgers; neither field is an authoritative mutable record. The server may
-store the normalized `Channel.linkedTargets` projection on the channel row for
-fast reads, but that stored set is rebuilt from the channel-target ledger and
-ignored whenever it
-disagrees with `ChannelTargetActivity`.
+active `ThreadLink` plus repaired `ChannelTargetActivity` output; neither field
+is an authoritative mutable record. If `ThreadLink`, `ChannelTargetActivity`,
+`Channel.linkedTargets`, and `ChatThreadProjection.linkedWork` disagree,
+`ThreadLink` wins, the derived ledger/projections are marked stale, and the
+engine repairs or rebuilds them before using them for authorization-sensitive
+read, replay, retry, export, search, notification, or side-rail behavior.
 
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
 tuple used by channel-target activity and compatible with `ThreadLink` creation,
@@ -324,9 +328,10 @@ side-rail path must re-authorize that grant before exposing the linked target.
 The server rejects unsupported, unauthorized, expired, revoked, or ambiguous
 targets, deduplicates exact duplicates, and writes only the normalized projection
 cache sorted by canonical target serialization after the corresponding
-`ChannelTargetActivity` rows are committed. General channel context, ACL
-expansion, side-rail projection, search, and export use that normalized projection
-only as a cache over the ledger. Array order and duplicates must never
+`ThreadLink` mutation and derived `ChannelTargetActivity` repair/output are
+durable. General channel context, ACL expansion, side-rail projection, search,
+and export use that normalized projection only as a cache over active
+`ThreadLink` rows. Array order and duplicates must never
 participate in channel identity, thread identity, or conversation-id derivation.
 
 `channelId` is the durable identity. `channelSlug` is a server-normalized lookup
@@ -797,13 +802,16 @@ For a `ChannelChatThread`, the same transaction or serialized unit must also run
 (`channel_target_linked` or `channel_target_unlinked`) for the thread's
 `channelId` and `threadId`, and enqueue the same durable outbox identity used
 for side rails, search, export, replay, and projection invalidation. DM threads
-do not emit `ChannelTargetActivity`. If a retry observes an already-active or
-tombstoned `ThreadLink`, it must verify the matching `ChannelTargetActivity` for
-the thread's `(channelId, threadId)` pair exists before reporting the
-idempotent result. If the activity is missing, the retry must repair it in the
-same transaction or serialized unit through `channel-target-ledger-sync`, then
-return success only after the `ThreadLink` and channel-target ledger entry are
-both durable.
+do not emit `ChannelTargetActivity`. The sync step is a derived repair/output
+contract: direct writes to `ChannelTargetActivity`, `Channel.linkedTargets`, or
+`ChatThreadProjection.linkedWork` must never create, remove, authorize, or
+tombstone linked work. If a retry observes an already-active or tombstoned
+`ThreadLink`, it must verify the matching `ChannelTargetActivity` for the
+thread's `(channelId, threadId)` pair exists before reporting the idempotent
+result. If the activity is missing, the retry must repair it in the same
+transaction or serialized unit through `channel-target-ledger-sync`, then return
+success only after the `ThreadLink` and channel-target ledger entry are both
+durable.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
@@ -851,7 +859,10 @@ a second active link or duplicate `link_added` fanout.
 `ChatThreadProjection.linkedWork`, projections, search, and export all build
 from one active canonical link per normalized uniqueness key and must use the
 same `canonicalThreadLinkKey(parts)` helper as link creation and `ThreadLink`
-upserts.
+upserts. Channel-level linked-target rebuilds must start from the same active
+`ThreadLink` set, replay or repair `ChannelTargetActivity` as derived output, and
+then regenerate `Channel.linkedTargets`; they must not use a stale channel target
+ledger as the source of truth over `ThreadLink`.
 The uniqueness key applies only to active links where `deletedAt` is absent.
 Tombstoned links remain historical records and do not block a future relink with
 the same target tuple; relinking creates a new active `ThreadLink` and a new

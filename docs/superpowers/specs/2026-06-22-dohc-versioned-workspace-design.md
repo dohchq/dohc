@@ -129,10 +129,9 @@ durability path accepts a non-canonical
 successful immediate save and not a canonical write that is merely waiting for
 read visibility. The only `durable-pending` response is the non-canonical
 `WriteResult` arm carrying `holdingRecordId`, `acceptedAt`, `replayUntil`,
-`operatorDispositionDueAt`, `retentionUntil`, `pendingState`, and the same
-idempotency/replay metadata used to resume or retire that holding record. UIs may
-show that pending record only in explicit ingest/recovery/status surfaces marked
-non-canonical.
+`operatorDispositionDueAt`, `pendingState`, and the same idempotency/replay
+metadata used to resume or retire that holding record. UIs may show that pending
+record only in explicit ingest/recovery/status surfaces marked non-canonical.
 In this spec, "files save immediately" means authorized writes that pass
 protection checks become canonical without an extra human apply/review step.
 Write results are explicit:
@@ -253,7 +252,6 @@ type WriteResult =
       acceptedAt: UnixMsDecimalString
       replayUntil: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
-      retentionUntil: UnixMsDecimalString
       pendingState:
         | 'pending_protection'
         | 'pending_review'
@@ -496,23 +494,21 @@ it does not itself cryptoshred or compact reconstructible bytes.
 `replayUntil` is the single canonical replay-expiry term. It controls how long
 the idempotency result for a `holdingRecordId` must replay and is the only
 deadline that changes write retries to `idempotency-expired`.
-`operatorDispositionDueAt`, `retentionUntil`, and
-`maxPendingCanonicalizationMs` are derived status/escalation deadlines inside
-that replay window; they do not independently expire idempotency replay and do
-not cryptoshred reconstructible bytes. `operatorDispositionDueAt` and
-`maxPendingCanonicalizationMs` control when `pending_canonicalization` becomes
-`overdue_disposition`; `retentionUntil` for durable-pending holding records is
-an operator/status deadline, not a payload-deletion deadline. Only explicit
-operator disposition may transition a durable-pending holding record to
-`terminal-retired` with reason `operator_disposition_retired`; retries before
-`replayUntil` replay that terminal result after disposition. Retries after
-`replayUntil` return `idempotency-expired`.
+For `accepted_holding_record`, `operatorDispositionDueAt` and
+`maxPendingCanonicalizationMs` are the only operator/status escalation deadlines
+inside that replay window; they do not independently expire idempotency replay
+and do not cryptoshred reconstructible bytes. They control when
+`pending_canonicalization` becomes `overdue_disposition`. `accepted_holding_record`
+does not use `retentionUntil` as an operator deadline or payload-deletion
+deadline. Only explicit operator disposition may transition a durable-pending
+holding record to `terminal-retired` with reason `operator_disposition_retired`;
+retries before `replayUntil` replay that terminal result after disposition.
+Retries after `replayUntil` return `idempotency-expired`.
 For `rejected_record`, `retentionUntil` is the minimal
 audit/replay/explanation retention horizon. For `quarantined_record`, it is the
-disposition/audit retention horizon. For `accepted_holding_record`, it is an
-operator/status escalation deadline and not a payload-deletion deadline. Payload
-retention for accepted holding records is controlled by canonicalization or
-explicit operator disposition, not by time alone.
+disposition/audit retention horizon. Payload retention for accepted holding
+records is controlled by canonicalization or explicit operator disposition, not
+by time alone.
 No accepted holding record may remain unreviewed forever: if no
 workspace-specific disposition policy is configured, the engine's default finite
 operator-escalation window applies, and workspaces may only choose values inside
