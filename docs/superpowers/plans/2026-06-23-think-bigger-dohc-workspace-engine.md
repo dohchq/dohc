@@ -2266,6 +2266,10 @@ links, activity, read state, and reactions.
 - composer send.
 - DM creation.
 - channel switching.
+- performance smoke for large message/channel lists using virtualization or list
+  windowing where needed.
+- accessibility pass for keyboard navigation, focus order, and screen-reader
+  labels.
 
 **E2E:**
 
@@ -2288,6 +2292,9 @@ links, activity, read state, and reactions.
 **Acceptance:**
 
 - chats feel fast, obvious, and natural.
+- large channels and long message lists remain responsive without visible jank.
+- keyboard navigation, focus handling, and screen-reader labels pass the PR13
+  accessibility checklist.
 
 ### PR 14 - Chats Linked To Files, Versions, And History
 

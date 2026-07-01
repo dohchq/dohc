@@ -1042,6 +1042,12 @@ type ThreadMessage = {
 server-assigned id through the idempotency result, or be rejected as
 `replay_metadata_mismatch`, so ordering tie-breakers and read cursors can rely on
 a stable unique message identifier.
+The create path must reserve or replay the idempotency result and server-assigned
+`ThreadMessage.id` before validating `parentMessageId`. That resolved id is then
+used for self-parent rejection and ancestry cycle detection. The reservation is
+not a visible message row: if parent validation, authorization, or commit fails,
+the message body/activity/projection is not exposed, and retries must reuse the
+same reserved id or return the recorded deterministic failure.
 If `parentMessageId` is present, authorization for that parent message in the
 same workspace/thread must be checked before any existence lookup or hidden-row
 distinction is exposed. After authorization, the parent must reference an
