@@ -254,10 +254,18 @@ function* contentLines(markdown) {
   }
 
   const stripBlockquoteMarkers = (value) => value.replace(/^(?: {0,3}>[ \t]?)+/, '')
+  const lines = markdown.split(/\r?\n/)
+  const frontMatterFence = lines[0]?.trim()
+  const frontMatterEndIndex = frontMatterFence === '---' || frontMatterFence === '+++'
+    ? lines.findIndex((line, index) => index > 0 && line.trim() === frontMatterFence)
+    : -1
 
   let lineIndex = 0
-  for (const rawLine of markdown.split(/\r?\n/)) {
+  for (const rawLine of lines) {
     lineIndex += 1
+    if (frontMatterEndIndex !== -1 && lineIndex <= frontMatterEndIndex + 1) {
+      continue
+    }
     const rawLineForBlockDetection = inFence ? rawLine : stripBlockquoteMarkers(rawLine)
     const rawListItemForBlockDetection = rawLineForBlockDetection.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const rawLeadingIndentForBlockDetection = indentationWidth(rawLineForBlockDetection)
@@ -732,8 +740,18 @@ const assertCheckerFixtures = () => {
   ) {
     throw new Error('real HTML comments after inline code should still be stripped')
   }
+  const frontMatterLinks = collectLinks('---\nsee: [hidden](./missing.md)\n---\n[visible](./visible.md)')
+  if (
+    frontMatterLinks.links.some((link) => link.target === './missing.md')
+    || !frontMatterLinks.links.some((link) => link.target === './visible.md')
+  ) {
+    throw new Error('front matter fixture should not produce body links')
+  }
   if (collectAnchors('<!-- # Hidden -->').has('hidden')) {
     throw new Error('HTML comment fixture should not produce anchors')
+  }
+  if (collectAnchors('---\nHidden\n---\n# Visible').has('hidden')) {
+    throw new Error('front matter fixture should not produce setext anchors')
   }
   if (!collectAnchors('## `WriteResult<T>`').has('writeresultt')) {
     throw new Error('generic code-span heading fixture should preserve type text in anchors')

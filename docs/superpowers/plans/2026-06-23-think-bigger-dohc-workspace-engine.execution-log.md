@@ -19,8 +19,8 @@ Source specs:
 - **Single mutable status block:** only the newest PR00 pass's
   `Live PR00 status` block owns CodeRabbit status, test evidence, open
   overrides, and completion state.
-- **Derived summaries:** this header, `Status:`, `Current PR Snapshot`, and any
-  other summaries are read-only pointers to that newest live-status block.
+- **Derived summaries:** this header, `Status:`, and any other summaries are
+  read-only pointers to that newest live-status block.
 - **Archive boundary:** earlier `Historical PR00 status` entries under
   `Archived PR00 Pass History` are append-only background.
 
@@ -7344,7 +7344,7 @@ Two-hundred-seventy-sixth pass:
 
 Two-hundred-seventy-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three major findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7361,6 +7361,38 @@ Two-hundred-seventy-seventh pass:
     replayable `WriteResult`.
   - Aligned `share` link request, shared-target, stored-link, and activity
     handling around `targetVersionRef: null`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: one major finding and two minor findings fixed; committed
+    review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's one major finding and two minor findings:
+  - Removed the execution-log pointer to an undefined `Current PR Snapshot`.
+  - Made the docs-link checker skip top-of-file front matter before body
+    link/anchor collection, with fixtures for hidden front matter links and
+    setext-like text.
+  - Changed `plannedLegacyPathOutcomes` to canonical `pathToken` entries and
+    documented path-normalized serialization/deserialization behavior.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

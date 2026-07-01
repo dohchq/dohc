@@ -833,7 +833,10 @@ type VersionsNamespaceActivationFence =
       fenceId: string
       migrationGeneration: UInt64DecimalString
       decision: 'activate' | 'rollback'
-      plannedLegacyPathOutcomes: Record<string, 'move' | 'reclassify' | 'preserve' | 'quarantine'>
+      plannedLegacyPathOutcomes: Array<{
+        pathToken: string
+        outcome: 'move' | 'reclassify' | 'preserve' | 'quarantine'
+      }>
       fromMode: 'legacy_unmanaged' | 'managed_versions'
       toMode: 'legacy_unmanaged' | 'managed_versions'
       startedAt: UnixMsDecimalString
@@ -909,7 +912,10 @@ walkers must skip it after the reserved-namespace scan.
 by persisted engine state, not process memory. It must survive restarts while a
 `.versions/**` namespace cutover is `activating`, `committing`, or
 `rolling_back`, and it returns `state: 'inactive'` only after the cutover has
-fully committed or rolled back.
+fully committed or rolled back. `plannedLegacyPathOutcomes` stores canonical
+path tokens produced by the same path-normalization pipeline used for namespace
+scans, never raw caller spelling, so NFC/case variants cannot diverge during
+activation, rollback, serialization, deserialization, or status lookup.
 `materializationPresentation` is a UI/status hint for whether the current actor
 sees hydrated bytes/projection or a placeholder for a virtual/lazy path; it does
 not create a third persisted `materialized` value.
