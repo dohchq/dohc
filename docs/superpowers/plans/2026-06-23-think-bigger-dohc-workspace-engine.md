@@ -520,10 +520,12 @@ Do not begin the expansion roadmap until Phase 0 passes. The biggest risk is
 building a beautiful substrate that has not survived contact with files, merge,
 history, UI, and chats in one loop.
 
-Keep each implementation slice behind an alpha flag, non-default API path, or
-internal workspace-engine adapter until the proof slice works end to end.
-Do not expose a half-integrated version/filesystem/chats model as the default
-product surface.
+Keep each post-Phase-0 implementation slice behind an alpha flag, non-default
+API path, or internal workspace-engine adapter until the proof slice works end
+to end. The exception is the Phase 0 watcher-backed normal-folder path: it must
+remain directly exercisable by local editors, shells, and agents so the proof
+arc tests the real "just files on your computer" loop. Do not expose a
+half-integrated version/filesystem/chats model as the default product surface.
 
 ## External Review Incorporated
 

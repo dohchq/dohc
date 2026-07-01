@@ -4388,9 +4388,8 @@ Hundred-ninety-fourth pass:
     handling so outcomes remain `PublicValidationErrorCode` or quarantine.
   - Required export/re-import metadata to carry the workspace path-equivalence
     profile and fail closed if the profile is missing or incompatible.
-  - Updated local agent CLI testing docs to use `codex-app-server` and
-    `claude-acp` with the actual `CODEX` / `CLAUDE_ACP` driver prefixes and
-    `claude-code-acp` fallback.
+  - Updated local agent CLI testing docs to use neutral dohc-branded driver
+    names and keep vendor-specific driver mappings in non-shipping QA notes.
   - Replaced plain deterministic deleted-body hashes with keyed digest/MAC
     evidence verified through authorized replay/export/audit paths.
 - Validation:
@@ -6384,7 +6383,7 @@ Two-hundred-fiftieth pass:
 
 Two-hundred-fifty-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one follow-up finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6400,6 +6399,43 @@ Two-hundred-fifty-first pass:
     no-create behavior when no channel thread exists yet.
   - Tied `send_channel_message` to the same canonical resolver while preserving
     first-send creation and exactly-once `chat_created` semantics.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Kept the Phase 0 watcher-backed normal-folder path directly exercisable while
+    leaving later implementation slices behind alpha/non-default/internal paths.
+  - Split persisted `WorkspaceStatusPayload` from request-stream freshness
+    metadata and added `WorkspaceStatusTransportPayload` for async status
+    delivery.
+  - Rewrote the historical local-agent CLI log note with neutral dohc-branded
+    driver wording.
+  - Clarified that idempotency acknowledgement waits for the canonical mutation
+    plus durable side-effect ledger/outbox records, while derived side effects
+    execute asynchronously.
+  - Narrowed `ShareChannelLinkedTargetRef` to shared-scope targets only.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -1173,18 +1173,23 @@ same retryable failure until the commit state is no longer unknown.
 Idempotency records must be persisted through the documented maximum retry
 horizon for that operation type and transport after the operation reaches a
 terminal result. The idempotency record/tombstone must be committed in the same
-transactional boundary as the canonical mutation. All derived side effects
-including projections, notifications, search indexing, and export/index fanout
-must be recorded in a durable outbox or side-effect ledger committed with the
-same workspace/version/idempotency identity. Retries replay, complete, or
-suppress side effects from that ledger exactly once; duplicate deliveries must
-not emit duplicate projections, notifications, search updates, export records,
-or other derived work. If an implementation cannot share a transaction boundary,
-it must provide an equivalent write-ahead guarantee: reserve the idempotency key
-durably before applying the mutation, make recovery complete either the original
-mutation plus side-effect ledger or tombstone the reserved key deterministically,
-and never acknowledge success until the idempotency result, canonical mutation,
-and required side-effect outbox entries are durable together. After the retry
+transactional boundary as the canonical mutation. All derived side effects,
+including watch propagation, projections, notifications, search indexing, and
+export/index fanout, must be recorded in a durable outbox or side-effect ledger
+committed with the same workspace/version/idempotency identity. Retries replay,
+complete, or suppress side effects from that ledger exactly once; duplicate
+deliveries must not emit duplicate projections, notifications, search updates,
+export records, or other derived work. If an implementation cannot share a
+transaction boundary, it must provide an equivalent write-ahead guarantee:
+reserve the idempotency key durably before applying the mutation, make recovery
+complete either the original mutation plus side-effect ledger or tombstone the
+reserved key deterministically, and never acknowledge success until the
+idempotency result, canonical mutation, and durable outbox or side-effect ledger
+records describing required derived work are committed together. The derived side
+effects themselves remain asynchronous; completion of watch propagation,
+projection rebuilds, notifications, search indexing, or export fanout is outside
+the synchronous acknowledgement boundary once their durable ledger records exist.
+After the retry
 horizon, an API retry with the same key must fail closed with an explicit
 `kind: 'idempotency-expired'` response; it must not silently apply as a new
 mutation and must not convert the expired key into a conflict response.

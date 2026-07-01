@@ -261,6 +261,9 @@ type NonVersionedChannelLinkedTargetRef = ChannelLinkedTargetBase & {
 }
 
 type ShareChannelLinkedTargetRef = ChannelLinkedTargetBase & {
+  scopeKind: 'shared'
+  shareGrantId: string
+  visibilityScope: string
   targetType: 'share'
   targetVersionRef?: VersionRef
 }

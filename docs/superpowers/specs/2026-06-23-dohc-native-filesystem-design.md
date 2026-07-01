@@ -775,7 +775,9 @@ type WorkspaceAsyncPayload = {
   pageToken?: string
 }
 
-type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
+type WorkspaceStatusPayload = {
+  workspaceId: string
+  versionId: string
   path?: string
   tracked: boolean
   versioned: boolean
@@ -802,11 +804,17 @@ type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
   idempotencyResultId?: string
   idempotencyReplayToken?: string
 }
+
+type WorkspaceStatusTransportPayload = WorkspaceAsyncPayload & {
+  status: WorkspaceStatusPayload
+}
 ```
 
-`WorkspaceStatusPayload` carries policy and legibility axes directly. Status
-clients must not infer `tracked`, `versioned`, `synced`, export handling, or
-conflict location by scraping path conventions, policy files, or conflict views.
+`WorkspaceStatusPayload` carries durable policy and legibility axes directly; it
+does not persist request-stream freshness metadata such as `requestToken`,
+`sequence`, or `pageToken`. Status clients must not infer `tracked`,
+`versioned`, `synced`, export handling, or conflict location by scraping path
+conventions, policy files, or conflict views.
 `versionsNamespaceMode` is persisted workspace status, not a per-client guess:
 `legacy_unmanaged` means pre-opt-in `.versions/**` content is ordinary content
 classified by the compatibility path, while `managed_versions` means
@@ -819,18 +827,19 @@ not create a third persisted `materialized` value.
 when one may be shown; secret-backed or unauthorized conflicts still report
 `conflictState` without leaking a projection path.
 
-`requestToken` is an opaque server/engine-minted request-stream token returned
-when the initiating watch/status/snapshot/list/search/filesystem-loading request
-is accepted. Callers may hold and echo the request handle, but they do not choose
-or forge the token. Every async payload for that request stream echoes the exact
-token minted for the initiating request, and stale-response checks compare that
-token together with workspace/version/page identity before applying results.
+`requestToken` is an opaque server/engine-minted request-stream token carried by
+`WorkspaceAsyncPayload` when the initiating watch/status/snapshot/list/search or
+filesystem-loading request is accepted. Callers may hold and echo the request
+handle, but they do not choose or forge the token. Every async transport payload
+for that request stream, including `WorkspaceStatusTransportPayload`, echoes the
+exact token minted for the initiating request, and stale-response checks compare
+that token together with workspace/version/page identity before applying results.
 Filesystem loading and local reconciliation mint the same kind of token from the
 engine context before emitting progress or result payloads. The `requestToken`
-parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only:
-callers may pass back a server/engine-issued token from an accepted request
-stream, but client-generated tokens are ignored or rejected and never establish
-request ownership.
+parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only
+transport freshness metadata: callers may pass back a server/engine-issued token
+from an accepted request stream, but client-generated tokens are ignored or
+rejected and never establish request ownership.
 
 `WorkspaceAsyncPayload.sequence` uses `UInt64DecimalString`: ASCII base-10
 digits only, no sign, separators, decimal point, whitespace, locale/non-ASCII
@@ -839,9 +848,10 @@ digits, or leading zeros except the literal `0`, with range
 clients must parse, range-check, and reserialize before freshness comparison.
 Handlers for `watch(workspaceId, versionId, path)`,
 `snapshot(workspaceId, versionId)`, `list(workspaceId, versionId, path, ...)`,
-`search(workspaceId, versionId, query, ...)`, status APIs, and filesystem loading
-must verify these fields before applying results. Each handler also compares the
-payload sequence against the latest applied value for the same
+`search(workspaceId, versionId, query, ...)`, async status transports, and
+filesystem loading must verify `WorkspaceAsyncPayload` fields before applying
+results. Each handler also compares the transport payload sequence against the
+latest applied value for the same
 workspace/version/request stream using BigInt-safe comparison of canonical
 `UInt64DecimalString` values, never floating-point numbers, locale string
 collation, or non-canonical decimal strings. For paginated `list` and `search`,
@@ -852,11 +862,16 @@ is stale. Server timestamps are metadata only and must not decide freshness
 unless they are explicitly defined as a monotonic per-stream counter. A stale
 response from one workspace/version/session must never repaint another or
 regress current UI state.
-`status(...)`, `.dohc/status.json` generation, CLI status streaming, and UI status
-badges must use `WorkspaceStatusPayload` or an isomorphic shape. A status update
-must be dropped before mutating UI/cache state unless its `workspaceId`,
-`versionId`, `requestToken`, and `sequence` match the currently active
-workspace/version/request stream and advance the canonical per-stream sequence.
+`status(...)`, CLI status streaming, and UI status badges must use the persisted
+`WorkspaceStatusPayload` plus separate `WorkspaceAsyncPayload` freshness metadata
+when status is delivered asynchronously. `.dohc/status.json` generation writes
+only the durable `WorkspaceStatusPayload` shape, with no `requestToken`,
+`sequence`, or `pageToken`. An async status update must be dropped before
+mutating UI/cache state unless its transport `workspaceId`, `versionId`,
+`requestToken`, and `sequence` match the currently active
+workspace/version/request stream, the nested status `workspaceId`/`versionId`
+match the transport envelope, and the sequence advances the canonical per-stream
+sequence.
 Internal status fields are server-derived only. Browser and client callers do
 not supply `includeInternal`; if they send such a flag through an older client or
 raw transport, the server strips or ignores it. Owner/admin/audit-only internal
