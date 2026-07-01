@@ -5495,8 +5495,11 @@ Two-hundred-twenty-sixth pass:
     path filters.
   - Froze the current PR pointer header so PR metadata lives only in the latest
     live pass block.
-  - Required `secretProjection` to remain explicit in status/API/UI serialization,
-    preserving `protectedLocal` versus `plaintextLocal`.
+  - Legacy-history note: required `secretProjection` to remain explicit in
+    status/API/UI serialization, preserving the current `local` materialization
+    state with `secretProjection: 'protectedLocal'` versus
+    `secretProjection: 'plaintextLocal'`; these are not third materialization
+    states.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -6599,7 +6602,7 @@ Two-hundred-fifty-sixth pass:
 
 Two-hundred-fifty-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: eight follow-up findings fixed and one lockfile finding
     verified already satisfied; committed review rerun is required after this
     pass is pushed.
@@ -6634,6 +6637,44 @@ Two-hundred-fifty-seventh pass:
   - Added a concrete presence/typing signal contract with TTL, refresh, expiry,
     redaction, shared-channel reauthorization, and ThreadMessage tombstone/edit
     degradation rules.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Increased the Think Bigger docs workflow timeout to cover cold install paths.
+  - Expanded PR12 `ThreadLink` requirements to retain source/owning workspace ID,
+    source thread ID, policy-gated display path/title capture, redacted labels,
+    and ACL/degraded-render behavior.
+  - Made active `embargoed` visibility a true audience cap for all readers until
+    expiry or condition clearance.
+  - Required first channel sends to persist the initial `ThreadMessage`,
+    `message_created` activity, and `chat_created` provenance in the same
+    serialized unit.
+  - Reworded the historical `secretProjection` note to use current `local` /
+    `virtual` materialization vocabulary and mark the old phrasing as legacy
+    history.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

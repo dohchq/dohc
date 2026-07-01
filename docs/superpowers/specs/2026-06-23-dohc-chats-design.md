@@ -1917,14 +1917,14 @@ the object that survives and resurfaces. A channel send maps to a
 The first send for a channel conversation must be one atomic
 `send_channel_message` mutation: the server resolves or creates the
 channel-backed `ChatThread` by `(workspaceId, channelId, channelConversationId)`
-and persists the initial `ThreadMessage` plus matching `chat_created`
-`ThreadActivity` in the same transaction or serialized unit. Callers must not
-implement the fast path as `create_chat` followed by `reply_to_chat`, because
-that creates a duplicate-thread window and splits the durable chat identity
-proof from the first message proof. Concurrent first sends for the same tuple
-must converge on one `ChatThread`, with distinct `ThreadMessage` rows ordered by
-the canonical per-thread sequence. There is no separate durable `ChannelMessage`
-entity outside the canonical
+and persists the initial `ThreadMessage` plus matching `message_created`
+`ThreadActivity` and `chat_created` provenance in the same transaction or
+serialized unit. Callers must not implement the fast path as `create_chat`
+followed by `reply_to_chat`, because that creates a duplicate-thread window and
+splits the durable chat identity proof from the first message proof. Concurrent
+first sends for the same tuple must converge on one `ChatThread`, with distinct
+`ThreadMessage` rows ordered by the canonical per-thread sequence. There is no
+separate durable `ChannelMessage` entity outside the canonical
 `ChatThread -> ThreadMessage` model.
 
 ## Side rail integration

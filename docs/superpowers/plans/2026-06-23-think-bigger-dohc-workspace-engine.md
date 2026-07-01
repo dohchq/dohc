@@ -2216,9 +2216,11 @@ links, activity, read state, and reactions.
 - Define `ThreadReadState` shape, monotonic cursor semantics, and read-state API
   upserts alongside thread/message models.
 - Store chat links through the canonical `ThreadLink` shape: stable link id,
-  source workspace/thread, target type, target workspace, stable target id,
-  optional `VersionRef`, display path/title captured at link time,
-  ACL/degraded-render state.
+  source/owning workspace ID, source thread ID, target type, target workspace ID,
+  stable target ID, optional `VersionRef`, and display path/title captured at link
+  time only when policy permits. Otherwise store a redacted/policy-gated display
+  label plus ACL/degraded-render behavior so rename, revocation, and
+  cross-workspace dereference remain safe.
 - Follow the
   [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
   for chat/thread/link/read-state ownership, migration/backfill, and projection

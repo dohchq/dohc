@@ -1316,19 +1316,22 @@ but not silently broaden the effective audience:
 
 `redacted` is a content-deny cap and wins for the covered payload even when a
 broader scope says `workspace` or `public`; only an authorized placeholder or
-opaque reference may render. Active `embargoed` is a time/condition cap: while
-the embargo is active it behaves as hidden for unauthorized readers, and when
-the embargo expires the engine recomputes visibility from the remaining scopes.
-`private`, `shared with selected people`, `workspace`, and `public` compose as
-increasingly broad audiences, so the effective audience is the intersection of
-all non-redacted, non-embargoed scopes plus server-side authorization. A public
-object inside a private version is not public; a workspace-visible folder inside
-a selected-person shared export is visible only to the selected export
-participants; a public export can include a resource only when the export grant
-explicitly includes it and no workspace/version/path/object/projection/moment
-scope narrows or redacts it for that viewer. Explicit shares and shared exports
-are allowlists over the resolved resource graph, not bypasses around ordinary
-workspace, version, path, object, projection, moment, secret, and policy checks.
+opaque reference may render. Active `embargoed` is a time/condition cap for all
+readers, not only unauthorized readers: while the embargo is active, the
+embargo's audience is intersected with `private`, `shared with selected people`,
+`workspace`, `public`, and every other applicable cap. Only after the embargo
+expires or its condition clears does the engine recompute visibility from the
+remaining scopes. `private`, `shared with selected people`, `workspace`, and
+`public` compose as increasingly broad audiences, so the effective audience is
+the intersection of all non-redacted scopes, active embargo caps, and server-side
+authorization. A public object inside a private version is not public; a
+workspace-visible folder inside a selected-person shared export is visible only
+to the selected export participants; a public export can include a resource only
+when the export grant explicitly includes it and no
+workspace/version/path/object/projection/moment scope narrows, embargoes, or
+redacts it for that viewer. Explicit shares and shared exports are allowlists
+over the resolved resource graph, not bypasses around ordinary workspace,
+version, path, object, projection, moment, secret, and policy checks.
 
 This is how dohc supports open work without requiring 100% of all work to be
 visible 100% of the time.
