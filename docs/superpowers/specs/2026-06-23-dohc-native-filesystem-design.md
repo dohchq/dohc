@@ -203,11 +203,11 @@ import, attach, sync, and raw filesystem scan is defined by this table:
 | Candidate | Import / Attach / Sync / Raw Scan Action |
 | --- | --- |
 | Allowlisted policy inputs: `.dohc/files.toml`, `.dohc/visibility.toml` | Parse as engine policy input outside the ordinary captured-content pipeline. |
-| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Classify as reserved engine state and route only to engine-specific recovery/status handling with an explainable reserved-internal disposition; never silently skip or re-ingest as user content. |
-| Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never propose ordinary user-content safe rename. |
+| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Classify as reserved engine state and route only to engine-specific recovery/status handling as `quarantined` with `reasonCode: 'protected_path'`, `quarantineState: 'quarantined_protection'`, and `reservedNamespaceReason: 'reserved_internal_engine_state'`; never silently skip or re-ingest as user content. |
+| Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with `reservedNamespaceReason: 'foreign_reserved_namespace'` or send to manual resolution; never propose ordinary user-content safe rename. |
 | Managed `~/dohc/<workspace>/.versions/<version>/` bound to a known workspace/version by the engine | Allow only through the engine workspace/version mount resolver, not generic tree walkers. |
-| Pre-opt-in ordinary `.versions/**` content in an existing attached workspace | Classify as `legacy_unmanaged_versions_content`; allow ordinary-content ingest only through the materialized workspace walker, never through the workspace/version mount resolver, and surface the explicit migration choices before managed namespace activation. |
-| Unmanaged or out-of-contract `.versions/**` or aliases of `.versions` after managed namespace opt-in, or where dohc already expects engine state | Quarantine with an explainable record or send to manual resolution; never silently promote into a named version. |
+| Pre-opt-in ordinary `.versions/**` content in an existing attached workspace | Classify with `reservedNamespaceReason: 'legacy_unmanaged_versions_content'`; allow ordinary-content ingest only through the materialized workspace walker, never through the workspace/version mount resolver, and surface the explicit migration choices before managed namespace activation. |
+| Unmanaged or out-of-contract `.versions/**` or aliases of `.versions` after managed namespace opt-in, or where dohc already expects engine state | Quarantine with `reservedNamespaceReason: 'managed_versions_namespace_collision'` or send to manual resolution; never silently promote into a named version. |
 | Ordinary user content outside engine-managed namespaces that collides with a reserved namespace | May receive a deterministic collision-proof safe-rename proposal before activation. |
 
 Only ordinary user content outside engine-managed namespaces may be proposed for
@@ -860,6 +860,12 @@ type WorkspaceWriteState =
 // native-filesystem write-result vocabulary above. This subset excludes
 // retry-only `idempotency-expired`.
 
+type ReservedNamespaceReason =
+  | 'reserved_internal_engine_state'
+  | 'foreign_reserved_namespace'
+  | 'managed_versions_namespace_collision'
+  | 'legacy_unmanaged_versions_content'
+
 type VersionsNamespaceActivationFence =
   | {
       state: 'inactive'
@@ -925,6 +931,7 @@ type WorkspaceStatusPayload = {
   secretProjection: 'none' | 'opaque' | 'protectedLocal' | 'plaintextLocal'
   conflictState: 'none' | 'preserved' | 'resolution_pending' | 'resolved'
   writeState: WorkspaceWriteState
+  reservedNamespaceReason?: ReservedNamespaceReason
   holdingRecordId?: string
   conflictProjectionPath?: string
   conflictReplayToken?: string

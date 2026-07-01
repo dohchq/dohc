@@ -8123,11 +8123,11 @@ Historical status snapshot.
 
 Two-hundred-ninety-eighth pass:
 
-### Live PR00 Status
+### Historical PR00 Status
 
-Mutable status symbol: `LivePR00Status`.
+Historical status snapshot.
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one major finding and three minor findings fixed; the
     parser-backed checker rewrite suggestion was narrowed by routing
     execution-log contract checks through prose-aware `contentLines()`;
@@ -8152,6 +8152,46 @@ Mutable status symbol: `LivePR00Status`.
   - Routed execution-log contract checks through prose-aware `contentLines()`
     before anchored marker/heading matching, avoiding fenced-code/comment
     false positives without replacing the whole link checker.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-ninth pass:
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: one major finding and one trivial finding fixed; committed
+    review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+
+- Fixed CodeRabbit's one major finding and one trivial finding:
+  - Mapped known engine-owned `.dohc/**` reserved namespace material to existing
+    `quarantined`/`quarantined_protection` write-state handling with explicit
+    `reservedNamespaceReason` status metadata.
+  - Split the dense `ThreadReadState` ownership matrix row into separate
+    read-state and projection rows that distinguish P0E provisional fixtures,
+    PR 01 `chat-read-state-bridge-v0` responsibility, and PR 12 final ownership.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
