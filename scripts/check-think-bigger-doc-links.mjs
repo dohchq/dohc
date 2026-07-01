@@ -258,13 +258,21 @@ function* contentLines(markdown) {
     const fenceLine = inFence && !fenceOpenedInBlockquote
       ? rawVisibleLine
       : stripBlockquoteMarkers(rawVisibleLine)
-    const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
     const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
     const indentedListItem = Boolean(listItem)
+    const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
+    const sameLineListFence = !inFence && listItem
+      ? line.slice(listItem[0].length).match(/^(```+|~~~+)(.*)$/)
+      : null
+    const fenceMatch = rawFence ?? (
+      sameLineListFence
+        ? [sameLineListFence[0], line.slice(0, listItem[0].length), sameLineListFence[1], sameLineListFence[2]]
+        : null
+    )
     const leadingIndent = indentationWidth(line)
     const listContentIndent = listItem ? markerWidth(listItem[0]) : null
-    const fenceIndent = rawFence ? indentationWidth(rawFence[1]) : null
-    const fence = rawFence && (
+    const fenceIndent = fenceMatch ? indentationWidth(fenceMatch[1]) : null
+    const fence = fenceMatch && (
       fenceIndent <= 3
       || (
         activeListIndent !== null
@@ -284,19 +292,22 @@ function* contentLines(markdown) {
       || listCodeBlock
 
     if (fence && !inFence) {
-      const marker = rawFence[2][0]
-      const markerLength = rawFence[2].length
+      const marker = fenceMatch[2][0]
+      const markerLength = fenceMatch[2].length
       inFence = true
       fenceChar = marker
       fenceLength = markerLength
       fenceOpenedInBlockquote = /^(?: {0,3}>[ \t]?)+/.test(rawVisibleLine)
+      if (sameLineListFence && listContentIndent !== null) {
+        activeListIndent = listContentIndent
+      }
       continue
     }
 
     if (fence && inFence) {
-      const marker = rawFence[2][0]
-      const markerLength = rawFence[2].length
-      const trailing = rawFence[3]
+      const marker = fenceMatch[2][0]
+      const markerLength = fenceMatch[2].length
+      const trailing = fenceMatch[3]
       if (marker === fenceChar && markerLength >= fenceLength && trailing.trim() === '') {
         inFence = false
         fenceChar = null
@@ -692,6 +703,14 @@ const assertCheckerFixtures = () => {
   const quotedFence = collectLinks('> ```md\n> [hidden](./missing.md)\n> ```')
   if (quotedFence.links.length > 0 || quotedFence.unresolvedReferences.length > 0) {
     throw new Error('blockquote fenced-code fixture should not produce links')
+  }
+  const sameLineListFence = collectLinks('- ```md\n  [hidden](./missing.md)\n  ```\n[visible](./visible.md)')
+  if (
+    sameLineListFence.links.some((link) => link.target === './missing.md')
+    || sameLineListFence.unresolvedReferences.length > 0
+    || !sameLineListFence.links.some((link) => link.target === './visible.md')
+  ) {
+    throw new Error('same-line list fenced-code fixture should hide code links and keep later prose links')
   }
   const normalFenceWithLiteralBlockquoteFence = collectLinks('```\n> ```\n[hidden](./missing.md)\n```')
   if (

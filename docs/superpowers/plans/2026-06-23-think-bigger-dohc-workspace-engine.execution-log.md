@@ -6979,7 +6979,7 @@ Two-hundred-sixty-sixth pass:
 
 Two-hundred-sixty-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one major finding fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6991,6 +6991,45 @@ Two-hundred-sixty-seventh pass:
 - Fixed CodeRabbit's one major finding:
   - Added policy-denial handling to the immediate-write first-match decision
     order before content comparison, conflict, review, or clean-write handling.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixty-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four major findings and three minor findings fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four major findings and three minor findings:
+  - Consolidated the PR01 Schema Promotion Checkpoint handoff into one canonical
+    checkpoint narrative for `Phase0SharedSubstrateBaseline`.
+  - Extended the schema-drift gate to cover `WorkspaceLinkRef`, projection
+    writeability/validation, and effective-policy boundary contracts.
+  - Added `retention_expired` to `TerminalRetirementReason`.
+  - Removed watcher/session/process identity from filesystem dedupe identity,
+    keeping the engine-owned opaque capture/replay token authoritative.
+  - Recognized same-line list fenced-code blocks in the Think Bigger docs
+    checker and added a fixture.
+  - Renamed the export/re-import policy envelope wording from `FilePolicyBase`
+    to the full resolved policy tuple when `secretProjection` is included.
+  - Replaced branded `WorkspaceWriteState` with an explicit durable status union
+    that excludes `idempotency-expired`.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

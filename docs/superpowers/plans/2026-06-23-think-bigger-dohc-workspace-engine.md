@@ -922,37 +922,33 @@ current-system inventory, storage/filesystem decision note, and unresolved
 blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
-After P0A and P0R, Phase 0 must enter one canonical ownership handoff: the
-**PR01 Schema Promotion Checkpoint**. The short alias `P0S` may be used only for
-the pre-PR01 freeze work inside that same checkpoint; it is not a separate
-ownership step, lane, or source of truth. The main orchestration thread plus the
-P0B lane own this checkpoint. P0B is the named schema-baseline workstream for
-Phase 0 and owns the shared substrate package scaffold until PR 01 adopts it.
-The named provisional source of truth is `Phase0SharedSubstrateBaseline` in that
-scaffold. It must be versioned, tested, and owned in one place; P0B, P0C, P0D,
-P0E, P0F, and P0G must import these provisional symbols from the baseline package
-rather than invent parallel shapes, ad hoc copies, or local lookalike types or
-depend on PR 01-owned contracts too early. For the checkpoint's pre-PR01 freeze,
-the baseline package must export the provisional `WorkspaceObject`,
-`WorkspaceVersion`, `VersionRef`,
+After P0A and P0R, Phase 0 has exactly one canonical ownership handoff: the
+**PR01 Schema Promotion Checkpoint**. The checkpoint includes the pre-PR01 freeze
+of `Phase0SharedSubstrateBaseline`; that freeze is not a separate lane,
+milestone, or source of truth. The main orchestration thread plus P0B own the
+checkpoint until PR 01 adopts it. During the freeze, P0B owns the shared
+substrate package scaffold and `Phase0SharedSubstrateBaseline` is the only
+provisional source for the symbols listed in the matrix below. P0B, P0C, P0D,
+P0E, P0F, and P0G must import those provisional symbols from that baseline
+package rather than invent parallel shapes, ad hoc copies, local lookalike
+types, or early dependencies on PR 01-owned contracts. The baseline package must
+export the provisional `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`,
 stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
 `ConflictRecord`, `ChatThread`, `ThreadMessage`, `ThreadLink`,
 `ThreadReadState`, and `AgentRun`/agent-run surrogate symbols listed in the
-matrix below, with tests proving consumers import those symbols. After PR 01
-lands, new code must consume the PR 01-owned contracts and
-`Phase0SharedSubstrateBaseline` becomes historical-only.
-The PR 01 completion step of the **PR01 Schema Promotion Checkpoint** must
-record in the execution log the commit/PR where PR 01 adopts or migrates each
-provisional symbol, and downstream code must stop importing
-`Phase0SharedSubstrateBaseline` for those symbols after that checkpoint.
-PR 01 must add a mechanical lint/test gate for this checkpoint: after each
-symbol is adopted or migrated by its owning PR lane, the check scans downstream
-code for imports of `Phase0SharedSubstrateBaseline` for that specific symbol and
-fails until consumers import the owning contract instead. The gate is
-symbol-specific, not a blanket removal of every baseline import on PR 01 merge:
-`ChatThread`, `ThreadMessage`, and chat `ThreadLink` remain allowed through the
-PR 01 bridge until the PR 12 chat ownership boundary explicitly adopts or
-migrates them.
+matrix, with tests proving consumers import them.
+
+The PR 01 completion step of the same checkpoint must record in the execution
+log the commit/PR where PR 01 adopts or migrates each provisional symbol. After
+that checkpoint, new code must consume the PR 01-owned contracts and
+`Phase0SharedSubstrateBaseline` becomes historical-only for adopted symbols. PR
+01 must add a mechanical lint/test gate for this checkpoint: after each symbol is
+adopted or migrated by its owning PR lane, the check scans downstream code for
+imports of `Phase0SharedSubstrateBaseline` for that specific symbol and fails
+until consumers import the owning contract instead. The gate is symbol-specific,
+not a blanket removal of every baseline import on PR 01 merge: `ChatThread`,
+`ThreadMessage`, and chat `ThreadLink` remain allowed through the PR 01 bridge
+until the PR 12 chat ownership boundary explicitly adopts or migrates them.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 
@@ -1797,10 +1793,13 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 - serialization round-trip tests.
 - schema-drift test that fails when the checked-in canonical schema no longer
   matches generated or conformance-tested TypeScript and Rust consumers for the
-  full Phase 0 / PR 01 / PR 12 ownership-matrix symbol set:
+  full Phase 0 / PR 01 / PR 12 ownership-matrix symbol set plus canonical
+  link/policy boundary contracts:
   `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, `WorkspaceEvent`,
   `DurabilityEvent`, `HistoryMoment`, `ConflictRecord`, `ChatThread`,
-  `ThreadMessage`, `ThreadLink`, `ThreadReadState`, and `AgentRun`.
+  `ThreadMessage`, `ThreadLink`, `ThreadReadState`, `AgentRun`,
+  `WorkspaceLinkRef`, projection writeability/validation types, and the core
+  effective-policy contract types/fixtures.
 - invalid workspace/version/path rejection.
 - stable IDs survive path rename fixture.
 - projection writeability fixture coverage.

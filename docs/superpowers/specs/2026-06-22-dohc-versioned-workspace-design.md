@@ -210,6 +210,7 @@ type RetryableWriteFailureCode =
 
 type TerminalRetirementReason =
   | 'operator_disposition_retired'
+  | 'retention_expired'
 
 type ExpiredRetryRecordKind =
   | 'canonical_result'
@@ -978,12 +979,14 @@ authoritative engine-owned opaque capture/replay token for that
 `(workspaceId, versionId, path, targetObjectId | expectedAbsent)` tuple. API
 callers submit ordinary server-verifiable preconditions; native filesystem saves
 submit the engine-issued opaque token. Client-visible freshness guards such as
-base-version ids, etags, absence assertions, and watcher sequence ids are inputs
-the engine may map into the opaque capture/replay token, not substitutes for the
-token and not caller-owned token formats. The opaque token is stable across auth
-refreshes, editor restarts, and session rotation; it is not a transient session
-handle. Broader multi-factor deduplication fingerprints may include content
-hashes, payload digests, or operation fingerprints, but they are not the
+base-version ids, etags, and absence assertions are validation evidence the
+engine may bind into the opaque capture/replay token, not substitutes for the
+token and not caller-owned token formats. Watcher sequence ids, session ids, and
+process ids are observation or correlation metadata only; they must not
+participate in filesystem dedupe identity. The opaque token is stable across
+auth refreshes, editor restarts, and session rotation; it is not a transient
+session handle. Broader multi-factor deduplication fingerprints may include
+content hashes, payload digests, or operation fingerprints, but they are not the
 authoritative capture/replay token and cannot substitute for it.
 First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
 a path with no prior object in that workspace/version and carries no

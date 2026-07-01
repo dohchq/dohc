@@ -807,10 +807,14 @@ type WorkspaceAsyncPayload = {
   pageToken?: string
 }
 
-type DurableSubsetOfSharedWriteResultKind = string & {
-  readonly __brand: 'DurableSubsetOfSharedWriteResultKind'
-}
-type WorkspaceWriteState = DurableSubsetOfSharedWriteResultKind
+type WorkspaceWriteState =
+  | 'canonical'
+  | 'durable-pending'
+  | 'conflict'
+  | 'quarantined'
+  | 'rejected'
+  | 'retryable-failure'
+  | 'terminal-retired'
 // The concrete allowed values are derived from the authoritative
 // native-filesystem write-result vocabulary above. This subset excludes
 // retry-only `idempotency-expired`.
@@ -1540,7 +1544,7 @@ workspace files. Only the explicitly allowlisted policy inputs above may cross
 the boundary, and only through the engine policy parsing/export path.
 That engine policy export path is responsible for preserving enough normalized
 policy state to reconstruct secret-backed versus non-secret files on re-import,
-including the full resolved `FilePolicyBase` tuple (`tracked`, `versioned`,
+including the full resolved policy tuple (`tracked`, `versioned`,
 `synced`, `pinned`, `searchable`, `visibility`, `publicExport`, `agentAccess`,
 `materialized`, and `secretProjection`), equal-specificity tie-breaking from the
 original source ordinal and rule index plus the workspace path-equivalence
