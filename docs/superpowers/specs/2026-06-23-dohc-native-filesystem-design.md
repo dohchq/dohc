@@ -150,6 +150,23 @@ failure, the workspace record, ordinary-walker skip rule, and resolver-owned
 mount bindings roll back together. Unmanaged entries created after opt-in are
 then fail-closed into quarantine or manual resolution. Unmanaged entries are
 never silently ignored, skipped, or promoted into a named version.
+The activation path must also persist a workspace-wide
+`versionsNamespaceActivationFence` beside `versionsNamespaceMode` before any
+scan, move, reclassify, or mount-binding work begins. The fence carries a
+monotonic migration generation, the activation decision, the set of planned
+legacy-path outcomes, and status `activating`, `committing`, or `rolling_back`.
+While the fence is present, the ordinary materialized workspace walker and the
+workspace/version mount resolver must honor that generation: generic walkers may
+not blindly skip `.versions/**`, resolvers may enter only generation-bound
+managed roots, and concurrent local/API writes under `.versions/**` are held in
+the same quarantine/manual-resolution path instead of racing the cutover. If the
+process restarts mid-activation, startup reloads the fence and resumes the
+commit or rollback using the recorded generation before ordinary walking or
+managed mount resolution can proceed. The fence is cleared only after the
+activation transaction has durably committed every move/reclassification,
+resolver binding, skip-rule transition, and
+`versionsNamespaceMode: 'managed_versions'`; rollback restores the previous
+mode, walker behavior, and resolver bindings before clearing the fence.
 
 The path is an affordance, not the security boundary. The engine resolves the
 active workspace, immutable version, effective file policy, and

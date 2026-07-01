@@ -713,6 +713,10 @@ type ThreadLinkCreateRequest =
       targetVersionRef?: never
     })
   | (SharedThreadLinkCreateRequestBase & {
+      targetType: 'agent_run' | 'chat_thread'
+      targetVersionRef?: never
+    })
+  | (SharedThreadLinkCreateRequestBase & {
       targetType: 'share'
       targetVersionRef?: VersionRef
     })

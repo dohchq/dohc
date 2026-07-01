@@ -372,7 +372,7 @@ const collectLinks = (markdown) => {
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
   const nestedImageLinkPattern = /\[!\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
   const linkPattern = /!?\[[^\]\n]*\]\((<[^>\n]*>|(?:[^()\s]|\([^()\n]*\))*)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
-  const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]+>|[^\s]+)/
+  const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)/
   const footnoteDefinitionPattern = /^\s{0,3}\[\^[^\]\n]+\]:\s*/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
@@ -433,8 +433,8 @@ const collectLinks = (markdown) => {
       if (isFootnoteLabel(label)) {
         continue
       }
-      const destination = referenceDefinitions.get(label)
-      if (destination) {
+      if (referenceDefinitions.has(label)) {
+        const destination = referenceDefinitions.get(label)
         addLink(destination, lineNumber)
       } else if (looksLikeBracketIndexing(prose, match)) {
         continue
@@ -447,8 +447,9 @@ const collectLinks = (markdown) => {
       if (isFootnoteLabel(match[1])) {
         continue
       }
-      const destination = referenceDefinitions.get(normalizeLabel(match[1]))
-      if (destination) {
+      const label = normalizeLabel(match[1])
+      if (referenceDefinitions.has(label)) {
+        const destination = referenceDefinitions.get(label)
         addLink(destination, lineNumber)
       }
     }
@@ -587,6 +588,11 @@ const assertCheckerFixtures = () => {
   const duplicateSecondTargetCount = duplicateReferenceLinks.links.filter((link) => link.target === './second.md').length
   if (duplicateFirstTargetCount !== 2 || duplicateSecondTargetCount !== 0) {
     throw new Error('duplicate reference definitions should preserve the first target and ignore later duplicates')
+  }
+  const emptyReferenceTarget = collectLinks('[empty]: <>\n[empty]\n[full][empty]')
+  const emptyReferenceTargetCount = emptyReferenceTarget.links.filter((link) => link.target === '').length
+  if (emptyReferenceTargetCount !== 3 || emptyReferenceTarget.unresolvedReferences.length > 0) {
+    throw new Error('empty reference definition targets should be collected as empty links')
   }
   const inlineTitleReferenceText = collectLinks('[text](./target.md "[missing][ref]")')
   if (
