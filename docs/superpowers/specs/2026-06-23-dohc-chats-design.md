@@ -921,27 +921,30 @@ projections, search, and notifications from active canonical links only. If the
 derived list includes a tombstoned link, omits an active link, or otherwise
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
-For a `ChannelChatThread`, the same transaction or serialized unit must also run
-`channel-target-ledger-sync`: normalize the changed `ThreadLink` target into a
-`ChannelLinkedTargetRef`, append the matching `ChannelTargetActivity`
-(`channel_target_linked` or `channel_target_unlinked`) for the thread's
-`channelId` and `threadId`, carrying the originating `sourceThreadLinkId`,
-`sourceCanonicalThreadLinkKey`, and `sourceThreadLinkState`, and enqueue the same
-durable outbox identity used for side rails, search, export, replay, and
-projection invalidation. `activityId` and `actorId` are server-owned fields; the
-client never supplies them. DM threads do not emit `ChannelTargetActivity`. The
-sync step is a derived repair/output contract: direct writes to `ChannelTargetActivity`,
+For a `ChannelChatThread`, successful `ThreadLink` mutation enqueues
+`channel-target-ledger-sync` as derived output: normalize the changed
+`ThreadLink` target into a `ChannelLinkedTargetRef`, append or repair the
+matching `ChannelTargetActivity` (`channel_target_linked` or
+`channel_target_unlinked`) for the thread's `channelId` and `threadId`, carrying
+the originating `sourceThreadLinkId`, `sourceCanonicalThreadLinkKey`, and
+`sourceThreadLinkState`, and enqueue the same durable outbox identity used for
+side rails, search, export, replay, and projection invalidation. `activityId`
+and `actorId` are server-owned fields; the client never supplies them. DM
+threads do not emit `ChannelTargetActivity`. The sync step is a derived
+repair/output contract: direct writes to `ChannelTargetActivity`,
 `ChannelProjection.linkedTargets`, or `ChatThreadProjection.linkedWork` must
-never create, remove, authorize, or tombstone linked work. If a retry observes an
-already-active or tombstoned `ThreadLink`, it must verify the matching
-`ChannelTargetActivity` for the thread's `(channelId, threadId)` pair, exact
-`sourceThreadLinkId`, exact `sourceCanonicalThreadLinkKey`, normalized
-`linkedTarget`, and current source state (`active` for an active link,
-`tombstoned` for a removed link) before reporting the idempotent result. If the
-ledger entry is missing, stale, points at another `ThreadLink`, or represents the
-wrong active/tombstoned state, the retry must repair it in the same transaction
-or serialized unit through `channel-target-ledger-sync`, then return success only
-after the `ThreadLink` and channel-target ledger entry are both durable.
+never create, remove, authorize, or tombstone linked work. A
+`ChannelTargetActivity` outage or stale ledger entry must not block an otherwise
+valid link add/remove once the canonical `ThreadLink` mutation and its
+idempotency result are durable; the ledger/projections are marked stale and
+rebuilt asynchronously or by repair. If a retry observes an already-active or
+tombstoned `ThreadLink`, it returns the idempotent result from `ThreadLink`
+durability, then verifies or repairs the matching derived `ChannelTargetActivity`
+for the thread's `(channelId, threadId)` pair, exact `sourceThreadLinkId`, exact
+`sourceCanonicalThreadLinkKey`, normalized `linkedTarget`, and current source
+state (`active` for an active link, `tombstoned` for a removed link). Only
+`ThreadLink` is authoritative for authorization-sensitive read, replay, retry,
+export, search, notification, side-rail, and conflict-repair behavior.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical

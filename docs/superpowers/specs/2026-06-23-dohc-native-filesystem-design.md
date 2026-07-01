@@ -1323,11 +1323,13 @@ Example opt-in policy for an already-authorized protected local projection:
 match = ".env"
 tracked = true
 versioned = true
+synced = true
 encrypted = true
 searchable = false
 visibility = "private"
 public_export = "redact"
 agent_access = "explicit"
+pinned = false
 materialized = "local" # protected/explicit local projection, not default exposure
 secret_projection = "protectedLocal"
 ```

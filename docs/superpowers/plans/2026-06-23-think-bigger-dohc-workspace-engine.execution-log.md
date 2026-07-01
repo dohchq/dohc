@@ -7377,7 +7377,7 @@ Two-hundred-seventy-seventh pass:
 
 Two-hundred-seventy-eighth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one major finding and two minor findings fixed; committed
     review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7393,6 +7393,39 @@ Two-hundred-seventy-eighth pass:
     setext-like text.
   - Changed `plannedLegacyPathOutcomes` to canonical `pathToken` entries and
     documented path-normalized serialization/deserialization behavior.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-ninth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two major findings and one minor finding fixed; committed
+    review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two major findings and one minor finding:
+  - Made `ChannelTargetActivity` a derived repair/output ledger behind
+    authoritative `ThreadLink` durability, so derived-ledger outages cannot
+    block valid link mutations or idempotent retries.
+  - Added explicit `synced` and `pinned` fields to the later secret-backed `.env`
+    policy example.
+  - Distinguished immutable accepted-holding replay metadata from compactable
+    derived retry/index state until the record is no longer replayable.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

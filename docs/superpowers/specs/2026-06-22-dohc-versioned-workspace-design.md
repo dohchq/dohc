@@ -489,6 +489,16 @@ it does not itself cryptoshred or compact reconstructible bytes.
 `replayUntil` is the single canonical replay-expiry term. It controls how long
 the idempotency result for a `holdingRecordId` must replay and is the only
 deadline that changes write retries to `idempotency-expired`.
+The immutable replay tuple for an accepted holding record is not compactable
+derived state. It includes `holdingRecordId`, `workspaceId`, `versionId`,
+`idempotencyKey`, `idempotencyResultId`, `idempotencyReplayToken`,
+`replayUntil`, the operation fingerprint, the normalized causal precondition
+tuple, and the accepted record's durable timestamp. These fields must remain
+addressable until the record is no longer replayable: canonicalization succeeds,
+an explicit terminal disposition is durably recorded, or `replayUntil` produces
+the canonical `idempotency-expired` result. Compaction may rebuild indexes,
+summaries, and retry acceleration caches, but it must not remove the immutable
+replay tuple required for same-key retries.
 For `accepted_holding_record`, `operatorDispositionDueAt` and
 `maxPendingCanonicalizationMs` are the only operator/status escalation deadlines
 inside that replay window; they do not independently expire idempotency replay
