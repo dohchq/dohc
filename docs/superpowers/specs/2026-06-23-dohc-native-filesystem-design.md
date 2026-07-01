@@ -529,6 +529,13 @@ deterministic validation, `rejected`, `quarantined`, or `retryable-failure`
 result with manual-follow-up metadata according to the capture/API path.
 `conflict` remains reserved for cases where the engine can form the
 base/current/incoming preservation envelope described above.
+If canonical source and destination paths are identical after path-equivalence
+normalization, `rename(...)` or `move(...)` returns a deterministic no-op only
+after verifying `sourceObjectId`, source freshness, workspace/version binding,
+and idempotency identity. If any guard fails, the operation returns the normal
+validation, `rejected`, `quarantined`, `retryable-failure`, or `conflict`
+outcome required by that failed guard. A same-path operation must never be
+represented as delete-plus-create history.
 If the destination already exists, the operation is an overwrite-rename and must
 map to `replace(...)`, not plain `rename(...)` or `move(...)`. Watcher and restart
 reconciliation must classify common editor temp-file-then-rename saves this way:
@@ -1403,7 +1410,9 @@ Export should produce:
   preserved, device/session/process/mount identifiers tokenized by default, and
   unredacted provenance available only in owner/admin audit exports governed by
   the source workspace policy envelope.
-- hashes or commitments for verification.
+- non-secret entries emit hashes for verification.
+- secret-backed entries emit only opaque commitments or authorized handles for
+  verification.
 - redacted/excluded secret files according to policy.
 - enough metadata to re-import and compare, including the workspace
   path-equivalence profile: case sensitivity/folding, Unicode normalization, and

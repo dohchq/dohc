@@ -113,7 +113,7 @@ implementation template for new implementation PR entries.
 ```md
 Two-hundred-nth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status:
   - Test evidence:
   - Open overrides:
@@ -5991,7 +5991,7 @@ Two-hundred-thirty-ninth pass:
 
 Two-hundred-fortieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6019,11 +6019,46 @@ Two-hundred-fortieth pass:
 - Overrides:
   - None approved.
 
-### Historical Findings Index
+Two-hundred-forty-first pass:
 
-This section is a historical category index only. Live unresolved blockers and
-decisions belong in the newest PR00 pass's `Live PR00 status` and `Unresolved
-findings` entries above.
+- Live PR00 status:
+  - CodeRabbit status: eight follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's eight follow-up findings:
+  - Removed the empty historical-findings placeholder section from this execution
+    log.
+  - Added `threadId` to `ChannelTargetActivity` and made channel target
+    synchronization authoritative for each `(channelId, threadId)` pair.
+  - Extended authorized legal erasure to user-authored `deleteReason` values as
+    well as original message bodies.
+  - Separated review-required pending states from review-gate denial outcomes.
+  - Clarified that capture/replay tokens are opaque, engine-owned guards, with
+    client-visible freshness evidence mapped into them by the engine.
+  - Split `retentionUntil` semantics by rejected, quarantined, and accepted
+    holding record kind.
+  - Defined same-path `rename(...)` and `move(...)` as verified no-ops instead
+    of delete-plus-create history.
+  - Split export verification material between non-secret hashes and
+    secret-backed opaque commitments or authorized handles.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
 
 ### Subagent Reviews
 

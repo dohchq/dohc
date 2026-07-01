@@ -293,6 +293,7 @@ type ChannelTargetActivity = {
   activityId: string
   workspaceId: string
   channelId: string
+  threadId: string
   kind: 'channel_target_linked' | 'channel_target_unlinked'
   linkedTarget: ChannelLinkedTargetRef
   actorId: string
@@ -303,11 +304,12 @@ type ChannelTargetActivity = {
 There is one canonical source per linked-work scope. `ThreadLink` is the
 authoritative record for thread-level links on a specific `ChatThread`.
 `ChannelTargetActivity` is the authoritative record for channel-level linked
-targets. `Channel.linkedTargets` and `ChatThreadProjection.linkedWork` are
-read-only projections/caches rebuilt from those ledgers; neither field is an
-authoritative mutable record. The server may store the normalized
-`Channel.linkedTargets` projection on the channel row for fast reads, but that
-stored set is rebuilt from the channel-target ledger and ignored whenever it
+targets on a specific `(channelId, threadId)` pair. `Channel.linkedTargets` and
+`ChatThreadProjection.linkedWork` are read-only projections/caches rebuilt from
+those ledgers; neither field is an authoritative mutable record. The server may
+store the normalized `Channel.linkedTargets` projection on the channel row for
+fast reads, but that stored set is rebuilt from the channel-target ledger and
+ignored whenever it
 disagrees with `ChannelTargetActivity`.
 
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
@@ -747,14 +749,15 @@ For a `ChannelChatThread`, the same transaction or serialized unit must also run
 `channel-target-ledger-sync`: normalize the changed `ThreadLink` target into a
 `ChannelLinkedTargetRef`, append the matching `ChannelTargetActivity`
 (`channel_target_linked` or `channel_target_unlinked`) for the thread's
-`channelId`, and enqueue the same durable outbox identity used for side rails,
-search, export, replay, and projection invalidation. DM threads do not emit
-`ChannelTargetActivity`. If a retry observes an already-active or tombstoned
-`ThreadLink`, it must verify the matching `ChannelTargetActivity` for the
-thread's `channelId` exists before reporting the idempotent result. If the
-activity is missing, the retry must repair it in the same transaction or
-serialized unit through `channel-target-ledger-sync`, then return success only
-after the `ThreadLink` and channel-target ledger entry are both durable.
+`channelId` and `threadId`, and enqueue the same durable outbox identity used
+for side rails, search, export, replay, and projection invalidation. DM threads
+do not emit `ChannelTargetActivity`. If a retry observes an already-active or
+tombstoned `ThreadLink`, it must verify the matching `ChannelTargetActivity` for
+the thread's `(channelId, threadId)` pair exists before reporting the
+idempotent result. If the activity is missing, the retry must repair it in the
+same transaction or serialized unit through `channel-target-ledger-sync`, then
+return success only after the `ThreadLink` and channel-target ledger entry are
+both durable.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
@@ -1012,17 +1015,19 @@ read the canonical delete activity, or a verified `ThreadMessage` cache derived
 from it, and must repair or reject drift between the activity and row fields.
 They must not invent ad hoc redaction behavior or retain plaintext secrets in
 history, audit, search, export, or agent-log flows.
-Authorized legal erasure is the exception to original-body retention: when a
-GDPR/CCPA or equivalent request is approved through policy, the engine may
-cryptographically purge, destroy keys for, or irreversibly redact the original
-body while preserving `deletedAt`, `tombstone`, deletion-placeholder rendering,
-minimal audit metadata, and the original persisted-body `bodyHash`. `bodyHash`
-is retained separately from the plaintext or encrypted body payload as
-non-renderable verification metadata, so replay/export/audit jobs can still prove
-which canonical body revision was deleted after the body itself is purged.
-Secret-backed references, encrypted payloads, or redacted forms replace
-plaintext wherever audit/history access would otherwise have retained the
-original body.
+Authorized legal erasure is the exception to original-body and user-authored
+delete-reason retention: when a GDPR/CCPA or equivalent request is approved
+through policy, the engine may cryptographically purge, destroy keys for, or
+irreversibly redact the original body and any user-authored `deleteReason` while
+preserving `deletedAt`, `tombstone`, deletion-placeholder rendering, minimal
+audit metadata, and the original persisted-body `bodyHash`. `bodyHash` is
+retained separately from the plaintext or encrypted body payload as
+non-renderable verification metadata, so replay/export/audit jobs can still
+prove which canonical body revision was deleted after the body itself is purged.
+Secret-backed references, encrypted payloads, safe placeholders, or redacted
+forms replace plaintext body and delete-reason text wherever audit/history,
+tombstone, search, export, notification, or agent-log access would otherwise
+have retained those values.
 
 `message_edited` is valid only for non-deleted `ThreadMessage` rows. Once
 `deletedAt` is present or `tombstone` is true, tombstone state is terminal for

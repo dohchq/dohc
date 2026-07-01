@@ -111,8 +111,8 @@ Normative gate/retry matrix:
 | Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Replayed idempotency key with mismatched stable actor identity, session-equivalence class when policy requires it, workspace, version context, operation type, target, secret-safe operand fingerprint, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
-| Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. |
-| Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. |
+| Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
+| Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
 | Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
 | Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
@@ -507,6 +507,12 @@ operator disposition may transition a durable-pending holding record to
 `terminal-retired` with reason `operator_disposition_retired`; retries before
 `replayUntil` replay that terminal result after disposition. Retries after
 `replayUntil` return `idempotency-expired`.
+For `rejected_record`, `retentionUntil` is the minimal
+audit/replay/explanation retention horizon. For `quarantined_record`, it is the
+disposition/audit retention horizon. For `accepted_holding_record`, it is an
+operator/status escalation deadline and not a payload-deletion deadline. Payload
+retention for accepted holding records is controlled by canonicalization or
+explicit operator disposition, not by time alone.
 No accepted holding record may remain unreviewed forever: if no
 workspace-specific disposition policy is configured, the engine's default finite
 operator-escalation window applies, and workspaces may only choose values inside
@@ -616,6 +622,16 @@ that order wins.
   `quarantined_attribution` internally.
   Proof failures use `proof_denied` externally and `quarantined_proof`
   internally.
+
+Review requirements and review denials are distinct outcomes:
+
+| Situation | Engine result | Canonical effect |
+| --- | --- | --- |
+| Policy requires review before canonicalization and the write is durably recorded | `durable-pending` with `pendingState: 'pending_review'` | No canonical commit until authorized reviewers approve or dispose the holding record. |
+| Review gate denies before any durable recording | Immediate denial with `PublicDeniedReasonCode: 'review_gate_denied'` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Review gate denies an accepted holding or replayed record | `quarantined` with `quarantineState: 'quarantined_review_gate'` | No canonical commit unless an authorized review outcome later changes disposition. |
+| Required review approves an accepted holding record | Replay/canonicalization may proceed | Canonical commit may occur only if all other authorization, policy, version, provenance, attribution, lock, secret, and conflict gates also pass. |
+
 - If the causal base is stale, advanced, missing, or otherwise no longer matches
   the target version state, the retry returns a deterministic `conflict` and
   preserves the incoming record for manual reconciliation. Stale causal state is
@@ -881,15 +897,17 @@ external editor or agent to synthesize a client precondition. Browse-only reads
 and materialization do not create durable capture/replay tokens. When a
 workspace/version/path becomes edit-capable, or when a first write, create, or
 import attempt targets it, the engine records or refreshes exactly one
-authoritative engine-owned capture/replay token for that
-`(workspaceId, versionId, path, targetObjectId | expectedAbsent)` tuple. That
-token is stable across auth refreshes, editor restarts, and session rotation; it
-is not a transient session handle. The token is the causal guard submitted by
-normal filesystem saves, such as a base-version token, etag, absence assertion,
-watcher sequence token, or engine capture token. Broader multi-factor
-deduplication fingerprints may include content hashes, payload digests, or
-operation fingerprints, but they are not the authoritative capture/replay token
-and cannot substitute for it.
+authoritative engine-owned opaque capture/replay token for that
+`(workspaceId, versionId, path, targetObjectId | expectedAbsent)` tuple. API
+callers submit ordinary server-verifiable preconditions; native filesystem saves
+submit the engine-issued opaque token. Client-visible freshness guards such as
+base-version ids, etags, absence assertions, and watcher sequence ids are inputs
+the engine may map into the opaque capture/replay token, not substitutes for the
+token and not caller-owned token formats. The opaque token is stable across auth
+refreshes, editor restarts, and session rotation; it is not a transient session
+handle. Broader multi-factor deduplication fingerprints may include content
+hashes, payload digests, or operation fingerprints, but they are not the
+authoritative capture/replay token and cannot substitute for it.
 First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
 a path with no prior object in that workspace/version and carries no
 `targetObjectId`; it is not a missing token. Overwrite capture/replay must carry
