@@ -748,17 +748,31 @@ It should ask only:
 9. Can the system preserve recovery and honest provenance?
 10. Does the change create a conflict or cross a visibility boundary?
 
-If the actor can write, all required policy/review gates pass, and the change
-does not create a conflict or cross a visibility boundary, the change saves
-immediately to that version. If the change creates a conflict, crosses a real
-visibility boundary, or requires mandatory review before canonicalization, it
-routes to the single deterministic non-immediate outcome for that gate:
-conflicts create conflict preservation/reconciliation, real visibility-boundary
-crossings return the mapped denied/quarantined visibility result, and mandatory
-review returns a `durable-pending holding record` with `pendingState:
-'pending_review'` once the change is durably recorded. If durable recording
-cannot be proven, the gate/retry matrix above controls the `retryable-failure`
-or rejection response.
+Immediate write evaluation is first-match, matching replay's deterministic
+routing style. After syntax, workspace scope, capture token, and idempotency
+checks pass, the write path resolves outcomes in this order:
+
+1. authorization, ownership, version-access, protected-path, lock, skill-turn,
+   provenance, attribution, proof, and secret/declassification denials return
+   their mapped `rejected` or `quarantined_*` result before any content
+   comparison.
+2. unavailable or indeterminate required evaluators return
+   `retryable-failure` with no canonical mutation.
+3. real visibility-boundary crossings return the mapped denied/quarantined
+   visibility result before conflict or review handling, so hidden state is not
+   leaked through conflict envelopes or review queues.
+4. preserved base/current/incoming divergence, stale causal bases, or semantic
+   merge uncertainty create conflict preservation/reconciliation.
+5. mandatory review for an otherwise clean write creates a durable-pending
+   holding record with `pendingState: 'pending_review'` once the accepted record
+   is durable.
+6. a clean write that passes all gates saves immediately to that version.
+
+If the outcome requires a conflict record, holding record, idempotency tombstone,
+or canonical append and durable recording cannot be proven, the gate/retry matrix
+above controls the `retryable-failure` or rejection response. One input must not
+map to different states across implementations because conflict, visibility, and
+review are evaluated in the fixed order above.
 
 For raw passive local file edits observed through the normal OS filesystem,
 dohc does not need to prove whether the process was a user, an external agent

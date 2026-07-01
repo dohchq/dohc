@@ -6691,7 +6691,7 @@ Two-hundred-fifty-eighth pass:
 
 Two-hundred-fifty-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6716,6 +6716,49 @@ Two-hundred-fifty-ninth pass:
     reconstruct post-edit message revision without mutable row state.
   - Made chat presence and typing display labels optional/redactable and
     server-owned.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixtieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's eight major findings and one trivial finding:
+  - Updated the Think Bigger docs workflow Node pin to `24.18.0`.
+  - Made `VersionRef` a tagged/discriminated reference for versions, fork
+    points, and history moments.
+  - Centralized the common link dereference payload as `WorkspaceLinkRef` and
+    separated chat-only `ThreadLink` storage fields.
+  - Clarified that channels/DMs/shared channels own membership and visibility
+    while `ChatThread` owns durable message streams.
+  - Defined `create_chat` DM participant input through
+    `canonicalizeDmParticipantIds` and the 2-16 participant invariant.
+  - Required first channel sends to persist both `chat_created` and canonical
+    `message_created` activity exactly once with the initial `ThreadMessage`.
+  - Replaced silent `.dohc/**` skipping with reserved-internal disposition or
+    engine-specific recovery handling.
+  - Added `secretProjection` and materialization state to export policy
+    envelopes.
+  - Added deterministic first-match write-path precedence for authorization,
+    visibility, conflict, review, and canonical save outcomes.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -251,7 +251,10 @@ WorkspaceObject
   stable identity for anything meaningful in the workspace
 
 VersionRef
-  optional pointer to a version, fork point, or history moment
+  discriminated reference with an explicit target kind:
+    { kind: "version", versionId }
+    { kind: "fork-point", forkPointId, sourceVersionId, targetVersionId }
+    { kind: "history-moment", historyMomentId }
 
 Projection
   a file, UI, API, search, export, or chat-readable view over an object
@@ -264,6 +267,11 @@ FilePolicy / effective policy
   source-backed desired file behavior plus resolved engine enforcement for
   access, materialization, export, search, and visibility
 ```
+
+Every `VersionRef` consumer must branch on `kind` before dereference. A link,
+provenance record, search row, restore operation, or activity item must never
+guess whether an ID names a live version, fork point, or history moment from
+field presence alone.
 
 Everything meaningful eventually gets a stable ID, but Phase 0 starts with the
 proof-arc identities required for the file/version/chat loop:
@@ -386,16 +394,22 @@ or external share exists through:
 
 ### Link Dereference
 
-Links between chats, files, folders, versions, moments, and agent runs must store:
+Links between chats, files, folders, versions, moments, and agent runs must use
+one canonical dereference payload, `WorkspaceLinkRef`. It stores:
 
 - source/owning workspace ID.
 - target type.
 - target workspace ID.
 - stable target ID.
-- optional `VersionRef`.
+- optional tagged `VersionRef`.
 - display path/title at link time only when policy permits; otherwise store a
   redacted or policy-gated label that cannot reveal hidden target metadata.
 - ACL/degrade behavior.
+
+Chat `ThreadLink` rows compose this canonical `WorkspaceLinkRef` with chat-only
+storage fields such as stable link ID, source thread ID, read-state/search
+projection hooks, and chat-specific ordering. PR 12/14 must not redefine the
+common target/workspace/version/display/degrade fields locally.
 
 Links must survive rename/move, degrade cleanly when access is lost, and avoid
 leaking hidden target metadata. If access is later revoked, stored display
@@ -493,19 +507,30 @@ File policy resolves:
 
 ### Chat Thread
 
-A ChatThread is a durable work conversation. It can appear in channels, DMs,
-file side rails, version activity, search, and external shared channels.
+A ChatThread is the durable message stream and activity log for one
+conversation. It stores messages, replies, edits, reactions, read-state cursors,
+and work links. It can appear inside channels, DMs, file side rails, version
+activity, search, and external shared channels, but it does not own membership
+or visibility by itself; it inherits those from the containing channel/DM/share
+plus linked-work policy.
 
 ### Channel
 
-A Channel is a place where chats gather. Channels can attach to workspace scope:
-folder, file, version, chat, share, agent run, or another stable
-`WorkspaceObject` type from the shared substrate/package contract.
+A Channel owns membership, default visibility, notification scope, and the
+container route where one or more `ChatThread` streams appear. Channels can
+attach to workspace scope: folder, file, version, chat, share, agent run, or
+another stable `WorkspaceObject` type from the shared substrate/package
+contract. A DM is a private channel subtype for one-to-one or small-group
+conversation, with membership derived from its canonical participant set. A
+workspace channel, DM, and shared channel are channel variants; a `ChatThread`
+is the durable message stream inside the authorized container.
 
 ### Shared Channel
 
-A shared channel is an external collaboration surface with explicit resource
-visibility, not broad workspace access.
+A shared channel is a channel variant for external collaboration with explicit
+resource visibility, participant boundaries, expiry/revocation, and audit/export
+rules. It grants access to selected resources and threads, not broad workspace
+access. PR 18 owns the final shared-channel/share grant contract.
 
 ## Implementation Strategy
 
@@ -1712,9 +1737,13 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   That matrix is the sole source of truth for which symbols PR 01 owns, bridges,
   or leaves to PR 12; this PR scope must not restate individual symbol ownership
   locally.
-- Define link dereference shape: source/owning workspace ID, target type, target
-  workspace ID, stable target ID, optional `VersionRef`, display path/title at
-  link time, ACL degrade behavior.
+- Define the canonical `WorkspaceLinkRef` dereference shape: source/owning
+  workspace ID, target type, target workspace ID, stable target ID, optional
+  tagged `VersionRef`, display path/title at link time, and ACL/degrade
+  behavior. This is the single source of truth for common link target fields.
+- Keep chat-specific link storage outside the common shape: stable link ID,
+  source thread ID, read-state/search projection hooks, and chat-specific
+  ordering live in the chat `ThreadLink` schema layer.
 - Defer the canonical share/external-channel shape with stable share ID, grant
   ID, owning workspace, target resource identity, visibility scope, participant
   boundary, expiry/revocation state, and policy/export/search/notification fields
@@ -2215,12 +2244,14 @@ links, activity, read state, and reactions.
 - Add message authorship with human/agent display.
 - Define `ThreadReadState` shape, monotonic cursor semantics, and read-state API
   upserts alongside thread/message models.
-- Store chat links through the canonical `ThreadLink` shape: stable link id,
-  source/owning workspace ID, source thread ID, target type, target workspace ID,
-  stable target ID, optional `VersionRef`, and display path/title captured at link
-  time only when policy permits. Otherwise store a redacted/policy-gated display
-  label plus ACL/degraded-render behavior so rename, revocation, and
-  cross-workspace dereference remain safe.
+- Store chat links as `ThreadLink = chat storage fields + WorkspaceLinkRef`.
+  Chat storage fields include stable link ID, source thread ID,
+  read-state/search projection hooks, and chat-specific ordering. The embedded
+  `WorkspaceLinkRef` supplies source/owning workspace ID, target type, target
+  workspace ID, stable target ID, optional tagged `VersionRef`, and display
+  path/title captured at link time only when policy permits. Otherwise it stores
+  a redacted/policy-gated display label plus ACL/degraded-render behavior so
+  rename, revocation, and cross-workspace dereference remain safe.
 - Follow the
   [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
   for chat/thread/link/read-state ownership, migration/backfill, and projection

@@ -186,7 +186,7 @@ import, attach, sync, and raw filesystem scan is defined by this table:
 | Candidate | Import / Attach / Sync / Raw Scan Action |
 | --- | --- |
 | Allowlisted policy inputs: `.dohc/files.toml`, `.dohc/visibility.toml` | Parse as engine policy input outside the ordinary captured-content pipeline. |
-| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Silently skip from import, attach, sync, and raw scan user-content flows; never re-ingest as user content. |
+| Known engine-owned `.dohc/**` projections, status, conflict, index, cache, and durability internals | Classify as reserved engine state and route only to engine-specific recovery/status handling with an explainable reserved-internal disposition; never silently skip or re-ingest as user content. |
 | Foreign non-allowlisted `.dohc/**` or aliases of `.dohc` where dohc expects engine state | Quarantine with an explainable record or send to manual resolution; never propose ordinary user-content safe rename. |
 | Managed `~/dohc/<workspace>/.versions/<version>/` bound to a known workspace/version by the engine | Allow only through the engine workspace/version mount resolver, not generic tree walkers. |
 | Pre-opt-in ordinary `.versions/**` content in an existing attached workspace | Classify as `legacy_unmanaged_versions_content`; allow ordinary-content ingest only through the materialized workspace walker, never through the workspace/version mount resolver, and surface the explicit migration choices before managed namespace activation. |
@@ -1485,8 +1485,9 @@ Export should produce:
 - readable files.
 - the full policy envelope required to re-import without changing file
   semantics, including whether each governed entry is secret-backed or
-  non-secret plus the effective-policy resolver's normalized source ordinal and
-  rule index for each emitted rule.
+  non-secret, its `secretProjection` variant (`opaque`, `protectedLocal`, or
+  `plaintextLocal`), its `materialized` state, plus the effective-policy
+  resolver's normalized source ordinal and rule index for each emitted rule.
 - only allowlisted source-backed policy files such as `.dohc/files.toml` and
   `.dohc/visibility.toml`; `.dohcignore` remains deferred and is not emitted as
   a live policy input in this phase.

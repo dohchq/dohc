@@ -1685,21 +1685,31 @@ server-assigned target identifiers:
 
 - `create_chat` requires an `idempotencyKey`; it creates DM threads only, emits
   the `threadKind: 'dm'` `chat_created` activity, assigns `threadId` in the
-  idempotency result, and retries return that same `threadId`. Channel-backed
-  threads must not be created through `create_chat`.
+  idempotency result, and retries return that same `threadId`. Its request body
+  supplies `requestedParticipantIds: string[]`, excluding the authenticated
+  actor. Before thread creation, the server calls
+  `canonicalizeDmParticipantIds({ serverActorId, requestedParticipantIds })`;
+  the result must satisfy the canonical 2-16 unique participant invariant and is
+  the exact `dmParticipantIds` persisted on the `DmChatThread`, activity,
+  uniqueness key, read-state fanout, and authorization checks. Invalid,
+  duplicate, oversized, or self-including participant inputs fail before any
+  thread row, activity, idempotency tombstone, or notification is allocated.
+  Channel-backed threads must not be created through `create_chat`.
 - `send_channel_message` requires an `idempotencyKey` and a
   `SendChannelMessageConversationSelector`; the server applies the same canonical
   conversation resolution rules as `read_channel_conversation`, then atomically
   resolves or creates the channel-backed `ChatThread` by
   `(workspaceId, channelId, channelConversationId)` and persists the
-  `ThreadMessage` plus the `threadKind: 'channel'` `chat_created` activity when
-  this is the first send for that tuple in the same serialized unit. The
-  `chat_created` activity is exactly-once: only the writer that wins the unique
-  `ChatThread` reservation for `(workspaceId, channelId, channelConversationId)`
-  may emit it, and retries or concurrent first sends that observe an existing
-  `ChatThread` must not emit duplicate creation provenance. The idempotency
-  result returns `threadId`, `channelConversationId`, and `messageId`, and retries
-  return the same triple.
+  `ThreadMessage`, its canonical `message_created` `ThreadActivity`, and the
+  `threadKind: 'channel'` `chat_created` activity when this is the first send for
+  that tuple in the same serialized unit. The `chat_created` and first
+  `message_created` activities are exactly-once for that winning first-send
+  mutation: only the writer that wins the unique `ChatThread` reservation for
+  `(workspaceId, channelId, channelConversationId)` may emit the creation
+  provenance, and retries or concurrent first sends that observe an existing
+  `ChatThread` must not duplicate `chat_created` or the winning message's
+  `message_created` activity. The idempotency result returns `threadId`,
+  `channelConversationId`, and `messageId`, and retries return the same triple.
 - `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
   in the idempotency result, and retries return that same `messageId`.
 - `rename_channel_conversation_label` requires an `idempotencyKey`, `channelId`,
