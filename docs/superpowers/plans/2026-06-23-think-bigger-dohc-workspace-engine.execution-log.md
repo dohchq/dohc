@@ -1,6 +1,7 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: see the canonical live-status block in the latest PR00 pass below.
+Status: derived from the single mutable `Live PR00 status` block in the latest
+PR00 pass below.
 Created: 2026-06-23
 
 Plan:
@@ -15,14 +16,13 @@ Source specs:
 
 ## Current PR Pointer
 
-- **Canonical live status block:** the latest PR00 pass below owns CodeRabbit
-  status, test evidence, open overrides, and completion state.
-- **Pointer role:** this header is not a mutable status summary; update the
-  canonical pass block instead of restating live state here.
-- **Archive boundary:** earlier PR00 pass entries under
-  `Archived PR00 Pass History` are append-only background. Only the newest PR00
-  pass's `Live PR00 status` block is mutable for current state.
-- **PR00:** see the canonical live-status block in the latest PR00 pass below.
+- **Single mutable status block:** only the newest PR00 pass's
+  `Live PR00 status` block owns CodeRabbit status, test evidence, open
+  overrides, and completion state.
+- **Derived summaries:** this header, `Status:`, `Current PR Snapshot`, and any
+  other summaries are read-only pointers to that newest live-status block.
+- **Archive boundary:** earlier `Historical PR00 status` entries under
+  `Archived PR00 Pass History` are append-only background.
 
 ## How To Use This Log
 
@@ -7266,7 +7266,7 @@ Two-hundred-seventy-fourth pass:
 
 Two-hundred-seventy-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four major findings and one minor finding fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7301,6 +7301,47 @@ Two-hundred-seventy-fifth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-seventy-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five major findings, one minor finding, and one trivial
+    finding fixed; committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five major findings, one minor finding, and one trivial
+  finding:
+  - Clarified retryable-failure taxonomy for evaluator/service failures,
+    unknown acknowledgement state, and conflict-envelope persistence failures.
+  - Added persisted `versionsNamespaceActivationFence` status for `.versions/**`
+    cutovers.
+  - Made the execution-log header point to a single mutable live-status block
+    and marked other summaries as derived/read-only.
+  - Marked Rust benchmark and bridge recommendation evidence as intentionally
+    deferred to P0R until recorded or explicitly deferred by the user.
+  - Hardened docs-link parsing so destinations are extracted from the raw
+    code-span-stripped line while escaped openers remain filtered.
+  - Required every non-versioned link activity target to serialize
+    `targetVersionRef: null`.
+  - Split public `read_channel_conversation` provenance from internal
+    `ChannelConversationProvenance`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Subagent Reviews
 
 - Architecture: prior planning review incorporated.
@@ -7315,13 +7356,18 @@ Two-hundred-seventy-fifth pass:
 ### Performance Notes
 
 - Budget areas touched: planning only.
-- Metrics: not applicable.
+- Metrics: runtime metrics are intentionally deferred for PR00. P0R must record
+  Rust vs TypeScript scan/reconcile/hash baseline numbers before the Phase 0
+  proof arc can satisfy the Rust performance gate.
 - Cold/warm distinction: not applicable.
 - Workspace/file/chat sizes: not applicable.
 - Machine/CI context: not applicable.
 - Budget pass/fail: not applicable.
 - Jank/blocking notes: not applicable.
 - Regression risk: none for runtime.
+- Follow-up required: P0R must record the Rust bridge, packaging, CI, crash
+  recovery, logging, and upgrade recommendation or document an explicit user
+  deferral before Phase 0 completion.
 - Follow-up required: implementation PRs must record measurements.
 
 ### Migration Notes
@@ -7361,8 +7407,10 @@ Gate evidence:
       recorded.
 - [ ] Phase 0 branch/worktree/chat ownership is recorded for each PR lane.
 - [ ] Rust workspace kernel spike completed or explicitly deferred by user.
-- [ ] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded.
-- [ ] Rust bridge/packaging/CI recommendation is recorded.
+- [ ] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded by
+      P0R, or explicitly deferred by user with a dated note.
+- [ ] Rust bridge/packaging/CI recommendation is recorded by P0R, or explicitly
+      deferred by user with a dated note.
 - [ ] Main plus one named version works for one text/file driver.
 - [ ] Phase0SharedSubstrateBaseline / P0S is finalized before P0B-P0G start.
 - [ ] File/API writes durably capture immediately and produce recoverable

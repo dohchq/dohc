@@ -823,6 +823,21 @@ type WorkspaceWriteState =
 // native-filesystem write-result vocabulary above. This subset excludes
 // retry-only `idempotency-expired`.
 
+type VersionsNamespaceActivationFence =
+  | {
+      state: 'inactive'
+      fenceId?: never
+    }
+  | {
+      state: 'activating' | 'committing' | 'rolling_back'
+      fenceId: string
+      fromMode: 'legacy_unmanaged' | 'managed_versions'
+      toMode: 'legacy_unmanaged' | 'managed_versions'
+      startedAt: UnixMsDecimalString
+      updatedAt: UnixMsDecimalString
+      operatorActionId?: string
+    }
+
 type WorkspaceStatusPayload = {
   workspaceId: string
   versionId: string
@@ -830,6 +845,7 @@ type WorkspaceStatusPayload = {
   tracked: boolean
   versioned: boolean
   versionsNamespaceMode: 'legacy_unmanaged' | 'managed_versions'
+  versionsNamespaceActivationFence: VersionsNamespaceActivationFence
   synced: boolean
   materialized: 'local' | 'virtual'
   materializationPresentation: 'hydrated' | 'placeholder'
@@ -886,6 +902,11 @@ re-import deserializers preserve the full resolved `FilePolicyBase` tuple:
 classified by the compatibility path, while `managed_versions` means
 `.versions/<version>/` is reserved for engine-managed version mounts and generic
 walkers must skip it after the reserved-namespace scan.
+`versionsNamespaceActivationFence` is serialized in status responses and backed
+by persisted engine state, not process memory. It must survive restarts while a
+`.versions/**` namespace cutover is `activating`, `committing`, or
+`rolling_back`, and it returns `state: 'inactive'` only after the cutover has
+fully committed or rolled back.
 `materializationPresentation` is a UI/status hint for whether the current actor
 sees hydrated bytes/projection or a placeholder for a virtual/lazy path; it does
 not create a third persisted `materialized` value.

@@ -526,6 +526,20 @@ type ChannelConversationProvenance =
       namedSubconversationLabelRevision: UInt64DecimalString
     }
 
+type ReadChannelConversationPublicProvenance =
+  | {
+      conversationKind: 'default'
+      displayLabel?: never
+    }
+  | {
+      conversationKind: 'linked_work'
+      displayLabel: string | null
+    }
+  | {
+      conversationKind: 'named_subconversation'
+      displayLabel: string
+    }
+
 type ChannelLinkedTargetRequestHandle =
   | {
       targetWorkspaceId: string
@@ -1454,11 +1468,13 @@ type LinkThreadActivity = ThreadActivityBase & {
 `VersionRef | null` representation as `CanonicalThreadLinkKeyParts`: object key
 order is `versionRefKind`, `versionId`, `versionEtag`, then `historyMomentId`;
 optional absent fields are omitted inside the object, and missing version refs
-are serialized as `null`, never omitted. `decision` and `task` link activities
-must store `targetVersionRef: null` for the same stable-object target tuple used
-by link creation and resolver lookup. Link activity writers, replay, export, and
-projection rebuilds must read and write that canonical form so the activity
-payload and canonical link key produce the same normalized target tuple.
+are serialized as `null`, never omitted. `agent_run`, `chat_thread`, `decision`,
+`task`, and `share` link activities must store `targetVersionRef: null` for the
+same stable-object target tuple used by link creation, resolver lookup,
+replay/export validation, and `CanonicalThreadLinkKeyParts`. Link activity
+writers, replay, export, and projection rebuilds must read and write that
+canonical form so the activity payload and canonical link key produce the same
+normalized target tuple.
 
 type MentionNotificationThreadActivityBase = ThreadActivityBase & {
   messageId: string
@@ -1693,10 +1709,14 @@ the authority model.
 server-issued `channelConversationId` or a `ChannelConversationCreateRequest`.
 It runs the same canonical conversation resolver as `send_channel_message` and
 returns the existing `threadId`, `channelConversationId`, and
-`ChannelConversationProvenance` for that authorized channel thread. Unauthorized,
-revoked, absent, and ambiguous channel-conversation lookups must all produce the
-same observable `conversation_unavailable` result; callers must not be able to
-distinguish whether a tuple exists outside their authorization scope.
+`ReadChannelConversationPublicProvenance` for that authorized channel thread.
+The server derives this redacted public provenance from internal
+`ChannelConversationProvenance`; `linkedWorkTarget`, `namedSubconversationKey`,
+`namedSubconversationKeyVersion`, and label revision metadata remain
+server-side-only. Unauthorized, revoked, absent, and ambiguous
+channel-conversation lookups must all produce the same observable
+`conversation_unavailable` result; callers must not be able to distinguish
+whether a tuple exists outside their authorization scope.
 `needs_first_send` is an internal `send_channel_message` resolver state, not a
 public `read_channel_conversation` result. If no authorized channel-backed
 thread is returned for the canonical tuple, the handler must not create or
@@ -1710,7 +1730,7 @@ type ReadChannelConversationResult =
       kind: 'authorized_thread'
       threadId: string
       channelConversationId: string
-      provenance: ChannelConversationProvenance
+      provenance: ReadChannelConversationPublicProvenance
     }
   | {
       kind: 'conversation_unavailable'

@@ -486,6 +486,9 @@ const collectLinks = (markdown) => {
   }
   const parseInlineLinkAt = (value, start) => {
     const isImage = value[start] === '!' && value[start + 1] === '['
+    if (value[start - 1] === '\\') {
+      return null
+    }
     if (!isImage && value[start] !== '[') {
       return null
     }
@@ -597,7 +600,7 @@ const collectLinks = (markdown) => {
   }
 
   for (const { text: line, lineNumber } of lines) {
-    const prose = stripBackslashEscapes(stripCodeSpans(line))
+    const prose = stripCodeSpans(line)
     const definition = prose.match(referenceDefinitionPattern)
     if (definition) {
       if (isFootnoteLabel(definition[1])) {
@@ -613,26 +616,32 @@ const collectLinks = (markdown) => {
   }
 
   for (const { text: line, lineNumber } of lines) {
-    let prose = stripBackslashEscapes(stripCodeSpans(line))
+    let prose = stripCodeSpans(line)
     const footnoteDefinition = prose.match(footnoteDefinitionPattern)
     if (footnoteDefinition) {
       prose = prose.slice(footnoteDefinition[0].length)
     } else if (referenceDefinitionPattern.test(prose)) {
       continue
     }
+    const rawHtmlAnchorRanges = []
     for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
+      if (match.index > 0 && prose[match.index - 1] === '\\') {
+        continue
+      }
       const href = htmlAttributeValue(match[0], 'href')
       if (href !== null) {
         addLink(href, lineNumber)
       }
+      rawHtmlAnchorRanges.push({ start: match.index, end: match.index + match[0].length })
     }
-    prose = prose.replace(rawHtmlAnchorTagPattern, ' ')
+    prose = eraseRanges(prose, rawHtmlAnchorRanges)
     const inlineLinks = extractInlineLinks(prose)
     for (const link of inlineLinks) {
       addLink(link.target, lineNumber)
     }
     prose = eraseRanges(prose, inlineLinks)
-    for (const match of prose.matchAll(referenceUsePattern)) {
+    let referenceProse = stripBackslashEscapes(prose)
+    for (const match of referenceProse.matchAll(referenceUsePattern)) {
       const label = normalizeLabel(match[2] === '' ? match[1] : match[2])
       if (isFootnoteLabel(label)) {
         continue
@@ -640,14 +649,14 @@ const collectLinks = (markdown) => {
       if (referenceDefinitions.has(label)) {
         const destination = referenceDefinitions.get(label)
         addLink(destination, lineNumber)
-      } else if (looksLikeBracketIndexing(prose, match)) {
+      } else if (looksLikeBracketIndexing(referenceProse, match)) {
         continue
       } else {
         unresolvedReferences.push({ reference: match[0], lineNumber })
       }
     }
-    prose = prose.replace(referenceUsePattern, '')
-    for (const match of prose.matchAll(shortcutReferencePattern)) {
+    referenceProse = referenceProse.replace(referenceUsePattern, '')
+    for (const match of referenceProse.matchAll(shortcutReferencePattern)) {
       if (isFootnoteLabel(match[1])) {
         continue
       }
@@ -658,6 +667,9 @@ const collectLinks = (markdown) => {
       }
     }
     for (const match of prose.matchAll(autolinkPattern)) {
+      if (match.index > 0 && prose[match.index - 1] === '\\') {
+        continue
+      }
       if (/^<\/?[A-Za-z][A-Za-z0-9-]*\s*\/?>$/.test(match[0])) {
         continue
       }
@@ -771,9 +783,17 @@ const assertCheckerFixtures = () => {
   if (!escapedDestination.links.some((link) => link.target === './file).md')) {
     throw new Error('escaped Markdown destination fixture should preserve escaped punctuation')
   }
+  const escapedPunctuationDestination = collectLinks('[visible](./file\\_v1\\.md)')
+  if (!escapedPunctuationDestination.links.some((link) => link.target === './file_v1.md')) {
+    throw new Error('escaped Markdown destination fixture should preserve escaped underscores and dots')
+  }
   const escapedReferenceDestination = collectLinks('[ref]: ./file\\).md\n[ref]')
   if (!escapedReferenceDestination.links.some((link) => link.target === './file).md')) {
     throw new Error('escaped reference destination fixture should preserve escaped punctuation')
+  }
+  const escapedPunctuationReferenceDestination = collectLinks('[ref]: ./file\\_v1\\.md\n[ref]')
+  if (!escapedPunctuationReferenceDestination.links.some((link) => link.target === './file_v1.md')) {
+    throw new Error('escaped reference destination fixture should preserve escaped underscores and dots')
   }
   if (collectAnchors('`<a id="fake"></a>`').has('fake')) {
     throw new Error('raw HTML anchor fixture should ignore inline code spans')

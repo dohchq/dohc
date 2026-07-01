@@ -126,10 +126,14 @@ Normative gate/retry matrix:
 
 Write, replay, conflict, and proof-slice sections in this spec use this matrix
 as the source of truth for gate, retry, and `WriteResult` semantics.
-The two `retryable-failure` rows above are the only acknowledged
-retryable-failure modes: both require a durable idempotency result before the
-engine responds, and their `commitState` value is the canonical statement of
-whether no canonical commit was recorded or the commit state is unknown.
+The two `retryable-failure` rows above are the acknowledged evaluator/service
+and unknown-acknowledgement modes: both require a durable idempotency result
+before the engine responds, and their `commitState` value is the canonical
+statement of whether no canonical commit was recorded or the commit state is
+unknown. Conflict-envelope persistence has its own later path: when a conflict
+record cannot be durably written or replayed safely, the engine returns a
+retryable failure only after durably recording the matching idempotency result
+and commit-state evidence instead of acknowledging a partial conflict.
 Canonical save success is acknowledged only after the mutation is durably
 committed to canonical workspace state and is visible to normal `read` semantics
 for that version. `watch` propagation and search indexing are eventually
