@@ -8077,13 +8077,11 @@ Historical status snapshot.
 
 Two-hundred-ninety-seventh pass:
 
-<a id="live-pr00-status"></a>
+### Historical PR00 Status
 
-### Live PR00 Status
+Historical status snapshot.
 
-Mutable status symbol: `LivePR00Status`.
-
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: six major findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -8108,6 +8106,52 @@ Mutable status symbol: `LivePR00Status`.
     `rejected`/`quarantined_*` outcomes in the versioned write flow.
   - Defined `channel-conversation-id-v1` deterministic serialization and hashing
     for default, linked-work, and named-subconversation channel threads.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-eighth pass:
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: one major finding and three minor findings fixed; the
+    parser-backed checker rewrite suggestion was narrowed by routing
+    execution-log contract checks through prose-aware `contentLines()`;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+
+- Fixed CodeRabbit's one major finding and three minor findings:
+  - Made `retryable-failure` persistence rules consistent: returned retryable
+    failures are durable idempotency results, otherwise callers see transport
+    failure/timeout and retry the same key.
+  - Replaced ambiguous `targetVersionId: versionId` replay labels for
+    single-version `replace` and `restore` operations with `[versionId]`.
+  - Removed the explicit live-status HTML anchor so the `Live PR00 Status`
+    heading owns the generated fragment.
+  - Routed execution-log contract checks through prose-aware `contentLines()`
+    before anchored marker/heading matching, avoiding fenced-code/comment
+    false positives without replacing the whole link checker.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

@@ -37,8 +37,6 @@ const executionLogContract = {
     '## Phase 0 Decision Note',
     '## PR Lane Inventory',
     '## Entry Template',
-    '### Phase 0 Decision Note Entry Template',
-    '### Live Blockers And Overrides',
     '## Archived PR00 Pass History',
     '## PR 00 - Mega Plan And Readiness Scaffold',
   ],
@@ -1148,6 +1146,10 @@ const lineOccurrenceCount = (raw, exactLine) => raw
   .filter((line) => line === exactLine)
   .length
 
+const proseMarkdown = (raw) => [...contentLines(raw)]
+  .map(({ text }) => text)
+  .join('\n')
+
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const findHeadingIndex = (raw, heading, startIndex = 0) => {
@@ -1213,37 +1215,39 @@ const assertExecutionLogContract = () => {
     return
   }
 
-  requireOrderedMarkers(raw, executionLogContract.topLevelMarkers, 'execution-log top-level')
+  const proseRaw = proseMarkdown(raw)
 
-  const pr00Section = sectionSlice(raw, '## PR 00 - Mega Plan And Readiness Scaffold')
+  requireOrderedMarkers(proseRaw, executionLogContract.topLevelMarkers, 'execution-log top-level')
+
+  const pr00Section = sectionSlice(proseRaw, '## PR 00 - Mega Plan And Readiness Scaffold')
   if (pr00Section !== null) {
     requireOrderedMarkers(pr00Section, executionLogContract.pr00SectionMarkers, 'execution-log PR00 section')
   }
 
-  const currentPointerSection = sectionSlice(raw, '## Current PR Pointer')
+  const currentPointerSection = sectionSlice(proseRaw, '## Current PR Pointer')
   if (currentPointerSection !== null) {
     requireOrderedMarkers(currentPointerSection, executionLogContract.currentPointerMarkers, 'execution-log current pointer')
   }
 
-  const howToUseSection = sectionSlice(raw, '## How To Use This Log')
+  const howToUseSection = sectionSlice(proseRaw, '## How To Use This Log')
   for (const item of executionLogContract.requiredEvidenceItems) {
     if (!howToUseSection?.includes(`- ${item}.`)) {
       failures.push(`${executionLogContract.file}: missing required evidence checklist item ${item}`)
     }
   }
 
-  const liveStatusCount = lineOccurrenceCount(raw, '- Live PR00 status:')
+  const liveStatusCount = lineOccurrenceCount(proseRaw, '- Live PR00 status:')
   if (liveStatusCount !== 1) {
     failures.push(`${executionLogContract.file}: expected exactly one writable - Live PR00 status: block, found ${liveStatusCount}`)
   }
 
-  const historicalStatusCount = lineOccurrenceCount(raw, '- Historical PR00 status:')
+  const historicalStatusCount = lineOccurrenceCount(proseRaw, '- Historical PR00 status:')
   if (historicalStatusCount < 1) {
     failures.push(`${executionLogContract.file}: expected archived - Historical PR00 status: blocks`)
   }
 
-  const latestLiveStatusIndex = raw.lastIndexOf('\n- Live PR00 status:')
-  const archivedHistoryIndex = raw.indexOf('## Archived PR00 Pass History')
+  const latestLiveStatusIndex = proseRaw.lastIndexOf('\n- Live PR00 status:')
+  const archivedHistoryIndex = findHeadingIndex(proseRaw, '## Archived PR00 Pass History')
   if (
     latestLiveStatusIndex === -1
     || archivedHistoryIndex === -1
@@ -1253,10 +1257,10 @@ const assertExecutionLogContract = () => {
     return
   }
 
-  const liveBlockEndIndex = raw.indexOf('\n### Subagent Reviews', latestLiveStatusIndex)
-  const liveBlock = raw.slice(
+  const liveBlockEndIndex = findHeadingIndex(proseRaw, '### Subagent Reviews', latestLiveStatusIndex)
+  const liveBlock = proseRaw.slice(
     latestLiveStatusIndex,
-    liveBlockEndIndex === -1 ? raw.length : liveBlockEndIndex,
+    liveBlockEndIndex === -1 ? proseRaw.length : liveBlockEndIndex,
   )
   for (const field of executionLogContract.liveStatusFields) {
     if (!liveBlock.includes(field)) {

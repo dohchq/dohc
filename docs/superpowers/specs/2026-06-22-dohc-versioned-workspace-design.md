@@ -131,13 +131,20 @@ Normative gate/retry matrix:
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state and `replayUntil`. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | Durable retryable idempotency result with `commitState: 'no_canonical_commit_recorded'`; no holding record, quarantine record, or canonical commit is allocated. Retry with the same idempotency key. |
 | Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'`; canonical commit state is not trusted until retry proves the final durable result. Retry with the same idempotency key. |
-| Conflict envelope cannot be durably written or replayed safely | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'` after persisting conflict-state evidence; no partial conflict acknowledgement. Retry with the same idempotency key. |
+| Conflict materialization cannot be completed or replayed safely after a retryable result can be persisted | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'`; no partial conflict acknowledgement. Retry with the same idempotency key. If the retryable idempotency result itself cannot be persisted, no `retryable-failure` is returned. |
 | Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
 | Preserved base/current/incoming divergence exists | `conflict` | Conflict record; no silent last-writer-wins. |
 
 Write, replay, conflict, and proof-slice sections in this spec use this matrix
 as the source of truth for gate, retry, and `WriteResult` semantics.
-The evaluator/service, unknown-acknowledgement, and conflict-envelope
+Every `retryable-failure` in the matrix is a durable replayable idempotency
+result before it is returned. If the engine cannot persist that result, callers
+receive a transport failure or timeout and must retry the same idempotency key
+until the engine can return either a durable `retryable-failure` with
+`commitState: 'no_canonical_commit_recorded'` or
+`commitState: 'commit_state_unknown_retry_required'`, or the final canonical,
+durable-pending, rejected, quarantined, conflict, terminal-retired, or expired
+outcome. The evaluator/service, unknown-acknowledgement, and conflict-envelope
 `retryable-failure` rows above all require a durable idempotency result before
 the engine responds, and their `commitState` value is the canonical statement of
 whether no canonical commit was recorded or the commit state is unknown. When a
@@ -365,7 +372,7 @@ type WriteResult =
 initiating write-producing request, not merely the version that eventually owns a
 record. The array is ordered by semantic request role, not lexical id order:
 single-version `write`, `delete`, `rename`, `move`, `replace`, and `restore`
-operations serialize `[targetVersionId]`; `merge` serializes
+operations serialize `[versionId]`; `merge` serializes
 `[targetVersionId, sourceVersionId]`; future multi-source operations serialize
 `[targetVersionId, ...sourceVersionIds]`, with `sourceVersionIds` kept in
 request order after server canonicalization. Duplicated version ids remain
@@ -377,10 +384,10 @@ that same tuple for writers, retries, status lookup, and conflict repair:
 
 | Operation | `requestedVersionIds` | Stable operand tuple additions |
 | --- | --- | --- |
-| `write`, `delete`, `rename`, `move` | `[targetVersionId]` | Target path/object handles, normalized path/object preconditions, and operation-specific source/destination paths. |
-| `replace(workspaceId, versionId, fromPath, toPath, ...)` | `[targetVersionId: versionId]` | `fromPath`, `toPath`, `sourceObjectId`, `destinationObjectId`, normalized source precondition, and normalized destination precondition. |
+| `write`, `delete`, `rename`, `move` | `[versionId]` | Target path/object handles, normalized path/object preconditions, and operation-specific source/destination paths. |
+| `replace(workspaceId, versionId, fromPath, toPath, ...)` | `[versionId]` | `fromPath`, `toPath`, `sourceObjectId`, `destinationObjectId`, normalized source precondition, and normalized destination precondition. |
 | `merge(workspaceId, sourceVersionId, targetVersionId, ...)` | `[targetVersionId, sourceVersionId]` | Normalized source-version freshness guard and normalized target-version freshness guard. Internal base/current/incoming conflict handles are derived later and are not substituted into replay identity. |
-| `restore(workspaceId, versionId, checkpointId, ...)` | `[targetVersionId: versionId]` | Stable `checkpointId` plus the normalized restore freshness guard. If restore materializes a checkpoint through an internal source version, replay identity must still serialize the same `checkpointId` and must not substitute a `restoredFromVersionId` alias. |
+| `restore(workspaceId, versionId, checkpointId, ...)` | `[versionId]` | Stable `checkpointId` plus the normalized restore freshness guard. If restore materializes a checkpoint through an internal source version, replay identity must still serialize the same `checkpointId` and must not substitute a `restoredFromVersionId` alias. |
 
 Delayed acknowledgements and replayed idempotency results must match the full
 `requestedVersionIds` array and the stable operand tuple before clearing
