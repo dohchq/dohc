@@ -110,7 +110,8 @@ Normative gate/retry matrix:
 | Malformed request, missing/incompatible precondition, invalid path/version, or cross-workspace reference before persistence | validation error such as `invalid_request`, `malformed_request`, `missing_precondition`, `incompatible_precondition`, `invalid_path`, `invalid_version`, or `cross_workspace_reference` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Replayed idempotency key with mismatched actor/session, workspace, version context, operation type, target, payload digest, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
-| Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before durable acceptance | `rejected` | `rejected_before_acceptance`; no canonical commit. |
+| Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. |
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. |
 | Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
 | Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
@@ -172,9 +173,11 @@ type PublicDeniedReasonCode =
   | 'attribution_denied'
   | 'proof_denied'
 
-// `not_authorized` maps to `rejected_before_acceptance` before durable
-// acceptance, and to `quarantined_authorization` for replayed or
-// post-acceptance authorization failures.
+// `not_authorized` maps to an immediate denial response before durable
+// rejection persistence, to `rejected_before_acceptance` only after the engine
+// persists a durable rejected record before canonical acceptance, and to
+// `quarantined_authorization` for replayed or post-acceptance authorization
+// failures.
 
 type PublicValidationErrorCode =
   // missing_precondition: required guard omitted
@@ -428,16 +431,24 @@ its retained retirement metadata is addressable; it degrades to
 `idempotency-expired` only after the retained idempotency/retry metadata for the
 retired record has expired.
 
-Non-persistent validation failures are separate from durable rejected writes:
+Non-persistent validation failures and immediate denials are separate from
+durable rejected writes:
 malformed requests, missing preconditions, invalid path/version shapes, and
 replay metadata mismatches return `PublicValidationErrorCode`, allocate no
 `holdingRecordId`, and store no `rejectedAt`, `acceptedAt`, or `quarantinedAt`.
+Authorization, ownership/review, policy, visibility, protected-path, lock,
+version-access, skill-turn, provenance, attribution, or proof denials that are
+resolved before any durable rejection record is allocated return
+`PublicDeniedReasonCode`, allocate no `holdingRecordId`, and store no
+`rejectedAt`, `acceptedAt`, or `quarantinedAt`.
 Durable `rejected` and `quarantined` ingests live in a non-canonical holding area
 with enough metadata to explain the decision, retry where allowed, or audit the
 outcome after evaluators recover. `rejected` means the write failed a protection
-gate before canonical acceptance and stores `rejectedAt`; `quarantined` means
-the write was accepted into the holding area but could not become canonical and
-stores `acceptedAt` plus `quarantinedAt`. `terminal-retired` is the later
+gate before canonical acceptance, after the engine allocated a durable
+`rejected_record`, and stores `holdingRecordId`, `rejectedAt`, `retentionUntil`,
+and replay/idempotency metadata; `quarantined` means the write was accepted into
+the holding area but could not become canonical and stores `acceptedAt` plus
+`quarantinedAt`. `terminal-retired` is the later
 retirement state for retained rejected-before-acceptance or accepted holding
 records. These durable results carry the required `versionId` for the requested
 or accepted version bound to the holding record. `rejected`, `quarantined`, and

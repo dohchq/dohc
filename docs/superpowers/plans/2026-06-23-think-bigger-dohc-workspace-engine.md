@@ -1660,9 +1660,10 @@ Foundation alpha and the relevant surface proof are complete.
   manifest changes, linked-target drift, or discovered-doc drift make the
   manifest and repository disagree.
 - [The workflow](../../../.github/workflows/think-bigger-docs.yml) must run that
-  checker for pull requests and pushes that touch the manifest, Think Bigger
-  docs, checker script, workflow file, or dependency manifests. `workflow_dispatch`
-  and the scheduled drift check run the same checker for non-PR drift visibility.
+  checker for pull requests and pushes that touch the manifest, source specs,
+  execution log, Think Bigger plan docs, checker script, workflow file, or
+  dependency manifests. `workflow_dispatch` and the scheduled drift check run the
+  same checker for non-PR drift visibility.
 
 **CodeRabbit focus:**
 
@@ -1727,7 +1728,10 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 - serialization round-trip tests.
 - schema-drift test that fails when the checked-in canonical schema no longer
   matches generated or conformance-tested TypeScript and Rust consumers for the
-  workspace/version/policy boundary types.
+  full Phase 0 / PR 01 / PR 12 ownership-matrix symbol set:
+  `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, `WorkspaceEvent`,
+  `DurabilityEvent`, `HistoryMoment`, `ConflictRecord`, `ChatThread`,
+  `ThreadMessage`, `ThreadLink`, `ThreadReadState`, and `AgentRun`.
 - invalid workspace/version/path rejection.
 - stable IDs survive path rename fixture.
 - projection writeability fixture coverage.
