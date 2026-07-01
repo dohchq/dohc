@@ -1558,9 +1558,12 @@ snapshot, and is handled explicitly by history/export/replay as incomplete legac
 evidence rather than a normal in-system delete. Legacy delete activities are
 exempt from the in-system requirement to hash a recovered prior plaintext body,
 but they must still carry `bodyHash` and `tombstoneHash`: use the imported body
-when available, otherwise hash a deterministic redacted fallback and set
-`legacyHashSource: 'redacted_fallback'` so export/replay can distinguish the
-evidence quality. Reaction events must satisfy
+when available, otherwise route a canonical redacted fallback payload through the
+same server-held keyed digest/MAC service used for `nextBodyHash`, `bodyHash`,
+and `tombstoneHash`, then set `legacyHashSource: 'redacted_fallback'` so
+export/replay can distinguish the evidence quality. Legacy fallback handling
+must never compute a plain SHA-256 over redacted, placeholder, purged, or
+importer-supplied body content. Reaction events must satisfy
 exactly one identity mode: either a
 stable `reactionId`, or the complete deterministic tuple `(workspaceId,
 threadId, messageId, actorId, reactionKey)`. `ThreadActivityBase.actorId` is the

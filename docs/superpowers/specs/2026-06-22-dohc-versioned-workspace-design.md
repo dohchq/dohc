@@ -119,13 +119,17 @@ Normative gate/retry matrix:
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `replayUntil`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state and `replayUntil`. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
-| Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | `commitState: 'no_canonical_commit_recorded'`; retry with the same idempotency key. |
-| Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | `commitState: 'commit_state_unknown_retry_required'`; retry with the same idempotency key. |
+| Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | Durable retryable idempotency result with `commitState: 'no_canonical_commit_recorded'`; no holding record, quarantine record, or canonical commit is allocated. Retry with the same idempotency key. |
+| Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'`; canonical commit state is not trusted until retry proves the final durable result. Retry with the same idempotency key. |
 | Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
 | Preserved base/current/incoming divergence exists | `conflict` | Conflict record; no silent last-writer-wins. |
 
 Write, replay, conflict, and proof-slice sections in this spec use this matrix
 as the source of truth for gate, retry, and `WriteResult` semantics.
+The two `retryable-failure` rows above are the only acknowledged
+retryable-failure modes: both require a durable idempotency result before the
+engine responds, and their `commitState` value is the canonical statement of
+whether no canonical commit was recorded or the commit state is unknown.
 Canonical save success is acknowledged only after the mutation is durably
 committed to canonical workspace state and is visible to normal `read` semantics
 for that version. `watch` propagation and search indexing are eventually
@@ -623,17 +627,19 @@ or transitioned the record's durable state for the same replay metadata identity
 The replay metadata identity remains frozen; each retry re-evaluates the record's
 current durable state through the same ordered rules.
 
-- If workspace/version binding metadata is malformed, mismatched, crosses
-  workspace scope, or cannot be proven before a holding record exists, return a
-  `PublicValidationErrorCode` before holding-area persistence. Use
-  `cross_workspace_reference` for syntactically valid metadata that points
-  outside the active workspace, including cross-workspace atom, folder, entity,
-  share, capture, file-object, version, event, projection, history, holding, or
-  conflict references. Syntactically valid but unresolved pre-persistence binding
-  evidence returns `retryable-failure` when an evaluator is unavailable or
-  indeterminate. Only already-persisted accepted records with syntactically valid
-  replay metadata but unresolved server-side provenance or binding evidence can
-  stay in the corresponding quarantined state while resolution proceeds.
+- If workspace/version binding metadata is malformed or crosses workspace scope
+  before a holding record exists, return a `PublicValidationErrorCode` before
+  holding-area persistence. If a persisted accepted record's replay metadata is
+  well-formed but stale or object-mismatched, route to `conflict` according to
+  the capture-token conflict matrix. Use `cross_workspace_reference` for
+  syntactically valid metadata that points outside the active workspace,
+  including cross-workspace atom, folder, entity, share, capture, file-object,
+  version, event, projection, history, holding, or conflict references.
+  Syntactically valid but unresolved pre-persistence binding evidence returns
+  `retryable-failure` when an evaluator is unavailable or indeterminate. Only
+  already-persisted accepted records with syntactically valid replay metadata but
+  unresolved server-side provenance or binding evidence can stay in the
+  corresponding quarantined state while resolution proceeds.
 - If server-derived authorization, permission, ownership/review gate, policy,
   visibility, protected-path, lock, version-access, skill-turn, provenance,
   attribution, or proof checks fail after replay, the record resolves to the
