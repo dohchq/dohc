@@ -4719,7 +4719,8 @@ Two-hundred-fourth pass:
   - Completion state: not complete or merge-ready until CodeRabbit is clean and
     the docs-only local-agent-CLI exception is approved.
 - Fixed CodeRabbit's seven follow-up findings:
-  - Replaced legacy Google Docs references with neutral collaborative-editor
+  - Replaced legacy collaborative document editor references with neutral
+    collaborative-editor
     language in the versioned workspace and chats specs.
   - Changed URI autolink extraction to collect all angle-bracketed URI schemes so
     disallowed schemes still reach the validator.
@@ -7442,7 +7443,7 @@ Two-hundred-seventy-ninth pass:
 
 Two-hundred-eightieth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five major findings, one minor finding, and one trivial
     finding fixed; committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7466,6 +7467,40 @@ Two-hundred-eightieth pass:
     tombstone-field consistency.
   - Added `create_channel` and `get_or_create_channel` to the chat action
     inventory.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-eighty-first pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three major findings and one minor finding fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three major findings and one minor finding:
+  - Moved `materialized` out of durable `FilePolicyBase` and policy
+    export/import tuples, leaving it as runtime status hydration state.
+  - Clarified watch/snapshot/diff secret-safe projection defaults while allowing
+    authorized plaintext materialization through the secret-aware server path.
+  - Replaced an archived legacy brand mention with neutral collaborative-editor
+    wording.
+  - Added `namedSubconversationKeyVersion` to the deterministic
+    `channelConversationId` identity tuple.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

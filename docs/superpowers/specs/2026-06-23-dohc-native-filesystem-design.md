@@ -545,12 +545,12 @@ restore(workspaceId, versionId, checkpointId, {
 ```
 
 `watch`, `snapshot`, and `diff` expose the same secret-safe projection contract
-as `read`, `stat`, `list`, and `search`. They must never emit raw
-secret-backed contents or raw secret-backed paths in event payloads, snapshot
-entries, diff headers, diff hunks, nested metadata, derived labels, or repair
-records. Before any output leaves the engine boundary, secret-backed path and
-content fields are redacted, omitted, or replaced with authorized opaque tokens
-according to the effective file policy and viewer authorization.
+as `read`, `stat`, `list`, and `search`. They must not emit raw secret-backed
+contents or raw secret-backed paths by default; authorized server-side views may
+materialize them only through the secret-aware authorization path. Before any
+output leaves the engine boundary, secret-backed path and content fields are
+redacted, omitted, or replaced with authorized opaque tokens according to the
+effective file policy and viewer authorization.
 
 In every API shape above, `expectedContentHash` is accepted only for
 non-secret-backed object operands. Secret-backed overwrite, delete,
@@ -914,7 +914,7 @@ does not persist request-stream freshness metadata such as `requestToken`,
 conventions, policy files, or conflict views. Status/export serializers and
 re-import deserializers preserve the full resolved `FilePolicyBase` tuple:
 `tracked`, `versioned`, `synced`, `pinned`, `searchable`, `visibility`,
-`publicExport`, `agentAccess`, and `materialized`.
+`publicExport`, and `agentAccess`.
 `versionsNamespaceMode` is persisted workspace status, not a per-client guess:
 `legacy_unmanaged` means pre-opt-in `.versions/**` content is ordinary content
 classified by the compatibility path, while `managed_versions` means
@@ -1128,7 +1128,6 @@ tracked = false
 versioned = false
 synced = false
 pinned = false
-materialized = "local"
 
 [[rule]]
 match = "dist/**"
@@ -1136,7 +1135,6 @@ tracked = false
 versioned = false
 synced = false
 pinned = false
-materialized = "local"
 
 [[rule]]
 match = "docs/**"
@@ -1144,7 +1142,6 @@ tracked = true
 versioned = true
 synced = true
 pinned = false
-materialized = "virtual"
 
 [[rule]]
 match = ".env"
@@ -1157,7 +1154,6 @@ visibility = "private"
 public_export = "redact"
 agent_access = "explicit"
 pinned = false
-materialized = "local"
 secret_projection = "protectedLocal"
 
 [[rule]]
@@ -1170,7 +1166,6 @@ searchable = false
 visibility = "team"
 agent_access = "ask"
 pinned = false
-materialized = "local"
 secret_projection = "protectedLocal"
 ```
 
@@ -1248,7 +1243,6 @@ type FilePolicyBase = {
   visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
-  materialized: 'local' | 'virtual'
 }
 
 type NonSecretFilePolicy = FilePolicyBase & {
@@ -1260,7 +1254,6 @@ type SecretBackedOpaqueFilePolicy = FilePolicyBase & {
   encrypted: true
   searchable: false
   publicExport: 'redact' | 'exclude'
-  materialized: 'virtual'
   secretProjection: 'opaque'
 }
 
@@ -1268,7 +1261,6 @@ type SecretBackedLocalFilePolicy = FilePolicyBase & {
   encrypted: true
   searchable: false
   publicExport: 'redact' | 'exclude'
-  materialized: 'local'
   secretProjection: 'protectedLocal' | 'plaintextLocal'
 }
 
@@ -1279,10 +1271,13 @@ type SecretBackedFilePolicy =
 type FilePolicy = NonSecretFilePolicy | SecretBackedFilePolicy
 ```
 
-`materialized` describes hydration state only: whether bytes are present locally
-or represented virtually. `pinned` is the independent offline-retention request
-that asks dohc to keep local bytes hydrated when policy allows; pinning does not
-change tracking, versioning, searchability, export behavior, or visibility.
+`materialized` describes runtime hydration state only and lives in
+`WorkspaceStatusPayload`, not in `FilePolicyBase` or persisted policy
+export/import envelopes. It records whether bytes are present locally or
+represented virtually for the current machine/session. `pinned` is the durable
+offline-retention request that asks dohc to keep local bytes hydrated when policy
+allows; pinning does not change tracking, versioning, searchability, export
+behavior, or visibility.
 `secretProjection` describes exposure for secret-backed paths separately from
 storage hydration: `opaque` means handles/redacted status only,
 `protectedLocal` means brokered or policy-controlled local projection, and
@@ -1291,8 +1286,8 @@ Policy validation and builders must emit `secretProjection: 'none'` for
 non-secret paths and `SecretBackedFilePolicy` for protected secret paths; secret
 entries cannot omit `secretProjection` or use the non-secret placeholder value.
 They must reject inconsistent pairs before status/export/access data is produced:
-`secretProjection: 'opaque'` requires `materialized: 'virtual'`, while
-`protectedLocal` and `plaintextLocal` require `materialized: 'local'`.
+`secretProjection: 'opaque'` requires status `materialized: 'virtual'`, while
+`protectedLocal` and `plaintextLocal` require status `materialized: 'local'`.
 Secret-backed policies must also force `searchable: false` and
 `publicExport: 'redact' | 'exclude'`; plaintext export or indexing requires a
 separate future policy with explicit review and must not be expressible through
@@ -1342,7 +1337,6 @@ visibility = "private"
 public_export = "redact"
 agent_access = "explicit"
 pinned = false
-materialized = "local" # protected/explicit local projection, not default exposure
 secret_projection = "protectedLocal"
 ```
 
@@ -1572,8 +1566,8 @@ Export should produce:
 - the full policy envelope required to re-import without changing file
   semantics, including the full `FilePolicyBase` tuple (`tracked`, `versioned`,
   `synced`, `pinned`, `searchable`, `visibility`, `publicExport`,
-  `agentAccess`, and `materialized`), whether each governed entry is
-  secret-backed or non-secret, its `secretProjection` variant (`opaque`,
+  and `agentAccess`), whether each governed entry is secret-backed or non-secret,
+  its `secretProjection` variant (`opaque`,
   `protectedLocal`, or `plaintextLocal`), plus the effective-policy resolver's
   normalized source ordinal and rule index for each emitted rule.
 - only allowlisted source-backed policy files such as `.dohc/files.toml` and
@@ -1618,7 +1612,7 @@ That engine policy export path is responsible for preserving enough normalized
 policy state to reconstruct secret-backed versus non-secret files on re-import,
 including the full resolved policy tuple (`tracked`, `versioned`,
 `synced`, `pinned`, `searchable`, `visibility`, `publicExport`, `agentAccess`,
-`materialized`, and `secretProjection`), equal-specificity tie-breaking from the
+and `secretProjection`), equal-specificity tie-breaking from the
 original source ordinal and rule index plus the workspace path-equivalence
 profile used during canonicalization and the persisted `versionsNamespaceMode`;
 re-import must fail closed rather than treating an entry with missing policy
@@ -1668,10 +1662,10 @@ The first proof should demonstrate the whole shape without solving every driver:
 3. Editing files in either folder captures immediately for that version, then
    promotes through quarantine/reconcile before canonical history updates.
 4. dohc records a durability log and coalesced meaningful history.
-5. `.dohc/files.toml` controls tracked/versioned/synced/pinned/materialized
-   behavior for a few path patterns.
-6. `node_modules/**` and `dist/**` are local materialized but untracked,
-   unversioned, and unsynced.
+5. `.dohc/files.toml` controls tracked/versioned/synced/pinned behavior for a
+   few path patterns; hydration/materialization is reported through status.
+6. `node_modules/**` and `dist/**` can be locally hydrated while remaining
+   untracked, unversioned, and unsynced.
 7. A `.env` path pattern can be tracked as secret-backed/private through
    `.dohc/files.toml`: read/write captures durably, status shows
    secret-backed plus redacted/export-excluded state, conflicts project through

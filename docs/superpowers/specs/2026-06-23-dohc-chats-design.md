@@ -876,9 +876,11 @@ not invent them. That tuple includes `workspaceId`, `channelId`,
 `conversationKind` (`default`, `linked_work`, or `named_subconversation`), and
 the kind-specific immutable discriminator: exactly one canonical linked-work
 target tuple for `linked_work`, normalized server-owned conversation key for
-`named_subconversation`, or no extra discriminator for `default`. The same tuple
-must reuse the existing id through atomic get-or-create; a materially different
-tuple gets a new deterministic id and therefore a different thread. Ordinary
+`named_subconversation` plus its `namedSubconversationKeyVersion`, or no extra
+discriminator for `default`. The same tuple, including
+`namedSubconversationKeyVersion`, must reuse the existing id through atomic
+get-or-create; a materially different tuple or normalization version gets a new
+deterministic id and therefore a different thread. Ordinary
 `ThreadLink` rows added or removed after thread creation are separate linked-work
 metadata and never mutate the `channelConversationId`. Changing the channel
 association, conversation kind, linked-work discriminator that defined a
