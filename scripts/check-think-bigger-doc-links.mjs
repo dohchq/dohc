@@ -113,6 +113,8 @@ if (unexpectedDiscoveredDocs.length > 0) {
 
 const files = discoveredThinkBiggerDocs
 
+const rawHtmlTagPattern = /<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s[^<>]*)?\s*\/?>/g
+
 const visibleHeadingText = (heading) => {
   const codeSpans = []
   const withCodePlaceholders = heading.replace(/`([^`]*)`/g, (_match, code) => {
@@ -126,7 +128,7 @@ const visibleHeadingText = (heading) => {
     .replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1')
     .replace(/(^|[^\w])__([^_\n]+)__($|[^\w])/g, '$1$2$3')
     .replace(/(^|[^\w])_([^_\n]+)_($|[^\w])/g, '$1$2$3')
-    .replace(/<[^>]+>/g, '')
+    .replace(rawHtmlTagPattern, '')
     .replace(/\u0000(\d+)\u0000/g, (_match, index) => codeSpans[Number(index)] ?? '')
 }
 
@@ -390,7 +392,7 @@ const collectAnchors = (markdown) => {
   }
   let previousLine = null
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
-  const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]()#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
+  const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
 
   for (const { text: line } of contentLines(markdown)) {
     const prose = stripBackslashEscapes(stripCodeSpans(line))
@@ -438,13 +440,17 @@ const collectLinks = (markdown) => {
   const referenceDefinitions = new Map()
   const normalizeLabel = (label) => label.trim().replace(/\s+/g, ' ').toLowerCase()
   const isFootnoteLabel = (label) => label.trim().startsWith('^')
-  const normalizeDestination = (destination) => (
-    destination.startsWith('<') && destination.endsWith('>')
+  const unescapeMarkdownDestination = (destination) => (
+    destination.replace(/\\([\\`*{}\[\]()#+\-.!_>~|<])/g, '$1')
+  )
+  const normalizeDestination = (destination) => {
+    const unwrapped = destination.startsWith('<') && destination.endsWith('>')
       ? destination.slice(1, -1)
       : destination
-  )
+    return unescapeMarkdownDestination(unwrapped)
+  }
   const stripCodeSpans = (line) => line.replace(/(`+)(?:(?!\1).)*\1/g, ' ')
-  const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]()#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
+  const stripBackslashEscapes = (line) => line.replace(/\\[\\`*{}\[\]#+\-.!_>~|<]/g, (match) => ' '.repeat(match.length))
   const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)/
   const footnoteDefinitionPattern = /^\s{0,3}\[\^[^\]\n]+\]:\s*/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
@@ -509,6 +515,10 @@ const collectLinks = (markdown) => {
         const char = value[cursor]
         if (char === '\n') {
           return null
+        }
+        if (char === '\\' && cursor + 1 < value.length) {
+          cursor += 2
+          continue
         }
         if (char === '(') {
           parenDepth += 1
@@ -723,6 +733,13 @@ const assertCheckerFixtures = () => {
   if (!collectAnchors('## Ship it 🚀').has('ship-it-')) {
     throw new Error('GitHub slugger fixture should match emoji heading behavior')
   }
+  const literalAngleHeadingAnchor = new GithubSlugger().slug('A < B > C')
+  if (!collectAnchors('## A < B > C').has(literalAngleHeadingAnchor)) {
+    throw new Error('literal angle heading fixture should preserve non-tag comparison text')
+  }
+  if (!collectAnchors('## A <span>Thing</span>').has('a-thing')) {
+    throw new Error('raw HTML tag heading fixture should strip tag markup')
+  }
   const rawHtmlAnchors = collectAnchors('<a id="custom-anchor"></a>\n<a name=\'legacy-anchor\'></a>\n<section id="section-anchor"></section>')
   if (
     !rawHtmlAnchors.has('custom-anchor')
@@ -749,6 +766,14 @@ const assertCheckerFixtures = () => {
   const markdownEmptyHref = collectLinks('[empty]()')
   if (!markdownEmptyHref.links.some((link) => link.target === '')) {
     throw new Error('empty Markdown link fixture should reach empty-target validation')
+  }
+  const escapedDestination = collectLinks('[visible](./file\\).md)')
+  if (!escapedDestination.links.some((link) => link.target === './file).md')) {
+    throw new Error('escaped Markdown destination fixture should preserve escaped punctuation')
+  }
+  const escapedReferenceDestination = collectLinks('[ref]: ./file\\).md\n[ref]')
+  if (!escapedReferenceDestination.links.some((link) => link.target === './file).md')) {
+    throw new Error('escaped reference destination fixture should preserve escaped punctuation')
   }
   if (collectAnchors('`<a id="fake"></a>`').has('fake')) {
     throw new Error('raw HTML anchor fixture should ignore inline code spans')

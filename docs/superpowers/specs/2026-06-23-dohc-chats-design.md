@@ -1693,15 +1693,16 @@ the authority model.
 server-issued `channelConversationId` or a `ChannelConversationCreateRequest`.
 It runs the same canonical conversation resolver as `send_channel_message` and
 returns the existing `threadId`, `channelConversationId`, and
-`ChannelConversationProvenance` for that authorized channel thread. Absent,
-unauthorized, revoked, and ambiguous channel-conversation lookups must produce
-the same observable `needs_first_send`/`not_found` result; callers must not be
-able to distinguish whether a tuple exists outside their authorization scope. If
-no authorized channel-backed thread is returned for the canonical tuple, the
-handler must not create or reserve a `ChatThread`, emit `chat_created`, or
-reserve a message id. Clients and agents use this action to recover a lost
-`channelConversationId` together with its `threadId`; they must not reconstruct
-channel conversation ids locally.
+`ChannelConversationProvenance` for that authorized channel thread. Unauthorized,
+revoked, absent, and ambiguous channel-conversation lookups must all produce the
+same observable `conversation_unavailable` result; callers must not be able to
+distinguish whether a tuple exists outside their authorization scope.
+`needs_first_send` is an internal `send_channel_message` resolver state, not a
+public `read_channel_conversation` result. If no authorized channel-backed
+thread is returned for the canonical tuple, the handler must not create or
+reserve a `ChatThread`, emit `chat_created`, or reserve a message id. Clients
+and agents use this action to recover a lost `channelConversationId` together
+with its `threadId`; they must not reconstruct channel conversation ids locally.
 
 ```ts
 type ReadChannelConversationResult =
@@ -1712,7 +1713,7 @@ type ReadChannelConversationResult =
       provenance: ChannelConversationProvenance
     }
   | {
-      kind: 'needs_first_send' | 'not_found'
+      kind: 'conversation_unavailable'
       threadId?: never
       channelConversationId?: never
       provenance?: never

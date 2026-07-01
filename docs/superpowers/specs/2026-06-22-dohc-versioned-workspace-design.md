@@ -155,6 +155,7 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_authorization'
   | 'quarantined_ownership'
   | 'quarantined_protection'
+  | 'quarantined_secret_declassification'
   | 'quarantined_review_gate'
   | 'quarantined_attribution'
   | 'quarantined_policy'
@@ -177,6 +178,7 @@ type PublicDeniedReasonCode =
   | 'policy_denied'
   | 'visibility_denied'
   | 'protected_path'
+  | 'secret_declassification_denied'
   | 'locked'
   | 'version_access_denied'
   | 'skill_turn_denied'
@@ -525,9 +527,9 @@ status APIs:
 
 | `pendingState` | Entry condition | Exit conditions |
 | --- | --- | --- |
-| `pending_protection` | The accepted holding record is durable, but protected-path, visibility, secret-broker/declassification, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. A denied protected-path or secret/declassification gate moves to `quarantined_protection`; other denied gates move to their matching `quarantined_*` state. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
+| `pending_protection` | The accepted holding record is durable, but protected-path, visibility, secret-broker/declassification, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. A denied protected-path gate moves to `quarantined_protection`; a denied secret-broker/declassification gate moves to `quarantined_secret_declassification`; other denied gates move to their matching `quarantined_*` state. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
 | `pending_review` | All protection checks needed to ask for review have passed, including secret-broker/declassification checks when the write touches protected secret material, and policy requires human or authorized workflow review before canonicalization. | Approval moves to `pending_canonicalization`; denial moves to `quarantined_review_gate`; explicit operator retirement moves to `terminal-retired`; reaching `operatorDispositionDueAt` without a decision moves to `overdue_disposition`. |
-| `pending_canonicalization` | All currently required gates have passed and the engine is durably queued or actively replaying the accepted record into canonical workspace state. | Successful canonicalization returns the canonical write result. Apply-time protected-path or secret/declassification denial moves to `quarantined_protection`; other apply-time gate denials move to the matching `quarantined_*` state. Preserved base/current/incoming divergence creates a conflict record. Reaching `operatorDispositionDueAt` before resolution moves to `overdue_disposition`. |
+| `pending_canonicalization` | All currently required gates have passed and the engine is durably queued or actively replaying the accepted record into canonical workspace state. | Successful canonicalization returns the canonical write result. Apply-time protected-path denial moves to `quarantined_protection`; apply-time secret-broker/declassification denial moves to `quarantined_secret_declassification`; other apply-time gate denials move to the matching `quarantined_*` state. Preserved base/current/incoming divergence creates a conflict record. Reaching `operatorDispositionDueAt` before resolution moves to `overdue_disposition`. |
 | `overdue_disposition` | Any pending state exceeded the effective `operatorDispositionDueAt` or maximum pending-canonicalization window. | It remains operator-visible until canonicalization succeeds, an authorized review/policy/protection/secret revalidation moves it back to a concrete pending state with a new due time, a gate denial quarantines it under the same mapping, or explicit operator disposition retires it as `terminal-retired`. |
 
 After explicit operator disposition retires the record, status APIs and
@@ -583,18 +585,19 @@ non-secret-backed objects this may be `expectedBaseVersion`, a non-secret conten
 hash, or an equivalent CAS token; for secret-backed objects it must be a
 secret-safe surrogate, keyed commitment, opaque handle, or non-hash CAS token
 that does not expose reusable plaintext equality. At apply time, the engine
-revalidates workspace scope plus server-derived visibility,
-authorization, ownership/review gate, policy, protected-path, lock, version-access,
-skill-turn, provenance, attribution, and proof checks. Each replay evaluation
-attempt is deterministic for the durable record's current metadata and the
-server-side facts visible to that attempt:
+revalidates workspace scope plus server-derived visibility, authorization,
+ownership/review gate, policy, protected-path, secret-broker/declassification,
+lock, version-access, skill-turn, provenance, attribution, and proof checks.
+Each replay evaluation attempt is deterministic for the durable record's current
+metadata and the server-side facts visible to that attempt:
 
 Replay evaluation is first-match in this order within a single attempt; once a
 class matches for that attempt, later checks in the same attempt cannot replace
 its `reasonCode`, `quarantineState`, or validation result:
 malformed/cross-scope binding, visibility, authorization/permission,
-ownership/review gate, policy, protected-path, lock, version-access, skill-turn,
-provenance, attribution, proof, then causal base conflict. If multiple
+ownership/review gate, policy, protected-path, secret-broker/declassification,
+lock, version-access, skill-turn, provenance, attribution, proof, then causal
+base conflict. If multiple
 server-derived checks fail in one replay attempt, the earliest matching class in
 that order wins. Review approval, policy revalidation, protection evidence, or
 causal-base changes do not change a replay result by themselves. Later retries
@@ -618,9 +621,10 @@ current durable state through the same ordered rules.
   unresolved server-side provenance or binding evidence can stay in the
   corresponding quarantined state while resolution proceeds.
 - If server-derived authorization, permission, ownership/review gate, policy,
-  visibility, protected-path, lock, version-access, skill-turn, provenance,
-  attribution, or proof checks fail after replay, the record resolves to the
-  corresponding durable denial/quarantine state.
+  visibility, protected-path, secret-broker/declassification, lock,
+  version-access, skill-turn, provenance, attribution, or proof checks fail
+  after replay, the record resolves to the corresponding durable
+  denial/quarantine state.
   Authorization and permission failures use `not_authorized` externally and
   `quarantined_authorization` internally.
   Ownership failures use `ownership_denied` externally and
@@ -633,6 +637,10 @@ current durable state through the same ordered rules.
   internally.
   Protected-path failures use `protected_path` externally and
   `quarantined_protection` internally.
+  Secret-broker/declassification failures use
+  `secret_declassification_denied` externally and
+  `quarantined_secret_declassification` internally; they must not be collapsed
+  into `policy_denied`, `not_authorized`, or `quarantined_protection`.
   Visibility-boundary failures use `visibility_denied` externally and
   `quarantined_visibility` internally; they must not be collapsed into
   `policy_denied` or `not_authorized`.
@@ -738,9 +746,9 @@ routing style. After syntax, workspace scope, capture token, and idempotency
 checks pass, the write path resolves outcomes in this order:
 
 1. authorization, ownership, version-access, protected-path, lock, skill-turn,
-   policy, provenance, attribution, proof, and secret/declassification denials
-   return their mapped `rejected` or `quarantined_*` result before any content
-   comparison.
+   policy, provenance, attribution, proof, and secret-broker/declassification
+   denials return their mapped `rejected` or `quarantined_*` result before any
+   content comparison.
 2. unavailable or indeterminate required evaluators return
    `retryable-failure` with no canonical mutation.
 3. real visibility-boundary crossings return the mapped denied/quarantined

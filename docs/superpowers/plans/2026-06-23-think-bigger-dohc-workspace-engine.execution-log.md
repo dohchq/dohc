@@ -7198,7 +7198,7 @@ Two-hundred-seventy-second pass:
 
 Two-hundred-seventy-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: one trivial finding and three minor findings fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7215,6 +7215,41 @@ Two-hundred-seventy-third pass:
   - Replaced the historical placeholder docs-link validation command with the
     exact runnable `REPO_ROOT=...` form.
   - Simplified the PR00 pointer label to avoid a duplicated "PR" token.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two major findings and two minor findings fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two major findings and two minor findings:
+  - Added explicit secret-broker/declassification denial and quarantine mapping
+    to replay ordering, pending-state transitions, and public denial codes.
+  - Made `read_channel_conversation` return one opaque
+    `conversation_unavailable` result for unauthorized, revoked, absent, and
+    ambiguous lookups, with `needs_first_send` kept internal to send flow.
+  - Hardened Markdown destination parsing and normalization for escaped
+    punctuation such as `\)`, with inline and reference fixtures.
+  - Restricted heading HTML stripping to actual raw HTML tags so literal
+    comparison text such as `A < B > C` survives slug generation.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
