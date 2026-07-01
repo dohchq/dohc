@@ -5883,7 +5883,7 @@ Two-hundred-thirty-sixth pass:
 
 Two-hundred-thirty-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5899,6 +5899,37 @@ Two-hundred-thirty-seventh pass:
   - Added an HTML atom sandbox/sanitization security regression case.
   - Aligned native filesystem write precondition prose with the API shape by
     allowing `expectedAuthorizedHashHandle` for secret/protected freshness.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-thirty-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two follow-up findings:
+  - Added shared `ThreadLinkCreateRequest` support for decision/task targets so
+    shared channels can use the same shared-grant/redaction flow.
+  - Added API-native `hydrate(...)` and `setPinned(...)` control-plane operations
+    for browser/runtime/sandbox clients, preserving `virtual` as the canonical
+    non-materialized label and `pinned` as an orthogonal boolean.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

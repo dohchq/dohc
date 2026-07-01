@@ -594,6 +594,10 @@ type ThreadLinkCreateRequest =
       targetType: 'decision' | 'task'
       targetVersionRef?: never
     })
+  | (SharedThreadLinkCreateRequestBase & {
+      targetType: 'decision' | 'task'
+      targetVersionRef?: never
+    })
 
 type ThreadLinkBase = ThreadLinkScope & {
   id: string

@@ -415,6 +415,15 @@ legacy/imported `lazy` labels map to `virtual` before validation or status
 output. `pinned` is an orthogonal boolean retention request, not a third
 materialization value.
 
+Non-mounted clients need the same control plane. Browser runtimes, cloud agents,
+and sandboxes call `hydrate(...)` to request content materialization in the
+current runtime/mount cache or an equivalent streamable projection, and
+`setPinned(...)` to toggle the offline-retention request when policy allows.
+`hydrate(...)` may change `materialized` from `virtual` to `local` only for the
+authorized runtime or mount that can hold bytes; `setPinned(...)` changes the
+orthogonal `pinned` boolean and does not by itself invent a third
+materialization state.
+
 ## API-native access
 
 The filesystem is the default interface, but not the only interface.
@@ -456,6 +465,8 @@ replace(workspaceId, versionId, fromPath, toPath, {
 list(workspaceId, versionId, path, { pageToken, pageSize })
 stat(workspaceId, versionId, path)
 status(workspaceId, versionId, path?, { requestToken? })
+hydrate(workspaceId, versionId, path, { recursive?, requestToken? })
+setPinned(workspaceId, versionId, path, { pinned, recursive?, requestToken? })
 search(workspaceId, versionId, query, { pageToken, pageSize })
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
