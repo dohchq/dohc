@@ -7693,7 +7693,7 @@ Two-hundred-eighty-sixth pass:
 
 Two-hundred-eighty-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five major findings and two minor findings fixed; committed
     review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7728,6 +7728,45 @@ Two-hundred-eighty-seventh pass:
 - Overrides:
   - None approved.
 
+Two-hundred-eighty-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: six major findings and one minor finding fixed; committed
+    review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's six major findings and one minor finding:
+  - Split diff async payload validation from generic `WorkspaceAsyncPayload`
+    validation and required `diffStreamId`, version pair, request token, and
+    sequence freshness.
+  - Tightened malformed inline/reference link-title parsing and added regression
+    fixtures.
+  - Clarified deterministic capture-token invalidity versus transient proof gaps
+    that return `retryable-failure`.
+  - Added shared-channel presence/typing redaction for `actorId`, `sessionId`,
+    display labels, and parent-message identity.
+  - Added reactions and reaction actor details to shared-channel
+    re-authorization/redaction rules.
+  - Added the missing `Accessibility` entry to the live PR00 subagent review
+    summary.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Subagent Reviews
 
 - Architecture: 2026-06-23 PR00 architecture review incorporated into
@@ -7739,6 +7778,8 @@ Two-hundred-eighty-seventh pass:
 - QA: 2026-06-23 PR00 QA review incorporated into this execution log's
   validation template, Phase 0 gate checklist, and repeated CodeRabbit evidence
   blocks.
+- Accessibility: N/A for PR00 docs-only scaffold beyond the accessibility gate,
+  reviewer slot, and future evidence template already added to the plan/log.
 - Other: 2026-06-23 external architecture review incorporated into the Rust
   kernel boundary questions and the Phase 0/P0R deferral evidence.
 

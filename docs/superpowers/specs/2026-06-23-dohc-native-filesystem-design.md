@@ -576,8 +576,9 @@ headers, hunks, labels, and nested metadata obey the same redaction/default
 projection rules and request-token freshness checks as watch, snapshot, list, and
 search. The engine mints a stable `diffStreamId` for the accepted diff request,
 derived from or bound to `workspaceId`, `versionAId`, `versionBId`, and the
-server-issued request stream. Diff results are stale unless that `diffStreamId`
-and both version ids still match the active diff request.
+server-issued request stream. Diff results are stale unless that `diffStreamId`,
+both version ids, `requestToken`, and monotonic `sequence` still match and advance
+the active diff request state.
 
 In every API shape above, `expectedContentHash` is accepted only for
 non-secret-backed object operands. Secret-backed overwrite, delete,
@@ -929,7 +930,9 @@ type WorkspaceSnapshotTransportPayload<Snapshot> = WorkspaceAsyncPayload & {
   snapshot: Snapshot
 }
 
-type WorkspaceDiffTransportPayload<Diff> = Omit<WorkspaceAsyncPayload, 'versionId'> & {
+type WorkspaceDiffAsyncPayload = Omit<WorkspaceAsyncPayload, 'versionId'>
+
+type WorkspaceDiffTransportPayload<Diff> = WorkspaceDiffAsyncPayload & {
   diffStreamId: string
   versionAId: string
   versionBId: string
@@ -1001,14 +1004,16 @@ Handlers for `watch(workspaceId, versionId, path)`,
 `snapshot(workspaceId, versionId)`, `list(workspaceId, versionId, path, ...)`,
 `search(workspaceId, versionId, query, ...)`,
 `diff(workspaceId, versionAId, versionBId)`, async status transports, and
-filesystem loading must verify `WorkspaceAsyncPayload` fields before applying
-results. Diff handlers must also compare `diffStreamId`, `versionAId`, and
-`versionBId` against the active diff request before applying hunks or summary
-state. Each handler also compares the transport payload sequence against the
-latest applied value for the same
-workspace/version/request stream using BigInt-safe comparison of canonical
-`UInt64DecimalString` values, never floating-point numbers, locale string
-collation, or non-canonical decimal strings. For paginated `list` and `search`,
+filesystem loading must verify their async payload identity before applying
+results. Non-diff handlers verify `WorkspaceAsyncPayload` including `versionId`.
+Diff handlers verify `WorkspaceDiffAsyncPayload` and must compare `diffStreamId`,
+`versionAId`, `versionBId`, `requestToken`, and `sequence` against the active diff
+request before applying hunks or summary state. Each handler also compares the
+transport payload sequence against the latest applied value for the same
+workspace/version/request stream or workspace/diff-stream request using
+BigInt-safe comparison of canonical `UInt64DecimalString` values, never
+floating-point numbers, locale string collation, or non-canonical decimal
+strings. For paginated `list` and `search`,
 the `pageToken` or cursor is part of the request stream identity and must match
 the currently active workspace/version/request before appending or replacing
 results; a page for an older token, older sequence, or different request stream

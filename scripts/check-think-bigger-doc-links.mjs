@@ -587,7 +587,7 @@ const collectLinks = (markdown) => {
     }
     return count % 2 === 1
   }
-  const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)/
+  const referenceDefinitionPattern = /^\s{0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|[^\s]+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?/
   const footnoteDefinitionPattern = /^\s{0,3}\[\^[^\]\n]+\]:\s*/
   const referenceUsePattern = /!?\[([^\]\n]+)\]\[([^\]\n]*)\]/g
   const shortcutReferencePattern = /!?\[([^\]\n]+)\](?![\[(])/g
@@ -674,32 +674,53 @@ const collectLinks = (markdown) => {
       destination = value.slice(destinationStart, cursor)
     }
 
-    let quote = null
-    let titleParenDepth = 0
-    for (; cursor < value.length; cursor += 1) {
+    while (cursor < value.length && /[ \t]/.test(value[cursor])) {
+      cursor += 1
+    }
+    if (value[cursor] === ')') {
+      return {
+        target: normalizeDestination(destination),
+        start,
+        end: cursor + 1,
+        labelStart: openBracketIndex + 1,
+        labelEnd: closeBracketIndex,
+      }
+    }
+
+    const titleDelimiter = value[cursor]
+    if (titleDelimiter !== '"' && titleDelimiter !== "'" && titleDelimiter !== '(') {
+      return null
+    }
+    const titleCloseDelimiter = titleDelimiter === '(' ? ')' : titleDelimiter
+    cursor += 1
+    while (cursor < value.length) {
       const char = value[cursor]
       if (char === '\n') {
         return null
       }
-      if (quote !== null) {
-        if (char === quote) {
-          quote = null
-        }
-      } else if (char === '"' || char === "'") {
-        quote = char
-      } else if (char === '(') {
-        titleParenDepth += 1
-      } else if (char === ')') {
-        if (titleParenDepth === 0) {
-          return {
-            target: normalizeDestination(destination),
-            start,
-            end: cursor + 1,
-            labelStart: openBracketIndex + 1,
-            labelEnd: closeBracketIndex,
-          }
-        }
-        titleParenDepth -= 1
+      if (char === '\\' && cursor + 1 < value.length) {
+        cursor += 2
+        continue
+      }
+      if (char === titleCloseDelimiter) {
+        cursor += 1
+        break
+      }
+      cursor += 1
+    }
+    if (cursor > value.length || value[cursor - 1] !== titleCloseDelimiter) {
+      return null
+    }
+    while (cursor < value.length && /[ \t]/.test(value[cursor])) {
+      cursor += 1
+    }
+    if (value[cursor] === ')') {
+      return {
+        target: normalizeDestination(destination),
+        start,
+        end: cursor + 1,
+        labelStart: openBracketIndex + 1,
+        labelEnd: closeBracketIndex,
       }
     }
     return null
@@ -757,7 +778,7 @@ const collectLinks = (markdown) => {
     if (footnoteDefinition) {
       prose = prose.slice(footnoteDefinition[0].length)
     } else if (referenceDefinitionPattern.test(prose)) {
-      continue
+      prose = prose.slice(prose.match(referenceDefinitionPattern)[0].length)
     }
     const rawHtmlAnchorRanges = []
     for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
@@ -1029,6 +1050,13 @@ const assertCheckerFixtures = () => {
   ) {
     throw new Error('inline link title fixture should not parse title text as a link')
   }
+  const malformedInlineTitle = collectLinks('[visible](./visible.md [hidden](./missing.md))')
+  if (
+    malformedInlineTitle.links.some((link) => link.target === './visible.md')
+    || !malformedInlineTitle.links.some((link) => link.target === './missing.md')
+  ) {
+    throw new Error('malformed inline title fixture should expose nested links instead of erasing them')
+  }
 
   const bracketIndexing = collectLinks('Matrix M[i][j] and coordinates [1][2] are notation, not links.')
   if (bracketIndexing.unresolvedReferences.length > 0) {
@@ -1072,6 +1100,13 @@ const assertCheckerFixtures = () => {
   const referenceTargetCount = referenceLinks.links.filter((link) => link.target === './target.md').length
   if (referenceTargetCount !== 3) {
     throw new Error('reference fixture should count definition, shortcut, and full reference links exactly once')
+  }
+  const malformedReferenceTitle = collectLinks('[ref]: ./visible.md [hidden](./missing.md)\n[ref]')
+  if (
+    !malformedReferenceTitle.links.some((link) => link.target === './visible.md')
+    || !malformedReferenceTitle.links.some((link) => link.target === './missing.md')
+  ) {
+    throw new Error('malformed reference title fixture should keep reference target and expose nested links')
   }
   const duplicateReferenceLinks = collectLinks('[dup]: ./first.md\n[dup]: ./second.md\n[dup]')
   const duplicateFirstTargetCount = duplicateReferenceLinks.links.filter((link) => link.target === './first.md').length

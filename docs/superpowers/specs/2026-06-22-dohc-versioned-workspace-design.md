@@ -1006,19 +1006,19 @@ must validate that object identity before any canonical mutation, holding record
 or quarantine allocation. When the file is saved or captured, the filesystem path
 submits that engine-owned token, the intended object identity or expected-absent
 guard, and the incoming bytes. Missing, ambiguous, malformed, syntactically
-invalid, or unparseably scoped capture tokens, missing overwrite
-`targetObjectId`, or object-identity evidence that cannot be validated
-deterministically fail closed only with
+invalid, unparseably scoped, or deterministically object-mismatched capture
+tokens, and missing overwrite `targetObjectId`, fail closed with
 `PublicValidationErrorCode` value `capture_token_invalid` before any holding
 record, quarantine record, or canonical mutation is allocated. A well-formed
 capture token that resolves to a different workspace is not
-`capture_token_invalid`; it fails before persistence as `cross_workspace_reference`
-under the workspace-scoping rules. If the capture
-infrastructure cannot currently prove token/object validity or commit state
-because an evaluator or service is unavailable or indeterminate, the write
-returns `retryable-failure` with the appropriate `commitState` from the
-gate/retry matrix. Quarantine is reserved for accepted holding records whose
-well-formed replay data reaches server-side policy/protection evaluation. A
+`capture_token_invalid`; it fails before persistence as
+`cross_workspace_reference` under the workspace-scoping rules. If token/object
+identity or commit state cannot currently be proven because a required evaluator,
+storage lookup, or service is unavailable or indeterminate, the write returns
+`retryable-failure` with the appropriate `commitState` from the gate/retry matrix
+instead of pretending the token is invalid. Quarantine is reserved for accepted
+holding records whose well-formed replay data reaches server-side
+policy/protection evaluation. A
 well-formed but stale capture token, including a token whose `targetObjectId` no
 longer matches the object currently at the path because of delete/recreate,
 rename, or replacement, is a real write conflict and returns the same

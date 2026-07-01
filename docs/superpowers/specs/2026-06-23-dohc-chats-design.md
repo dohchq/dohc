@@ -2132,12 +2132,16 @@ history, notifications, or unread counts.
 
 Presence/typing fanout re-authorizes each recipient against the current channel,
 thread, linked-work, and share grant policy at delivery time. In shared channels,
-the server may redact `actorDisplayLabel`, omit `parentMessageId`, or suppress the
-signal entirely when a recipient can see the channel but not the actor, thread, or
-reply parent. Typing against a `parentMessageId` must recheck the same
-`ThreadMessage` visibility used by message reads; if the parent message is edited,
-deleted, tombstoned, or hidden before delivery, the typing signal degrades to
-thread-level typing or is suppressed without exposing deleted body metadata.
+the server must either suppress the signal entirely or redact every
+identity-bearing field consistently when a recipient can see the channel but not
+the actor, thread, session, or reply parent. A redacted live signal omits
+`actorId`, `sessionId`, `actorDisplayLabel`, and `parentMessageId`, sets
+`actorDisplayLabelRedacted: true`, and may expose only non-identifying aggregate
+state authorized for that recipient. Typing against a `parentMessageId` must
+recheck the same `ThreadMessage` visibility used by message reads; if the parent
+message is edited, deleted, tombstoned, or hidden before delivery, the typing
+signal degrades to thread-level typing or is suppressed without exposing deleted
+body metadata.
 Lightweight reactions remain durable `ReactionThreadActivity` records, while
 presence and typing remain best-effort live state.
 
@@ -2241,17 +2245,20 @@ sharing substrate.
 
 The channel should not grant broad workspace access. Shared channel access must
 compose with normal file/folder/version visibility.
-Every message, thread title, participant list, inbox or side-rail entry, activity
-feed item, unread badge, presence signal, typing indicator, read/seen state,
-link, projected reference, and free-text mention inside a shared channel must be
-re-authorized or redacted against normal workspace policy before rendering,
-search, projection, notification materialization, or export. An external viewer
-can see only the chat content and work artifacts explicitly shared with them;
-non-shared files, atoms, versions, app views, agent runs, participants, thread
-subjects, presence, typing state, read/seen state, unread state, activity, and
+Every message, reaction, reaction actor detail, thread title, participant list,
+inbox or side-rail entry, activity feed item, unread badge, presence signal,
+typing indicator, read/seen state, link, projected reference, and free-text
+mention inside a shared channel must be re-authorized or redacted against normal
+workspace policy before rendering, search, projection, notification
+materialization, or export. An external viewer can see only the chat content and
+work artifacts explicitly shared with them; non-shared files, atoms, versions,
+app views, agent runs, participants, thread subjects, reactions, reaction actor
+details, presence, typing state, read/seen state, unread state, activity, and
 unshared links remain hidden even if they are mentioned inside an otherwise
-shared thread. Explicitly shared links and work references remain visible only
-when their server-side grant is still valid for that viewer and redaction scope.
+shared thread. Explicitly shared links, work references, and reaction badges
+remain visible only when their server-side grant is still valid for that viewer
+and redaction scope; otherwise the badge and actor details are suppressed or
+redacted at the same policy boundary.
 
 User-facing preview before sharing:
 
