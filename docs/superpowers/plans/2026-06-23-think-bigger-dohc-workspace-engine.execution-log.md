@@ -7046,7 +7046,7 @@ Two-hundred-sixty-eighth pass:
 
 Two-hundred-sixty-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: eight follow-up findings handled; seven fixed and one
     lockfile warning verified stale. A committed review rerun is required after
     this pass is pushed.
@@ -7082,6 +7082,40 @@ Two-hundred-sixty-ninth pass:
     passed for 5 discovered Think Bigger docs and the in-script fixtures.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --lockfile-only --ignore-scripts`
     passed with no package or lockfile diff.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two major findings and two minor findings fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two major findings and two minor findings:
+  - Preserved empty Markdown link destinations so later validation can flag empty
+    targets.
+  - Excluded root-level indented code that looks like a Markdown list from link
+    extraction, with fixture coverage.
+  - Added the Phase0SharedSubstrateBaseline / P0S prerequisite to the Phase 0
+    gate checklist and clarified promotion is gated by policy, review, and
+    validation.
+  - Added the concrete `ReadChannelConversationResult` response union.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
   - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Unresolved findings:
@@ -7153,8 +7187,9 @@ Gate evidence:
 - [ ] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded.
 - [ ] Rust bridge/packaging/CI recommendation is recorded.
 - [ ] Main plus one named version works for one text/file driver.
+- [ ] Phase0SharedSubstrateBaseline / P0S is finalized before P0B-P0G start.
 - [ ] File/API writes durably capture immediately and produce recoverable
-      history, with canonical promotion gated by validation.
+      history, with canonical promotion gated by policy, review, and validation.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
 - [ ] Every atom, folder, entity, file, version, chat, thread, message, link,

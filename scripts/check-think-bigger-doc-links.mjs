@@ -258,9 +258,19 @@ function* contentLines(markdown) {
     const fenceLine = inFence && !fenceOpenedInBlockquote
       ? rawVisibleLine
       : stripBlockquoteMarkers(rawVisibleLine)
-    const listItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
-    const indentedListItem = Boolean(listItem)
     const rawFence = fenceLine.match(/^([ \t]*)(```+|~~~+)(.*)$/)
+    const rawListItem = line.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
+    const leadingIndent = indentationWidth(line)
+    const listItemAllowed = rawListItem && (
+      leadingIndent <= 3
+      || (
+        activeListIndent !== null
+        && leadingIndent >= activeListIndent
+        && leadingIndent <= activeListIndent + 3
+      )
+    )
+    const listItem = listItemAllowed ? rawListItem : null
+    const indentedListItem = Boolean(listItem)
     const sameLineListFence = !inFence && listItem
       ? line.slice(listItem[0].length).match(/^(```+|~~~+)(.*)$/)
       : null
@@ -269,7 +279,6 @@ function* contentLines(markdown) {
         ? [sameLineListFence[0], line.slice(0, listItem[0].length), sameLineListFence[1], sameLineListFence[2]]
         : null
     )
-    const leadingIndent = indentationWidth(line)
     const listContentIndent = listItem ? markerWidth(listItem[0]) : null
     const fenceIndent = fenceMatch ? indentationWidth(fenceMatch[1]) : null
     const fence = fenceMatch && (
@@ -477,9 +486,6 @@ const collectLinks = (markdown) => {
         cursor += 1
       }
       destination = value.slice(destinationStart, cursor)
-      if (destination === '') {
-        return null
-      }
     }
 
     let quote = null
@@ -699,6 +705,10 @@ const assertCheckerFixtures = () => {
   if (!rawHtmlEmptyHref.links.some((link) => link.target === '')) {
     throw new Error('raw HTML empty href fixture should reach empty-target validation')
   }
+  const markdownEmptyHref = collectLinks('[empty]()')
+  if (!markdownEmptyHref.links.some((link) => link.target === '')) {
+    throw new Error('empty Markdown link fixture should reach empty-target validation')
+  }
   if (collectAnchors('`<a id="fake"></a>`').has('fake')) {
     throw new Error('raw HTML anchor fixture should ignore inline code spans')
   }
@@ -744,6 +754,10 @@ const assertCheckerFixtures = () => {
   const indentedBlockquoteMarkerCode = collectLinks('    > [hidden](./missing.md)')
   if (indentedBlockquoteMarkerCode.links.length > 0 || indentedBlockquoteMarkerCode.unresolvedReferences.length > 0) {
     throw new Error('indented code starting with a blockquote marker should not produce links')
+  }
+  const indentedListItemCode = collectLinks('    - [hidden](./missing.md)')
+  if (indentedListItemCode.links.length > 0 || indentedListItemCode.unresolvedReferences.length > 0) {
+    throw new Error('indented code starting with a list marker should not produce links')
   }
   const listContinuationAfterCode = collectLinks('- item\n      code block\n    [visible](./visible.md)')
   if (!listContinuationAfterCode.links.some((link) => link.target === './visible.md')) {

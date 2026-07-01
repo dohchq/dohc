@@ -1698,6 +1698,22 @@ reserve a message id. Clients and agents use this action to recover a lost
 `channelConversationId` together with its `threadId`; they must not reconstruct
 channel conversation ids locally.
 
+```ts
+type ReadChannelConversationResult =
+  | {
+      kind: 'authorized_thread'
+      threadId: string
+      channelConversationId: string
+      provenance: ChannelConversationProvenance
+    }
+  | {
+      kind: 'needs_first_send' | 'not_found'
+      threadId?: never
+      channelConversationId?: never
+      provenance?: never
+    }
+```
+
 Chat mutation handlers are idempotent by stable request identifiers and
 server-assigned target identifiers:
 
