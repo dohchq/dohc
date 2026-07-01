@@ -249,11 +249,39 @@ function* contentLines(markdown) {
     return visible
   }
 
+  const stripBlockquoteMarkers = (value) => value.replace(/^(?: {0,3}>[ \t]?)+/, '')
+
   let lineIndex = 0
   for (const rawLine of markdown.split(/\r?\n/)) {
     lineIndex += 1
-    const rawVisibleLine = inFence ? rawLine : stripHtmlComments(rawLine)
-    const stripBlockquoteMarkers = (value) => value.replace(/^(?: {0,3}>[ \t]?)+/, '')
+    const rawLineForBlockDetection = inFence ? rawLine : stripBlockquoteMarkers(rawLine)
+    const rawListItemForBlockDetection = rawLineForBlockDetection.match(/^([ \t]*)(?:[-+*]|\d+[.)])([ \t]+)/)
+    const rawLeadingIndentForBlockDetection = indentationWidth(rawLineForBlockDetection)
+    const rawListItemAllowedForBlockDetection = rawListItemForBlockDetection && (
+      rawLeadingIndentForBlockDetection <= 3
+      || (
+        activeListIndent !== null
+        && rawLeadingIndentForBlockDetection >= activeListIndent
+        && rawLeadingIndentForBlockDetection <= activeListIndent + 3
+      )
+    )
+    const rawIndentedListItemForBlockDetection = Boolean(rawListItemAllowedForBlockDetection)
+    const rawListCodeBlockForBlockDetection = activeListIndent !== null
+      && rawLineForBlockDetection.trim() !== ''
+      && rawLeadingIndentForBlockDetection >= activeListIndent + 4
+      && !rawIndentedListItemForBlockDetection
+    const rawListContinuationForBlockDetection = activeListIndent !== null
+      && rawLineForBlockDetection.trim() !== ''
+      && rawLeadingIndentForBlockDetection >= activeListIndent
+      && !rawListCodeBlockForBlockDetection
+    const rawIndentedCodeForBlockDetection = (
+      /^(?: {4}|\t)/.test(rawLineForBlockDetection)
+      && !rawIndentedListItemForBlockDetection
+      && !rawListContinuationForBlockDetection
+    ) || rawListCodeBlockForBlockDetection
+    const rawVisibleLine = inFence || (!inHtmlComment && rawIndentedCodeForBlockDetection)
+      ? rawLine
+      : stripHtmlComments(rawLine)
     const line = inFence ? rawVisibleLine : stripBlockquoteMarkers(rawVisibleLine)
     const fenceLine = inFence && !fenceOpenedInBlockquote
       ? rawVisibleLine
@@ -758,6 +786,10 @@ const assertCheckerFixtures = () => {
   const indentedListItemCode = collectLinks('    - [hidden](./missing.md)')
   if (indentedListItemCode.links.length > 0 || indentedListItemCode.unresolvedReferences.length > 0) {
     throw new Error('indented code starting with a list marker should not produce links')
+  }
+  const indentedCodeUnclosedHtmlComment = collectLinks('    <!--\n[visible](./visible.md)')
+  if (!indentedCodeUnclosedHtmlComment.links.some((link) => link.target === './visible.md')) {
+    throw new Error('indented code HTML comment fixture should not hide later prose links')
   }
   const listContinuationAfterCode = collectLinks('- item\n      code block\n    [visible](./visible.md)')
   if (!listContinuationAfterCode.links.some((link) => link.target === './visible.md')) {

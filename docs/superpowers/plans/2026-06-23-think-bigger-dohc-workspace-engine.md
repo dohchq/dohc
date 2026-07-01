@@ -285,16 +285,13 @@ proof-arc identities required for the file/version/chat loop:
 - thread links.
 
 Deferred substrate identities stay in the expansion backlog until their
-contracts are mounted into the product surface:
+contracts are mounted into the product surface. Schema ownership, migration, and
+bridge behavior for any deferred identity listed in the
+[Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+must be read from that matrix, not from this overview list:
 
 - channels.
-- agent runs. PR 01 owns the AgentRun identity contract and migration/backfill
-  semantics. Until PR 01 promotion, agent run events are provisional
-  history/search references only and must use the stable surrogate key
-  `(workspaceId, runProvider, runExternalId)` when `runExternalId` is present,
-  with `(workspaceId, runProvider, runEventId)` as the fallback when no external
-  id exists. If neither identifier is present, replay/backfill fails closed;
-  `createdAt` is metadata only and never part of the surrogate key.
+- agent runs.
 - shares.
 - apps.
 - databases.
@@ -932,11 +929,8 @@ provisional source for the symbols listed in the matrix below. P0B, P0C, P0D,
 P0E, P0F, and P0G must import those provisional symbols from that baseline
 package rather than invent parallel shapes, ad hoc copies, local lookalike
 types, or early dependencies on PR 01-owned contracts. The baseline package must
-export the provisional `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`,
-stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
-`ConflictRecord`, `ChatThread`, `ThreadMessage`, `ThreadLink`,
-`ThreadReadState`, and `AgentRun`/agent-run surrogate symbols listed in the
-matrix, with tests proving consumers import them.
+export every Phase 0 baseline symbol in the matrix below, with tests proving
+consumers import those symbols from the baseline package.
 
 The PR 01 completion step of the same checkpoint must record in the execution
 log the commit/PR where PR 01 adopts or migrates each provisional symbol. After
@@ -962,7 +956,9 @@ until the PR 12 chat ownership boundary explicitly adopts or migrates them.
 The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
 canonical core plus chat bridge -> PR 12 final chat/link schema. Later PR entries
 may state acceptance criteria or migration notes for those symbols, but they are
-not ownership sources.
+not ownership sources. When a later PR needs any matrix-listed symbol, it must
+link back to this matrix for ownership, adoption, bridge, and migration/backfill
+rules. Local field lists and tests are acceptance requirements only.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -1792,14 +1788,12 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 - type-level compile tests where useful.
 - serialization round-trip tests.
 - schema-drift test that fails when the checked-in canonical schema no longer
-  matches generated or conformance-tested TypeScript and Rust consumers for the
-  full Phase 0 / PR 01 / PR 12 ownership-matrix symbol set plus canonical
-  link/policy boundary contracts:
-  `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, `WorkspaceEvent`,
-  `DurabilityEvent`, `HistoryMoment`, `ConflictRecord`, `ChatThread`,
-  `ThreadMessage`, `ThreadLink`, `ThreadReadState`, `AgentRun`,
-  `WorkspaceLinkRef`, projection writeability/validation types, and the core
-  effective-policy contract types/fixtures.
+  matches generated or conformance-tested TypeScript and Rust consumers for:
+  every symbol that the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+  assigns to PR 01 as owner or bridge writer, plus canonical link/policy
+  boundary contracts: `WorkspaceLinkRef`, projection writeability/validation
+  types, and the core effective-policy contract types/fixtures.
 - invalid workspace/version/path rejection.
 - stable IDs survive path rename fixture.
 - projection writeability fixture coverage.
@@ -2250,8 +2244,10 @@ links, activity, read state, and reactions.
 - Add channel membership/visibility.
 - Add DMs and small group chat primitives.
 - Add message authorship with human/agent display.
-- Define `ThreadReadState` shape, monotonic cursor semantics, and read-state API
-  upserts alongside thread/message models.
+- Implement the read-state storage/API behavior assigned to PR 12 by the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix):
+  monotonic cursor semantics, server-owned revision/CAS upserts, and projection
+  rebuild/invalidation alongside thread/message models.
 - Store chat links as `ThreadLink = chat storage fields + WorkspaceLinkRef`.
   Chat storage fields include stable link ID, source thread ID,
   read-state/search projection hooks, and chat-specific ordering. The embedded
