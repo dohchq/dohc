@@ -5657,7 +5657,7 @@ Two-hundred-thirtieth pass:
 
 Two-hundred-thirty-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5677,6 +5677,43 @@ Two-hundred-thirty-first pass:
     P0B-P0G remain queued behind the shared-substrate baseline freeze.
   - Added persisted channel conversation provenance to `ChannelChatThread` and
     channel thread-created activity records.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-thirty-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: three follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three follow-up findings:
+  - Clarified that browse-only reads and materialization do not mint durable
+    capture/replay tokens; tokens are minted or refreshed only when a
+    workspace/version/path becomes edit-capable or receives a first
+    write/create/import attempt.
+  - Split capture-token outcomes so invalid tokens map to
+    `capture_token_invalid`, indeterminate infrastructure maps to
+    `retryable-failure`, and well-formed stale tokens map to write conflict.
+  - Tightened native filesystem capture so raw local writes must resolve
+    workspace, immutable version, effective policy, and server/engine-derived
+    principal before entering workspace durability state; unbound events remain
+    isolated local spool/quarantine material.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

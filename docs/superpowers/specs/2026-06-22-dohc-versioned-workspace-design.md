@@ -858,9 +858,11 @@ save
 
 Normal filesystem saves are translated into the same semantic write contract as
 `write(workspaceId, versionId, path, bytes, ...)`, but they do not require an
-external editor or agent to synthesize a client precondition. When a file is read
-or materialized, or when a new local path is first created/imported, the engine
-records exactly one authoritative engine-owned capture/replay token for that
+external editor or agent to synthesize a client precondition. Browse-only reads
+and materialization do not create durable capture/replay tokens. When a
+workspace/version/path becomes edit-capable, or when a first write, create, or
+import attempt targets it, the engine records or refreshes exactly one
+authoritative engine-owned capture/replay token for that
 `(workspaceId, versionId, path)` tuple. That token is the workspace/version/path
 causal guard submitted by normal filesystem saves, such as a base-version token,
 etag, absence assertion, watcher sequence token, or session capture id. Broader
@@ -870,17 +872,18 @@ workspace/version/path capture/replay token and cannot substitute for it.
 First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
 a path with no prior object in that workspace/version, not a missing token. When
 the file is saved or captured, the filesystem path submits that engine-owned
-token with the incoming bytes. Missing, ambiguous, malformed, or mismatched
-workspace/version/path capture tokens fail closed through the existing
-`retryable-failure` result when capture infrastructure cannot currently prove
-commit state, or through `PublicValidationErrorCode` value
-`capture_token_invalid` before any holding record, quarantine record, or
-canonical mutation is allocated when the token problem is deterministic.
-Quarantine is reserved for accepted holding records whose well-formed replay
-data reaches server-side policy/protection evaluation. A
-well-formed but stale capture token is a real write conflict and returns the
-same deterministic current-vs-incoming conflict behavior as the API write flow
-instead of blindly overwriting canonical state.
+token with the incoming bytes. Missing, ambiguous, malformed, or wrongly scoped
+workspace/version/path capture tokens deterministically fail closed with
+`PublicValidationErrorCode` value `capture_token_invalid` before any holding
+record, quarantine record, or canonical mutation is allocated. If the capture
+infrastructure cannot currently prove token validity or commit state because an
+evaluator or service is unavailable or indeterminate, the write returns
+`retryable-failure` with the appropriate `commitState` from the gate/retry
+matrix. Quarantine is reserved for accepted holding records whose well-formed
+replay data reaches server-side policy/protection evaluation. A well-formed but
+stale capture token is a real write conflict and returns the same deterministic
+current-vs-incoming conflict behavior as the API write flow instead of blindly
+overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:

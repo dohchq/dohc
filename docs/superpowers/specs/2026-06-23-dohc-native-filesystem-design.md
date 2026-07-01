@@ -38,11 +38,12 @@ normal files and folders
 ```
 
 Editing a file is captured immediately for the version represented by that
-folder or mount. Local capture is not the same as canonical history: the write
-becomes canonical only after the quarantine/reconcile/promote path validates
-workspace, version, policy, and conflict rules. For allowed canonical writes
-there is still no user-visible commit step, apply step, or special agent
-protocol.
+folder or mount once the engine has bound the save to the active workspace,
+immutable version, and server/engine-derived principal. Local capture is not the
+same as canonical history: the write becomes canonical only after the
+quarantine/reconcile/promote path validates workspace, version, policy, and
+conflict rules. For allowed canonical writes there is still no user-visible
+commit step, apply step, or special agent protocol.
 
 When local capture is accepted but canonical promotion is still pending, callers
 must receive the shared `WriteResult.kind: 'durable-pending'` shape with a
@@ -129,12 +130,17 @@ into quarantine or manual resolution. Only after that classification may the
 ordinary content walker skip `.versions/**`; unmanaged entries are never
 silently ignored, skipped, or promoted into a named version.
 
-The path is an affordance, not the security boundary. The engine still resolves
-the active workspace, version, and effective file policy for captured writes.
-For raw local filesystem writes, exact process identity is not required for local
-durability capture only; promotion into canonical history still requires a
-server/engine-derived principal, workspace/version resolution, and policy
-validation before the captured write can leave quarantine.
+The path is an affordance, not the security boundary. The engine resolves the
+active workspace, immutable version, effective file policy, and
+server/engine-derived principal before a raw local write can enter workspace
+durability capture. A pre-auth local filesystem event may be placed in an
+isolated device-local spool or quarantine envelope for crash recovery and user
+explanation, but that envelope is not workspace durable state: it is not version
+history, not searchable, not synced, not exported, and not visible through
+workspace APIs. Only after workspace/version binding and principal resolution
+succeed may the engine append a captured write to the workspace durability log;
+then the normal policy path decides whether it becomes canonical,
+durable-pending, quarantined, rejected, retryable, or conflicted.
 
 Reserved namespace collisions fail closed. Reserved namespace handling for
 import, attach, sync, and raw filesystem scan is defined by this table:
@@ -219,13 +225,14 @@ not validate one path and then reopen a different path for content. If the
 handle identity no longer matches the canonicalized path, workspace, version,
 or reserved-namespace decision, the operation is quarantined or rejected.
 
-Identity-light capture is allowed; identity-light commit is not. During
-reconciliation, each raw local write must be revalidated against workspace
-scope, active locks, folder/atom access, sharing boundaries, skill-turn gates,
-and effective policy before it is persisted into version history. Unauthorized
-or indeterminate writes must be quarantined rather than merged into canonical
-history. Local durability logging may still record the raw capture; promotion to
-shared history waits for fresh server/engine-derived validation.
+Identity-light discovery is allowed; identity-light workspace capture and commit
+are not. During reconciliation, each raw local write must resolve an active
+workspace, immutable version, source mount binding, effective policy envelope,
+and server/engine-derived principal before it is appended to the workspace
+durability log or persisted into version history. Unauthorized, unbound, or
+indeterminate writes remain in isolated local spool/quarantine state rather than
+being merged into canonical history or treated as durable workspace capture.
+Promotion to shared history waits for fresh server/engine-derived validation.
 Before classification and policy checks complete, secret-eligible captures that
 include payload bytes must retain an encrypted payload envelope plus metadata
 until the write is promoted or explicitly discarded. Metadata-only quarantine is
@@ -300,7 +307,13 @@ Phase 0 should use a normal folder plus reconciliation:
    - Use OS file watching for create/modify/delete/rename events.
    - Debounce noisy save sequences.
    - Stat and hash changed candidates.
-   - Append captured tracked changes to the durability log with `workspaceId`,
+   - Resolve workspace, immutable version, source mount binding,
+     server/engine-derived principal, and effective file policy before appending
+     tracked changes to the workspace durability log. If any binding is missing,
+     ambiguous, stale, or indeterminate, keep the event in isolated local
+     spool/quarantine state and do not expose it as workspace history, search,
+     sync, export, status success, or an API-visible capture.
+   - Append bound tracked changes to the durability log with `workspaceId`,
      immutable `versionId`, source mount binding, version/base metadata, capture
      token, and actor/device/session provenance. Ordinary paths may include the
      canonical path. Protected or secret-backed paths must use an opaque/redacted
@@ -328,6 +341,12 @@ Phase 0 should use a normal folder plus reconciliation:
      metadata cannot prove content stability on the active filesystem. A
      filesystem-specific trust guarantee may skip this fallback only when it can
      prove unchanged content despite preserved size/mtime.
+   - Resolve workspace, immutable version, source mount binding,
+     server/engine-derived principal, and effective file policy before appending
+     a change to the workspace durability log. If any binding is missing,
+     ambiguous, stale, or indeterminate, keep the event in isolated local
+     spool/quarantine state and do not expose it as workspace history, search,
+     sync, export, status success, or an API-visible capture.
    - Detect creates, edits, deletes, and likely renames/moves.
    - Promote a captured result only when the persisted `workspaceId`, immutable
      `versionId`, and source mount binding match the workspace, version, and
