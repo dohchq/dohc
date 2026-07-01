@@ -1368,7 +1368,7 @@ for (const file of files) {
 
 if (failures.length > 0) {
   console.error(failures.join('\n'))
-  process.exit(1)
+  process.exitCode = 1
+} else {
+  console.log(`docs link/anchor check passed for ${files.length} files`)
 }
-
-console.log(`docs link/anchor check passed for ${files.length} files`)

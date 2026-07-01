@@ -838,6 +838,9 @@ type WorkspaceAsyncPayload = {
   versionId: string
   requestToken: ServerIssuedRequestToken
   sequence: UInt64DecimalString
+}
+
+type WorkspacePagedAsyncPayload = WorkspaceAsyncPayload & {
   pageToken?: string
 }
 
@@ -916,12 +919,12 @@ type WorkspaceStatusTransportPayload = WorkspaceAsyncPayload & {
   status: WorkspaceStatusPayload
 }
 
-type WorkspaceListTransportPayload<Entry> = WorkspaceAsyncPayload & {
+type WorkspaceListTransportPayload<Entry> = WorkspacePagedAsyncPayload & {
   entries: Entry[]
   nextPageToken: string | null
 }
 
-type WorkspaceSearchTransportPayload<Result> = WorkspaceAsyncPayload & {
+type WorkspaceSearchTransportPayload<Result> = WorkspacePagedAsyncPayload & {
   results: Result[]
   nextPageToken: string | null
 }

@@ -929,14 +929,15 @@ After P0A and P0R, Phase 0 has exactly one canonical ownership handoff: the
 **PR01 Schema Promotion Checkpoint**. The checkpoint includes the pre-PR01 freeze
 of `Phase0SharedSubstrateBaseline`; that freeze is not a separate lane,
 milestone, or source of truth. The main orchestration thread plus P0B own the
-checkpoint until PR 01 adopts it. During the freeze, P0B owns the shared
-substrate package scaffold and `Phase0SharedSubstrateBaseline` is the only
-provisional source for the symbols listed in the matrix below. P0B, P0C, P0D,
-P0E, P0F, and P0G must import those provisional symbols from that baseline
-package rather than invent parallel shapes, ad hoc copies, local lookalike
-types, or early dependencies on PR 01-owned contracts. The baseline package must
-export every Phase 0 baseline symbol in the matrix below, with tests proving
-consumers import those symbols from the baseline package.
+provisional baseline only until PR 01 adopts it; PR 01 is the sole canonical
+owner after handoff. During the freeze, P0B owns the shared substrate package
+scaffold and `Phase0SharedSubstrateBaseline` is the only provisional source for
+the symbols listed in the matrix below. P0B, P0C, P0D, P0E, P0F, and P0G must
+import those provisional symbols from that baseline package rather than invent
+parallel shapes, ad hoc copies, local lookalike types, or early dependencies on
+PR 01-owned contracts. The baseline package must export every Phase 0 baseline
+symbol in the matrix below, with tests proving consumers import those symbols
+from the baseline package.
 
 The PR 01 completion step of the same checkpoint must record in the execution
 log the commit/PR where PR 01 adopts or migrates each provisional symbol. After

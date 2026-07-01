@@ -1007,10 +1007,11 @@ or quarantine allocation. When the file is saved or captured, the filesystem pat
 submits that engine-owned token, the intended object identity or expected-absent
 guard, and the incoming bytes. Missing, ambiguous, malformed, syntactically
 invalid, unparseably scoped, or deterministically object-mismatched capture
-tokens, and missing overwrite `targetObjectId`, fail closed with
-`PublicValidationErrorCode` value `capture_token_invalid` before any holding
-record, quarantine record, or canonical mutation is allocated. A well-formed
-capture token that resolves to a different workspace is not
+tokens fail closed with `PublicValidationErrorCode` value
+`capture_token_invalid` before any holding record, quarantine record, or
+canonical mutation is allocated. Missing overwrite `targetObjectId` fails closed
+with `missing_precondition` or `invalid_request`. A well-formed capture token
+that resolves to a different workspace is not
 `capture_token_invalid`; it fails before persistence as
 `cross_workspace_reference` under the workspace-scoping rules. If token/object
 identity or commit state cannot currently be proven because a required evaluator,
