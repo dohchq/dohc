@@ -26,15 +26,25 @@ The user-facing promise is simple:
 
 Canonical lifecycle term: **`durable-pending holding record`**. This is the
 single prose term for an accepted, non-canonical write held for replay,
-canonicalization, or operator disposition. `WriteResult.kind: 'durable-pending'`,
-`recordKind: 'accepted_holding_record'`, and `lifecycleState:
-'pending_protection' | 'pending_review' | 'pending_canonicalization' |
-'overdue_disposition'` are wire/schema values for that same lifecycle concept:
-`pending_protection` means durable recording succeeded before async protection
-checks finished, `pending_review` means protection passed but required review has
-not approved canonical acceptance, and `pending_canonicalization` means all
-current gates passed but canonical promotion is still in progress. They are not
-separate lifecycle names.
+canonicalization, or operator disposition. The schema separates three axes:
+`kind` names the public write-result shape, `recordKind` names the durable row
+family when a public result needs that detail, and `lifecycleState` names the
+current accepted-holding state while the row remains non-canonical. Writers,
+retries, holding-record lookup, and status APIs all map the active accepted
+holding row to `kind: 'durable-pending'`,
+`recordKind: 'accepted_holding_record'`, and a `lifecycleState` of
+`pending_protection`, `pending_review`, `pending_canonicalization`, or
+`overdue_disposition`. `pending_protection` means durable recording succeeded
+before async protection checks finished, `pending_review` means protection
+passed but required review has not approved canonical acceptance,
+`pending_canonicalization` means all current gates passed but canonical
+promotion is still in progress, and `overdue_disposition` means the accepted
+holding row exceeded its operator-disposition window. If explicit operator
+disposition retires the retained holding row, retries and status APIs stop
+returning `durable-pending`; they return `kind: 'terminal-retired'` with the
+same `holdingRecordId` until the replay horizon expires, after which retry
+traffic returns `kind: 'idempotency-expired'` with the corresponding expired
+record kind.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -351,14 +361,22 @@ type WriteResult =
     })
 ```
 
-`requestedVersionIds` is the complete canonical version set named by the
+`requestedVersionIds` is the complete canonical version role vector named by the
 initiating write-producing request, not merely the version that eventually owns a
-record. Single-version operations serialize one id in request-role order. Merge,
-replace, restore, or future multi-version operations serialize every requested
-source/target version id in the operation fingerprint's canonical role order.
-Delayed acknowledgements and replayed idempotency results must match the full
-`requestedVersionIds` array before clearing in-flight state or applying UI/cache
-updates.
+record. The array is ordered by semantic request role, not lexical id order:
+single-version `write`, `delete`, `rename`, and `move` operations serialize
+`[targetVersionId]`; `replace` serializes `[targetVersionId, sourceVersionId]`;
+`restore` serializes `[targetVersionId, restoredFromVersionId]`; `merge`
+serializes `[targetVersionId, baseVersionId, currentVersionId,
+incomingVersionId]`; future multi-source operations serialize
+`[targetVersionId, baseVersionId?, currentVersionId?, incomingVersionId?,
+...sourceVersionIds]`, with optional roles omitted only when that operation does
+not define the role and `sourceVersionIds` kept in request order after server
+canonicalization. Duplicated version ids remain duplicated when two roles point
+at the same version, because the operation fingerprint compares positions, not a
+deduplicated set. Delayed acknowledgements and replayed idempotency results must
+match the full `requestedVersionIds` array before clearing in-flight state or
+applying UI/cache updates.
 
 `recordKind` is a public response field only on `durable-pending` and
 `idempotency-expired` variants. Canonical, retryable-failure, and conflict

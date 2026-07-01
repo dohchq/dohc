@@ -770,6 +770,7 @@ type ThreadLinkCreateRequest =
   | (SharedThreadLinkCreateRequestBase & {
       targetType: 'share'
       targetVersionRef: null
+      shareGrantHandle: string
     })
   | (ThreadLinkCreateRequestBase & {
       targetType: 'decision' | 'task'
@@ -779,6 +780,14 @@ type ThreadLinkCreateRequest =
       targetType: 'decision' | 'task'
       targetVersionRef?: never
     })
+
+For `ThreadLinkCreateRequest` with `targetType: 'share'`, the shared request
+must include a server-issued `shareGrantHandle` that resolves to exactly one
+authorized share grant for the actor, thread, workspace, target share, and
+target policy. The caller never supplies stored `shareGrantId` or
+`visibilityScope`; the server derives both from the handle. Missing, expired,
+revoked, forged, mismatched, or ambiguous handles fail closed before creating a
+thread link, fanout item, projection row, search edge, or export reference.
 
 type ThreadLinkBase = ThreadLinkScope & {
   id: string
