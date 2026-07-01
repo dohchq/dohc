@@ -488,6 +488,7 @@ type ChannelConversationProvenance =
       conversationKind: 'named_subconversation'
       linkedWorkTarget?: never
       namedSubconversationKey: string
+      namedSubconversationKeyVersion: string
     }
 
 type ChannelConversationCreateRequest =
@@ -509,10 +510,12 @@ type ChannelConversationCreateRequest =
 
 type SendChannelMessageConversationSelector =
   | {
+      channelId: string
       channelConversationId: string
       conversation?: never
     }
   | {
+      channelId: string
       channelConversationId?: never
       conversation: ChannelConversationCreateRequest
     }
@@ -527,9 +530,11 @@ empty result, reject ASCII control characters and path-like separators (`/`,
 `\`, NUL), and enforce both a 96 Unicode-scalar limit and a 256 UTF-8 byte limit
 after normalization. Internal whitespace is preserved exactly after NFC/case
 folding; the server does not collapse or rewrite it. The server stores the
-normalized key plus the normalization-version metadata used to derive it, and
-creation retries must compare against that stored value instead of
-reinterpreting an older key with a newer normalizer.
+versioned normalized value as `(namedSubconversationKey,
+namedSubconversationKeyVersion)` on `ChannelConversationProvenance`, and
+creation retries compare against that stored pair instead of re-normalizing with
+the current rules. If the normalizer changes later, migration must create a new
+versioned value explicitly rather than silently reinterpreting old keys.
 
 type ChannelChatThread = ChatThreadBase & ChannelConversationProvenance & {
   channelId: string
@@ -743,10 +748,10 @@ after creation. The active uniqueness key is
 `channelConversationId: "default"` for the default channel stream conversation.
 The persisted thread row also stores the canonical conversation provenance:
 `conversationKind` plus the selected `linkedWorkTarget` for `linked_work`, the
-server-normalized `namedSubconversationKey` for `named_subconversation`, or
-neither field for `default`. Reads, replay, export, search, idempotent retries,
-and migration jobs must use that stored provenance instead of reverse-engineering
-intent from `channelConversationId`.
+server-normalized `(namedSubconversationKey, namedSubconversationKeyVersion)`
+pair for `named_subconversation`, or neither field for `default`. Reads, replay,
+export, search, idempotent retries, and migration jobs must use that stored
+provenance instead of reverse-engineering intent from `channelConversationId`.
 Non-default `channelConversationId` values must be server-issued and
 deterministic from one canonical channel-conversation context tuple; clients must
 not invent them. That tuple includes `workspaceId`, `channelId`,
@@ -774,11 +779,12 @@ exactly one canonical target, get-or-create must fail closed as ambiguous instea
 of picking from `Channel.linkedTargets` order. The selected target is the sole
 linked-work discriminator for `channelConversationId` generation, replay,
 export, search, and subsequent thread reads.
-`send_channel_message` accepts a `SendChannelMessageConversationSelector`: either
-an existing server-issued `channelConversationId`, or a
-`ChannelConversationCreateRequest` whose `named_subconversation` branch carries
-the raw `namedSubconversationName` used to derive the stored
-`namedSubconversationKey`. Callers obtain the server-issued
+`send_channel_message` accepts a `SendChannelMessageConversationSelector` with
+the target `channelId`: either an existing server-issued
+`channelConversationId`, or a `ChannelConversationCreateRequest` whose
+`named_subconversation` branch carries the raw `namedSubconversationName` used to
+derive the stored `(namedSubconversationKey,
+namedSubconversationKeyVersion)` pair. Callers obtain the server-issued
 `channelConversationId` from the `send_channel_message` create/read response or
 from a thread/conversation read for the same canonical context tuple. Clients and
 agents should persist and reuse that returned `channelConversationId` with the

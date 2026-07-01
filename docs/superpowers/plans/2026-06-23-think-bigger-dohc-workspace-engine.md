@@ -608,8 +608,11 @@ better answer.
    - Plain files use bytes/text.
    - Rich docs can use Y.Doc.
    - SQLite/app-backed objects get dedicated drivers later.
-   - Every driver must declare snapshot, diff, merge/conflict, projection,
-     search, export, restore, and ACL behavior.
+   - Every driver must declare the behaviors that apply to it: snapshot, diff,
+     merge/conflict, projection, search, export, restore, ACL, and recovery.
+   - `readOnly` and `internalOnly` drivers use the reduced behavior matrix
+     defined above; they must not be treated as if they implement the full
+     writable content-driver surface.
 
 8. **Secret model:** secret-backed files are a first-class driver, not ordinary
    plaintext with a label.
@@ -1630,8 +1633,11 @@ Milestones:
   snapshots, conflicts, policies, secrets, lazy hydration, and API parity.
 - **Chats proof:** PR 12-17 prove channels, DMs, agent participation, side-rail
   links, notifications, and search.
-- **Collaboration expansion:** PR 18-22 prove external/shared channels,
+- **Collaboration expansion:** PR 18-21 and PR 22 prove external/shared channels,
   integrated UX, agent work loops, migration, and full release hardening.
+- **Sync replication and offline rejoin:** PR 21R runs after the PR 21 migration
+  contracts are known and before PR 22 release hardening closes; it has its own
+  acceptance gate for local-to-cloud and machine-to-machine replication.
 
 Do not expose the new system as the default product surface until the
 Foundation alpha and the relevant surface proof are complete.

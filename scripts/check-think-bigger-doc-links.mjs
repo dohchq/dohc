@@ -156,6 +156,40 @@ const htmlAttributeValue = (tag, attrName) => {
 
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
 
+const inlineCodeRanges = (line) => {
+  const ranges = []
+  let index = 0
+  while (index < line.length) {
+    if (line[index] !== '`') {
+      index += 1
+      continue
+    }
+    let tickEnd = index + 1
+    while (tickEnd < line.length && line[tickEnd] === '`') {
+      tickEnd += 1
+    }
+    const marker = '`'.repeat(tickEnd - index)
+    const close = line.indexOf(marker, tickEnd)
+    if (close === -1) {
+      index = tickEnd
+      continue
+    }
+    ranges.push([index, close + marker.length])
+    index = close + marker.length
+  }
+  return ranges
+}
+
+const isInsideRange = (index, ranges) => ranges.some(([start, end]) => index >= start && index < end)
+
+const indexOutsideInlineCode = (line, needle, fromIndex, ranges) => {
+  let index = line.indexOf(needle, fromIndex)
+  while (index !== -1 && isInsideRange(index, ranges)) {
+    index = line.indexOf(needle, index + 1)
+  }
+  return index
+}
+
 function* contentLines(markdown) {
   let inFence = false
   let fenceChar = null
@@ -165,8 +199,10 @@ function* contentLines(markdown) {
   let inHtmlComment = false
 
   const stripHtmlComments = (line) => {
+    const codeRanges = inlineCodeRanges(line)
     let rest = line
     let visible = ''
+    let offset = 0
     while (rest.length > 0) {
       if (inHtmlComment) {
         const end = rest.indexOf('-->')
@@ -174,23 +210,26 @@ function* contentLines(markdown) {
           return visible
         }
         rest = rest.slice(end + 3)
+        offset += end + 3
         inHtmlComment = false
         continue
       }
 
-      const start = rest.indexOf('<!--')
+      const start = indexOutsideInlineCode(line, '<!--', offset, codeRanges)
       if (start === -1) {
         return visible + rest
       }
 
-      visible += rest.slice(0, start)
-      rest = rest.slice(start + 4)
+      visible += line.slice(offset, start)
+      offset = start + 4
+      rest = line.slice(offset)
       const end = rest.indexOf('-->')
       if (end === -1) {
         inHtmlComment = true
         return visible
       }
       rest = rest.slice(end + 3)
+      offset += end + 3
     }
     return visible
   }
@@ -443,6 +482,17 @@ const assertCheckerFixtures = () => {
   const commented = collectLinks('<!-- [hidden](./missing.md) -->\nVisible')
   if (commented.links.length > 0) {
     throw new Error('HTML comment fixture should not produce links')
+  }
+  const inlineCodeCommentDelimiter = collectLinks('`<!--` [visible](./visible.md) `-->`')
+  if (!inlineCodeCommentDelimiter.links.some((link) => link.target === './visible.md')) {
+    throw new Error('inline-code HTML comment delimiters should not hide visible links')
+  }
+  const realCommentAfterInlineCode = collectLinks('`<!--` <!-- [hidden](./missing.md) --> [visible](./visible.md)')
+  if (
+    realCommentAfterInlineCode.links.some((link) => link.target === './missing.md')
+    || !realCommentAfterInlineCode.links.some((link) => link.target === './visible.md')
+  ) {
+    throw new Error('real HTML comments after inline code should still be stripped')
   }
   if (collectAnchors('<!-- # Hidden -->').has('hidden')) {
     throw new Error('HTML comment fixture should not produce anchors')

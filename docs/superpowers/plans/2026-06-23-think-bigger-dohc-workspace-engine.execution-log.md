@@ -166,7 +166,7 @@ Date completed:
 
 - ...
 
-### Phase 0 Decision Note
+### Phase 0 Decision Note Entry Template
 
 - Storage baseline:
 - Filesystem interposition:
@@ -6130,7 +6130,7 @@ Two-hundred-forty-third pass:
 
 Two-hundred-forty-fourth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6146,6 +6146,47 @@ Two-hundred-forty-fourth pass:
   - Removed `retentionUntil` from the `accepted_holding_record` durable-pending
     wire arm and reserved it for `rejected` and `quarantined` retention semantics,
     with `operatorDispositionDueAt` carrying accepted-holding status escalation.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-forty-fifth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: eight follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's eight follow-up findings:
+  - Updated the docs-link checker so HTML comment delimiters inside inline code
+    do not hide visible links, and added in-script fixtures for that case.
+  - Made the content-driver contract conditional on driver capability, including
+    reduced `readOnly` and `internalOnly` surfaces.
+  - Added PR 21R as an explicit sync/offline-rejoin milestone with its own
+    acceptance gate between PR 21 migration and PR 22 hardening.
+  - Persisted `namedSubconversationKeyVersion` alongside
+    `namedSubconversationKey` and required retries to compare the stored pair.
+  - Added `channelId` to both `SendChannelMessageConversationSelector` branches.
+  - Clarified replay identity to hash/compare normalized guard class and value
+    instead of raw precondition alias names.
+  - Renamed the execution-log template heading to avoid duplicating the stable
+    `Phase 0 Decision Note` anchor.
+  - Split P0S out of the Phase 0 proof-arc PR lane list into a checkpoint
+    subsection.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -6199,17 +6240,20 @@ Two-hundred-forty-fourth pass:
 
 ### Phase 0 Proof Arc
 
-PRs and checkpoint:
+PR lanes:
 
 - P0A
 - P0R
-- P0S - PR01 Schema Promotion Checkpoint, not a standalone lane
 - P0B
 - P0C
 - P0D
 - P0E
 - P0F
 - P0G
+
+Checkpoint:
+
+- P0S - PR01 Schema Promotion Checkpoint, not a standalone lane.
 
 Gate evidence:
 

@@ -1016,6 +1016,14 @@ class. Supplying two aliases for the same guard, omitting the required guard, or
 treating aliases such as `expectedBaseVersion` and `expectedEtag` as independent
 freshness checks is a malformed request/protocol error before conflict
 materialization.
+Idempotency and replay identity use the normalized guard class plus the
+server-normalized guard value, not the raw request field name. Equivalent aliases
+such as `expectedBaseVersion` and `expectedEtag` must be resolved into the same
+causal precondition tuple before computing `idempotencyReplayToken`,
+idempotency fingerprints, or `replay_metadata_mismatch` comparisons. A retry that
+changes only the alias spelling but proves the same normalized guard class/value
+is the same replay identity; a retry whose normalized guard class or value
+differs is a `replay_metadata_mismatch`.
 `expectedContentHash` is never accepted for secret-backed objects or redacted
 secret hash handles. Secret-backed overwrite, delete, rename/move source, and
 replace source/destination operands must use another permitted freshness guard,
