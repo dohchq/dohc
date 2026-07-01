@@ -8028,13 +8028,13 @@ Two-hundred-ninety-fifth pass:
 
 Two-hundred-ninety-sixth pass:
 
-<a id="live-pr00-status"></a>
+<a id="historical-pr00-status-296"></a>
 
-### Live PR00 Status
+### Historical PR00 Status
 
-Mutable status symbol: `LivePR00Status`.
+Historical status snapshot.
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three major findings and three minor findings fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -8074,6 +8074,60 @@ Mutable status symbol: `LivePR00Status`.
     before completion or merge-readiness.
 - Overrides:
   - None approved.
+
+Two-hundred-ninety-seventh pass:
+
+<a id="live-pr00-status"></a>
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: six major findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+
+- Fixed CodeRabbit's six major findings:
+  - Separated pre-auth local spool/quarantine metadata from workspace durability
+    capture in the native filesystem spec.
+  - Tightened versions-namespace activation fence variants so activate and
+    rollback states cannot carry the wrong transition.
+  - Hardened the Think Bigger docs checker to locate execution-log contract
+    markers through anchored heading and line-boundary matching.
+  - Defined `channel-slug-v1` normalization, uniqueness, collision, and redirect
+    behavior for channel lookup aliases.
+  - Separated pre-persistence immediate denials from post-acceptance durable
+    `rejected`/`quarantined_*` outcomes in the versioned write flow.
+  - Defined `channel-conversation-id-v1` deterministic serialization and hashing
+    for default, linked-work, and named-subconversation channel threads.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+### Unresolved Findings
+
+- CodeRabbit committed review rerun remains pending.
+- The PR00 docs-only local-agent-CLI exception remains pending human approval
+  before completion or merge-readiness.
 
 ### Subagent Reviews
 

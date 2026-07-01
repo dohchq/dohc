@@ -338,9 +338,13 @@ Before quarantine can be lifted, the capture/promotion policy path must perform
 explicit server/engine validation and the same policy checks for workspace scope,
 user locks, folder/atom access, sharing boundaries, protected paths, and
 skill-turn gates. If a raw OS write arrives without a resolvable active
-principal, dohc may record device/session provenance in the local durability log,
-but promotion to canonical history stays quarantined until a valid principal and
-policy decision are established.
+principal, dohc may record device/session provenance only in the isolated
+pre-auth spool/quarantine envelope for crash recovery and user explanation. It
+must not append that raw write, its payload, or its provenance to the workspace
+durability log until workspace/version binding, principal resolution, and policy
+validation all succeed; after that point the normal durability result may still
+be canonical, durable-pending, quarantined, rejected, retryable-failure, or
+conflict.
 
 ## Local capture and reconciliation
 
@@ -861,31 +865,32 @@ type VersionsNamespaceActivationFence =
       state: 'inactive'
       fenceId?: never
     }
-  | (VersionsNamespaceActivationFenceActive & {
+  | (VersionsNamespaceActivationFenceBase & VersionsNamespaceActivateTransition & {
       state: 'activating'
       decision: 'activate'
     })
-  | (VersionsNamespaceActivationFenceActive & {
+  | (VersionsNamespaceActivationFenceBase & VersionsNamespaceActivateTransition & {
       state: 'committing'
       decision: 'activate'
     })
-  | (VersionsNamespaceActivationFenceActive & {
+  | (VersionsNamespaceActivationFenceBase & VersionsNamespaceRollbackTransition & {
       state: 'rolling_back'
       decision: 'rollback'
     })
 
 type VersionsNamespaceActivationFenceActive =
-  VersionsNamespaceActivationFenceBase & VersionsNamespaceActivationTransition
+  | (VersionsNamespaceActivationFenceBase & VersionsNamespaceActivateTransition)
+  | (VersionsNamespaceActivationFenceBase & VersionsNamespaceRollbackTransition)
 
-type VersionsNamespaceActivationTransition =
-  | {
-      fromMode: 'legacy_unmanaged'
-      toMode: 'managed_versions'
-    }
-  | {
-      fromMode: 'managed_versions'
-      toMode: 'legacy_unmanaged'
-    }
+type VersionsNamespaceActivateTransition = {
+  fromMode: 'legacy_unmanaged'
+  toMode: 'managed_versions'
+}
+
+type VersionsNamespaceRollbackTransition = {
+  fromMode: 'managed_versions'
+  toMode: 'legacy_unmanaged'
+}
 
 type VersionsNamespaceActivationFenceBase = {
   fenceId: string

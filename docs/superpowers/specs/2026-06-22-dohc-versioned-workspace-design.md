@@ -813,20 +813,26 @@ that shared order:
 
 1. visibility, authorization/permission, ownership, review gate, policy,
    protected-path, secret-broker/declassification, lock, version-access,
-   skill-turn, provenance, attribution, and proof denials return their mapped
-   `rejected` or `quarantined_*` result before any content comparison.
-2. unavailable or indeterminate required evaluators return
+   skill-turn, provenance, attribution, and proof denials return an immediate
+   `PublicDeniedReasonCode` response with no holding record, quarantine record,
+   idempotency result, or canonical commit when no durable record is being
+   created.
+2. only replayed or post-acceptance gate failures return durable `rejected` or
+   `quarantined_*` results, using the same one-to-one denial mapping recorded in
+   the durable outcome matrix.
+3. unavailable or indeterminate required evaluators return
    `retryable-failure` with no canonical mutation.
-3. real visibility-boundary crossings return the mapped denied/quarantined
-   visibility result before conflict or review handling, so hidden state is not
-   leaked through conflict envelopes or review queues.
-4. preserved base/current/incoming divergence, stale causal bases, or semantic
+4. real visibility-boundary crossings return immediate `visibility_denied`
+   before durable acceptance, or `quarantined_visibility` only after a record is
+   already durably accepted/replayed, so hidden state is not leaked through
+   conflict envelopes or review queues.
+5. preserved base/current/incoming divergence, stale causal bases, or semantic
    merge uncertainty create conflict preservation/reconciliation.
-5. mandatory review for an otherwise clean write creates a `durable-pending`
+6. mandatory review for an otherwise clean write creates a `durable-pending`
    holding record with `lifecycleState: 'pending_review'` only after the accepted
    write-intent record and idempotency result are durable; no canonical file
    content is mutated yet.
-6. a clean write that passes all synchronous gates and does not require
+7. a clean write that passes all synchronous gates and does not require
    deferred review or deferred canonicalization saves immediately to that
    version.
 

@@ -390,6 +390,18 @@ existing `ChatThread` rows, rewrite message history, or invalidate durable
 links. Active slugs are unique per workspace; old aliases may redirect or expire
 according to product policy, but they are never the durable join key for
 threads, notifications, search, projections, export, replay, or history.
+Canonical slug normalization is `channel-slug-v1`: trim leading/trailing
+Unicode whitespace, normalize to Unicode NFKC, apply Unicode default case
+folding, replace each run of Unicode whitespace, punctuation, or separator
+characters with a single ASCII `-`, drop remaining characters outside Unicode
+letters/numbers plus `-`, collapse repeated `-`, and trim leading/trailing `-`.
+The server rejects empty, reserved, or over-length slugs after normalization and
+enforces uniqueness on `(workspaceId, channelSlug)` for active channels. Rename
+or create requests that collide with an active slug fail with
+`channel_slug_conflict`; clients may propose another display name or explicit
+slug, but only the server-normalized slug becomes a lookup alias. Redirect rows
+for old aliases store the normalized slug and the target `channelId`, never a
+thread join key.
 
 Channel ACL and visibility are server-derived from workspace membership,
 channel membership, explicit linked targets, and shared-channel grants. Every
@@ -918,10 +930,26 @@ target tuple for `linked_work`, normalized server-owned conversation key for
 discriminator for `default`. The same tuple, including
 `namedSubconversationKeyVersion`, must reuse the existing id through atomic
 get-or-create; a materially different tuple or normalization version gets a new
-deterministic id and therefore a different thread. Ordinary
-`ThreadLink` rows added or removed after thread creation are separate linked-work
-metadata and never mutate the `channelConversationId`. Changing the channel
-association, conversation kind, linked-work discriminator that defined a
+deterministic id and therefore a different thread.
+The deterministic id algorithm is `channel-conversation-id-v1`. `default`
+always serializes to literal `channelConversationId: "default"`. For
+non-default conversations, the server serializes a UTF-8 length-prefixed tuple:
+`["channel-conversation-id-v1", workspaceId, channelId, conversationKind,
+discriminatorKind, discriminatorVersion, discriminatorValue]`. For
+`linked_work`, `discriminatorKind` is `linked_work`,
+`discriminatorVersion` is the canonical linked-target serialization version, and
+`discriminatorValue` is the canonical serialization of exactly one
+server-resolved linked target. For `named_subconversation`,
+`discriminatorKind` is `named_subconversation`, `discriminatorVersion` is
+`namedSubconversationKeyVersion`, and `discriminatorValue` is the
+server-normalized `namedSubconversationKey`. The resulting
+`channelConversationId` is `cc:v1:` plus lowercase base32 without padding of
+SHA-256 over those tuple bytes. Atomic get-or-create, retries, replay, redirects,
+and migration jobs must use this exact serialization before inserting or looking
+up `(workspaceId, channelId, channelConversationId)`.
+Ordinary `ThreadLink` rows added or removed after thread creation are separate
+linked-work metadata and never mutate the `channelConversationId`. Changing the
+channel association, conversation kind, linked-work discriminator that defined a
 `linked_work` conversation, or named-subconversation key requires tombstoning or
 archiving the old thread and creating a new one. Channel renames, moves, topic
 changes, ordering changes, and other channel metadata updates preserve

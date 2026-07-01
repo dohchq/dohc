@@ -1148,10 +1148,35 @@ const lineOccurrenceCount = (raw, exactLine) => raw
   .filter((line) => line === exactLine)
   .length
 
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const findHeadingIndex = (raw, heading, startIndex = 0) => {
+  const pattern = new RegExp(`(^|\\n)${escapeRegExp(heading)}\\s*(?:\\r?\\n|$)`, 'g')
+  pattern.lastIndex = startIndex
+  const match = pattern.exec(raw)
+  if (!match) {
+    return -1
+  }
+  return match.index + (match[1] ? 1 : 0)
+}
+
+const findLineMarkerIndex = (raw, marker, startIndex = 0) => {
+  if (/^#{1,6}\s+/.test(marker)) {
+    return findHeadingIndex(raw, marker, startIndex)
+  }
+  const pattern = new RegExp(`(^|\\n)${escapeRegExp(marker)}.*(?:\\r?\\n|$)`, 'g')
+  pattern.lastIndex = startIndex
+  const match = pattern.exec(raw)
+  if (!match) {
+    return -1
+  }
+  return match.index + (match[1] ? 1 : 0)
+}
+
 const requireOrderedMarkers = (raw, markers, label, startIndex = 0) => {
   let cursor = startIndex
   for (const marker of markers) {
-    const index = raw.indexOf(marker, cursor)
+    const index = findLineMarkerIndex(raw, marker, cursor)
     if (index === -1) {
       failures.push(`${executionLogContract.file}: missing ${label} marker ${marker}`)
       return -1
@@ -1162,16 +1187,20 @@ const requireOrderedMarkers = (raw, markers, label, startIndex = 0) => {
 }
 
 const sectionSlice = (raw, heading) => {
-  const start = raw.indexOf(heading)
+  const start = findHeadingIndex(raw, heading)
   if (start === -1) {
     return null
   }
-  const rest = raw.slice(start + heading.length)
-  const nextPeerHeading = rest.search(/\n##\s+/)
-  return raw.slice(
-    start,
-    nextPeerHeading === -1 ? raw.length : start + heading.length + nextPeerHeading,
-  )
+  const level = heading.match(/^(#{1,6})\s+/)?.[1]?.length
+  if (!level) {
+    return null
+  }
+  const firstLineEnd = raw.indexOf('\n', start)
+  const searchStart = firstLineEnd === -1 ? raw.length : firstLineEnd + 1
+  const nextHeadingPattern = new RegExp(`\\n#{1,${level}}\\s+`, 'g')
+  nextHeadingPattern.lastIndex = searchStart
+  const nextHeading = nextHeadingPattern.exec(raw)
+  return raw.slice(start, nextHeading ? nextHeading.index : raw.length)
 }
 
 const assertExecutionLogContract = () => {
