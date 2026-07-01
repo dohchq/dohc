@@ -135,15 +135,21 @@ mount. Activation surfaces a user-facing migration choice instead of immediate
 quarantine: move the legacy content to a collision-proof ordinary path, bind
 eligible children as managed versions, preserve the legacy content outside the
 future skipped namespace while choosing another managed namespace, or cancel
-activation. Managed-namespace opt-in cannot be finalized while legacy unmanaged
-entries still live under a `.versions/**` path that the ordinary walker will skip.
-Only after every legacy entry has been moved, explicitly reclassified as a
-managed version, or otherwise preserved outside the skipped namespace may the
-workspace record managed-namespace opt-in and let the ordinary content walker
-apply the default `.versions/**` skip rule for that workspace. Unmanaged entries
-created after opt-in are then fail-closed into quarantine or manual resolution.
-Unmanaged entries are never silently ignored, skipped, or promoted into a named
-version.
+activation. Activation is all-or-nothing: either every legacy `.versions/**`
+entry is moved, explicitly reclassified, or preserved outside the skipped
+namespace in the same cutover that records the workspace
+`versionsNamespaceMode: 'managed_versions'`, or the workspace remains
+`legacy_unmanaged`, the materialized workspace walker continues treating those
+entries as ordinary content, and the workspace/version mount resolver still
+refuses to enter them as managed roots. Managed-namespace opt-in cannot be
+finalized while legacy unmanaged entries still live under a `.versions/**` path
+that the ordinary walker will skip. Only after the cutover commits may the
+ordinary content walker apply the default `.versions/**` skip rule and may the
+workspace/version mount resolver own named-version mounts. On any activation
+failure, the workspace record, ordinary-walker skip rule, and resolver-owned
+mount bindings roll back together. Unmanaged entries created after opt-in are
+then fail-closed into quarantine or manual resolution. Unmanaged entries are
+never silently ignored, skipped, or promoted into a named version.
 
 The path is an affordance, not the security boundary. The engine resolves the
 active workspace, immutable version, effective file policy, and
@@ -485,9 +491,9 @@ replace(workspaceId, versionId, fromPath, toPath, {
 })
 list(workspaceId, versionId, path, { pageToken, pageSize })
 stat(workspaceId, versionId, path)
-status(workspaceId, versionId, path?, { requestToken? })
-hydrate(workspaceId, versionId, path, { recursive?, requestToken? })
-setPinned(workspaceId, versionId, path, { pinned, recursive?, requestToken? })
+status(workspaceId, versionId, path?, { requestToken?: ServerIssuedRequestToken })
+hydrate(workspaceId, versionId, path, { recursive?, requestToken?: ServerIssuedRequestToken })
+setPinned(workspaceId, versionId, path, { pinned, recursive?, requestToken?: ServerIssuedRequestToken })
 search(workspaceId, versionId, query, { pageToken, pageSize })
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
@@ -759,11 +765,12 @@ monotonic ordering guard before it can update UI state:
 ```ts
 // Canonical base-10 unsigned 64-bit integer.
 type UInt64DecimalString = string
+type ServerIssuedRequestToken = string & { readonly __brand: 'ServerIssuedRequestToken' }
 
 type WorkspaceAsyncPayload = {
   workspaceId: string
   versionId: string
-  requestToken: string
+  requestToken: ServerIssuedRequestToken
   sequence: UInt64DecimalString
   pageToken?: string
 }
@@ -819,7 +826,11 @@ or forge the token. Every async payload for that request stream echoes the exact
 token minted for the initiating request, and stale-response checks compare that
 token together with workspace/version/page identity before applying results.
 Filesystem loading and local reconciliation mint the same kind of token from the
-engine context before emitting progress or result payloads.
+engine context before emitting progress or result payloads. The `requestToken`
+parameters on `status(...)`, `hydrate(...)`, and `setPinned(...)` are echo-only:
+callers may pass back a server/engine-issued token from an accepted request
+stream, but client-generated tokens are ignored or rejected and never establish
+request ownership.
 
 `WorkspaceAsyncPayload.sequence` uses `UInt64DecimalString`: ASCII base-10
 digits only, no sign, separators, decimal point, whitespace, locale/non-ASCII
@@ -1408,7 +1419,8 @@ secret state, including the exact `secretProjection` value, export state, and
 conflict state above in one coherent record. They must preserve the
 `protectedLocal` versus `plaintextLocal` distinction in serialized status output
 and include the relevant
-`holdingRecordId`, `conflictReplayToken`, idempotency correlation, and conflict
+`holdingRecordId`, `conflictReplayToken`,
+`idempotencyResultId`/`idempotencyReplayToken`, and conflict
 projection path when policy permits. A status projection must report `canonical`
 once the same write has promoted into history. `idempotency-expired` is not a
 persisted workspace status or badge state; it appears only as an operation result

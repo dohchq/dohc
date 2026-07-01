@@ -114,7 +114,7 @@ Normative gate/retry matrix:
 | Gate outcome | Public result | Commit state / record |
 | --- | --- | --- |
 | Malformed request, missing/incompatible precondition, invalid path/version, or cross-workspace reference before persistence | validation error such as `invalid_request`, `malformed_request`, `missing_precondition`, `incompatible_precondition`, `invalid_path`, `invalid_version`, or `cross_workspace_reference` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
-| Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. Well-formed but stale or object-mismatched capture tokens do not use this code; they route to `conflict`. |
+| Deterministically missing, ambiguous, malformed, syntactically invalid, or unparseably scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. Well-formed tokens that resolve to another workspace use `cross_workspace_reference`; well-formed but stale or object-mismatched capture tokens route to `conflict`. |
 | Replayed idempotency key with mismatched stable actor identity, session-equivalence class when policy requires it, workspace, version context, operation type, target, secret-safe operand fingerprint, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `replayUntil`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
@@ -955,11 +955,15 @@ the intended `targetObjectId` obtained from the engine's read/stat/list state an
 must validate that object identity before any canonical mutation, holding record,
 or quarantine allocation. When the file is saved or captured, the filesystem path
 submits that engine-owned token, the intended object identity or expected-absent
-guard, and the incoming bytes. Missing, ambiguous, malformed, or wrongly scoped
-capture tokens, missing overwrite `targetObjectId`, or object-identity evidence
-that cannot be validated deterministically fail closed only with
+guard, and the incoming bytes. Missing, ambiguous, malformed, syntactically
+invalid, or unparseably scoped capture tokens, missing overwrite
+`targetObjectId`, or object-identity evidence that cannot be validated
+deterministically fail closed only with
 `PublicValidationErrorCode` value `capture_token_invalid` before any holding
-record, quarantine record, or canonical mutation is allocated. If the capture
+record, quarantine record, or canonical mutation is allocated. A well-formed
+capture token that resolves to a different workspace is not
+`capture_token_invalid`; it fails before persistence as `cross_workspace_reference`
+under the workspace-scoping rules. If the capture
 infrastructure cannot currently prove token/object validity or commit state
 because an evaluator or service is unavailable or indeterminate, the write
 returns `retryable-failure` with the appropriate `commitState` from the

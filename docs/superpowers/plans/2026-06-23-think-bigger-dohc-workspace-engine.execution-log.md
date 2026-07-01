@@ -6315,7 +6315,7 @@ Two-hundred-forty-eighth pass:
 
 Two-hundred-forty-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6331,6 +6331,43 @@ Two-hundred-forty-ninth pass:
     accessibility acceptance gates.
   - Made message create reserve or replay the server-assigned `ThreadMessage.id`
     before parent validation, self-parent checks, and ancestry cycle detection.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fiftieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five follow-up findings:
+  - Split capture-token validation so syntactically invalid or unparseably scoped
+    tokens use `capture_token_invalid`, while valid cross-workspace tokens use
+    `cross_workspace_reference`.
+  - Added all-or-nothing managed `.versions/**` namespace cutover semantics.
+  - Made `requestToken` a declared server-issued echo token across native status,
+    hydrate, set-pinned, and async payload shapes.
+  - Replaced vague status idempotency wording with
+    `idempotencyResultId`/`idempotencyReplayToken`.
+  - Required legacy delete activities to carry delete hashes, with
+    `legacyHashSource` distinguishing imported-body from redacted-fallback
+    evidence.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

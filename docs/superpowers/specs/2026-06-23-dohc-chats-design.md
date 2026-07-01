@@ -1232,8 +1232,9 @@ type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
   legacyImportId: string
   previousBody?: ChatBodySnapshot
   deleteReason?: string
-  bodyHash?: string
-  tombstoneHash?: string
+  bodyHash: string
+  tombstoneHash: string
+  legacyHashSource: 'imported_body' | 'redacted_fallback'
 }
 
 type MessageRestoreThreadActivity = ThreadActivityBase & {
@@ -1427,7 +1428,12 @@ new body. Legacy import flows that cannot recover a prior body revision must map
 `message_deleted_legacy`, which renders as a tombstone, preserves
 `legacyImportId`, `deleteReason`, and any available redacted/secret-backed body
 snapshot, and is handled explicitly by history/export/replay as incomplete legacy
-evidence rather than a normal in-system delete. Reaction events must satisfy
+evidence rather than a normal in-system delete. Legacy delete activities are
+exempt from the in-system requirement to hash a recovered prior plaintext body,
+but they must still carry `bodyHash` and `tombstoneHash`: use the imported body
+when available, otherwise hash a deterministic redacted fallback and set
+`legacyHashSource: 'redacted_fallback'` so export/replay can distinguish the
+evidence quality. Reaction events must satisfy
 exactly one identity mode: either a
 stable `reactionId`, or the complete deterministic tuple `(workspaceId,
 threadId, messageId, actorId, reactionKey)`. `ThreadActivityBase.actorId` is the
