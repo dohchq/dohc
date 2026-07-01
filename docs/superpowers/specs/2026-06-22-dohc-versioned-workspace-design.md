@@ -521,11 +521,24 @@ still-unresolved accepted records must enter `overdue_disposition` and remain
 operator-visible until canonicalized or explicitly dispositioned. Payload bytes
 must not be deleted, cryptoshredded, or compacted into non-reconstructible
 evidence without that explicit disposition record.
-Status APIs and holding-record lookup represent that state as
-`terminal-retired` for the same `holdingRecordId` while retained retirement
-metadata exists; they must not collapse it into `rejected`, `quarantined`,
-conflict, `idempotency-expired`, or generic expiration. Write retries are
-different: before `replayUntil`, retry tooling replays the `terminal-retired`
+
+Durable-pending `pendingState` transitions are part of the write contract and
+must be reflected identically by writers, retries, holding-record lookup, and
+status APIs:
+
+| `pendingState` | Entry condition | Exit conditions |
+| --- | --- | --- |
+| `pending_protection` | The accepted holding record is durable, but protected-path, visibility, secret, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. A denied gate moves to the matching `quarantined_*` state. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
+| `pending_review` | All protection checks needed to ask for review have passed, and policy requires human or authorized workflow review before canonicalization. | Approval moves to `pending_canonicalization`; denial moves to `quarantined_review_gate`; explicit operator retirement moves to `terminal-retired`; reaching `operatorDispositionDueAt` without a decision moves to `overdue_disposition`. |
+| `pending_canonicalization` | All currently required gates have passed and the engine is durably queued or actively replaying the accepted record into canonical workspace state. | Successful canonicalization returns the canonical write result. Apply-time gate denial moves to the matching `quarantined_*` state. Preserved base/current/incoming divergence creates a conflict record. Reaching `operatorDispositionDueAt` before resolution moves to `overdue_disposition`. |
+| `overdue_disposition` | Any pending state exceeded the effective `operatorDispositionDueAt` or maximum pending-canonicalization window. | It remains operator-visible until canonicalization succeeds, an authorized review/policy/protection revalidation moves it back to a concrete pending state with a new due time, a gate denial quarantines it, or explicit operator disposition retires it as `terminal-retired`. |
+
+After explicit operator disposition retires the record, status APIs and
+holding-record lookup represent that state as `terminal-retired` for the same
+`holdingRecordId` while retained retirement metadata exists; they must not
+collapse it into `rejected`, `quarantined`, conflict, `idempotency-expired`, or
+generic expiration. Write retries are different: before `replayUntil`, retry
+tooling replays the `terminal-retired`
 result; after `replayUntil`, the write API returns `idempotency-expired` for
 that idempotency identity while status lookup continues to report
 `terminal-retired` until the retained retirement metadata itself expires.
@@ -572,16 +585,21 @@ include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
 or equivalent CAS token captured with the original ingest. At apply time, the
 engine revalidates workspace scope plus server-derived visibility,
 authorization, ownership/review gate, policy, protected-path, lock, version-access,
-skill-turn, provenance, attribution, and proof checks. The retry outcome matrix
-is deterministic for the same replay metadata:
+skill-turn, provenance, attribution, and proof checks. Each replay evaluation
+attempt is deterministic for the durable record's current metadata and the
+server-side facts visible to that attempt:
 
-Replay evaluation is first-match in this order; once a class matches, later
-checks cannot replace its `reasonCode`, `quarantineState`, or validation result:
+Replay evaluation is first-match in this order within a single attempt; once a
+class matches for that attempt, later checks in the same attempt cannot replace
+its `reasonCode`, `quarantineState`, or validation result:
 malformed/cross-scope binding, visibility, authorization/permission,
 ownership/review gate, policy, protected-path, lock, version-access, skill-turn,
 provenance, attribution, proof, then causal base conflict. If multiple
 server-derived checks fail in one replay attempt, the earliest matching class in
-that order wins.
+that order wins. Later retries may produce a different authoritative replay
+outcome when review approval, policy revalidation, protection evidence, or
+causal-base state has changed; the replay metadata identity remains frozen, but
+the record's current durable state is re-evaluated.
 
 - If workspace/version binding metadata is malformed, mismatched, crosses
   workspace scope, or cannot be proven before a holding record exists, return a
@@ -639,9 +657,12 @@ Review requirements and review denials are distinct outcomes:
 - If the captured causal base still matches and apply-time policy revalidation
   passes, the record may become canonical.
 
-The same replay metadata cannot move between these classes across attempts
-unless the durable record itself changes state through an explicit operator,
-policy, or conflict-resolution action.
+The same replay metadata cannot be rewritten, rebound to another target, or
+silently reclassified inside one replay attempt. Across later attempts, the
+authoritative outcome may change only through the record's explicit durable
+state transition, such as review approval, policy/protection revalidation,
+quarantine, conflict preservation/resolution, canonicalization, or operator
+disposition.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,

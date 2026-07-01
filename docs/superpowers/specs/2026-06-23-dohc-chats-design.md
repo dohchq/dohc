@@ -485,17 +485,46 @@ type ChannelConversationProvenance =
       namedSubconversationKey: string
     }
 
+type ChannelConversationCreateRequest =
+  | {
+      conversationKind: 'default'
+      linkedWorkTarget?: never
+      namedSubconversationName?: never
+    }
+  | {
+      conversationKind: 'linked_work'
+      linkedWorkTarget: ChannelLinkedTargetRef
+      namedSubconversationName?: never
+    }
+  | {
+      conversationKind: 'named_subconversation'
+      linkedWorkTarget?: never
+      namedSubconversationName: string
+    }
+
+type SendChannelMessageConversationSelector =
+  | {
+      channelConversationId: string
+      conversation?: never
+    }
+  | {
+      channelConversationId?: never
+      conversation: ChannelConversationCreateRequest
+    }
+
 For `named_subconversation`, the server derives `namedSubconversationKey` from
-the submitted raw name and treats any client-supplied key as advisory. The
-normalization contract is: decode as UTF-8, trim leading and trailing Unicode
-`White_Space`, normalize to Unicode NFC, apply locale-independent Unicode simple
-case folding, reject an empty result, reject ASCII control characters and
-path-like separators (`/`, `\`, NUL), and enforce both a 96 Unicode-scalar limit
-and a 256 UTF-8 byte limit after normalization. Internal whitespace is preserved
-exactly after NFC/case folding; the server does not collapse or rewrite it.
-The server stores the normalized key plus the normalization-version metadata
-used to derive it, and creation retries must compare against that stored value
-instead of reinterpreting an older key with a newer normalizer.
+the submitted `namedSubconversationName` in
+`ChannelConversationCreateRequest`; persisted `namedSubconversationKey` is
+server-owned and is not accepted as create authority. The normalization contract
+is: decode as UTF-8, trim leading and trailing Unicode `White_Space`, normalize
+to Unicode NFC, apply locale-independent Unicode simple case folding, reject an
+empty result, reject ASCII control characters and path-like separators (`/`,
+`\`, NUL), and enforce both a 96 Unicode-scalar limit and a 256 UTF-8 byte limit
+after normalization. Internal whitespace is preserved exactly after NFC/case
+folding; the server does not collapse or rewrite it. The server stores the
+normalized key plus the normalization-version metadata used to derive it, and
+creation retries must compare against that stored value instead of
+reinterpreting an older key with a newer normalizer.
 
 type ChannelChatThread = ChatThreadBase & ChannelConversationProvenance & {
   channelId: string
@@ -740,12 +769,17 @@ exactly one canonical target, get-or-create must fail closed as ambiguous instea
 of picking from `Channel.linkedTargets` order. The selected target is the sole
 linked-work discriminator for `channelConversationId` generation, replay,
 export, search, and subsequent thread reads.
-Callers obtain the server-issued `channelConversationId` from the
-`send_channel_message` create/read response or from a thread/conversation read
-for the same canonical context tuple. Clients and agents should persist and reuse
-that returned `channelConversationId` with the `threadId` for subsequent sends or
-reads; if they lose it, they must re-resolve it through the same server
-conversation read/get-or-create path rather than reconstructing the id locally.
+`send_channel_message` accepts a `SendChannelMessageConversationSelector`: either
+an existing server-issued `channelConversationId`, or a
+`ChannelConversationCreateRequest` whose `named_subconversation` branch carries
+the raw `namedSubconversationName` used to derive the stored
+`namedSubconversationKey`. Callers obtain the server-issued
+`channelConversationId` from the `send_channel_message` create/read response or
+from a thread/conversation read for the same canonical context tuple. Clients and
+agents should persist and reuse that returned `channelConversationId` with the
+`threadId` for subsequent sends or reads; if they lose it, they must re-resolve
+it through the same server conversation read/get-or-create path rather than
+reconstructing the id locally.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current
@@ -1457,8 +1491,9 @@ server-assigned target identifiers:
   the `threadKind: 'dm'` `chat_created` activity, assigns `threadId` in the
   idempotency result, and retries return that same `threadId`. Channel-backed
   threads must not be created through `create_chat`.
-- `send_channel_message` requires an `idempotencyKey`; the server atomically
-  resolves or creates the channel-backed `ChatThread` by
+- `send_channel_message` requires an `idempotencyKey` and a
+  `SendChannelMessageConversationSelector`; the server atomically resolves or
+  creates the channel-backed `ChatThread` by
   `(workspaceId, channelId, channelConversationId)` and persists the
   `ThreadMessage` plus the `threadKind: 'channel'` `chat_created` activity when
   this is the first send for that tuple in the same serialized unit. The

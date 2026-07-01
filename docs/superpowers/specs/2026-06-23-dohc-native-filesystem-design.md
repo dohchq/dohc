@@ -767,6 +767,7 @@ type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
   path?: string
   tracked: boolean
   versioned: boolean
+  versionsNamespaceMode: 'legacy_unmanaged' | 'managed_versions'
   synced: boolean
   materialized: 'local' | 'virtual'
   materializationPresentation: 'hydrated' | 'placeholder'
@@ -794,6 +795,11 @@ type WorkspaceStatusPayload = WorkspaceAsyncPayload & {
 `WorkspaceStatusPayload` carries policy and legibility axes directly. Status
 clients must not infer `tracked`, `versioned`, `synced`, export handling, or
 conflict location by scraping path conventions, policy files, or conflict views.
+`versionsNamespaceMode` is persisted workspace status, not a per-client guess:
+`legacy_unmanaged` means pre-opt-in `.versions/**` content is ordinary content
+classified by the compatibility path, while `managed_versions` means
+`.versions/<version>/` is reserved for engine-managed version mounts and generic
+walkers must skip it after the reserved-namespace scan.
 `materializationPresentation` is a UI/status hint for whether the current actor
 sees hydrated bytes/projection or a placeholder for a virtual/lazy path; it does
 not create a third persisted `materialized` value.
@@ -1433,6 +1439,9 @@ Export should produce:
 - enough metadata to re-import and compare, including the workspace
   path-equivalence profile: case sensitivity/folding, Unicode normalization, and
   mount-compatibility constraints.
+- the persisted `versionsNamespaceMode` for the workspace so re-import uses the
+  same reserved-namespace scan, materialized workspace walker, and
+  workspace/version mount resolver behavior for `.versions/**` on every machine.
 
 Default ownership export operates on a clean canonical snapshot. If the selected
 workspace scope contains unresolved `durable-pending`, `quarantined`, or
@@ -1452,9 +1461,12 @@ That engine policy export path is responsible for preserving enough normalized
 policy state to reconstruct secret-backed versus non-secret files on re-import,
 including equal-specificity tie-breaking from the original source ordinal and
 rule index plus the workspace path-equivalence profile used during
-canonicalization; re-import must fail closed rather than treating an entry with
-missing policy envelope, ordering data, or a missing/incompatible
-path-equivalence profile as ordinary content.
+canonicalization and the persisted `versionsNamespaceMode`; re-import must fail
+closed rather than treating an entry with missing policy envelope, ordering data,
+a missing/incompatible path-equivalence profile, or a missing/incompatible
+versions-namespace mode as ordinary content. Legacy exports that predate
+`versionsNamespaceMode` require an explicit import-time migration choice before
+activation.
 
 Generated or internal `.dohc/**` state is excluded from export unless it is one
 of the named policy inputs above and crosses through the engine policy export
