@@ -6203,7 +6203,7 @@ Two-hundred-forty-fifth pass:
 
 Two-hundred-forty-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6221,6 +6221,42 @@ Two-hundred-forty-sixth pass:
     namespace opt-in finalizes.
   - Added `replayUntil` to `rejected` and `quarantined` write-result arms and
     aligned the surrounding rejection/quarantine prose.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-forty-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Clarified that holding-area replay metadata uses non-secret content hashes
+    only for non-secret-backed objects, and secret-backed objects use secret-safe
+    surrogates, keyed commitments, opaque handles, or non-hash CAS tokens.
+  - Split capture-token routing so malformed, missing, ambiguous, or wrongly
+    scoped tokens use `capture_token_invalid`, while well-formed stale/mismatched
+    tokens route to deterministic `conflict`.
+  - Moved `linkedTargets` out of the persisted `Channel` shape into
+    `ChannelProjection`.
+  - Added `dm_thread_relinked` as the concrete activity for immutable DM
+    membership transitions, with replay/export continuity rules.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

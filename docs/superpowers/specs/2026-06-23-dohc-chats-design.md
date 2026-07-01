@@ -282,12 +282,15 @@ type Channel = {
   // `displayName` and `description` are user-authored untrusted text. They must
   // be escaped or sanitized before rendering and handled safely in search/export.
   visibility: ChannelVisibility
-  // Derived from active ThreadLink rows; ChannelTargetActivity is repair/output.
-  linkedTargets: ChannelLinkedTargetRef[]
   createdById: string
   createdAt: UnixMsDecimalString
   updatedAt: UnixMsDecimalString
   archivedAt?: UnixMsDecimalString
+}
+
+type ChannelProjection = Channel & {
+  // Derived from active ThreadLink rows; ChannelTargetActivity is repair/output.
+  readonly linkedTargets: readonly ChannelLinkedTargetRef[]
 }
 
 type ChannelTargetActivity = {
@@ -307,13 +310,14 @@ There is one canonical source for linked work: active `ThreadLink` rows where
 retry, authorization, export, search, rebuild, and conflict repair. For channel
 threads, `ChannelTargetActivity` is a derived append-only channel aggregation
 ledger emitted from `ThreadLink` mutations for a specific `(channelId, threadId)`
-pair; it is not an independent write authority. `Channel.linkedTargets` and
-`ChatThreadProjection.linkedWork` are read-only projections/caches rebuilt from
-active `ThreadLink` plus repaired `ChannelTargetActivity` output; neither field
-is an authoritative mutable record. If `ThreadLink`, `ChannelTargetActivity`,
-`Channel.linkedTargets`, and `ChatThreadProjection.linkedWork` disagree,
-`ThreadLink` wins, the derived ledger/projections are marked stale, and the
-engine repairs or rebuilds them before using them for authorization-sensitive
+pair; it is not an independent write authority.
+`ChannelProjection.linkedTargets` and `ChatThreadProjection.linkedWork` are
+read-only projections/caches rebuilt from active `ThreadLink` plus repaired
+`ChannelTargetActivity` output; neither field is an authoritative mutable
+record. If `ThreadLink`, `ChannelTargetActivity`,
+`ChannelProjection.linkedTargets`, and `ChatThreadProjection.linkedWork`
+disagree, `ThreadLink` wins, the derived ledger/projections are marked stale, and
+the engine repairs or rebuilds them before using them for authorization-sensitive
 read, replay, retry, export, search, notification, or side-rail behavior.
 
 The server canonicalizes each `ChannelLinkedTargetRef` to the same stable target
@@ -767,18 +771,18 @@ association, conversation kind, linked-work discriminator that defined a
 `linked_work` conversation, or named-subconversation key requires tombstoning or
 archiving the old thread and creating a new one. Channel renames, moves, topic
 changes, ordering changes, and other channel metadata updates preserve
-`channelConversationId`. Multi-target channel context from `Channel.linkedTargets`
-does not derive a `linked_work` conversation id from array order; a linked-work
-conversation chooses one normalized target discriminator, while broader
-multi-target discussion uses the default conversation or a server-owned
-`named_subconversation` key.
+`channelConversationId`. Multi-target channel context from
+`ChannelProjection.linkedTargets` does not derive a `linked_work` conversation id
+from array order; a linked-work conversation chooses one normalized target
+discriminator, while broader multi-target discussion uses the default
+conversation or a server-owned `named_subconversation` key.
 For `linked_work`, the request must include the chosen normalized
 `ChannelLinkedTargetRef` or an equivalent server-resolved target handle. If the
 channel has multiple active linked targets and the request does not select
 exactly one canonical target, get-or-create must fail closed as ambiguous instead
-of picking from `Channel.linkedTargets` order. The selected target is the sole
-linked-work discriminator for `channelConversationId` generation, replay,
-export, search, and subsequent thread reads.
+of picking from `ChannelProjection.linkedTargets` order. The selected target is
+the sole linked-work discriminator for `channelConversationId` generation,
+replay, export, search, and subsequent thread reads.
 `send_channel_message` accepts a `SendChannelMessageConversationSelector` with
 the target `channelId`: either an existing server-issued
 `channelConversationId`, or a `ChannelConversationCreateRequest` whose
@@ -809,15 +813,15 @@ For a `ChannelChatThread`, the same transaction or serialized unit must also run
 `channelId` and `threadId`, and enqueue the same durable outbox identity used
 for side rails, search, export, replay, and projection invalidation. DM threads
 do not emit `ChannelTargetActivity`. The sync step is a derived repair/output
-contract: direct writes to `ChannelTargetActivity`, `Channel.linkedTargets`, or
-`ChatThreadProjection.linkedWork` must never create, remove, authorize, or
-tombstone linked work. If a retry observes an already-active or tombstoned
-`ThreadLink`, it must verify the matching `ChannelTargetActivity` for the
-thread's `(channelId, threadId)` pair exists before reporting the idempotent
-result. If the activity is missing, the retry must repair it in the same
-transaction or serialized unit through `channel-target-ledger-sync`, then return
-success only after the `ThreadLink` and channel-target ledger entry are both
-durable.
+contract: direct writes to `ChannelTargetActivity`,
+`ChannelProjection.linkedTargets`, or `ChatThreadProjection.linkedWork` must
+never create, remove, authorize, or tombstone linked work. If a retry observes an
+already-active or tombstoned `ThreadLink`, it must verify the matching
+`ChannelTargetActivity` for the thread's `(channelId, threadId)` pair exists
+before reporting the idempotent result. If the activity is missing, the retry
+must repair it in the same transaction or serialized unit through
+`channel-target-ledger-sync`, then return success only after the `ThreadLink` and
+channel-target ledger entry are both durable.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
@@ -867,8 +871,8 @@ from one active canonical link per normalized uniqueness key and must use the
 same `canonicalThreadLinkKey(parts)` helper as link creation and `ThreadLink`
 upserts. Channel-level linked-target rebuilds must start from the same active
 `ThreadLink` set, replay or repair `ChannelTargetActivity` as derived output, and
-then regenerate `Channel.linkedTargets`; they must not use a stale channel target
-ledger as the source of truth over `ThreadLink`.
+then regenerate `ChannelProjection.linkedTargets`; they must not use a stale
+channel target ledger as the source of truth over `ThreadLink`.
 The uniqueness key applies only to active links where `deletedAt` is absent.
 Tombstoned links remain historical records and do not block a future relink with
 the same target tuple; relinking creates a new active `ThreadLink` and a new
@@ -968,12 +972,21 @@ constraint so concurrent creates resolve to one canonical thread instead of
 duplicate DM threads for the same participant set.
 DM participant sets are immutable after thread creation. Any membership change
 creates or resolves a new canonical DM-backed `ChatThread` for the new exact
-participant set and records a linkage event from the prior thread, rather than
-mutating `dmParticipantIds` in place. `read_chat`, `reply_to_chat`, reactions,
+participant set and appends a deterministic `dm_thread_relinked` activity on the
+prior thread, rather than mutating `dmParticipantIds` in place. `read_chat`,
+`reply_to_chat`, reactions,
 `edit_chat_message`, `delete_chat_message`, notifications, and read-state
 updates continue to authorize against the canonical participant set of the
 specific thread being accessed, so membership changes cannot silently merge,
 split, or reassign thread history.
+The `dm_thread_relinked` activity is appended only on the prior thread, with
+`ThreadActivityBase.threadId` equal to `previousThreadId`; the new thread records
+its own `chat_created` activity. The relink activity is idempotent by
+`(workspaceId, previousThreadId, nextThreadId, nextDmParticipantIds)` after the
+same canonical participant sorting used for DM creation. Replay, export,
+migration, and retained-history reads use `dm_thread_relinked` to show continuity
+between the old and new threads, but they must not treat it as permission to
+mutate either thread's immutable `dmParticipantIds`.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
@@ -1160,6 +1173,16 @@ type ThreadCreatedActivity =
   // message.
   | SendChannelMessageThreadCreatedActivity
   | CreateChatDmThreadCreatedActivity
+
+type DmThreadRelinkedThreadActivity = ThreadActivityBase & {
+  kind: 'dm_thread_relinked'
+  threadKind: 'dm'
+  previousThreadId: string
+  nextThreadId: string
+  previousDmParticipantIds: DmParticipantIds
+  nextDmParticipantIds: DmParticipantIds
+  relinkReason: 'membership_changed' | 'membership_revoked'
+}
 
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
@@ -1366,6 +1389,7 @@ badges, duplicate notifications, or duplicate export/history records.
 
 type ThreadActivity =
   | ThreadCreatedActivity
+  | DmThreadRelinkedThreadActivity
   | MessageCreateThreadActivity
   | MessageEditThreadActivity
   | MessageDeleteThreadActivity

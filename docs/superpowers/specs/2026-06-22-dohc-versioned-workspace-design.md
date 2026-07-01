@@ -108,7 +108,7 @@ Normative gate/retry matrix:
 | Gate outcome | Public result | Commit state / record |
 | --- | --- | --- |
 | Malformed request, missing/incompatible precondition, invalid path/version, or cross-workspace reference before persistence | validation error such as `invalid_request`, `malformed_request`, `missing_precondition`, `incompatible_precondition`, `invalid_path`, `invalid_version`, or `cross_workspace_reference` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
-| Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. Well-formed but stale or object-mismatched capture tokens do not use this code; they route to `conflict`. |
 | Replayed idempotency key with mismatched stable actor identity, session-equivalence class when policy requires it, workspace, version context, operation type, target, secret-safe operand fingerprint, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `replayUntil`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
@@ -579,9 +579,12 @@ explanations, or retry metadata. Secret-bearing ingests are stored only as
 encrypted references, redacted forms, or broker metadata until an authorized
 read path reconstructs them.
 Replay from the holding area must be causal and fail-closed. Retry metadata must
-include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content hash,
-or equivalent CAS token captured with the original ingest. At apply time, the
-engine revalidates workspace scope plus server-derived visibility,
+include `workspaceId`, `versionId`, and the captured causal guard: for
+non-secret-backed objects this may be `expectedBaseVersion`, a non-secret content
+hash, or an equivalent CAS token; for secret-backed objects it must be a
+secret-safe surrogate, keyed commitment, opaque handle, or non-hash CAS token
+that does not expose reusable plaintext equality. At apply time, the engine
+revalidates workspace scope plus server-derived visibility,
 authorization, ownership/review gate, policy, protected-path, lock, version-access,
 skill-turn, provenance, attribution, and proof checks. Each replay evaluation
 attempt is deterministic for the durable record's current metadata and the
@@ -936,7 +939,7 @@ or quarantine allocation. When the file is saved or captured, the filesystem pat
 submits that engine-owned token, the intended object identity or expected-absent
 guard, and the incoming bytes. Missing, ambiguous, malformed, or wrongly scoped
 capture tokens, missing overwrite `targetObjectId`, or object-identity evidence
-that cannot be validated deterministically fail closed with
+that cannot be validated deterministically fail closed only with
 `PublicValidationErrorCode` value `capture_token_invalid` before any holding
 record, quarantine record, or canonical mutation is allocated. If the capture
 infrastructure cannot currently prove token/object validity or commit state
@@ -947,8 +950,8 @@ well-formed replay data reaches server-side policy/protection evaluation. A
 well-formed but stale capture token, including a token whose `targetObjectId` no
 longer matches the object currently at the path because of delete/recreate,
 rename, or replacement, is a real write conflict and returns the same
-deterministic current-vs-incoming conflict behavior as the API write flow instead
-of blindly overwriting canonical state.
+deterministic current-vs-incoming `conflict` behavior as the API write flow,
+never `capture_token_invalid`, instead of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
