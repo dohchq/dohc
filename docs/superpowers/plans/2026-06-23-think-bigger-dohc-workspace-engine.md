@@ -925,29 +925,30 @@ current-system inventory, storage/filesystem decision note, and unresolved
 blockers in
 `docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
 
-Phase 0 ends with one canonical ownership handoff recorded in the
-**Phase 0 Schema Promotion Checkpoint**. `Phase0SharedSubstrateBaseline` remains the
-provisional source for P0B-P0G only during the freeze and only until PR 01
-formally adopts each symbol. The checkpoint includes the pre-PR01 freeze of
-`Phase0SharedSubstrateBaseline`; that freeze is not a separate lane, milestone,
-or source of truth. The main orchestration thread plus P0B own the provisional
-baseline only pre-adoption; PR 01 is the sole canonical owner after handoff.
-During the freeze, P0B owns the shared substrate package scaffold and
+#### Phase 0 Baseline Freeze
+
+Before P0B-P0G begin implementation work, P0B records the
+**Phase 0 Baseline Freeze** in the execution log. During this freeze,
 `Phase0SharedSubstrateBaseline` is the only provisional source for the symbols
-listed in the matrix below. P0B, P0C, P0D, P0E, P0F, and P0G must import those
-provisional symbols from that baseline package rather than invent parallel
-shapes, ad hoc copies, local lookalike types, or early dependencies on
+listed in the matrix below, and only for Phase 0 proof lanes. The main
+orchestration thread plus P0B own the provisional baseline during this freeze;
+PR 01 has not adopted those symbols yet. P0B, P0C, P0D, P0E, P0F, and P0G must
+import the provisional symbols from that baseline package rather than invent
+parallel shapes, ad hoc copies, local lookalike types, or early dependencies on
 PR 01-owned contracts. The baseline package must export every Phase 0 baseline
 symbol in the matrix below, with tests proving consumers import those symbols
 from the baseline package.
 
-The PR 01 completion step of the same checkpoint must record in the execution
-log the commit/PR where PR 01 adopts or migrates each provisional symbol. After
-that checkpoint, new code must consume the PR 01-owned contracts and
-`Phase0SharedSubstrateBaseline` becomes historical-only for each adopted symbol.
+#### PR 01 Canonical Adoption Handoff
+
+PR 01 ends with a separate **PR 01 Canonical Adoption Handoff** recorded in the
+execution log. That handoff records the commit/PR where PR 01 adopts, migrates,
+or bridges each provisional symbol. After handoff for a specific symbol, new
+code must consume the PR 01-owned contract and
+`Phase0SharedSubstrateBaseline` becomes historical-only for that adopted symbol.
 Downstream lanes may keep importing the provisional baseline only for symbols not
-yet migrated. PR 01 must add a mechanical lint/test gate for this checkpoint:
-after each symbol is adopted or migrated by its owning PR lane, the check scans
+yet migrated. PR 01 must add a mechanical lint/test gate for this handoff: after
+each symbol is adopted or migrated by its owning PR lane, the check scans
 downstream code for imports of `Phase0SharedSubstrateBaseline` for that specific
 symbol and fails until consumers import the owning contract instead. The gate is
 symbol-specific, not a blanket removal of every baseline import on PR 01 merge:
@@ -963,7 +964,7 @@ migrates them.
 | `WorkspaceLinkRef`, projection writeability values (`canonical`, `writable`, `readOnly`, `lossy`, `redacted`), projection validation values (`none`, `sourceValidated`, `policyValidated`, `internalOnly`) | P0C/P0D/P0F may use provisional link/projection fixtures only through `Phase0SharedSubstrateBaseline`. | PR 01C is the sole canonical owner of the link/projection vocabulary and migration from provisional symbols. | Consumer only; chat-specific `ThreadLink` storage remains owned by PR 12 after handoff. |
 | `Phase0EffectivePolicyInput`, `Phase0EffectivePolicyResult`, core effective-policy input/output boundary, `file_read`, `thread_link_visibility`, `chat_projection_visibility`, `search_index_visibility` | P0F is the only provisional writer for the Phase 0 effective-policy hook and required surface names. All Phase 0 policy/search/chat projection consumers import these symbols from `Phase0SharedSubstrateBaseline`. | PR 01D is the sole canonical owner of the core effective-policy boundary and migration from provisional policy hooks. | Consumer only through the PR 01D-owned core contract; chat/search implementation PRs must not invent local visibility hooks. |
 | `ChatThread`, `ThreadMessage`, chat `ThreadLink` | P0E is the only provisional writer for linked-chat proof rows before PR 01; other Phase 0 lanes may read the baseline symbols but must not mutate these records. | Bridge writer only under schema version `chat-core-bridge-v0` so file/history/search proof code can compile; owns migration metadata and import compatibility for P0E rows, but must not extend final chat storage semantics. | Single final writer; explicitly adopts, migrates, or backfills from `chat-core-bridge-v0`, then owns durable channels, DMs, linked-work behavior, and full chat storage. |
-| `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | P0E is the only provisional writer when read-state rows are needed for Phase 0 chat bridge tests; other lanes may read fixtures only. The provisional rows must use monotonic cursor semantics and server-owned revision tokens. | Sole owner/writer for schema version `chat-read-state-bridge-v0` from the **Phase 0 Schema Promotion Checkpoint** until the PR 12 handoff. PR 01 owns bridge-v0 projection rebuild/invalidation, the migration boundary from Phase 0 fixtures, monotonic cursor compatibility, and server-owned revision/CAS compatibility. It does not define the final PR 12 cursor model. | Consumer of `chat-read-state-bridge-v0` until PR 12 begins the explicit handoff migration. After that handoff, PR 12 becomes the single final writer, migrates/backfills from bridge-v0, owns final cursor semantics, server-owned revision/CAS token behavior, final projection rebuild/invalidation, and compatibility for legacy read-state rows. PR 12 must not mutate bridge-v0 projection rebuild/invalidation rules before the handoff. |
+| `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | P0E is the only provisional writer when read-state rows are needed for Phase 0 chat bridge tests; other lanes may read fixtures only. The provisional rows must use monotonic cursor semantics and server-owned revision tokens. | Sole owner/writer for schema version `chat-read-state-bridge-v0` from the **PR 01 Canonical Adoption Handoff** until the PR 12 handoff. PR 01 owns bridge-v0 projection rebuild/invalidation, the migration boundary from Phase 0 fixtures, monotonic cursor compatibility, and server-owned revision/CAS compatibility. It does not define the final PR 12 cursor model. | Consumer of `chat-read-state-bridge-v0` until PR 12 begins the explicit handoff migration. After that handoff, PR 12 becomes the single final writer, migrates/backfills from bridge-v0, owns final cursor semantics, server-owned revision/CAS token behavior, final projection rebuild/invalidation, and compatibility for legacy read-state rows. PR 12 must not mutate bridge-v0 projection rebuild/invalidation rules before the handoff. |
 | `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
 
 The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
@@ -1672,15 +1673,18 @@ split it before opening.
 Milestones:
 
 - **Foundation setup:** PR 00 remains the docs/readiness scaffold.
-- **Phase 0 Schema Promotion Checkpoint:** immediately after P0A/P0R, the main
-  orchestration thread plus P0B's schema-baseline responsibility must use the
-  canonical **Phase 0 Schema Promotion Checkpoint** definition in
-  [Phase 0 PRs](#phase-0-prs) for the freeze/handoff symbol list,
-  import-enforcement gate, execution-log evidence, and
-  `Phase0SharedSubstrateBaseline` exit criteria.
+- **Phase 0 Baseline Freeze:** immediately after P0A/P0R, the main orchestration
+  thread plus P0B's schema-baseline responsibility must record the
+  [Phase 0 Baseline Freeze](#phase-0-baseline-freeze) before P0B-P0G consume
+  provisional substrate symbols.
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.
+- **PR 01 Canonical Adoption Handoff:** PR 01 records the
+  [PR 01 Canonical Adoption Handoff](#pr-01-canonical-adoption-handoff), adopts
+  or bridges each provisional symbol, and activates the symbol-specific
+  import-enforcement gate before downstream implementation lanes consume the
+  canonical contracts.
 - **Foundation alpha:** PR 01-04 prove shared contracts, stable IDs, typed
   events, versions, and effective policy.
 - **Filesystem/version proof:** PR 05-11 prove normal files, versions,
@@ -1766,11 +1770,13 @@ TypeScript and Rust consumers generated or conformance-tested from it.
     casing, enum encoding, explicit `null` vs absent-field rules,
     backwards/forwards schema-version rules, strict unknown-field behavior, and
     declared `extensions` preservation. The TypeScript package entrypoint owns
-    `serializeWorkspaceEngineWire` and `parseWorkspaceEngineWireStrict`; the Rust
-    crate/conformance fixture owns `encode_workspace_engine_wire` and
-    `decode_workspace_engine_wire_strict`. This slice owns runtime round-trip
-    fixtures only; it must not introduce link, projection, share, or policy model
-    decisions.
+    `serializeWorkspaceEngineWire` and `parseWorkspaceEngineWireStrict`. If PR
+    01B adds the Rust crate, that crate owns `encode_workspace_engine_wire` and
+    `decode_workspace_engine_wire_strict`; otherwise PR 01B is TypeScript-only
+    runtime conformance and the Rust symbols may appear only as inert
+    conformance-fixture names that fail generated-consumer claims until the crate
+    exists. This slice owns runtime round-trip fixtures only; it must not
+    introduce link, projection, share, or policy model decisions.
   - **PR 01C - Link And Projection Contracts:** adopt, migrate, or replace the
     provisional projection and `WorkspaceLinkRef` vocabulary from the shared
     substrate section above in the shared schema package. This slice owns the

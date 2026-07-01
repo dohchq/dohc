@@ -861,18 +861,31 @@ type VersionsNamespaceActivationFence =
       state: 'inactive'
       fenceId?: never
     }
-  | (VersionsNamespaceActivationFenceBase & {
+  | (VersionsNamespaceActivationFenceActive & {
       state: 'activating'
       decision: 'activate'
     })
-  | (VersionsNamespaceActivationFenceBase & {
+  | (VersionsNamespaceActivationFenceActive & {
       state: 'committing'
       decision: 'activate'
     })
-  | (VersionsNamespaceActivationFenceBase & {
+  | (VersionsNamespaceActivationFenceActive & {
       state: 'rolling_back'
       decision: 'rollback'
     })
+
+type VersionsNamespaceActivationFenceActive =
+  VersionsNamespaceActivationFenceBase & VersionsNamespaceActivationTransition
+
+type VersionsNamespaceActivationTransition =
+  | {
+      fromMode: 'legacy_unmanaged'
+      toMode: 'managed_versions'
+    }
+  | {
+      fromMode: 'managed_versions'
+      toMode: 'legacy_unmanaged'
+    }
 
 type VersionsNamespaceActivationFenceBase = {
   fenceId: string
@@ -881,8 +894,6 @@ type VersionsNamespaceActivationFenceBase = {
     pathToken: string
     outcome: 'move' | 'reclassify' | 'preserve' | 'quarantine'
   }>
-  fromMode: 'legacy_unmanaged' | 'managed_versions'
-  toMode: 'legacy_unmanaged' | 'managed_versions'
   startedAt: UnixMsDecimalString
   updatedAt: UnixMsDecimalString
   operatorActionId?: string
@@ -1335,9 +1346,13 @@ storage hydration: `opaque` means handles/redacted status only,
 Policy validation and builders must emit `secretProjection: 'none'` for
 non-secret paths and `SecretBackedFilePolicy` for protected secret paths; secret
 entries cannot omit `secretProjection` or use the non-secret placeholder value.
-They must reject inconsistent pairs before status/export/access data is produced:
-`secretProjection: 'opaque'` requires status `materialized: 'virtual'`, while
-`protectedLocal` and `plaintextLocal` require status `materialized: 'local'`.
+FilePolicy and SecretBackedFilePolicy import/export builders validate the
+persisted policy shape only; they must not depend on current runtime
+materialization values. WorkspaceStatusPayload assembly and status-side
+validators perform the materialized consistency check tied to the resolved
+policy: `secretProjection: 'opaque'` requires status `materialized: 'virtual'`,
+while `protectedLocal` and `plaintextLocal` require status
+`materialized: 'local'`.
 Secret-backed policies must also force `searchable: false` and
 `publicExport: 'redact' | 'exclude'`; plaintext export or indexing requires a
 separate future policy with explicit review and must not be expressible through

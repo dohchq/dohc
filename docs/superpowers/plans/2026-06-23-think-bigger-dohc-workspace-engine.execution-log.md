@@ -1,7 +1,7 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
 Read-only summary: current state derives from the single mutable
-`Live PR00 status` block in the latest PR00 pass below.
+`LivePR00Status` block under the `Live PR00 Status` heading below.
 Created: 2026-06-23
 
 Plan:
@@ -17,8 +17,8 @@ Source specs:
 ## Current PR Pointer
 
 - **Single mutable status block:** only the newest PR00 pass's
-  `Live PR00 status` block owns CodeRabbit status, test evidence, open
-  overrides, and completion state.
+  `LivePR00Status` block under the `Live PR00 Status` heading owns CodeRabbit
+  status, test evidence, open overrides, and completion state.
 - **Derived summaries:** this header and any other summaries are
   read-only pointers to that newest live-status block.
 - **Archive boundary:** earlier `Historical PR00 status` entries under
@@ -68,8 +68,8 @@ unattended Phase 0 execution on 2026-06-24; P0B-P0G remain queued behind the
 shared-substrate baseline freeze. Current live state is recorded only in the
 canonical live-status block in the latest PR00 pass below. This table records
 static lane ownership, branch, worktree, and planned validation shape. The
-Phase 0 Schema Promotion Checkpoint is a handoff checkpoint, not a standalone
-lane row.
+Phase 0 Baseline Freeze and PR 01 Canonical Adoption Handoff are schema
+milestones, not standalone lane rows.
 
 | PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -259,7 +259,7 @@ Date completed:
 
 The PR00 pass entries below are an append-only archive. Treat older pass blocks
 as read-only background; do not edit them to express current state. The current
-state is only the newest PR00 pass's `Live PR00 status` block, as referenced by
+state is only the newest PR00 pass's `LivePR00Status` block, as referenced by
 the Current PR Pointer above.
 
 ## PR 00 - Mega Plan And Readiness Scaffold
@@ -7990,7 +7990,7 @@ Two-hundred-ninety-fourth pass:
 
 Two-hundred-ninety-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four major findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -8011,6 +8011,55 @@ Two-hundred-ninety-fifth pass:
     filesystem lifecycle table and kept `idempotency-expired` as retry-only.
   - Split redacted linked-work projections from internal/audit projections so
     shared/public channel and thread reads expose only opaque handles.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-sixth pass:
+
+<a id="live-pr00-status"></a>
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: three major findings and three minor findings fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+
+- Fixed CodeRabbit's three major findings and three minor findings:
+  - Split the Phase 0 baseline freeze from the PR 01 canonical adoption handoff
+    and updated related schema-ownership references.
+  - Made PR 01B Rust wire-format ownership conditional on the Rust crate landing;
+    otherwise the Rust symbols remain inert conformance-fixture names.
+  - Split versions-namespace activation fences into explicit real transitions so
+    no-op `fromMode`/`toMode` pairs are unrepresentable.
+  - Moved secret-backed `secretProjection`/`materialized` consistency checks to
+    WorkspaceStatusPayload assembly or status-side validation, leaving policy
+    import/export builders independent of runtime materialization.
+  - Scoped Phase 0 performance measurement checklist items to P0R and later
+    implementation lanes so PR00 remains a docs-only deferral.
+  - Promoted the current mutable PR00 status to this dedicated heading and
+    `LivePR00Status` symbol.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -8090,9 +8139,10 @@ PR lanes:
 - P0F
 - P0G
 
-Checkpoint:
+Schema milestones:
 
-- Phase 0 Schema Promotion Checkpoint, not a standalone lane.
+- Phase 0 Baseline Freeze, not a standalone lane.
+- PR 01 Canonical Adoption Handoff, not a standalone lane.
 
 Gate evidence:
 
@@ -8130,10 +8180,11 @@ Gate evidence:
 - [ ] Search returns linked chat/file context without policy leaks.
 - [ ] `.env` is excluded/redacted/ignored until secret-backed files exist.
 - [ ] Workspace-switch async race E2E passes.
-- [ ] Performance measurements are recorded for startup, reconciliation,
-      watcher capture, history restore, search, and linked chat UI.
-- [ ] Phase 0 performance budgets pass or budget misses have explicit user
-      approval and follow-up.
+- [ ] P0R and later implementation lanes record performance measurements for
+      startup, reconciliation, watcher capture, history restore, search, and
+      linked chat UI.
+- [ ] Phase 0 implementation performance budgets pass or budget misses have
+      explicit user approval and follow-up.
 - [ ] No renderer-blocking whole-workspace scan ships in Phase 0.
 - [ ] Local agent CLI QA passes with the configured `DOHC_TEST_AGENT_CLI`.
 - [ ] Alternative local agent CLI compatibility is run or unavailable status is
