@@ -35,10 +35,23 @@ if (
   process.exit(1)
 }
 
+const thinkBiggerSpecMarkerPattern = /^Think Bigger Spec:\s*true\s*$/im
+const thinkBiggerMetadataHeader = (raw) => {
+  const lines = raw.split(/\r?\n/)
+  const openingFence = lines[0]?.trim()
+  if (openingFence === '---' || openingFence === '+++') {
+    const endIndex = lines.findIndex((line, index) => index > 0 && line.trim() === openingFence)
+    if (endIndex !== -1) {
+      return lines.slice(0, endIndex + 1).join('\n')
+    }
+  }
+
+  const nextSectionIndex = lines.findIndex((line, index) => index > 0 && /^#{2,6}\s+/.test(line))
+  return lines.slice(0, nextSectionIndex === -1 ? lines.length : nextSectionIndex).join('\n')
+}
+
 const discoverThinkBiggerDocs = () => {
   const repoRelativePath = (...segments) => path.posix.join(...segments)
-  const thinkBiggerSpecMarkerPattern = /^Think Bigger Spec:\s*true\s*$/im
-  const metadataHeader = (raw) => raw.split(/\r?\n/).slice(0, 12).join('\n')
   const hasThinkBiggerSpecMarker = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -56,7 +69,7 @@ const discoverThinkBiggerDocs = () => {
     }
 
     const raw = fs.readFileSync(canonicalCandidatePath, 'utf8')
-    return thinkBiggerSpecMarkerPattern.test(metadataHeader(raw))
+    return thinkBiggerSpecMarkerPattern.test(thinkBiggerMetadataHeader(raw))
   }
   const discoveryRoots = [
     {
@@ -472,6 +485,22 @@ const collectLinks = (markdown) => {
 const isMarkdownPath = (targetPath) => /\.(?:md|markdown)$/i.test(targetPath)
 
 const assertCheckerFixtures = () => {
+  const longMetadataHeader = [
+    '# Spec',
+    '',
+    'Status: exploratory',
+    'Cohort: dohc Think Bigger Workspace Engine',
+    ...Array.from({ length: 16 }, (_, index) => `Extra-${index}: value`),
+    'Think Bigger Spec: true',
+    'Date: 2026-06-23',
+    '',
+    '## Body',
+    'Think Bigger Spec: false',
+  ].join('\n')
+  if (!thinkBiggerSpecMarkerPattern.test(thinkBiggerMetadataHeader(longMetadataHeader))) {
+    throw new Error('long metadata header fixture should preserve Think Bigger spec markers before body headings')
+  }
+
   const splitQueryTarget = splitLocalTarget('./diagram.svg?raw=1#overview')
   if (splitQueryTarget.targetRaw !== './diagram.svg' || splitQueryTarget.anchorRaw !== 'overview') {
     throw new Error('local query fixture should strip query strings while preserving anchors')

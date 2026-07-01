@@ -147,9 +147,12 @@ that the ordinary walker will skip. Only after the cutover commits may the
 ordinary content walker apply the default `.versions/**` skip rule and may the
 workspace/version mount resolver own named-version mounts. On any activation
 failure, the workspace record, ordinary-walker skip rule, and resolver-owned
-mount bindings roll back together. Unmanaged entries created after opt-in are
-then fail-closed into quarantine or manual resolution. Unmanaged entries are
-never silently ignored, skipped, or promoted into a named version.
+mount bindings roll back together. After the cutover commits, unmanaged entries
+created under `.versions/**` are still detected by the reserved-namespace
+scan/watcher path before the ordinary walker applies its skip rule. If an entry
+is not bound to a known workspace/version mount by the workspace/version mount
+resolver, it fails closed into quarantine or manual resolution. Unmanaged
+entries are never silently ignored, skipped, or promoted into a named version.
 The activation path must also persist a workspace-wide
 `versionsNamespaceActivationFence` beside `versionsNamespaceMode` before any
 scan, move, reclassify, or mount-binding work begins. The fence carries a
@@ -1537,12 +1540,13 @@ That engine policy export path is responsible for preserving enough normalized
 policy state to reconstruct secret-backed versus non-secret files on re-import,
 including the full resolved `FilePolicyBase` tuple (`tracked`, `versioned`,
 `synced`, `pinned`, `searchable`, `visibility`, `publicExport`, `agentAccess`,
-and `materialized`), equal-specificity tie-breaking from the original source
-ordinal and rule index plus the workspace path-equivalence profile used during
-canonicalization and the persisted `versionsNamespaceMode`; re-import must fail
-closed rather than treating an entry with missing policy envelope, missing
-resolved policy tuple, ordering data, a missing/incompatible path-equivalence
-profile, or a missing/incompatible versions-namespace mode as ordinary content.
+`materialized`, and `secretProjection`), equal-specificity tie-breaking from the
+original source ordinal and rule index plus the workspace path-equivalence
+profile used during canonicalization and the persisted `versionsNamespaceMode`;
+re-import must fail closed rather than treating an entry with missing policy
+envelope, missing or incompatible resolved policy tuple, ordering data, a
+missing/incompatible path-equivalence profile, or a missing/incompatible
+versions-namespace mode as ordinary content.
 If an export declares an active
 `versionsNamespaceActivationFence`, re-import treats the fence as required
 migration state and must resume/complete or roll back the cutover before

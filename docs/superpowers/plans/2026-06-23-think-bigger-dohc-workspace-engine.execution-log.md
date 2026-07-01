@@ -6775,7 +6775,7 @@ Two-hundred-sixtieth pass:
 
 Two-hundred-sixty-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6799,6 +6799,47 @@ Two-hundred-sixty-first pass:
     Think Bigger docs and the in-script fixtures.
   - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
     passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-sixty-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings handled; three fixed and one
+    lockfile warning verified stale. A committed review rerun is required after
+    this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's three still-valid major findings:
+  - Replaced the fixed 12-line Think Bigger spec metadata scan with a complete
+    metadata-header parser that reads fenced front matter or the full initial
+    metadata block.
+  - Made post-opt-in unmanaged `.versions/**` entries discoverable through the
+    reserved-namespace scan/watcher and workspace/version mount resolver failure
+    path before quarantine/manual resolution.
+  - Added `secretProjection` to the export/re-import resolved policy tuple and
+    made missing/incompatible tuple data fail closed.
+- Verified stale CodeRabbit finding:
+  - `package.json` and `pnpm-lock.yaml` are already synchronized for
+    `github-slugger`; `pnpm install --lockfile-only --ignore-scripts` produced no
+    package or lockfile diff.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --lockfile-only --ignore-scripts`
+    passed with no package or lockfile diff.
   - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Unresolved findings:
