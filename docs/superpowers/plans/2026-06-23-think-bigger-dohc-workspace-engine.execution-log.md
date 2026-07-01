@@ -8941,7 +8941,7 @@ Status: restacked on P0R; not approved
 Branch: codex/think-bigger-p0b-versioned-store
 Worktree: `/home/ice/dev/dohc-p0b-versioned-store`
 Implementation workstream, if used: main orchestration thread
-PR Link: not opened
+PR Link: [#49](https://github.com/dohc-ai/dohc/pull/49)
 Date started: 2026-06-24
 Date completed:
 
