@@ -1180,7 +1180,7 @@ history.
 
 - Full Phase 0 test matrix.
 - CodeRabbit loop for every Phase 0 PR.
-- Architecture/security/QA subagent reviews.
+- Architecture/security/performance/migration/QA subagent reviews.
 - Manual QA script.
 - Performance smoke.
 - Migration impact note.
@@ -1718,6 +1718,13 @@ TypeScript and Rust consumers generated or conformance-tested from it.
   making one runtime the authority for the others. The ownership matrix above
   determines which boundary symbols are generated from, bridged through, or
   conformance-checked against that single source of truth.
+- Define the wire-format contract beside the canonical schema source: canonical
+  field casing, enum encoding, explicit `null` vs absent-field rules,
+  backwards/forwards schema-version rules, and how unknown fields are preserved,
+  rejected, or ignored. The TypeScript package entrypoint and Rust crate or
+  conformance fixture must round-trip fixtures against those exact wire-format
+  rules; neither runtime may assume local serializer defaults for casing,
+  enums, optional fields, or version tags.
 - Add fixtures for personal, team, and agent-authored core cases. External shared
   fixtures land with PR 18.
 

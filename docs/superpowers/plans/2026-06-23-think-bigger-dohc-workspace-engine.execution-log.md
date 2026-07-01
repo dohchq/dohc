@@ -5730,7 +5730,7 @@ Two-hundred-thirty-second pass:
 
 Two-hundred-thirty-third pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: three follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -5749,6 +5749,50 @@ Two-hundred-thirty-third pass:
   - Split immediate denial responses from durable `rejected_record` lifecycle
     state so `rejected` is consistently addressable by `holdingRecordId`,
     `rejectedAt`, retention, and replay/idempotency metadata.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-thirty-fourth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: nine follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's nine follow-up findings:
+  - Added Performance and Migration reviewers to the P0G hardening scope.
+  - Added explicit PR 01 wire-format contract requirements for casing, enum
+    encoding, nullability, unknown fields, and schema versioning across
+    TypeScript and Rust consumers.
+  - Limited Think Bigger spec marker discovery to header metadata instead of
+    scanning arbitrary body text.
+  - Preserved first reference-definition targets in the docs checker when later
+    duplicate labels appear.
+  - Split retired-record status/lookup semantics from write-time retry expiry:
+    `terminal-retired` remains the retained status, while `idempotency-expired`
+    is a write replay outcome after the replay horizon.
+  - Replaced transient actor/session idempotency binding with stable actor
+    identity plus policy-required session-equivalence handling.
+  - Required secret-safe operand fingerprints and capture dedup commitments for
+    secret-backed writes instead of reusable raw payload hashes.
+  - Normalized native filesystem outcome names to the canonical
+    `WriteResult.kind` values.
+  - Added an in-script checker fixture for duplicate reference definitions.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

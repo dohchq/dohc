@@ -109,7 +109,7 @@ Normative gate/retry matrix:
 | --- | --- | --- |
 | Malformed request, missing/incompatible precondition, invalid path/version, or cross-workspace reference before persistence | validation error such as `invalid_request`, `malformed_request`, `missing_precondition`, `incompatible_precondition`, `invalid_path`, `invalid_version`, or `cross_workspace_reference` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Deterministically missing, ambiguous, malformed, or wrongly scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
-| Replayed idempotency key with mismatched actor/session, workspace, version context, operation type, target, payload digest, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Replayed idempotency key with mismatched stable actor identity, session-equivalence class when policy requires it, workspace, version context, operation type, target, secret-safe operand fingerprint, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. |
 | Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state. |
@@ -426,10 +426,12 @@ before that delay elapses; the engine chooses the delay for
 `service_unavailable`, `evaluator_unavailable`, `evaluator_indeterminate`,
 `quota_exceeded`, and `rate_limited` so retry pressure is bounded by policy
 rather than by each caller. Retries must preserve the original idempotency key.
-`terminal-retired` is a first-class terminal `WriteResult` while
-its retained retirement metadata is addressable; it degrades to
-`idempotency-expired` only after the retained idempotency/retry metadata for the
-retired record has expired.
+`terminal-retired` is the canonical status/lookup state while retained
+retirement metadata for the `holdingRecordId` is addressable. Write replay is a
+separate path: retries before `replayUntil` replay `terminal-retired`; retries
+after the replay horizon return `idempotency-expired` instead of creating a fresh
+write. `idempotency-expired` is a write-time retry outcome, not the durable
+status label for a retained retired record.
 
 Non-persistent validation failures and immediate denials are separate from
 durable rejected writes:
@@ -512,9 +514,14 @@ still-unresolved accepted records must enter `overdue_disposition` and remain
 operator-visible until canonicalized or explicitly dispositioned. Payload bytes
 must not be deleted, cryptoshredded, or compacted into non-reconstructible
 evidence without that explicit disposition record.
-Status APIs and retry tooling represent that state as a `terminal-retired`
-`WriteResult` for the same `holdingRecordId`; they must not collapse it into
-`rejected`, `quarantined`, conflict, or generic expiration.
+Status APIs and holding-record lookup represent that state as
+`terminal-retired` for the same `holdingRecordId` while retained retirement
+metadata exists; they must not collapse it into `rejected`, `quarantined`,
+conflict, `idempotency-expired`, or generic expiration. Write retries are
+different: before `replayUntil`, retry tooling replays the `terminal-retired`
+result; after `replayUntil`, the write API returns `idempotency-expired` for
+that idempotency identity while status lookup continues to report
+`terminal-retired` until the retained retirement metadata itself expires.
 Durable-pending holding-record retries apply only when a real `holdingRecordId`
 exists for an accepted holding record. Retries using the same idempotency key,
 `holdingRecordId`, and matching replay metadata derive the response from the
@@ -1045,18 +1052,28 @@ source precondition, one destination precondition, and one idempotency key. This
 models temp-file-then-rename saves without an extra read/round trip and without
 allowing a path-only delete/recreate substitution.
 API-originated write-producing operations must carry an idempotency key bound to
-the actor/session, workspace, version context, operation type, target, write
-payload digest or canonical operation payload fingerprint, full operation
-operand tuple, and causal precondition set. If the same idempotency key
-reappears with a different actor/session, workspace, version context, operation
-type, target, payload digest, operand tuple, or causal precondition set, return
-the non-persistent `replay_metadata_mismatch` validation error before
-holding-area persistence instead of minting a new idempotency identity. The
-operand tuple includes materially distinguishing values such as source/destination
-paths, sourceVersionId, targetVersionId, versionA/versionB identifiers,
-checkpointId, snapshot ids, merge inputs, and restore targets as applicable, so
-different `merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide
-under one key. Duplicate delivery with the same idempotency key must return the
+the stable actor identity, workspace, version context, operation type, target,
+secret-safe operand fingerprint, full operation operand tuple, and causal
+precondition set. A transient session handle is not part of the replay identity:
+auth refreshes, editor restarts, or equivalent session rotation remain replayable
+when the server/engine re-derives the same stable actor identity and any
+policy-required session-equivalence class. If the same idempotency key reappears
+with a different stable actor identity, required session-equivalence class,
+workspace, version context, operation type, target, operand fingerprint, operand
+tuple, or causal precondition set, return the non-persistent
+`replay_metadata_mismatch` validation error before holding-area persistence
+instead of minting a new idempotency identity. Non-secret operands may derive the
+operand fingerprint from a canonical payload digest. Secret-backed operands must
+use a server/secret-bound keyed digest, opaque handle, or equivalent
+secret-safe surrogate; raw payload bytes, reusable payload digests, plaintext
+content hashes, and equality-oracle fingerprints must never be stored or
+compared as ordinary replay metadata, returned to clients, logged, exported, or
+included in a client-visible idempotency identity. The operand tuple includes
+materially distinguishing values such as source/destination paths,
+sourceVersionId, targetVersionId, versionA/versionB identifiers, checkpointId,
+snapshot ids, merge inputs, and restore targets as applicable, so different
+`merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide under
+one key. Duplicate delivery with the same idempotency key must return the
 original result or a deterministic equivalent and must not create additional
 canonical mutations, duplicate history events, duplicate projections, or
 repeated notification/search side effects.
@@ -1111,11 +1128,12 @@ behavior.
 Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
 Those paths use an engine-generated capture token and engine-side deduplication
 bound to the watcher/session id, workspace, version, path, observed filesystem
-event sequence when available, file size/mtime where trustworthy, content hash,
-and causal base token. Deduplication may collapse duplicate native events into
-one canonical mutation, but it must not be exposed as the API idempotency-key
-contract and must still preserve conflicts when the causal base no longer
-matches.
+event sequence when available, file size/mtime where trustworthy, either a
+non-secret content hash or a secret-safe keyed commitment / opaque fingerprint
+for protected paths, and causal base token. Deduplication may collapse duplicate
+native events into one canonical mutation, but it must not be exposed as the API
+idempotency-key contract and must still preserve conflicts when the causal base
+no longer matches.
 
 ## Conflict behavior
 

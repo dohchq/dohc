@@ -140,7 +140,7 @@ history, not searchable, not synced, not exported, and not visible through
 workspace APIs. Only after workspace/version binding and principal resolution
 succeed may the engine append a captured write to the workspace durability log;
 then the normal policy path decides whether it becomes canonical,
-durable-pending, quarantined, rejected, retryable, or conflicted.
+durable-pending, quarantined, rejected, retryable-failure, or conflict.
 
 Reserved namespace collisions fail closed. Reserved namespace handling for
 import, attach, sync, and raw filesystem scan is defined by this table:
@@ -642,9 +642,12 @@ snapshot/etag or target base, the merge returns a deterministic conflict
 response instead of applying stale output.
 
 API-originated write-producing operations must carry an idempotency key bound to
-the actor/session, workspace, version, operation type, target, causal
-precondition, full operation operand tuple after workspace path canonicalization
-and equivalence normalization, and a server-scoped opaque operand fingerprint.
+the stable actor identity, any policy-required session-equivalence class,
+workspace, version, operation type, target, causal precondition, full operation
+operand tuple after workspace path canonicalization and equivalence
+normalization, and a server-scoped opaque operand fingerprint. A transient
+session handle is not part of the replay identity when auth refresh or editor
+restart re-derives the same actor and required session-equivalence class.
 Non-secret operands may derive that fingerprint from a canonical payload digest.
 For secret-backed operands, payload bytes must contribute only inside the
 server/secret boundary through a keyed digest, handle, or equivalent opaque
@@ -680,11 +683,12 @@ Mounted-folder and file-watch captured saves cannot rely on caller-generated API
 idempotency keys, because native editors and shell tools do not provide them.
 Those paths use engine-side capture deduplication instead: bind the capture to
 the watcher/session id, workspace, version, path, observed filesystem event
-sequence when available, file size/mtime where trustworthy, content hash, and
-causal base token. Deduplication may collapse duplicate native events into one
-canonical mutation, but it must not be exposed as the API idempotency-key
-contract and must still preserve conflicts when the causal base no longer
-matches.
+sequence when available, file size/mtime where trustworthy, and either a
+non-secret content hash or a secret-safe keyed commitment / opaque fingerprint
+for protected paths, plus the causal base token. Deduplication may collapse
+duplicate native events into one canonical mutation, but it must not be exposed
+as the API idempotency-key contract and must still preserve conflicts when the
+causal base no longer matches.
 
 `restore(workspaceId, versionId, checkpointId, ...)` is also write-producing, but
 it is never a destructive rollback. A successful restore records a new

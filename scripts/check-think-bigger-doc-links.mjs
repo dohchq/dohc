@@ -40,6 +40,7 @@ const discoverThinkBiggerDocs = () => {
   const expectedSpecDocs = new Set(expectedThinkBiggerDocs
     .filter((file) => file.startsWith('docs/superpowers/specs/')))
   const thinkBiggerSpecMarkerPattern = /^Think Bigger Spec:\s*true\s*$/im
+  const metadataHeader = (raw) => raw.split(/\r?\n/).slice(0, 12).join('\n')
   const hasThinkBiggerSpecMarker = (dir, name) => {
     const candidatePath = path.resolve(repoRoot, dir, name)
     let canonicalCandidatePath
@@ -57,7 +58,7 @@ const discoverThinkBiggerDocs = () => {
     }
 
     const raw = fs.readFileSync(canonicalCandidatePath, 'utf8')
-    return thinkBiggerSpecMarkerPattern.test(raw)
+    return thinkBiggerSpecMarkerPattern.test(metadataHeader(raw))
   }
   const discoveryRoots = [
     {
@@ -356,8 +357,11 @@ const collectLinks = (markdown) => {
         continue
       }
       const destination = normalizeDestination(definition[2])
-      referenceDefinitions.set(normalizeLabel(definition[1]), destination)
-      addLink(destination, lineNumber)
+      const label = normalizeLabel(definition[1])
+      if (!referenceDefinitions.has(label)) {
+        referenceDefinitions.set(label, destination)
+        addLink(destination, lineNumber)
+      }
     }
   }
 
@@ -519,6 +523,12 @@ const assertCheckerFixtures = () => {
   const referenceTargetCount = referenceLinks.links.filter((link) => link.target === './target.md').length
   if (referenceTargetCount !== 3) {
     throw new Error('reference fixture should count definition, shortcut, and full reference links exactly once')
+  }
+  const duplicateReferenceLinks = collectLinks('[dup]: ./first.md\n[dup]: ./second.md\n[dup]')
+  const duplicateFirstTargetCount = duplicateReferenceLinks.links.filter((link) => link.target === './first.md').length
+  const duplicateSecondTargetCount = duplicateReferenceLinks.links.filter((link) => link.target === './second.md').length
+  if (duplicateFirstTargetCount !== 2 || duplicateSecondTargetCount !== 0) {
+    throw new Error('duplicate reference definitions should preserve the first target and ignore later duplicates')
   }
   const codeSpanSeparatedLink = collectLinks('[text]`code`(target.md)')
   if (codeSpanSeparatedLink.links.length > 0 || codeSpanSeparatedLink.unresolvedReferences.length > 0) {
