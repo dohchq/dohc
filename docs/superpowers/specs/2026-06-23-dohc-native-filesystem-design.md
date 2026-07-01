@@ -800,6 +800,7 @@ monotonic ordering guard before it can update UI state:
 
 ```ts
 // Canonical base-10 unsigned 64-bit integer.
+type UnixMsDecimalString = string
 type UInt64DecimalString = string
 type ServerIssuedRequestToken = string & { readonly __brand: 'ServerIssuedRequestToken' }
 
@@ -828,21 +829,32 @@ type VersionsNamespaceActivationFence =
       state: 'inactive'
       fenceId?: never
     }
-  | {
-      state: 'activating' | 'committing' | 'rolling_back'
-      fenceId: string
-      migrationGeneration: UInt64DecimalString
-      decision: 'activate' | 'rollback'
-      plannedLegacyPathOutcomes: Array<{
-        pathToken: string
-        outcome: 'move' | 'reclassify' | 'preserve' | 'quarantine'
-      }>
-      fromMode: 'legacy_unmanaged' | 'managed_versions'
-      toMode: 'legacy_unmanaged' | 'managed_versions'
-      startedAt: UnixMsDecimalString
-      updatedAt: UnixMsDecimalString
-      operatorActionId?: string
-    }
+  | (VersionsNamespaceActivationFenceBase & {
+      state: 'activating'
+      decision: 'activate'
+    })
+  | (VersionsNamespaceActivationFenceBase & {
+      state: 'committing'
+      decision: 'activate'
+    })
+  | (VersionsNamespaceActivationFenceBase & {
+      state: 'rolling_back'
+      decision: 'rollback'
+    })
+
+type VersionsNamespaceActivationFenceBase = {
+  fenceId: string
+  migrationGeneration: UInt64DecimalString
+  plannedLegacyPathOutcomes: Array<{
+    pathToken: string
+    outcome: 'move' | 'reclassify' | 'preserve' | 'quarantine'
+  }>
+  fromMode: 'legacy_unmanaged' | 'managed_versions'
+  toMode: 'legacy_unmanaged' | 'managed_versions'
+  startedAt: UnixMsDecimalString
+  updatedAt: UnixMsDecimalString
+  operatorActionId?: string
+}
 
 type WorkspaceStatusPayload = {
   workspaceId: string

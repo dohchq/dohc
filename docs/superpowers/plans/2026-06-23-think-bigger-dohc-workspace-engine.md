@@ -328,6 +328,12 @@ they must not disagree about what happened.
 
 ### Projection Writeability
 
+Until PR 01C lands, this section is provisional product vocabulary for Phase 0
+planning, not the canonical schema owner. PR 01C must adopt, migrate, or replace
+these projection and link contracts in the shared schema package through an
+explicit compatibility boundary; later PRs must import the PR 01C-owned
+contracts instead of copying this prose.
+
 Every projection must declare two independent contracts: whether edits can
 round-trip, and whether engine validation is required before those edits become
 canonical source.
@@ -1173,12 +1179,18 @@ history.
 
 - Search text file and linked chat.
 - Apply minimal effective policy to files, chat links, projections, and search.
-- Add provisional Phase 0 policy resolver hooks for linked chat/projection
-  visibility before search consumes those surfaces: file effective policy,
-  `ThreadLink` visibility, chat projection visibility, and search indexing must
-  all resolve through one Phase 0 baseline policy result instead of local
-  ad hoc checks. PR 04 may replace the provisional hook only through an explicit
-  migration/backfill boundary.
+- Add provisional `Phase0EffectivePolicyInput` ->
+  `Phase0EffectivePolicyResult` hooks that mirror the PR 04 shared
+  effective-policy subset before linked chat/projection/search consumes those
+  surfaces. The required Phase 0 surface names are `file_read`,
+  `thread_link_visibility`, `chat_projection_visibility`, and
+  `search_index_visibility`; each path must provide the same workspace, actor,
+  version, target object/path, projection contract, and object-family policy
+  facts shape that PR 04 later promotes. File effective policy, `ThreadLink`
+  visibility, chat projection visibility, and search indexing must all resolve
+  through this baseline result instead of local ad hoc checks. Extra Phase 0
+  fields are allowed only behind an explicit migration/backfill boundary so PR
+  04 can replace the provisional hook cleanly.
 - Default `.env` to ignored/excluded/redacted until secret-backed files exist.
 
 **Tests:**
@@ -1749,13 +1761,15 @@ TypeScript and Rust consumers generated or conformance-tested from it.
     `decode_workspace_engine_wire_strict`. This slice owns runtime round-trip
     fixtures only; it must not introduce link, projection, share, or policy model
     decisions.
-  - **PR 01C - Link And Projection Contracts:** define `WorkspaceLinkRef`,
-    projection writeability values (`canonical`, `writable`, `readOnly`,
-    `lossy`, `redacted`), and projection validation values (`none`,
-    `sourceValidated`, `policyValidated`, `internalOnly`). Chat-specific link
-    storage stays in the chat `ThreadLink` layer: stable link ID, source thread
-    ID, read-state/search projection hooks, and chat-specific ordering are not
-    part of `WorkspaceLinkRef`.
+  - **PR 01C - Link And Projection Contracts:** adopt, migrate, or replace the
+    provisional projection and `WorkspaceLinkRef` vocabulary from the shared
+    substrate section above in the shared schema package. This slice owns the
+    canonical `WorkspaceLinkRef`, projection writeability values (`canonical`,
+    `writable`, `readOnly`, `lossy`, `redacted`), and projection validation
+    values (`none`, `sourceValidated`, `policyValidated`, `internalOnly`).
+    Chat-specific link storage stays in the chat `ThreadLink` layer: stable link
+    ID, source thread ID, read-state/search projection hooks, and chat-specific
+    ordering are not part of `WorkspaceLinkRef`.
   - **PR 01D - Core Effective Policy Boundary:** define one core effective policy
     input/output type for filesystem, search, and export substrate. Chat,
     notification, secret, and external-share policy extensions land with their

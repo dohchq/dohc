@@ -1135,7 +1135,7 @@ Messages are comments/replies inside a chat thread.
 Fields:
 
 ```ts
-type ThreadMessage = {
+type ThreadMessageBase = {
   id: string // server-issued; unique within (workspaceId, threadId)
   workspaceId: string
   threadId: string
@@ -1148,12 +1148,24 @@ type ThreadMessage = {
   createdAt: UnixMsDecimalString // server-assigned; client values rejected
   editedAt?: UnixMsDecimalString // server-assigned; client values rejected
   readonly editedById?: string // server-assigned immutable edit actor id
-  // Derived cache from the canonical message_deleted activity.
-  deletedAt?: UnixMsDecimalString
-  readonly deletedById?: string // server-assigned immutable delete actor id
-  deleteReason?: string
-  tombstone?: boolean
 }
+
+type LiveThreadMessage = ThreadMessageBase & {
+  deletedAt?: never
+  readonly deletedById?: never
+  deleteReason?: never
+  tombstone?: never
+}
+
+type DeletedThreadMessage = ThreadMessageBase & {
+  // Derived cache from the canonical message_deleted activity.
+  deletedAt: UnixMsDecimalString
+  readonly deletedById: string // server-assigned immutable delete actor id
+  deleteReason?: string
+  tombstone: true
+}
+
+type ThreadMessage = LiveThreadMessage | DeletedThreadMessage
 ```
 
 `ThreadMessage.id` is assigned by the server and unique within
@@ -1161,6 +1173,12 @@ type ThreadMessage = {
 server-assigned id through the idempotency result, or be rejected as
 `replay_metadata_mismatch`, so ordering tie-breakers and read cursors can rely on
 a stable unique message identifier.
+Projection, restore, export, and search schemas must consume the same
+`LiveThreadMessage | DeletedThreadMessage` union. Live messages must omit
+`deletedAt`, `deletedById`, `deleteReason`, and `tombstone`; deleted messages
+must carry `deletedAt`, `deletedById`, and `tombstone: true`, with
+`deleteReason` present only when policy permits retention. Renderers must not
+infer deletion from partial optional-field combinations.
 The create path must reserve or replay the idempotency result and server-assigned
 `ThreadMessage.id` before validating `parentMessageId`. That resolved id is then
 used for self-parent rejection and ancestry cycle detection. The reservation is
@@ -1673,6 +1691,8 @@ Core actions:
 ```text
 list_channels
 list_chats
+create_channel
+get_or_create_channel
 read_chat
 read_channel_conversation
 rename_channel_conversation_label
@@ -1688,6 +1708,8 @@ enforce workspace scope on every entity and result:
 
 - `list_chats`
 - `list_channels`
+- `create_channel`
+- `get_or_create_channel`
 - `read_chat`
 - `read_channel_conversation`
 - `rename_channel_conversation_label`

@@ -3505,8 +3505,8 @@ Hundred-sixty-sixth pass:
 - Fixed CodeRabbit's two follow-up findings:
   - Made the docs checker skip self-closing HTML tags such as `<br/>`, `<hr/>`,
     and `<wbr/>` during autolink scanning.
-  - Clarified that the newest PR00 pass entry owns live status while Current PR
-    Snapshot is a derived summary.
+  - Clarified that the newest PR00 pass entry's `Live PR00 status` block owns
+    live status while the rest of the log is read-only history.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -7409,7 +7409,7 @@ Two-hundred-seventy-eighth pass:
 
 Two-hundred-seventy-ninth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two major findings and one minor finding fixed; committed
     review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7440,12 +7440,59 @@ Two-hundred-seventy-ninth pass:
 - Overrides:
   - None approved.
 
+Two-hundred-eightieth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five major findings, one minor finding, and one trivial
+    finding fixed; committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five major findings, one minor finding, and one trivial
+  finding:
+  - Marked the shared substrate projection/link vocabulary as provisional until
+    PR 01C adopts or replaces it canonically.
+  - Aligned the P0F provisional effective-policy hook with the PR 04 resolver
+    surface names for file, thread-link, chat-projection, and search indexing.
+  - Made `VersionsNamespaceActivationFence` a stricter discriminated union and
+    added the missing `UnixMsDecimalString` alias.
+  - Replaced vague subagent review notes with dated, traceable artifact
+    references.
+  - Removed a stale historical `Current PR Snapshot` reference.
+  - Refactored `ThreadMessage` into strict live/deleted row unions for
+    tombstone-field consistency.
+  - Added `create_channel` and `get_or_create_channel` to the chat action
+    inventory.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Subagent Reviews
 
-- Architecture: prior planning review incorporated.
-- Security: prior planning review incorporated.
-- QA: prior planning review incorporated.
-- Other: external architecture review incorporated.
+- Architecture: 2026-06-23 PR00 architecture review incorporated into
+  `2026-06-23-think-bigger-dohc-workspace-engine.md` Phase 0 PR lanes and PR 01
+  split sections.
+- Security: 2026-06-23 PR00 security review incorporated into the versioned,
+  native-filesystem, and chats specs' authorization, policy, secret, and
+  visibility-gate contracts.
+- QA: 2026-06-23 PR00 QA review incorporated into this execution log's
+  validation template, Phase 0 gate checklist, and repeated CodeRabbit evidence
+  blocks.
+- Other: 2026-06-23 external architecture review incorporated into the Rust
+  kernel boundary questions and the Phase 0/P0R deferral evidence.
 
 ### Security / Privacy Notes
 
