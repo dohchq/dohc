@@ -27,7 +27,7 @@ The user-facing promise is simple:
 Canonical lifecycle term: **`durable-pending holding record`**. This is the
 single prose term for an accepted, non-canonical write held for replay,
 canonicalization, or operator disposition. `WriteResult.kind: 'durable-pending'`,
-`recordKind: 'accepted_holding_record'`, and `pendingState:
+`recordKind: 'accepted_holding_record'`, and `lifecycleState:
 'pending_protection' | 'pending_review' | 'pending_canonicalization' |
 'overdue_disposition'` are wire/schema values for that same lifecycle concept:
 `pending_protection` means durable recording succeeded before async protection
@@ -144,7 +144,7 @@ durability path accepts a non-canonical
 successful immediate save and not a canonical write that is merely waiting for
 read visibility. The only `durable-pending` response is the non-canonical
 `WriteResult` arm carrying `holdingRecordId`, `acceptedAt`, `replayUntil`,
-`operatorDispositionDueAt`, `pendingState`, and the same idempotency/replay
+`operatorDispositionDueAt`, `lifecycleState`, and the same idempotency/replay
 metadata used to resume or retire that holding record. UIs may show that pending
 record only in explicit ingest/recovery/status surfaces marked non-canonical.
 In this spec, "files save immediately" means authorized writes become canonical
@@ -283,7 +283,7 @@ type WriteResult =
       recordKind: 'accepted_holding_record'
       acceptedAt: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
-      pendingState:
+      lifecycleState:
         | 'pending_protection'
         | 'pending_review'
         | 'pending_canonicalization'
@@ -555,11 +555,11 @@ operator-visible until canonicalized or explicitly dispositioned. Payload bytes
 must not be deleted, cryptoshredded, or compacted into non-reconstructible
 evidence without that explicit disposition record.
 
-Durable-pending `pendingState` transitions are part of the write contract and
+Durable-pending `lifecycleState` transitions are part of the write contract and
 must be reflected identically by writers, retries, holding-record lookup, and
 status APIs:
 
-| `pendingState` | Entry condition | Exit conditions |
+| `lifecycleState` | Entry condition | Exit conditions |
 | --- | --- | --- |
 | `pending_protection` | The accepted holding record is durable, but protected-path, policy, visibility, secret-broker/declassification, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. Denials map one-to-one: protected-path -> `quarantined_protection`; policy -> `quarantined_policy`; visibility -> `quarantined_visibility`; secret-broker/declassification -> `quarantined_secret_declassification`; provenance -> `quarantined_provenance`; attribution -> `quarantined_attribution`; proof -> `quarantined_proof`; lock -> `quarantined_locked`; version access -> `quarantined_version_access`; skill-turn -> `quarantined_skill_turn`. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
 | `pending_review` | All protection checks needed to ask for review have passed, including policy, visibility, provenance, attribution, proof, lock, version-access, skill-turn, and secret-broker/declassification checks when they apply, and policy requires human or authorized workflow review before canonicalization. | Approval moves to `pending_canonicalization`; review denial moves to `quarantined_review_gate`; any evaluator recheck denial uses the same one-to-one `quarantined_*` mapping as `pending_protection`; explicit operator retirement moves to `terminal-retired`; reaching `operatorDispositionDueAt` without a decision moves to `overdue_disposition`. |
@@ -696,7 +696,7 @@ Review requirements and review denials are distinct outcomes:
 
 | Situation | Engine result | Canonical effect |
 | --- | --- | --- |
-| Policy requires review before canonicalization and the write is durably recorded | `durable-pending` with `pendingState: 'pending_review'` | No canonical commit until authorized reviewers approve or dispose the holding record. |
+| Policy requires review before canonicalization and the write is durably recorded | `durable-pending` with `lifecycleState: 'pending_review'` | No canonical commit until authorized reviewers approve or dispose the holding record. |
 | Review gate denies before any durable recording | Immediate denial with `PublicDeniedReasonCode: 'review_gate_denied'` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
 | Review gate denies an accepted holding or replayed record | `quarantined` with `quarantineState: 'quarantined_review_gate'` | No canonical commit unless an authorized review outcome later changes disposition. |
 | Required review approves an accepted holding record | Replay/canonicalization may proceed | Canonical commit may occur only if the full enforcement matrix also passes: visibility, authorization, ownership/review, policy, protected-path, secret-broker/declassification, lock, version-access, skill-turn, provenance, attribution, proof, causal-base, and conflict-preservation gates. |
@@ -794,7 +794,7 @@ that shared order:
 4. preserved base/current/incoming divergence, stale causal bases, or semantic
    merge uncertainty create conflict preservation/reconciliation.
 5. mandatory review for an otherwise clean write creates a `durable-pending`
-   holding record with `pendingState: 'pending_review'` only after the accepted
+   holding record with `lifecycleState: 'pending_review'` only after the accepted
    write-intent record and idempotency result are durable; no canonical file
    content is mutated yet.
 6. a clean write that passes all synchronous gates and does not require

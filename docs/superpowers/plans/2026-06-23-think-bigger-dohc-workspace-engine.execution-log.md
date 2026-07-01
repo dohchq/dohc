@@ -7844,7 +7844,7 @@ Two-hundred-ninetieth pass:
 
 Two-hundred-ninety-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four major findings and two minor findings fixed; committed
     review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7876,6 +7876,43 @@ Two-hundred-ninety-first pass:
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-ninety-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: one major finding and one minor finding addressed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: CodeRabbit committed review rerun remains pending; the
+    PR00 docs-only local-agent-CLI exception remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Addressed CodeRabbit's one major finding and one minor finding:
+  - Verified `github-slugger@^2.0.0` is reflected in `pnpm-lock.yaml` root
+    importer, package snapshot, and resolution snapshot; rerunning
+    `pnpm install --lockfile-only --ignore-scripts` produced no additional
+    lockfile diff.
+  - Renamed the public durable-pending holding-record state field from
+    `pendingState` to `lifecycleState` so `overdue_disposition` is expressed as
+    part of the accepted holding record lifecycle instead of a pending-only
+    state.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - CodeRabbit committed review rerun remains pending.
   - The PR00 docs-only local-agent-CLI exception remains pending human approval
     before completion or merge-readiness.
 - Overrides:
