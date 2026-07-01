@@ -622,9 +622,14 @@ history surfaces read that label instead of rendering the normalized key.
 Creation retries and identity checks compare against the stored key pair instead
 of re-normalizing with the current rules, and retries replay the stored display
 label. A later label change must use an explicit rename/history action rather
-than a second create request. If the normalizer changes later, migration must
-create a new versioned value explicitly rather than silently reinterpreting old
-keys.
+than a second create request: `rename_channel_conversation_label` validates the
+existing `channelConversationId` is a `named_subconversation`, keeps the stored
+`(namedSubconversationKey, namedSubconversationKeyVersion)` and
+`channelConversationId` unchanged, stores the next
+`namedSubconversationDisplayLabel`, and appends
+`NamedSubconversationLabelRenamedThreadActivity` in the same serialized unit. If
+the normalizer changes later, migration must create a new versioned value
+explicitly rather than silently reinterpreting old keys.
 
 type ChannelChatThread = ChatThreadBase & ChannelConversationProvenance & {
   channelId: string
@@ -1165,9 +1170,9 @@ serialized unit of work and become visible together. The activity is the
 canonical creation event for replay, projections, exports, and audit; the
 message row must not become visible without it, and a creation activity must not
 be exposed without the corresponding row. `MessageCreateThreadActivity` stores
-the created row's canonical `threadSequence` and initial `bodyRevision` so
-replay/export consumers can reconstruct deterministic ordering and body identity
-without inferring them from timestamps.
+the created row's immutable `parentMessageId`, canonical `threadSequence`, and
+initial `bodyRevision` so replay/export consumers can reconstruct reply topology,
+deterministic ordering, and body identity without inferring them from timestamps.
 
 `ThreadMessage.body` is untrusted user/agent input. Rendering must escape plain
 text by default or sanitize through an allowlisted formatting subset before
@@ -1288,11 +1293,22 @@ type DmThreadRelinkedThreadActivity = ThreadActivityBase & {
 
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
+  parentMessageId?: string
   kind: 'message_created'
   threadSequence: UInt64DecimalString
   bodyRevision: UInt64DecimalString
   bodyHash: string
   nextBodyHash: string
+}
+
+type NamedSubconversationLabelRenamedThreadActivity = ThreadActivityBase & {
+  kind: 'named_subconversation_label_renamed'
+  channelId: string
+  channelConversationId: string
+  namedSubconversationKey: string
+  namedSubconversationKeyVersion: string
+  previousNamedSubconversationDisplayLabel: string
+  nextNamedSubconversationDisplayLabel: string
 }
 
 type MessageEditThreadActivity = ThreadActivityBase & {
@@ -1494,6 +1510,7 @@ type ThreadActivity =
   | ThreadCreatedActivity
   | DmThreadRelinkedThreadActivity
   | MessageCreateThreadActivity
+  | NamedSubconversationLabelRenamedThreadActivity
   | MessageEditThreadActivity
   | MessageDeleteThreadActivity
   | MessageDeleteLegacyThreadActivity
@@ -1505,8 +1522,12 @@ type ThreadActivity =
 
 For `message_created`, `message_edited`, `message_deleted`, `message_restored`,
 `reaction_added`, and `reaction_removed`, `messageId`, `actorId`, `actorKind`,
-and `createdAt` are required. For `message_edited`, `previousBody` and
-`previousBodyRevision` are also required. For in-system `message_deleted` events,
+and `createdAt` are required. For `message_created`, `parentMessageId` is the
+immutable reply parent captured from `ThreadMessage.parentMessageId` when present.
+For `named_subconversation_label_renamed`, previous/next display labels,
+`channelConversationId`, and the stored named-subconversation key pair are
+required. For `message_edited`, `previousBody` and `previousBodyRevision` are
+also required. For in-system `message_deleted` events,
 `previousBody` and `previousBodyRevision` are required and must preserve the
 deleted body as plaintext, redacted, or secret-backed snapshot according to
 policy. `message_restored` must create a new current body revision from
@@ -1605,6 +1626,7 @@ list_channels
 list_chats
 read_chat
 read_channel_conversation
+rename_channel_conversation_label
 create_chat
 send_channel_message
 reply_to_chat
@@ -1619,6 +1641,7 @@ enforce workspace scope on every entity and result:
 - `list_channels`
 - `read_chat`
 - `read_channel_conversation`
+- `rename_channel_conversation_label`
 - `create_chat`
 - `send_channel_message`
 - `reply_to_chat`
@@ -1669,6 +1692,16 @@ server-assigned target identifiers:
   return the same triple.
 - `reply_to_chat` requires an `idempotencyKey`; the server assigns `messageId`
   in the idempotency result, and retries return that same `messageId`.
+- `rename_channel_conversation_label` requires an `idempotencyKey`, `channelId`,
+  server-issued `channelConversationId`, expected conversation/display-label
+  revision, and the next user-entered label. It applies only to an existing
+  `named_subconversation` thread the actor can administer, derives the next
+  display label with the same display-safety validation used by creation, keeps
+  `namedSubconversationKey`, `namedSubconversationKeyVersion`, and
+  `channelConversationId` unchanged, and appends
+  `NamedSubconversationLabelRenamedThreadActivity` with previous/next labels in
+  the same serialized unit. Retries replay the same activity and display label;
+  callers must not recreate the conversation to rename it.
 - `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected
   `bodyRevision`.
 - `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected

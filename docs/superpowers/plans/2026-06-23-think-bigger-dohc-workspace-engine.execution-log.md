@@ -123,8 +123,8 @@ implementation template for new implementation PR entries.
 - Validation:
   - `git diff --check`:
   - `node scripts/check-think-bigger-doc-links.mjs`:
-  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` from `/tmp`:
-  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`:
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`:
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`:
 - Unresolved findings:
   - ...
 - Overrides:
@@ -6526,7 +6526,7 @@ Two-hundred-fifty-fourth pass:
 
 Two-hundred-fifty-fifth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: five follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6555,6 +6555,41 @@ Two-hundred-fifty-fifth pass:
   - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
     for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-fifty-sixth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: four follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's four follow-up findings:
+  - Updated the Think Bigger docs workflow to the `actions/setup-node` v6 pinned
+    release.
+  - Defined `rename_channel_conversation_label` and
+    `NamedSubconversationLabelRenamedThreadActivity` as the canonical
+    named-subconversation display-label rename/history path.
+  - Added immutable `parentMessageId` to `MessageCreateThreadActivity` so replay
+    can reconstruct reply topology.
+  - Replaced non-copy-pasteable execution-log template validation commands with
+    repo-relative commands.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd /tmp && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
 - Unresolved findings:
   - The PR00 docs-only local-agent-CLI exception remains pending human approval
