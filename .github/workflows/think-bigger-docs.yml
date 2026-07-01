@@ -4,7 +4,7 @@ on:
   pull_request:
     branches:
       - main
-    paths:
+    paths: &think-bigger-doc-paths
       - 'docs/superpowers/**'
       - 'scripts/check-think-bigger-doc-links.mjs'
       - '.github/workflows/think-bigger-docs.yml'
@@ -13,12 +13,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'docs/superpowers/**'
-      - 'scripts/check-think-bigger-doc-links.mjs'
-      - '.github/workflows/think-bigger-docs.yml'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
+    paths: *think-bigger-doc-paths
   workflow_dispatch:
   schedule:
     - cron: '17 5 * * 1'

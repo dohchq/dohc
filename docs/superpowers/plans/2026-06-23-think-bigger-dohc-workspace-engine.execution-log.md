@@ -22,7 +22,7 @@ Source specs:
 - **Archive boundary:** earlier PR00 pass entries under
   `Archived PR00 Pass History` are append-only background. Only the newest PR00
   pass's `Live PR00 status` block is mutable for current state.
-- **PR00 PR:** see the canonical live-status block in the latest PR00 pass below.
+- **PR00:** see the canonical live-status block in the latest PR00 pass below.
 
 ## How To Use This Log
 
@@ -2169,7 +2169,7 @@ Hundred-thirteenth pass:
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
-  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")` passed
     for 5 files from `/tmp`, confirming repo-root-stable path resolution.
   - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
     passed with 1 file and 2 tests.
@@ -7160,7 +7160,7 @@ Two-hundred-seventy-first pass:
 
 Two-hundred-seventy-second pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two major findings, two minor findings, and one trivial
     finding fixed; committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7182,6 +7182,39 @@ Two-hundred-seventy-second pass:
     reserved for actual review-gate failures.
   - Refactored the `WriteResult` contract around shared workspace/version and
     idempotency envelopes to reduce drift across union arms.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-third pass:
+
+- Live PR00 status:
+  - CodeRabbit status: one trivial finding and three minor findings fixed;
+    committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's one trivial finding and three minor findings:
+  - Reused one YAML-anchored docs path list for both pull request and push
+    triggers in the Think Bigger docs workflow.
+  - Required the Think Bigger docs manifest to contain at least one unique
+    string entry.
+  - Replaced the historical placeholder docs-link validation command with the
+    exact runnable `REPO_ROOT=...` form.
+  - Simplified the PR00 pointer label to avoid a duplicated "PR" token.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
