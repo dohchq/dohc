@@ -8284,11 +8284,11 @@ Mutable status symbol: `LivePR00Status`.
 
 Three-hundred-second pass:
 
-### Live PR00 Status
+### Historical PR00 Status - Pass 302
 
 Mutable status symbol: `LivePR00Status`.
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: per 2026-06-29 user direction, CodeRabbit is now a
     major-gate reviewer rather than a per-fix rerun. The in-flight committed
     review was cancelled after a prior rate-limit wait; the next CodeRabbit run
@@ -8324,8 +8324,55 @@ Mutable status symbol: `LivePR00Status`.
 - Overrides:
   - None approved.
 
+Three-hundred-third pass:
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: deferred to the next PR00 major readiness/material-risk
+    gate under the 2026-06-29 user-directed review policy.
+  - Test evidence: local validation remains green; GitHub Actions did not start
+    runners because the GitHub billing/spending limit gate blocked jobs before
+    any workflow step ran.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Unresolved findings: GitHub Actions billing/spending-limit blocker prevents
+    fresh remote CI; the PR00 docs-only local-agent-CLI exception remains
+    pending human approval.
+  - Completion state: not complete or merge-ready until remote CI can run or the
+    user explicitly accepts the external CI blocker for PR00, the required
+    major-gate review policy is satisfied, and the docs-only local-agent-CLI
+    exception is approved.
+
+- CI investigation:
+  - `gh run view 28526764674 --verbose` for `Think Bigger Docs / Link And Anchor Check`
+    reported: "The job was not started because recent account payments have
+    failed or your spending limit needs to be increased."
+  - `gh run view 28526764899 --verbose` for `Desktop Release / Preflight`
+    reported the same GitHub Actions billing/spending-limit annotation.
+  - Both failed jobs had empty step lists and no runner assignment, so no
+    repository code or workflow command executed before failure.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - External GitHub Actions billing/spending-limit blocker prevents remote CI.
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
 ### Unresolved Findings
 
+- GitHub Actions billing/spending-limit blocker prevents remote CI from running
+  on PR00.
 - CodeRabbit is deferred to the next major PR00 readiness gate under the
   updated review policy.
 - The PR00 docs-only local-agent-CLI exception remains pending human approval
