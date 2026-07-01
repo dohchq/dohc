@@ -954,7 +954,8 @@ until the PR 12 chat ownership boundary explicitly adopts or migrates them.
 
 | Symbols | Phase 0 baseline | PR 01 | PR 12 |
 | --- | --- | --- | --- |
-| `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, stable object ID, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
+| `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
+| `Phase0EffectivePolicyInput`, `Phase0EffectivePolicyResult`, `file_read`, `thread_link_visibility`, `chat_projection_visibility`, `search_index_visibility` | P0F is the only provisional writer for the shared effective-policy hook and required surface names. All Phase 0 policy/search/chat projection consumers import these symbols from `Phase0SharedSubstrateBaseline`. | Consumer/bridge only until PR 04 promotes the shared effective-policy contract; must not fork a second schema. | Consumer only through the PR 04-owned effective-policy contract; chat/search implementation PRs must not invent local visibility hooks. |
 | `ChatThread`, `ThreadMessage`, chat `ThreadLink` | P0E is the only provisional writer for linked-chat proof rows before PR 01; other Phase 0 lanes may read the baseline symbols but must not mutate these records. | Bridge writer only under schema version `chat-core-bridge-v0` so file/history/search proof code can compile; owns migration metadata and import compatibility for P0E rows, but must not extend final chat storage semantics. | Single final writer; explicitly adopts, migrates, or backfills from `chat-core-bridge-v0`, then owns durable channels, DMs, linked-work behavior, and full chat storage. |
 | `ThreadReadState`, read cursor tuple, `readStateRevision`, unread/read-state projections | P0E is the only provisional writer when read-state rows are needed for Phase 0 chat bridge tests; other lanes may read fixtures only. The provisional rows must use monotonic cursor semantics and server-owned revision tokens. | Sole owner/writer for schema version `chat-read-state-bridge-v0` from the **PR01 Schema Promotion Checkpoint** until the PR 12 handoff. PR 01 owns bridge-v0 projection rebuild/invalidation, the migration boundary from Phase 0 fixtures, monotonic cursor compatibility, and server-owned revision/CAS compatibility. It does not define the final PR 12 cursor model. | Consumer of `chat-read-state-bridge-v0` until PR 12 begins the explicit handoff migration. After that handoff, PR 12 becomes the single final writer, migrates/backfills from bridge-v0, owns final cursor semantics, server-owned revision/CAS token behavior, final projection rebuild/invalidation, and compatibility for legacy read-state rows. PR 12 must not mutate bridge-v0 projection rebuild/invalidation rules before the handoff. |
 | `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
@@ -964,7 +965,9 @@ canonical core plus chat bridge -> PR 12 final chat/link schema. Later PR entrie
 may state acceptance criteria or migration notes for those symbols, but they are
 not ownership sources. When a later PR needs any matrix-listed symbol, it must
 link back to this matrix for ownership, adoption, bridge, and migration/backfill
-rules. Local field lists and tests are acceptance requirements only.
+rules. Local field lists and tests are acceptance requirements only. Stable
+object identifiers are represented as fields on `WorkspaceObject` and
+object-facing mutation/read shapes, not as a standalone matrix-owned symbol.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -2245,10 +2248,13 @@ links, activity, read state, and reactions.
 - Add channel membership/visibility.
 - Add DMs and small group chat primitives.
 - Add message authorship with human/agent display.
-- Implement the read-state storage/API behavior assigned to PR 12 by the
+- After the explicit `chat-read-state-bridge-v0` handoff from PR 01, implement the
+  final read-state storage/API behavior assigned to PR 12 by the
   [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix):
   monotonic cursor semantics, server-owned revision/CAS upserts, and projection
-  rebuild/invalidation alongside thread/message models.
+  rebuild/invalidation alongside thread/message models. PR 01 retains bridge-v0
+  migration, projection rebuild/invalidation, and compatibility ownership until
+  that handoff is recorded.
 - Store chat links as `ThreadLink = chat storage fields + WorkspaceLinkRef`.
   Chat storage fields include stable link ID, source thread ID,
   read-state/search projection hooks, and chat-specific ordering. The embedded

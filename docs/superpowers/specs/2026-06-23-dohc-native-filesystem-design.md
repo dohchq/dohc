@@ -490,15 +490,20 @@ request dedupe. `requestToken` is a server-issued transport/correlation token:
 the first accepted call mints it, responses echo it, and callers may echo it only
 to correlate follow-up transport state; it is not caller authority and is not the
 replay identity. The handler records the idempotency key with the
-workspace/version/path/runtime identity, the full operation tuple (`hydrate`
-versus `setPinned`, with `recursive` included for both and `pinned` only for
-`setPinned`), and the server-derived actor/session equivalence class before
-applying workspace state changes. Authorization and actor/session identity are
-derived only server-side; callers cannot widen authority by choosing request
-fields. Retries with the same expanded idempotency key must replay the original
-result or deduplicate the already-enqueued hydration/pin side effects instead of
-applying them again, while different recursive, pinned, runtime, actor, or
-session operations remain distinct.
+workspace/version/path and target runtime or source mount identity, the full
+operation tuple (`hydrate` versus `setPinned`, with `recursive` included for both
+and `pinned` only for `setPinned`), the stable server-derived actor identity, and
+any policy-required session-equivalence class before applying workspace state
+changes. Authorization and actor/session identity are derived only server-side;
+callers cannot widen authority by choosing request fields. Transient
+`requestToken`, auth session handle, editor process id, or watcher session id is
+not part of replay identity when auth refresh or editor restart re-derives the
+same stable actor, target runtime/mount identity, and required
+session-equivalence class. Retries with the same expanded idempotency key must
+replay the original result or deduplicate the already-enqueued hydration/pin side
+effects instead of applying them again, while different recursive, pinned,
+runtime/mount, actor, required session-equivalence class, or operation tuple
+values remain distinct.
 
 ## API-native access
 

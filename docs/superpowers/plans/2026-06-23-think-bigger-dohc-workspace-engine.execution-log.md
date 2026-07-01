@@ -218,6 +218,7 @@ Date completed:
 - Architecture:
 - Security:
 - QA:
+- Accessibility:
 - Other:
 
 ### Security / Privacy Notes
@@ -7657,7 +7658,7 @@ Two-hundred-eighty-fifth pass:
 
 Two-hundred-eighty-sixth pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two major findings and three minor findings fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7676,6 +7677,43 @@ Two-hundred-eighty-sixth pass:
     HTML links, and autolinks.
   - Added `diffStreamId` to diff transport payloads and async stale-response
     checks.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-eighty-seventh pass:
+
+- Live PR00 status:
+  - CodeRabbit status: five major findings and two minor findings fixed; committed
+    review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's five major findings and two minor findings:
+  - Added `Accessibility` to the reusable subagent-review template.
+  - Added `agent_run` to the workspace-scope proof checklist.
+  - Replaced the non-symbol stable-object-id matrix entry with explicit prose and
+    added the Phase 0 effective-policy symbols/surface hooks to the ownership
+    matrix.
+  - Clarified that PR 12 read-state storage/API ownership starts only after the
+    explicit `chat-read-state-bridge-v0` handoff from PR 01.
+  - Aligned `hydrate(...)` and `setPinned(...)` replay identity with the later
+    stable actor/runtime/mount/session-equivalence rule.
+  - Replaced raw HTML attribute matching with a quoted-value-safe scanner and
+    added fixtures for `href`/`id` text inside data attributes.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -7773,9 +7811,9 @@ Gate evidence:
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
 - [ ] Every atom, folder, entity, file, version, chat, thread, message, link,
-      read state, notification, activity, share, capture, event, history moment,
-      search result, projection, holding record, durability-log entry, and
-      idempotency tombstone is workspace-scoped.
+      read state, notification, activity, share, capture, agent_run, event,
+      history moment, search result, projection, holding record, durability-log
+      entry, and idempotency tombstone is workspace-scoped.
 - [ ] Agent writes respect user locks, protected paths, atom/folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.

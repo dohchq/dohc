@@ -228,10 +228,64 @@ const splitLocalTarget = (raw) => {
 const rawHtmlStartTagPattern = /<[A-Za-z][A-Za-z0-9:-]*(?:\s[^<>]*)?>/g
 const rawHtmlAnchorTagPattern = /<a\b[^>]*>/gi
 const htmlAttributeValue = (tag, attrName) => {
-  const attributePattern = new RegExp(`(?:^|\\s)${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>=]+))`, 'i')
-  const match = tag.match(attributePattern)
-  const value = match?.[1] ?? match?.[2] ?? match?.[3]
-  return value === undefined ? null : decodeHtmlEntities(value)
+  const lowerAttrName = attrName.toLowerCase()
+  let cursor = tag.search(/\s/)
+  if (cursor === -1) {
+    return null
+  }
+
+  while (cursor < tag.length) {
+    while (cursor < tag.length && /\s/.test(tag[cursor])) {
+      cursor += 1
+    }
+    if (cursor >= tag.length || tag[cursor] === '>' || tag[cursor] === '/') {
+      break
+    }
+
+    const nameStart = cursor
+    while (cursor < tag.length && /[^\s"'<>/=]/.test(tag[cursor])) {
+      cursor += 1
+    }
+    if (nameStart === cursor) {
+      cursor += 1
+      continue
+    }
+    const name = tag.slice(nameStart, cursor).toLowerCase()
+    while (cursor < tag.length && /\s/.test(tag[cursor])) {
+      cursor += 1
+    }
+    if (tag[cursor] !== '=') {
+      continue
+    }
+    cursor += 1
+    while (cursor < tag.length && /\s/.test(tag[cursor])) {
+      cursor += 1
+    }
+
+    let value
+    const quote = tag[cursor]
+    if (quote === '"' || quote === "'") {
+      const valueStart = cursor + 1
+      const valueEnd = tag.indexOf(quote, valueStart)
+      if (valueEnd === -1) {
+        return null
+      }
+      value = tag.slice(valueStart, valueEnd)
+      cursor = valueEnd + 1
+    } else {
+      const valueStart = cursor
+      while (cursor < tag.length && /[^\s>]/.test(tag[cursor])) {
+        cursor += 1
+      }
+      value = tag.slice(valueStart, cursor)
+    }
+
+    if (name === lowerAttrName) {
+      return decodeHtmlEntities(value)
+    }
+  }
+
+  return null
 }
 
 const indentationWidth = (line) => line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length
@@ -900,6 +954,13 @@ const assertCheckerFixtures = () => {
   const rawHtmlDataAttributes = collectLinks('<a data-href="./hidden.md" data-id="hidden-anchor">target</a>')
   if (rawHtmlDataAttributes.links.length > 0 || collectAnchors('<a data-id="hidden-anchor"></a>').has('hidden-anchor')) {
     throw new Error('raw HTML data-* attributes should not count as links or anchors')
+  }
+  const quotedAttributeText = collectLinks('<a data-note=\'href="./hidden.md"\'>target</a>')
+  if (
+    quotedAttributeText.links.length > 0
+    || collectAnchors('<section data-note=\'id="hidden-anchor"\'></section>').has('hidden-anchor')
+  ) {
+    throw new Error('raw HTML quoted attribute text should not count as links or anchors')
   }
   const footnoteBodyLink = collectLinks('[^note]: See [visible](./visible.md)')
   if (!footnoteBodyLink.links.some((link) => link.target === './visible.md')) {
