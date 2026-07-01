@@ -7126,7 +7126,7 @@ Two-hundred-seventieth pass:
 
 Two-hundred-seventy-first pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: two major findings and one trivial finding fixed;
     committed review rerun is required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -7144,6 +7144,44 @@ Two-hundred-seventy-first pass:
     of restating ownership locally.
   - Updated the execution-log validation template to use `${TMPDIR:-/tmp}` for
     the run-from-another-cwd docs-link check.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-seventy-second pass:
+
+- Live PR00 status:
+  - CodeRabbit status: two major findings, two minor findings, and one trivial
+    finding fixed; committed review rerun is required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's two major findings, two minor findings, and one trivial
+  finding:
+  - Clarified that PR 01 is the sole `chat-read-state-bridge-v0`
+    read-state bridge owner before the PR 12 handoff, while PR 12 owns only the
+    final post-handoff read-state lifecycle.
+  - Broadened raw HTML anchor collection so non-`a` start tags with `id`
+    attributes produce local anchors, while `name` remains `a`-tag-only.
+  - Added `restoreReason` text-safety rules matching the existing
+    `deleteReason` escape/sanitize/redact contract.
+  - Split ownership denial from review-gate denial so `review_gate_denied` is
+    reserved for actual review-gate failures.
+  - Refactored the `WriteResult` contract around shared workspace/version and
+    idempotency envelopes to reduce drift across union arms.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered

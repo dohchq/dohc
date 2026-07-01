@@ -1398,6 +1398,11 @@ rules as message bodies and thread titles: escape by default, sanitize only
 through the allowlisted formatting subset, and redact or omit where the viewer
 lacks access. History, export, projection, search snippet, and notification
 surfaces must not render raw `deleteReason` text.
+`restoreReason`, when present on `MessageRestoreThreadActivity`, is also
+preserved user/agent text and follows the same text-safety rules: escape by
+default, sanitize only through the allowlisted formatting subset, and redact or
+omit where the viewer lacks access. History, export, projection, search snippet,
+and notification surfaces must not render raw `restoreReason` text.
 Message create, edit, restore, and delete lifecycle activities must populate `bodyHash`
 from this same canonical persisted-body hash used by
 `MentionNotificationThreadActivity`. For create/edit/restore, `bodyHash` is the

@@ -153,6 +153,7 @@ type UInt64DecimalString = string & { readonly __brand: 'UInt64DecimalString' }
 type DeniedOrQuarantinedStatus =
   | 'rejected_before_acceptance'
   | 'quarantined_authorization'
+  | 'quarantined_ownership'
   | 'quarantined_protection'
   | 'quarantined_review_gate'
   | 'quarantined_attribution'
@@ -171,6 +172,7 @@ type QuarantinedStatus = Exclude<
 
 type PublicDeniedReasonCode =
   | 'not_authorized'
+  | 'ownership_denied'
   | 'review_gate_denied'
   | 'policy_denied'
   | 'visibility_denied'
@@ -240,135 +242,95 @@ type NonHoldingExpiredRetryRecordKind = Extract<
   | 'conflict_record'
 >
 
+type WriteResultEnvelope = {
+  workspaceId: string
+  versionId: string
+  idempotencyKey: string
+  idempotencyResultId: string
+}
+
+type ReplayableWriteResultEnvelope = WriteResultEnvelope & {
+  idempotencyReplayToken: string
+}
+
+type HoldingWriteResultEnvelope = ReplayableWriteResultEnvelope & {
+  holdingRecordId: string
+  replayUntil: UnixMsDecimalString
+}
+
+type ExpiredWriteResultEnvelope = WriteResultEnvelope & {
+  expiredAt: UnixMsDecimalString
+  reasonCode: 'idempotency_expired'
+}
+
 type WriteResult =
-  | {
+  | (ReplayableWriteResultEnvelope & {
       kind: 'canonical'
-      workspaceId: string
-      versionId: string
       historyMomentId: string
       objectId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
-    }
-  | {
+    })
+  | (HoldingWriteResultEnvelope & {
       kind: 'durable-pending'
       recordKind: 'accepted_holding_record'
-      holdingRecordId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
       acceptedAt: UnixMsDecimalString
-      replayUntil: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
       pendingState:
         | 'pending_protection'
         | 'pending_review'
         | 'pending_canonicalization'
         | 'overdue_disposition'
-    }
-  | {
+    })
+  | (ReplayableWriteResultEnvelope & {
       kind: 'retryable-failure'
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
       reasonCode: RetryableWriteFailureCode
       failedAt: UnixMsDecimalString
       retryAfterMs: UInt64DecimalString
       commitState:
         | 'no_canonical_commit_recorded'
         | 'commit_state_unknown_retry_required'
-    }
-  | {
+    })
+  | (HoldingWriteResultEnvelope & {
       kind: 'rejected'
-      holdingRecordId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
-      replayUntil: UnixMsDecimalString
       reasonCode: PublicDeniedReasonCode
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
       rejectionState: 'rejected_before_acceptance'
-    }
-  | {
+    })
+  | (HoldingWriteResultEnvelope & {
       kind: 'quarantined'
-      holdingRecordId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
-      replayUntil: UnixMsDecimalString
       reasonCode: PublicDeniedReasonCode
       acceptedAt: UnixMsDecimalString
       quarantinedAt: UnixMsDecimalString
       operatorDispositionDueAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
       quarantineState: QuarantinedStatus
-    }
-  | {
+    })
+  | (HoldingWriteResultEnvelope & {
       kind: 'terminal-retired'
-      holdingRecordId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
       retiredAt: UnixMsDecimalString
-      replayUntil: UnixMsDecimalString
       reasonCode: TerminalRetirementReason
       retainedMetadata: 'minimal_audit_idempotency_and_explanation_only'
-    }
-  | {
+    })
+  | (ExpiredWriteResultEnvelope & {
       kind: 'idempotency-expired'
       recordScope: 'holding'
       holdingRecordId: string
-      idempotencyResultId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      expiredAt: UnixMsDecimalString
       recordKind: HoldingExpiredRetryRecordKind
-      reasonCode: 'idempotency_expired'
-    }
-  | {
+    })
+  | (ExpiredWriteResultEnvelope & {
       kind: 'idempotency-expired'
       recordScope: 'rejected'
       holdingRecordId: string
-      idempotencyResultId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      expiredAt: UnixMsDecimalString
       recordKind: RejectedExpiredRetryRecordKind
-      reasonCode: 'idempotency_expired'
-    }
-  | {
+    })
+  | (ExpiredWriteResultEnvelope & {
       kind: 'idempotency-expired'
       recordScope: 'non_holding'
-      idempotencyResultId: string
-      workspaceId: string
-      versionId: string
-      idempotencyKey: string
-      expiredAt: UnixMsDecimalString
       recordKind: NonHoldingExpiredRetryRecordKind
-      reasonCode: 'idempotency_expired'
-    }
-  | {
+    })
+  | (ReplayableWriteResultEnvelope & {
       kind: 'conflict'
-      workspaceId: string
-      versionId: string
       conflictId: string
-      idempotencyKey: string
-      idempotencyResultId: string
-      idempotencyReplayToken: string
       conflictReplayToken: string
       recordedAt: UnixMsDecimalString
       operationKind: 'write' | 'delete' | 'rename' | 'move' | 'replace' | 'merge' | 'restore'
@@ -377,7 +339,7 @@ type WriteResult =
       currentObjectId?: string
       incomingObjectId?: string
       conflictState: 'unresolved' | 'manual_resolution_required'
-    }
+    })
 ```
 
 `recordKind` is a public response field only on `durable-pending` and
@@ -661,7 +623,9 @@ current durable state through the same ordered rules.
   corresponding durable denial/quarantine state.
   Authorization and permission failures use `not_authorized` externally and
   `quarantined_authorization` internally.
-  Ownership or review-gate failures use `review_gate_denied` externally and
+  Ownership failures use `ownership_denied` externally and
+  `quarantined_ownership` internally.
+  Review-gate failures use `review_gate_denied` externally and
   `quarantined_review_gate` internally; replay cannot become canonical until
   the required server-side review decision is satisfied or the durable record is
   explicitly disposed.

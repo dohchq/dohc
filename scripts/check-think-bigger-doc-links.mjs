@@ -159,6 +159,7 @@ const splitLocalTarget = (raw) => {
   }
 }
 
+const rawHtmlStartTagPattern = /<[A-Za-z][A-Za-z0-9:-]*(?:\s[^<>]*)?>/g
 const rawHtmlAnchorTagPattern = /<a\b[^>]*>/gi
 const htmlAttributeValue = (tag, attrName) => {
   const attributePattern = new RegExp(`(?:^|\\s)${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>=]+))`, 'i')
@@ -392,10 +393,17 @@ const collectAnchors = (markdown) => {
 
   for (const { text: line } of contentLines(markdown)) {
     const prose = stripBackslashEscapes(stripCodeSpans(line))
-    for (const match of prose.matchAll(rawHtmlAnchorTagPattern)) {
-      const anchor = htmlAttributeValue(match[0], 'id') ?? htmlAttributeValue(match[0], 'name')
-      if (anchor) {
-        anchors.add(anchor)
+    for (const match of prose.matchAll(rawHtmlStartTagPattern)) {
+      const tag = match[0]
+      const idAnchor = htmlAttributeValue(tag, 'id')
+      if (idAnchor) {
+        anchors.add(idAnchor)
+      }
+      if (/^<a\b/i.test(tag)) {
+        const nameAnchor = htmlAttributeValue(tag, 'name')
+        if (nameAnchor) {
+          anchors.add(nameAnchor)
+        }
       }
     }
 
@@ -714,8 +722,12 @@ const assertCheckerFixtures = () => {
   if (!collectAnchors('## Ship it 🚀').has('ship-it-')) {
     throw new Error('GitHub slugger fixture should match emoji heading behavior')
   }
-  const rawHtmlAnchors = collectAnchors('<a id="custom-anchor"></a>\n<a name=\'legacy-anchor\'></a>')
-  if (!rawHtmlAnchors.has('custom-anchor') || !rawHtmlAnchors.has('legacy-anchor')) {
+  const rawHtmlAnchors = collectAnchors('<a id="custom-anchor"></a>\n<a name=\'legacy-anchor\'></a>\n<section id="section-anchor"></section>')
+  if (
+    !rawHtmlAnchors.has('custom-anchor')
+    || !rawHtmlAnchors.has('legacy-anchor')
+    || !rawHtmlAnchors.has('section-anchor')
+  ) {
     throw new Error('raw HTML anchor fixture should collect id and name anchors')
   }
   if (collectAnchors('\\<a id="escaped-anchor"></a>').has('escaped-anchor')) {
