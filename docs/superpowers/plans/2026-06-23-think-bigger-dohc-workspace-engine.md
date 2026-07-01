@@ -1,7 +1,7 @@
 # Think Bigger: dohc Workspace Engine Mega Plan
 
 > **For agentic workers:** This is an orchestration plan, not a single coding
-> task. Use subagents, CodeRabbit review loops, phase execution logs, and
+> task. Use subagents, CodeRabbit gate reviews, phase execution logs, and
 > comprehensive automated plus manual QA. Do not start implementation until the
 > user approves the overall direction and branch/PR strategy.
 
@@ -31,11 +31,15 @@ Agents collaborate like users, without special source-control knowledge.
 
 This mega plan collates and orchestrates:
 
-- `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`
-- `docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md`
-- `docs/superpowers/specs/2026-06-23-dohc-chats-design.md`
+- [dohc Versioned Workspace Design](../specs/2026-06-22-dohc-versioned-workspace-design.md)
+- [dohc Native Filesystem Design](../specs/2026-06-23-dohc-native-filesystem-design.md)
+- [dohc Chats Design](../specs/2026-06-23-dohc-chats-design.md)
 
 Those files are the conceptual inputs. This file is the execution plan.
+
+Audit/history artifact:
+
+- [Think Bigger dohc Workspace Engine Execution Log](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md)
 
 ## North Star
 
@@ -73,8 +77,7 @@ Keep the surface simple:
 - **Chats**: familiar communication surface, internally durable work threads.
 - **Channels**: places for people and chats.
 - **DMs**: fast direct or small-group conversation.
-- **Share**: controlled exposure of files, folders, versions, chats, apps, or
-  channels.
+- **Share**: controlled exposure of files, folders, versions, chats, or channels.
 
 Avoid exposing these as default UI language:
 
@@ -105,22 +108,37 @@ Those are engine-room concepts.
 - Chats must feel fast and natural, not like a forum.
 - Chats must be called **Chats** in the UI, even if the internal model is
   thread/post-shaped.
-- Channels and DMs are required, not follow-up polish.
+- Channels and DMs are required for the eventual product, but Phase 0 ships only
+  the single linked-chat proof; PR 12/13 own the first channel and DM surfaces.
 - Agent messages in shared chats display as `<User Name>'s agent`.
 
 ### Robustness
 
-- Do not sacrifice VCS-grade durability.
-- Stable object IDs are canonical. Paths are aliases.
-- Every version must have clear ancestry/fork-point metadata.
-- Meaningful state must be recoverable.
-- Conflicts must preserve both sides.
-- No silent last-writer-wins for tracked workspace content.
-- No raw conflict markers as the primary UX.
-- No hidden safety-relevant state.
-- Every content/projection driver must declare snapshot, diff, merge/conflict,
-  projection, search, export, restore, and ACL behavior.
-- No skipped E2E tests for implemented, shipped, or in-scope surfaces;
+These are target invariants for the workspace engine. Phase 0 must choose the
+storage baseline and filesystem-interposition approach before treating each item
+as a shipped guarantee; deferred surfaces are recorded as not applicable rather
+than skipped.
+
+- Target: do not sacrifice VCS-grade durability.
+- Target: stable object IDs are canonical. Paths are aliases.
+- Target: every version must have clear ancestry/fork-point metadata.
+- Target: meaningful state must be recoverable.
+- Target: async workspace-scoped responses must be gated by the active
+  workspace/request token or abort signal before mutating any workspace-bound
+  state, including UI, cache, store, projection, atom, folder, entity, share, or
+  capture state.
+- Target: conflicts must preserve both sides.
+- Target: no silent last-writer-wins for tracked workspace content.
+- Target: no raw conflict markers as the primary UX.
+- Target: no hidden safety-relevant state.
+- Target: every writable content/projection driver must declare the
+  `ProjectionValidation` behaviors that apply to that surface: snapshot,
+  diff, merge/conflict, projection, search, export, restore, and ACL behavior.
+  `readOnly` projections declare read/search/export/ACL behavior only; internal
+  `internalOnly` projections declare validation, ownership, retention, and
+  exclusion behavior instead of impossible round-trip diff/merge/restore
+  guarantees.
+- Target: no skipped E2E tests for implemented, shipped, or in-scope surfaces;
   deferred surfaces are recorded as not applicable, not skipped.
 
 ### Performance
@@ -149,25 +167,26 @@ Those are engine-room concepts.
 
 - Authorization is derived server-side or engine-side. Clients, browsers,
   agents, and projections never provide trusted identity claims.
-- Every object, event, projection, file, folder, version, chat, channel, DM,
-  message, share, app, database, secret reference, search index entry, and
-  export is scoped to a workspace.
+- Every atom, capture, object, event, projection, file, folder, version, history
+  moment, chat, channel, DM, message, share, app, database, secret reference,
+  search index entry, agent run, and export is scoped to a workspace.
 - Agent writes must respect user locks, protected paths, folder/file access,
   sharing boundaries, and skill-turn gates.
 - HTML atoms remain sandboxed and sanitized.
-- Canonical Y.Doc state takes precedence over derived Markdown/body caches for
-  rich document content.
+- Canonical Y.Doc state is the only rich document write source; Markdown/body
+  caches such as `atoms.body` are read-through derived caches and are never
+  patched directly.
 - Secret-backed files are allowed, including `.env`, but plaintext secrets must
   not leak into normal history, search, public export, logs, or unauthorized
   projections.
 - Secret values must not enter durable chats, summaries, agent replies,
   projections, notifications, search snippets, or logs unless explicitly
   declassified or redacted.
-- This guarantee applies to dohc-controlled surfaces. If an authorized user,
-  agent, or tool reads plaintext and writes it into an external process log,
-  shell transcript, third-party provider, or non-dohc file, that is outside
-  dohc's automatic containment and must be handled through process sandboxing,
-  agent policy, and user-visible warnings.
+- This guarantee applies to dohc-controlled surfaces. If plaintext would leave
+  those surfaces, the default is block or redact unless an explicit
+  declassification step and sandboxed transport are in place. External process
+  logs, shell transcripts, third-party providers, and non-dohc files are never
+  trusted sinks by default.
 - Policy files are source-backed, but enforcement is engine-backed.
 - External/shared channels never grant broad workspace access by accident.
 - Search, notifications, side rails, activity feeds, and export metadata are
@@ -178,8 +197,9 @@ Those are engine-room concepts.
 - No giant unreviewable implementation PR.
 - Every PR must have targeted tests, regression tests, and relevant E2E for its
   implemented, shipped, or in-scope surfaces.
-- Every PR must go through the canonical CodeRabbit loop until approval or an
-  explicitly approved non-sensitive override.
+- Every PR must have fresh local validation before review. CodeRabbit runs at
+  major readiness gates, security-sensitive diffs, architecture pivots, and
+  final merge readiness, not after every small fix.
 - Every security-sensitive PR must use subagent review.
 - Every UI PR must include Playwright/visual QA where applicable.
 - No weakening assertions or skipping tests to move forward.
@@ -232,34 +252,55 @@ WorkspaceObject
   stable identity for anything meaningful in the workspace
 
 VersionRef
-  optional pointer to a version, fork point, or history moment
+  discriminated reference with an explicit target kind:
+    { kind: "version", versionId }
+    { kind: "fork-point", forkPointId, sourceVersionId, targetVersionId }
+    { kind: "history-moment", historyMomentId }
 
 Projection
   a file, UI, API, search, export, or chat-readable view over an object
 
-Event
-  typed record of something that happened
+WorkspaceEvent / DurabilityEvent
+  typed workspace-scoped record of something that happened, or a fine-grained
+  recovery/durability record
 
-Policy
-  effective access/materialization/export/search behavior
+FilePolicy / effective policy
+  source-backed desired file behavior plus resolved engine enforcement for
+  access, materialization, export, search, and visibility
 ```
 
-Everything meaningful gets a stable ID:
+Every `VersionRef` consumer must branch on `kind` before dereference. A link,
+provenance record, search row, restore operation, or activity item must never
+guess whether an ID names a live version, fork point, or history moment from
+field presence alone.
+
+Everything meaningful eventually gets a stable ID, but Phase 0 starts with the
+proof-arc identities required for the file/version/chat loop:
 
 - files.
 - folders.
 - versions.
 - history moments.
 - chats.
-- channels.
 - messages.
+- thread links.
+
+Deferred substrate identities stay in the expansion backlog until their
+contracts are mounted into the product surface. Schema ownership, migration, and
+bridge behavior for any deferred identity listed in the
+[Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+must be read from that matrix, not from this overview list:
+
+- channels.
+- agent runs.
+- shares.
 - apps.
 - databases.
 - rows where row-level links are needed.
-- agent runs.
-- shares.
-- secrets.
-- projections.
+- secret references, secret-backed file drivers, and secret value materialization
+  deferred to PR 08.
+- higher-level derived projections that are not part of the core `Projection`
+  contract.
 
 Paths are aliases, not identity. Links, history, search, shares, and chats must
 resolve through stable IDs so renames, moves, version forks, restores, and
@@ -288,7 +329,17 @@ they must not disagree about what happened.
 
 ### Projection Writeability
 
-Every projection must declare its write contract:
+Until PR 01C lands, this section is provisional product vocabulary for Phase 0
+planning, not the canonical schema owner. PR 01C must adopt, migrate, or replace
+these projection and link contracts in the shared schema package through an
+explicit compatibility boundary; later PRs must import the PR 01C-owned
+contracts instead of copying this prose.
+
+Every projection must declare two independent contracts: whether edits can
+round-trip, and whether engine validation is required before those edits become
+canonical source.
+
+Writeability:
 
 - `canonical`: this projection is the canonical content surface.
 - `writable`: edits can be ingested back into the object.
@@ -296,14 +347,27 @@ Every projection must declare its write contract:
 - `lossy`: export is incomplete and cannot round-trip.
 - `redacted`: intentionally hides data by policy.
 
+Validation:
+
+- `none`: no ingest path exists.
+- `sourceValidated`: normal source-backed content validation.
+- `policyValidated`: source-backed policy/config requests such as
+  `.dohc/files.toml` and `.dohc/visibility.toml`; edits are writable requests,
+  but the engine validates, normalizes, and may reject them before enforcement.
+  PR 04 owns parsing/enforcement for these policy inputs.
+- `internalOnly`: engine-owned status/cache/projection state that is never
+  re-ingested as source.
+
 Examples:
 
-- normal source file projection: writable.
-- `.dohc/chats/v1-<digest>.md`: read-only by default.
-- public export of `.env`: redacted or excluded.
-- generated dashboard summary: lossy unless explicitly source-backed.
-- `.dohc/status.json`: read-only.
-- `.dohc/files.toml`: writable policy request, but engine-validated.
+- normal source file projection: `writable` + `sourceValidated`.
+- `.dohc/chats/v1-<digest>.md`: `readOnly` + `none` by default.
+- public export of secret-backed files such as `.env`: excluded by default, or
+  replaced with a non-secret placeholder such as `.env.example`.
+- generated dashboard summary: `lossy` + `none` unless explicitly source-backed.
+- `.dohc/status.json`: `readOnly` + `internalOnly`.
+- `.dohc/files.toml`: `writable` + `policyValidated`.
+- `.dohc/visibility.toml`: `writable` + `policyValidated`.
 
 ### Effective Policy
 
@@ -314,7 +378,7 @@ workspace defaults
   + actor permissions
   + version visibility
   + path/object policy
-  + channel/chat membership
+  + object-family policy facts
   + share/export context
   + projection contract
   = effective behavior
@@ -334,17 +398,26 @@ or external share exists through:
 
 ### Link Dereference
 
-Links between chats, files, versions, moments, apps, data, and agent runs must
-store:
+Links between chats, files, folders, versions, moments, and agent runs must use
+one canonical dereference payload, `WorkspaceLinkRef`. It stores:
 
+- source/owning workspace ID.
 - target type.
+- target workspace ID.
 - stable target ID.
-- optional `VersionRef`.
-- display path/title at link time.
+- optional tagged `VersionRef`.
+- display path/title at link time only when policy permits; otherwise store a
+  redacted or policy-gated label that cannot reveal hidden target metadata.
 - ACL/degrade behavior.
 
+Chat `ThreadLink` rows compose this canonical `WorkspaceLinkRef` with chat-only
+storage fields such as stable link ID, source thread ID, read-state/search
+projection hooks, and chat-specific ordering. PR 12/14 must not redefine the
+common target/workspace/version/display/degrade fields locally.
+
 Links must survive rename/move, degrade cleanly when access is lost, and avoid
-leaking hidden target metadata.
+leaking hidden target metadata. If access is later revoked, stored display
+labels are hidden or replaced with the same degraded label used by dereference.
 
 ### Chats And Versioning
 
@@ -373,7 +446,10 @@ they can affect engine behavior:
 
 - `.dohc/files.toml`
 - `.dohc/visibility.toml`
-- optional workspace-root `.dohcignore`
+
+Workspace-root `.dohcignore` is deferred until the policy resolver PR assigns it
+an implementation and enforcement owner; until then it is not part of the
+source-backed policy allowlist.
 
 Internal projection/reserved-state examples are inspectable, but they are not
 source-backed user content, not importable as ordinary workspace files, and not
@@ -394,6 +470,11 @@ re-ingest internal `.dohc/` projections as canonical user content.
 ### Version
 
 A Version is a live line of work.
+
+`WorkspaceVersion` is the canonical shared package contract name. Product copy
+and user-facing docs may say "Version", but exported engine contracts, events,
+schemas, and tests must use `WorkspaceVersion`; `Version` is shorthand, not a
+second type.
 
 Examples:
 
@@ -430,18 +511,30 @@ File policy resolves:
 
 ### Chat Thread
 
-A ChatThread is a durable work conversation. It can appear in channels, DMs,
-file side rails, version activity, search, and external shared channels.
+A ChatThread is the durable message stream and activity log for one
+conversation. It stores messages, replies, edits, reactions, read-state cursors,
+and work links. It can appear inside channels, DMs, file side rails, version
+activity, search, and external shared channels, but it does not own membership
+or visibility by itself; it inherits those from the containing channel/DM/share
+plus linked-work policy.
 
 ### Channel
 
-A Channel is a place where chats gather. Channels can attach to workspace scope:
-folder, project, version, app, client, or workspace object.
+A Channel owns membership, default visibility, notification scope, and the
+container route where one or more `ChatThread` streams appear. Channels can
+attach to workspace scope: folder, file, version, chat, share, agent run, or
+another stable `WorkspaceObject` type from the shared substrate/package
+contract. A DM is a private channel subtype for one-to-one or small-group
+conversation, with membership derived from its canonical participant set. A
+workspace channel, DM, and shared channel are channel variants; a `ChatThread`
+is the durable message stream inside the authorized container.
 
 ### Shared Channel
 
-A shared channel is an external collaboration surface with explicit resource
-visibility, not broad workspace access.
+A shared channel is a channel variant for external collaboration with explicit
+resource visibility, participant boundaries, expiry/revocation, and audit/export
+rules. It grants access to selected resources and threads, not broad workspace
+access. PR 18 owns the final shared-channel/share grant contract.
 
 ## Implementation Strategy
 
@@ -456,10 +549,12 @@ Do not begin the expansion roadmap until Phase 0 passes. The biggest risk is
 building a beautiful substrate that has not survived contact with files, merge,
 history, UI, and chats in one loop.
 
-Keep each implementation slice behind an alpha flag, non-default API path, or
-internal workspace-engine adapter until the proof slice works end to end.
-Do not expose a half-integrated version/filesystem/chats model as the default
-product surface.
+Keep each post-Phase-0 implementation slice behind an alpha flag, non-default
+API path, or internal workspace-engine adapter until the proof slice works end
+to end. The exception is the Phase 0 watcher-backed normal-folder path: it must
+remain directly exercisable by local editors, shells, and agents so the proof
+arc tests the real "just files on your computer" loop. Do not expose a
+half-integrated version/filesystem/chats model as the default product surface.
 
 ## External Review Incorporated
 
@@ -493,8 +588,12 @@ better answer.
    - The user sees normal files, but the durable source of truth is the local
      dohc engine: object IDs, versions, history, conflicts, policy, and
      projections.
-   - dohc Cloud syncs and coordinates engine state. It is not just a database
-     that replaces the user's files.
+   - dohc Cloud syncs and replicates engine state. It never becomes
+     authoritative over local writes, object identity, version membership,
+     history, conflicts, policy, or projections.
+   - PR 21R owns the local-to-cloud and machine-to-machine replication protocol,
+     offline edit queues, replay ordering, conflict handling, and offline rejoin
+     behavior so this promise has one accountable workstream.
 
 2. **Filesystem surface:** watcher-backed folder for Phase 0, managed
    filesystem projection long-term.
@@ -540,8 +639,11 @@ better answer.
    - Plain files use bytes/text.
    - Rich docs can use Y.Doc.
    - SQLite/app-backed objects get dedicated drivers later.
-   - Every driver must declare snapshot, diff, merge/conflict, projection,
-     search, export, restore, and ACL behavior.
+   - Every driver must declare the behaviors that apply to it: snapshot, diff,
+     merge/conflict, projection, search, export, restore, ACL, and recovery.
+   - `readOnly` and `internalOnly` drivers use the reduced behavior matrix
+     defined above; they must not be treated as if they implement the full
+     writable content-driver surface.
 
 8. **Secret model:** secret-backed files are a first-class driver, not ordinary
    plaintext with a label.
@@ -575,9 +677,15 @@ better answer.
       `<User Name>'s agent`, but normal file versioning must work even when
       dohc only sees a local file change.
 
-12. **Phase 0 success demo:** prove the full loop with one ordinary text file,
-    one named version, history/restore, compare/merge/conflict preservation,
-    one linked chat, search, and no `.env` leakage.
+12. **Phase 0 success demo:**
+    - Must-pass: prove the full loop with one ordinary text file, one named
+      version, history/restore, compare/merge/conflict preservation, one linked
+      chat, search, and no `.env` leakage.
+    - Demo-only: keep the UI plain but understandable; do not require polished
+      chat texture, advanced ranking, or full workspace scale for Phase 0.
+    - Future-phase: external/shared channels, rich chat presence, virtual
+      filesystem scale, secret-backed `.env`, SQLite/app-aware merge, and
+      broad release hardening remain outside the Phase 0 completion gate.
 
 ## Runtime And Language Strategy
 
@@ -658,6 +766,14 @@ daemons all must enforce channel binding plus server/engine-derived actor,
 workspace, and version resolution on every request. Localhost alone is not a
 security boundary.
 
+Rust spike acceptance is blocked unless this binding is proven negative-first:
+P0R must add a bridge test that sends forged client-supplied actor, workspace,
+and version metadata and verifies the bridge rejects or ignores those fields,
+resolving the actor, workspace, and version from the authenticated local channel
+and server/engine context instead. P0F and P0G must carry that same negative test
+through the policy/search and proof-arc gates so client-provided identity
+metadata never becomes a trusted input to the local kernel bridge.
+
 Adoption criteria after the spike:
 
 - Rust packaging is reliable across target OSes.
@@ -683,6 +799,7 @@ contracts
   -> workspace object/version/event core
   -> file policy and projection contracts
   -> filesystem/API parity
+  -> sync replication and offline rejoin
   -> chats data/actions
   -> UI integration
   -> external sharing/search/hardening
@@ -697,7 +814,8 @@ Each PR must:
 5. Run required integration/E2E/security regressions.
 6. Update the execution log.
 7. Open a PR.
-8. Run the canonical CodeRabbit loop defined below.
+8. Run the canonical CodeRabbit gate when the PR reaches a major readiness
+   checkpoint or touches risky architecture/security/data-loss behavior.
 
 Recommended branch naming:
 
@@ -715,16 +833,18 @@ Recommended branch naming:
 Phase 0 is the immediate execution target. It is intentionally smaller than the
 full roadmap and must be grounded in the current repository implementation.
 
-Phase 0 proves:
+Phase 0 must-pass gates prove:
 
 ```text
-normal file edit
-  -> automatic history
-  -> restore
-  -> named version
-  -> compare/merge
-  -> conflict preservation
-  -> one chat linked to the file
+must-pass: normal file edit
+  -> must-pass: automatic history
+  -> must-pass: restore
+  -> must-pass: named version
+  -> must-pass: compare/merge
+  -> must-pass: conflict preservation
+  -> must-pass: one chat linked to the file
+  -> must-pass: search across linked file/chat
+  -> must-pass: `.env` exclusion/redaction smoke
 ```
 
 It should use one content driver first: ordinary text/file content. Do not
@@ -732,14 +852,25 @@ generalize to SQLite row merge, app-aware merge, full lazy hydration, external
 channels, or rich chat texture until the proof arc passes.
 
 Phase 0 must also prove the architecture is fast enough to build on. A correct
-but sluggish proof is not acceptable; it must demonstrate native-feeling local
-file edits, startup reconciliation, history display, search, and linked chat UI
-under the initial performance budgets.
+but sluggish proof is not acceptable; the must-pass performance gate covers
+native-feeling local file edits, startup reconciliation, file-history/timeline
+render, and history display under the initial performance budgets.
+
+Phase 0 stretch/follow-up outcomes, useful but not minimum acceptance gates:
+
+- search performance and ranking beyond the proof slice.
+- polished linked-chat UI beyond proving that one chat is linked and visible.
+- full QA matrix expansion beyond the focused proof-arc gates.
+
+Required E2E checks still include the P0G local-agent CLI validation once
+implementation PRs begin. The PR00 docs-only local-agent-CLI exception applies
+only to this readiness scaffold, not to the Phase 0 implementation gates.
 
 ### Phase 0 Decisions
 
-Before implementation starts, write a short decision note inside this plan's
-execution log covering:
+Before implementation starts, write a short decision note inside
+`docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`
+covering:
 
 1. **Storage baseline**
    - Which existing dohc packages/tables/files are the starting point?
@@ -747,9 +878,13 @@ execution log covering:
      moments, and conflicts?
 
 2. **Filesystem interposition**
-   - Is Phase 0 watcher-backed over normal folders, virtual filesystem-backed,
-     or API-only with a simulated folder adapter?
-   - What safety guarantees does that choice provide and not provide?
+   - Phase 0 must be watcher-backed over normal folders so ordinary local files
+     and external editors/agents are exercised.
+   - Virtual filesystem and API-only simulated-folder adapters are later
+     experiments; they cannot satisfy P0C, P0F, local-agent, or performance
+     gates.
+   - What safety guarantees does the watcher-backed normal-folder path provide
+     and not provide?
 
 3. **Secret boundary**
    - Phase 0 must not promise unenforceable secret guarantees.
@@ -776,9 +911,73 @@ execution log covering:
    - Which Phase 0 filesystem/reconciliation workload should Rust benchmark
      against the TypeScript implementation?
 
+7. **Async workspace gating**
+   - Which workspace/request-token, request epoch, or abort-signal mechanism owns
+     stale-response suppression before any workspace-bound UI, cache, store, or
+     projection state is mutated?
+   - How does Phase 0 prevent workspace-switch races for reconciliation,
+     history, linked chat, status, and projection reads?
+
 ### Phase 0 PRs
 
 These PRs precede PR 01 in the expansion roadmap.
+Do not begin PR 01 or any later roadmap PR until Phase 0 passes, and do not
+begin contract or implementation work until P0A writes and gets approval for the
+current-system inventory, storage/filesystem decision note, and unresolved
+blockers in
+`docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md`.
+
+#### Phase 0 Baseline Freeze
+
+Before P0B-P0G begin implementation work, P0B records the
+**Phase 0 Baseline Freeze** in the execution log. During this freeze,
+`Phase0SharedSubstrateBaseline` is the only provisional source for the symbols
+listed in the matrix below, and only for Phase 0 proof lanes. The main
+orchestration thread plus P0B own the provisional baseline during this freeze;
+PR 01 has not adopted those symbols yet. P0B, P0C, P0D, P0E, P0F, and P0G must
+import the provisional symbols from that baseline package rather than invent
+parallel shapes, ad hoc copies, local lookalike types, or early dependencies on
+PR 01-owned contracts. The baseline package must export every Phase 0 baseline
+symbol in the matrix below, with tests proving consumers import those symbols
+from the baseline package.
+
+#### PR 01 Canonical Adoption Handoff
+
+PR 01 ends with a separate **PR 01 Canonical Adoption Handoff** recorded in the
+execution log. That handoff records the commit/PR where PR 01 adopts, migrates,
+or bridges each provisional symbol. After handoff for a specific symbol, new
+code must consume the PR 01-owned contract and
+`Phase0SharedSubstrateBaseline` becomes historical-only for that adopted symbol.
+Downstream lanes may keep importing the provisional baseline only for symbols not
+yet migrated. PR 01 must add a mechanical lint/test gate for this handoff: after
+each symbol is adopted or migrated by its owning PR lane, the check scans
+downstream code for imports of `Phase0SharedSubstrateBaseline` for that specific
+symbol and fails until consumers import the owning contract instead. The gate is
+symbol-specific, not a blanket removal of every baseline import on PR 01 merge:
+`ChatThread`, `ThreadMessage`, and chat `ThreadLink` remain allowed through the
+PR 01 bridge until the PR 12 chat ownership boundary explicitly adopts or
+migrates them.
+
+#### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
+
+| Symbols | Phase 0 baseline | PR 01 | PR 12 |
+| --- | --- | --- | --- |
+| `WorkspaceObject`, `WorkspaceVersion`, `VersionRef`, `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`, `ConflictRecord` | Provisional fixture owner until PR 01 lands. | Single canonical owner; adopts or migrates/backfills Phase 0 fixtures through an explicit schema-version boundary. | Consumer only. |
+| `WorkspaceLinkRef`, projection writeability values (`canonical`, `writable`, `readOnly`, `lossy`, `redacted`), projection validation values (`none`, `sourceValidated`, `policyValidated`, `internalOnly`) | P0C/P0D/P0F may use provisional link/projection fixtures only through `Phase0SharedSubstrateBaseline`. | PR 01C is the sole canonical owner of the link/projection vocabulary and migration from provisional symbols. | Consumer only; chat-specific `ThreadLink` storage remains owned by PR 12 after handoff. |
+| `Phase0EffectivePolicyInput`, `Phase0EffectivePolicyResult`, core effective-policy input/output boundary, `file_read`, `thread_link_visibility`, `chat_projection_visibility`, `search_index_visibility` | P0F is the only provisional writer for the Phase 0 effective-policy hook and required surface names. All Phase 0 policy/search/chat projection consumers import these symbols from `Phase0SharedSubstrateBaseline`. | PR 01D is the sole canonical owner of the core effective-policy boundary and migration from provisional policy hooks. | Consumer only through the PR 01D-owned core contract; chat/search implementation PRs must not invent local visibility hooks. |
+| `ChatThread`, `ThreadMessage`, chat `ThreadLink` | P0E is the only provisional writer for linked-chat proof rows before PR 01; other Phase 0 lanes may read the baseline symbols but must not mutate these records. | Bridge writer only under schema version `chat-core-bridge-v0` so file/history/search proof code can compile; owns migration metadata and import compatibility for P0E rows, but must not extend final chat storage semantics. | Single final writer; explicitly adopts, migrates, or backfills from `chat-core-bridge-v0`, then owns durable channels, DMs, linked-work behavior, and full chat storage. |
+| `ThreadReadState`, read cursor tuple, `readStateRevision` | P0E is the only provisional writer when read-state rows are needed for Phase 0 chat bridge tests; other lanes may read fixtures only. The provisional rows must use monotonic cursor semantics and server-owned revision tokens. | Bridge writer for schema version `chat-read-state-bridge-v0` from the **PR 01 Canonical Adoption Handoff** until the PR 12 handoff. PR 01 owns migration from Phase 0 fixtures, monotonic cursor compatibility, and server-owned revision/CAS compatibility. It does not define the final PR 12 cursor model. | Final writer after the PR 12 handoff. PR 12 migrates/backfills from `chat-read-state-bridge-v0`, owns final cursor semantics, server-owned revision/CAS token behavior, and compatibility for legacy read-state rows. |
+| unread/read-state projections | P0E may create provisional projection fixtures only when needed for Phase 0 chat bridge tests; other lanes may read fixtures only. | Owns `chat-read-state-bridge-v0` projection rebuild/invalidation until the PR 12 handoff and records the migration boundary from Phase 0 projection fixtures. | Owns final projection rebuild/invalidation after the explicit PR 12 handoff. PR 12 must not mutate bridge-v0 projection rebuild/invalidation rules before that handoff. |
+| `AgentRun`, agent run event, stable run surrogate key | Provisional history/search reference only; must use `(workspaceId, runProvider, runExternalId)` or fallback `(workspaceId, runProvider, runEventId)` and fail closed when neither identifier exists. | Single canonical owner of the AgentRun identity contract, replay/backfill semantics, and first-class promotion boundary. | Consumer only. |
+
+The migration direction is one-way: Phase 0 provisional fixtures -> PR 01
+canonical core plus chat bridge -> PR 12 final chat/link schema. Later PR entries
+may state acceptance criteria or migration notes for those symbols, but they are
+not ownership sources. When a later PR needs any matrix-listed symbol, it must
+link back to this matrix for ownership, adoption, bridge, and migration/backfill
+rules. Local field lists and tests are acceptance requirements only. Stable
+object identifiers are represented as fields on `WorkspaceObject` and
+object-facing mutation/read shapes, not as a standalone matrix-owned symbol.
 
 #### PR P0A - Current System Inventory And Decisions
 
@@ -794,14 +993,20 @@ These PRs precede PR 01 in the expansion roadmap.
 
 **Tests:**
 
-- No production tests required unless inventory reveals broken existing tests.
-- Run docs/link smoke if available.
+- Add at least one minimal smoke/contract validation that codifies the chosen
+  Phase 0 storage baseline and filesystem-interposition assumption, such as a
+  small script or test that asserts selected packages, tables, adapters, and
+  watcher/projection paths exist or are explicitly absent.
+- Run the PR00 docs link checker or equivalent docs tooling so the inventory
+  links and anchors are validated against the same plan artifacts.
 
 **Acceptance:**
 
 - execution log contains concrete current-to-target deltas.
 - Phase 0 implementation path is chosen.
 - unresolved decisions are explicit blockers, not implied.
+- PR 01 and later roadmap work remain blocked until the P0A decision note is
+  approved.
 
 #### PR P0R - Rust Workspace Kernel Spike
 
@@ -816,7 +1021,12 @@ implementation.
   - scan/reconcile a workspace root.
   - return changed path metadata.
   - hash changed candidates.
+  - resolve bridge identity only from the authenticated local-channel binding
+    plus server/engine context.
   - emit structured timing/log events.
+- The local workspace kernel boundary must reject client-supplied actor,
+  workspace, or version metadata; requests missing a valid local-channel binding
+  or bound to the wrong channel fail before scan/hash/reconcile work begins.
 - Compare bridge options:
   - sidecar daemon.
   - IPC/JSON-RPC.
@@ -836,6 +1046,10 @@ implementation.
 - TypeScript contract tests for request/response shape.
 - fixture-based scan/hash benchmark.
 - failure-mode test for malformed paths and missing workspace roots.
+- negative bridge-auth tests that reject forged client-supplied actor,
+  workspace, and version metadata, reject requests missing a valid authenticated
+  local-channel binding, reject requests bound to the wrong channel, and resolve
+  identity only from the authenticated local channel plus server/engine context.
 
 **Acceptance:**
 
@@ -861,7 +1075,8 @@ implementation.
 - create Main.
 - create named version from Main.
 - write same path in both versions and prove isolation.
-- path rename keeps stable object ID where supported.
+- path rename keeps stable object ID, with reconciliation reconnecting the same
+  object if the platform cannot surface the move atomically.
 - wrong workspace/version denied.
 
 **Acceptance:**
@@ -886,7 +1101,8 @@ history.
 - temp-file/rename save sequence if watcher-backed.
 - multiple rapid writes coalesce into a readable moment.
 - restore creates forward history.
-- API and filesystem/simulated filesystem agree.
+- watcher-backed capture and direct filesystem state agree for the chosen Phase
+  0 surface.
 
 **E2E:**
 
@@ -906,6 +1122,17 @@ history.
 - Clean merge from named version into Main.
 - Preserve base/current/incoming on conflict.
 - Minimal conflict UI or API.
+- Use the provisional `ConflictRecord` contract from
+  `Phase0SharedSubstrateBaseline`; the field list below is an acceptance
+  checklist for that baseline, not a second ownership source:
+  `id`, `workspaceId`, `targetVersionId`, `sourceVersionId`, `objectId`,
+  `pathAtConflict`, `driver`, `base`, `current`, `incoming`, `createdAt`,
+  `resolvedAt?`, `resolutionHistoryMomentId?`, and
+  `schemaVersion: 'conflict-record:p0d:v1'`. `base`, `current`, and `incoming`
+  each preserve `{ versionRef, contentHash, bodySnapshot }` so the proof slice
+  does not lose merge evidence or need a later backfill. PR 01 may rename or
+  extend fields only through an explicit migration boundary that preserves every
+  P0D conflict record.
 
 **Tests:**
 
@@ -930,16 +1157,21 @@ history.
 
 **Scope:**
 
-- Minimal channel or workspace chat.
+- Minimal workspace-local chat thread.
 - One chat thread linked to a stable file object ID.
 - Message send.
+- Follow the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+  for chat/thread/link/read-state ownership and migration boundaries. P0E may add
+  acceptance notes for the linked-chat proof, but it must not restate or redefine
+  those schema ownership contracts locally.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
 
 **Tests:**
 
 - create chat linked to file object.
-- link survives file path display change where supported.
+- link survives file path display change through the stable file object ID.
 - message send.
 - projection is read-only.
 - unauthorized linked file degrades without metadata leak.
@@ -960,6 +1192,18 @@ history.
 
 - Search text file and linked chat.
 - Apply minimal effective policy to files, chat links, projections, and search.
+- Add provisional `Phase0EffectivePolicyInput` ->
+  `Phase0EffectivePolicyResult` hooks that mirror the PR 04 shared
+  effective-policy subset before linked chat/projection/search consumes those
+  surfaces. The required Phase 0 surface names are `file_read`,
+  `thread_link_visibility`, `chat_projection_visibility`, and
+  `search_index_visibility`; each path must provide the same workspace, actor,
+  version, target object/path, projection contract, and object-family policy
+  facts shape that PR 04 later promotes. File effective policy, `ThreadLink`
+  visibility, chat projection visibility, and search indexing must all resolve
+  through this baseline result instead of local ad hoc checks. Extra Phase 0
+  fields are allowed only behind an explicit migration/backfill boundary so PR
+  04 can replace the provisional hook cleanly.
 - Default `.env` to ignored/excluded/redacted until secret-backed files exist.
 
 **Tests:**
@@ -967,6 +1211,9 @@ history.
 - search returns file and linked chat.
 - unauthorized actor cannot see private file/chat result.
 - `.env` plaintext does not enter search/history/export in Phase 0.
+- forged client-supplied actor, workspace, or version metadata is hard-rejected
+  by the bridge; search/policy identity comes only from the authenticated local
+  channel and server/engine context.
 - workspace switch/request-token race test for file/search/chat loading.
 
 **E2E:**
@@ -985,8 +1232,8 @@ history.
 **Scope:**
 
 - Full Phase 0 test matrix.
-- CodeRabbit loop for every Phase 0 PR.
-- Architecture/security/QA subagent reviews.
+- CodeRabbit gates at Phase 0 readiness checkpoints and risky changes.
+- Architecture/security/performance/migration/QA subagent reviews.
 - Manual QA script.
 - Performance smoke.
 - Migration impact note.
@@ -1000,6 +1247,9 @@ history.
 - search across chat/file.
 - local agent CLI edits a file through the normal workspace surface and dohc
   captures history without the agent knowing dohc-specific version control.
+- forged client-supplied actor, workspace, and version metadata is rejected or
+  ignored by the bridge, with identity resolved only from the authenticated local
+  channel and server/engine context.
 - workspace-switch race.
 - `.env` exclusion/redaction smoke.
 
@@ -1017,8 +1267,9 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 
 - external/shared channels.
 - lazy hydration at scale.
-- full virtual filesystem/FUSE/ProjFS implementation unless chosen by the
-  interposition spike as the smallest viable path.
+- full virtual filesystem/FUSE/ProjFS implementation; Phase 0 remains
+  watcher-backed over normal folders, and VFS/FUSE/ProjFS work can only begin
+  after the proof arc explicitly revises the roadmap.
 - user-authored `.dohc/files.toml` policy DSL beyond minimal hardcoded/default
   policy.
 - encrypted synced secret-backed `.env` with full broker/declassification flow.
@@ -1031,7 +1282,7 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 
 ## Agent And Review Workflow
 
-### Execution Topology: Worktrees And Focused Implementation Threads
+### Execution Topology: Worktrees And Focused Implementation Workstreams
 
 Use this main thread as the orchestration thread. It owns the mega plan,
 execution log, cross-lane decisions, and final reconciliation.
@@ -1050,24 +1301,26 @@ main planning checkout
 Default rule:
 
 - one implementation PR = one branch = one worktree.
-- one focused implementation chat/thread may own that worktree when the lane is
-  substantial.
+- one focused internal implementation workstream may own that worktree when the
+  lane is substantial.
 - no two agents edit the same worktree at the same time.
 - shared decisions flow back into this main thread and the execution log.
 - generated artifacts, perf measurements, review notes, and migration notes
   must be copied back into the PR entry before the lane is considered done.
 
-Create separate focused implementation chats/threads for major lanes, not for
-tiny edits:
+Create separate focused internal implementation workstreams for major lanes, not
+for tiny edits. These are worktree-owned coordination lanes, not product-visible
+dohc chats:
 
-- **Rust Kernel Spike Thread:** PR P0R.
-- **Versioned Store Thread:** PR P0B/P0D if merge work stays tightly coupled.
-- **Filesystem Capture Thread:** PR P0C and later PR 05/06/09/10.
-- **Chats Product Thread:** PR P0E and later PR 12-17.
-- **Search/Policy Thread:** PR P0F and later PR 04/11/17/18.
-- **QA/Performance Hardening Thread:** PR P0G and later release gates.
+- **Rust Kernel Spike Workstream:** PR P0R.
+- **Versioned Store Workstream:** PR P0B/P0D if merge work stays tightly coupled.
+- **Filesystem Capture Workstream:** PR P0C and later PR 05/06/09/10.
+- **Chats Product Workstream:** PR P0E and later PR 12-16, with PR 17 as a
+  required product reviewer/dependency.
+- **Search/Policy Workstream:** PR P0F and later PR 04/11/17/18.
+- **QA/Performance Hardening Workstream:** PR P0G and later release gates.
 
-Each implementation thread should start with:
+Each implementation workstream should start with:
 
 - this mega plan.
 - the execution log.
@@ -1076,18 +1329,18 @@ Each implementation thread should start with:
 - the branch/worktree path.
 - required tests and performance budgets.
 - CodeRabbit loop instructions.
-- if the scope touches `apps/web`, the thread must read `apps/web/AGENTS.md`
+- if the scope touches `apps/web`, the workstream must read `apps/web/AGENTS.md`
   before editing and record that in its execution-log entry.
-- if the scope touches `apps/app`, the thread must read `apps/app/AGENTS.md`
+- if the scope touches `apps/app`, the workstream must read `apps/app/AGENTS.md`
   before editing and record that in its execution-log entry.
-- if the scope touches Convex code under `apps/app`, the thread must first
+- if the scope touches Convex code under `apps/app`, the workstream must first
   check `apps/app/convex/_generated/ai/guidelines.md`, read it when present,
   and record the checked path or absence in its execution-log entry before
   editing.
 
-Separate implementation chats/threads are user-visible and should only be
-created when the user explicitly asks or approves. Subagents remain the default
-for short bounded reviews inside the current thread.
+Separate user-visible agent chats are different from internal workstreams and
+should only be created when the user explicitly asks or approves. Subagents
+remain the default for short bounded reviews inside the current thread.
 
 Worktree hygiene:
 
@@ -1115,6 +1368,9 @@ Recommended roles:
   external channels, and agent authorship.
 - **QA Reviewer**: checks test coverage, E2E, visual QA, performance budgets,
   and skipped tests.
+- **Accessibility Reviewer**: checks keyboard navigation, focus order, ARIA
+  semantics, contrast, screen reader behavior, and WCAG regressions on shipped
+  UI surfaces.
 - **Performance Reviewer**: checks startup, filesystem capture, indexing,
   search, chat/history virtualization, renderer jank, memory, and budget
   regressions.
@@ -1134,19 +1390,36 @@ checklist before merging a milestone PR.
 
 ### CodeRabbit Loop
 
-For every implementation PR:
+CodeRabbit is a major-gate reviewer, not a per-commit tax. Local validation,
+targeted tests, required E2E, security checks, and subagent review stay
+mandatory on every meaningful implementation step. CodeRabbit is reserved for:
+
+- PR readiness before requesting human merge review.
+- architecture pivots or primitive contract changes.
+- security, authorization, ownership, privacy, secrets, migration, sync, or
+  data-loss-sensitive diffs.
+- final milestone gates such as Phase 0 proof-arc acceptance.
+- user-requested focused audits.
+
+At a CodeRabbit gate:
 
 ```text
-Open PR
-  -> wait for CodeRabbit review
+Reach major readiness checkpoint
+  -> run local validation first
+  -> run/wait for CodeRabbit review
   -> triage every finding
   -> fix valid findings
   -> document rejected findings with reason
   -> rerun targeted/full tests
-  -> request/re-run review if needed
+  -> request/re-run review only for material fixes or final readiness
   -> repeat until CodeRabbit approves or the user explicitly approves a
      documented non-sensitive override
 ```
+
+If CodeRabbit is rate-limited or slow at a non-final checkpoint, continue with
+local tests, subagent review, and documented risk tracking. Do not burn a new
+CodeRabbit review after each narrow follow-up commit. Re-run CodeRabbit only
+when the accumulated changes are ready for a meaningful gate decision.
 
 CodeRabbit findings must not be "resolved" by:
 
@@ -1183,13 +1456,26 @@ For every PR/phase record:
 - subagent reviews.
 - manual QA.
 - remaining risks.
+- decision note / unresolved blockers, including storage, filesystem, secret,
+  merge, and async-gating decisions plus resolution status.
 - follow-up deletion conditions.
+- baseline machine/CI profile.
+- cold/warm fixture state and measured values.
+- variance/tolerance.
+- explicit non-sensitive override or user-approval reference.
 
 ## Testing Standard
 
 ### Required Test Types
 
-Each relevant PR must include:
+Each PR must test the feature area, schema, migration, UI, policy surface, or
+infrastructure it actually changes. "Relevant" means the PR introduces,
+modifies, or claims readiness for that surface in the Phase 0 proof arc or the
+expansion roadmap. Docs-only and narrow infra PRs must still run doc/link,
+format, brand, and impacted contract checks, but they are not blocked by E2E
+areas for product surfaces they do not touch or ship.
+
+For changed surfaces, include the applicable subset of:
 
 - unit tests.
 - integration tests.
@@ -1213,7 +1499,9 @@ Each relevant PR must include:
 These E2E requirements apply to surfaces that are implemented, shipped, or in
 scope for the PR/milestone under review. Deferred Phase 0 areas do not require
 their E2E before they exist, but once a surface is introduced its listed E2E is
-mandatory for that PR and future release gates.
+mandatory for that PR and future release gates. A PR that only edits docs,
+workflow plumbing, or an unrelated substrate slice records that the E2E area is
+not touched instead of skipping a required test for a shipped surface.
 
 - workspace creation/open.
 - file editing and automatic save.
@@ -1235,8 +1523,10 @@ mandatory for that PR and future release gates.
 - filesystem/API parity for the same version.
 - workspace switch while files/chats/search are loading; old workspace data must
   never repaint the new workspace.
-- secret-backed content must not appear in UI, search, history, diff, export,
-  logs, chat summaries, notifications, agent context, or public projections.
+- unauthorized or public surfaces must not expose secret-backed content in UI,
+  search, history, diff, export, logs, chat summaries, notifications, agent
+  context, or public projections; permitted users may view plaintext locally
+  through the authorized secret-backed path.
 - crash or kill during file write/capture does not corrupt recoverable state.
 - missed watcher event is recovered by startup reconciliation or periodic audit.
 - two actors writing the same path/version concurrently preserve both states or
@@ -1257,14 +1547,18 @@ that agents can operate the workspace naturally.
 The test harness should support:
 
 ```bash
-DOHC_TEST_AGENT_CLI=codex
+DOHC_TEST_AGENT_CLI=codex-app-server
 ```
 
 Defaults:
 
-- `DOHC_TEST_AGENT_CLI` defaults to `codex`.
-- `codex` should resolve from `DOHC_CODEX_CLI` or `codex` on `PATH`.
-- `claude` should resolve from `DOHC_CLAUDE_CLI` or `claude` on `PATH`.
+- `DOHC_TEST_AGENT_CLI` defaults to `codex-app-server`.
+- `codex-app-server` should resolve from the `CODEX` driver prefix
+  (`DOHC_AGENT_CODEX_COMMAND` / `DOHC_AGENT_CODEX_ARGS_JSON`) or
+  `codex app-server` on `PATH`.
+- `claude-acp` should resolve from the `CLAUDE_ACP` driver prefix
+  (`DOHC_AGENT_CLAUDE_ACP_COMMAND` / `DOHC_AGENT_CLAUDE_ACP_ARGS_JSON`) or
+  `claude-code-acp` on `PATH`.
 
 Required behavior:
 
@@ -1274,9 +1568,9 @@ Required behavior:
 - capture transcripts/artifacts for QA, with secret redaction.
 - test the agent through normal files and normal dohc actions, not privileged
   internals, unless the PR is explicitly testing internal APIs.
-- use `codex` as the required default path.
-- run `claude` as a secondary compatibility path where available, especially
-  before major milestone gates.
+- use `codex-app-server` as the required default path.
+- run `claude-acp` as a secondary compatibility path where available,
+  especially before major milestone gates.
 
 ### Security Regression Matrix
 
@@ -1311,6 +1605,8 @@ Minimum cases:
   explicit declassification.
 - prompt-injection content in chats cannot expand agent permissions or bypass
   tool policy.
+- HTML atoms remain sandboxed, sanitized, and unable to escape the renderer
+  sandbox.
 
 ### Accessibility Gate
 
@@ -1321,7 +1617,10 @@ User-facing UI PRs must define and test an accessibility target. Default target:
   conflict choices, search results, and notification controls.
 - visible focus.
 - no color-only conflict/secret/privacy indicators.
-- WCAG 2.2 AA where practical for shipped surfaces.
+- WCAG 2.2 AA for shipped surfaces.
+
+Any accessibility exception must be explicitly documented in the execution log
+with the affected surface, reason, owner, mitigation, and follow-up before merge.
 
 ### Performance Budgets
 
@@ -1338,6 +1637,9 @@ and hoping to optimize later.
   explicit remote cold-start conditions.
 - external editor save reflected in dohc UI/history status: under 500ms local
   target after file watcher event.
+- render file-history/timeline view for 1,000 coalesced moments: under 500ms to
+  first useful content, with incremental loading or virtualization for larger
+  histories.
 - coalesce 100 file writes into a moment: under 3s without renderer blocking.
 - absorb 1,000 ignored/cache file events without visible UI jank or sync flood.
 - render channel with 1,000 chats: under 500ms to first useful content.
@@ -1347,12 +1649,20 @@ and hoping to optimize later.
 - conflict compare for two 250KB text files: under 1s.
 - switching workspaces cancels/guards stale work without blocking interaction.
 
-Record measured values in the execution log. If CI cannot meet local budgets,
-record environment and assert regression thresholds.
+Before these numeric targets become release gates, the PR must record a stable
+machine/CI profile, baseline measurements, fixture shape, cold/warm state, and
+acceptable tolerance/variance. Until that baseline exists for the relevant
+profile, the targets are design budgets and regression signals rather than
+machine-independent release gates. Once a baseline is declared, future PRs must
+compare against the same profile or explicitly record why a new profile is being
+introduced. If CI cannot meet local budgets, record environment and assert
+regression thresholds against the CI baseline.
 
 Instrumentation requirements:
 
 - Add timing spans or metrics before optimizing by guesswork.
+- Record the baseline commit/profile, measured baseline values, and tolerance
+  before treating a budget as a pass/fail gate.
 - Record cold vs warm measurements separately.
 - Record workspace size, file count, changed file count, chat/message count,
   machine/CI context, and whether content was local, lazy, or remote.
@@ -1382,14 +1692,30 @@ split it before opening.
 
 Milestones:
 
-- **Foundation alpha:** PR 00-04 prove shared contracts, stable IDs, typed
+- **Foundation setup:** PR 00 remains the docs/readiness scaffold.
+- **Phase 0 Baseline Freeze:** immediately after P0A/P0R, the main orchestration
+  thread plus P0B's schema-baseline responsibility must record the
+  [Phase 0 Baseline Freeze](#phase-0-baseline-freeze) before P0B-P0G consume
+  provisional substrate symbols.
+- **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
+  the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
+  implementation work.
+- **PR 01 Canonical Adoption Handoff:** PR 01 records the
+  [PR 01 Canonical Adoption Handoff](#pr-01-canonical-adoption-handoff), adopts
+  or bridges each provisional symbol, and activates the symbol-specific
+  import-enforcement gate before downstream implementation lanes consume the
+  canonical contracts.
+- **Foundation alpha:** PR 01-04 prove shared contracts, stable IDs, typed
   events, versions, and effective policy.
 - **Filesystem/version proof:** PR 05-11 prove normal files, versions,
   snapshots, conflicts, policies, secrets, lazy hydration, and API parity.
 - **Chats proof:** PR 12-17 prove channels, DMs, agent participation, side-rail
   links, notifications, and search.
-- **Collaboration expansion:** PR 18-22 prove external/shared channels,
+- **Collaboration expansion:** PR 18-21 and PR 22 prove external/shared channels,
   integrated UX, agent work loops, migration, and full release hardening.
+- **Sync replication and offline rejoin:** PR 21R runs after the PR 21 migration
+  contracts are known and before PR 22 release hardening closes; it has its own
+  acceptance gate for local-to-cloud and machine-to-machine replication.
 
 Do not expose the new system as the default product surface until the
 Foundation alpha and the relevant surface proof are complete.
@@ -1401,14 +1727,32 @@ Foundation alpha and the relevant surface proof are complete.
 **Scope:**
 
 - Add this mega plan.
-- Add execution-log template.
-- Add a tracking checklist doc or section.
-- Add links from relevant product docs if appropriate.
+- Add execution-log template and checklist section in
+  [the Think Bigger execution log](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md);
+  that file is the only PR00 status tracker for progress, blockers, and
+  evidence.
+- Add the checked-in Think Bigger docs manifest consumed by
+  [the Think Bigger docs manifest](./2026-06-23-think-bigger-docs.manifest.json).
+- Add [the Think Bigger docs workflow](../../../.github/workflows/think-bigger-docs.yml)
+  and checker script; the canonical run/fail contract is the PR00 docs-checker
+  contract in **Tests** below.
+- Add the canonical links from this plan to the source specs and execution log.
 
 **Tests:**
 
-- docs lint if available.
-- link/path smoke via `rg` or docs tooling.
+- PR00 docs-checker contract: `node scripts/check-think-bigger-doc-links.mjs`
+  is the single fail-closed enforcement mechanism. It must compare the checked-in
+  Think Bigger docs manifest with repository inventory, validate all discovered
+  Think Bigger doc links/anchors, validate the canonical execution-log structure
+  and required evidence/status sections by name, and fail when doc renames,
+  execution-log edits, manifest changes, linked-target drift, required
+  execution-log section drift, or discovered-doc drift make the manifest,
+  execution-log contract, and repository disagree.
+- [The workflow](../../../.github/workflows/think-bigger-docs.yml) must run that
+  checker for pull requests and pushes that touch the manifest, source specs,
+  execution log, Think Bigger plan docs, checker script, workflow file, or
+  dependency manifests and lockfiles. `workflow_dispatch` and the scheduled drift
+  check run the same checker for non-PR drift visibility.
 
 **CodeRabbit focus:**
 
@@ -1424,30 +1768,68 @@ Foundation alpha and the relevant surface proof are complete.
 
 ### PR 01 - Workspace Engine Contracts And Substrate
 
-**Goal:** Define shared TypeScript contracts for the substrate all later work
-must use.
+**Goal:** Define one canonical schema source for the substrate contracts, with
+TypeScript and Rust consumers generated or conformance-tested from it.
 
 **Scope:**
 
-- Add or extend shared package for workspace engine contracts.
-- Define `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
-  `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
-  `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  `ConflictRecord`, `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`.
-- Define link dereference shape: target type, stable target ID, optional
-  `VersionRef`, display path/title at link time, ACL degrade behavior.
-- Define projection writeability values: `canonical`, `writable`, `readOnly`,
-  `lossy`, `redacted`.
-- Define one effective policy input/output type for filesystem, chats, search,
-  notifications, export, and external shares.
-- Add zod/valibot-style runtime validation if repo convention supports it.
-- Add fixtures for personal, team, external shared, and agent-authored cases.
+- Split PR 01 into separate reviewable PRs; do not submit one omnibus contracts
+  PR. Each slice must be independently reviewable by CodeRabbit and can merge
+  only after its own validation passes:
+  - **PR 01A - Canonical Schema / IDL Core:** add or extend the shared package
+    for workspace engine contracts; choose the checked-in IDL/schema location;
+    define the generator or conformance command; wire the TypeScript package
+    entrypoint; add either the Rust crate plus Cargo manifest that consumes it
+    or an explicit Rust conformance fixture that blocks generated-consumer
+    claims until the crate exists; and adopt, migrate, or bridge schema symbols
+    exactly as assigned in the
+    [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix).
+    The matrix is the sole source of truth for which symbols PR 01 owns,
+    bridges, or leaves to PR 12.
+  - **PR 01B - Wire Format And Runtime Conformance:** define canonical field
+    casing, enum encoding, explicit `null` vs absent-field rules,
+    backwards/forwards schema-version rules, strict unknown-field behavior, and
+    declared `extensions` preservation. The TypeScript package entrypoint owns
+    `serializeWorkspaceEngineWire` and `parseWorkspaceEngineWireStrict`. If PR
+    01B adds the Rust crate, that crate owns `encode_workspace_engine_wire` and
+    `decode_workspace_engine_wire_strict`; otherwise PR 01B is TypeScript-only
+    runtime conformance and the Rust symbols may appear only as inert
+    conformance-fixture names that fail generated-consumer claims until the crate
+    exists. This slice owns runtime round-trip fixtures only; it must not
+    introduce link, projection, share, or policy model decisions.
+  - **PR 01C - Link And Projection Contracts:** adopt, migrate, or replace the
+    provisional projection and `WorkspaceLinkRef` vocabulary from the shared
+    substrate section above in the shared schema package. This slice owns the
+    canonical `WorkspaceLinkRef`, projection writeability values (`canonical`,
+    `writable`, `readOnly`, `lossy`, `redacted`), and projection validation
+    values (`none`, `sourceValidated`, `policyValidated`, `internalOnly`).
+    Chat-specific link storage stays in the chat `ThreadLink` layer: stable link
+    ID, source thread ID, read-state/search projection hooks, and chat-specific
+    ordering are not part of `WorkspaceLinkRef`.
+  - **PR 01D - Core Effective Policy Boundary:** define one core effective policy
+    input/output type for filesystem, search, and export substrate. Chat,
+    notification, secret, and external-share policy extensions land with their
+    consuming PRs and must compose with the core type.
+- Defer the canonical share/external-channel shape with stable share ID, grant
+  ID, owning workspace, target resource identity, visibility scope, participant
+  boundary, expiry/revocation state, and policy/export/search/notification fields
+  to PR 18. Export, search, notifications, and shared channels must consume that
+  validated PR 18 shape instead of inventing local share models.
+- Add fixtures for personal, team, and agent-authored core cases in PR 01A/01B
+  as appropriate. External shared fixtures land with PR 18.
 
 **Tests:**
 
 - unit tests for validators and fixtures.
 - type-level compile tests where useful.
 - serialization round-trip tests.
+- schema-drift test that fails when the checked-in canonical schema no longer
+  matches generated or conformance-tested TypeScript and Rust consumers for:
+  every symbol that the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+  assigns to PR 01 as owner or bridge writer, plus canonical link/policy
+  boundary contracts: `WorkspaceLinkRef`, projection writeability/validation
+  types, and the core effective-policy contract types/fixtures.
 - invalid workspace/version/path rejection.
 - stable IDs survive path rename fixture.
 - projection writeability fixture coverage.
@@ -1456,6 +1838,9 @@ must use.
 
 - Architecture Reviewer.
 - Security Reviewer.
+- Versioning Reviewer.
+- Filesystem Reviewer.
+- Chats Reviewer.
 
 **CodeRabbit focus:**
 
@@ -1484,9 +1869,11 @@ default user behavior.
 - Add history/moment projection tied to writes/imports/agent runs where safe.
 - Add actor-neutral provenance fields, with file-level attribution allowed to
   be device/session-level for raw local writes.
-- Add stable object ID registry for existing file/doc/app/chat-like state where
+- Add stable object ID registry for existing file/doc/chat-like state where
   applicable.
-- Add migration/backfill for existing workspaces.
+- Add migration/backfill for existing file/doc/chat substrate in current
+  workspaces; defer app/data object-ID migration to the subsystem or migration
+  milestone that introduces those identities.
 
 **Tests:**
 
@@ -1552,19 +1939,21 @@ default user behavior.
 
 ### PR 04 - Effective Policy And File Policy Resolver
 
-**Goal:** Implement `.dohc/files.toml` parsing and one effective policy
-resolver used by files, versions, chats, links, search, notifications, and
-exports.
+**Goal:** Implement `.dohc/files.toml` and `.dohc/visibility.toml` parsing plus
+one effective policy resolver used by files, versions, search, and exports.
 
 **Scope:**
 
-- Add policy parser.
-- Add defaults for source, apps, data, `node_modules`, `dist`, cache, scratch,
-  and `.env`.
+- Add policy parsers for `.dohc/files.toml` and `.dohc/visibility.toml`.
+- Add defaults for source, apps, data, `node_modules`, `dist`, cache, and
+  scratch.
+- Keep `.env` ignored/excluded/redacted by default until PR 08 introduces
+  secret-backed files.
 - Resolve tracked/synced/materialized/encrypted/searchable/visibility/export
   policy.
-- Resolve channel/chat membership and linked-work visibility into the same
-  effective policy shape.
+- Add neutral extension hooks for later object families to provide policy facts
+  without introducing chat/share-specific types in PR 04. PR 12/14 bind chat and
+  linked-work visibility to those hooks after chat schemas exist.
 - Add projection writeability checks.
 - Add UI/API-safe status shape.
 
@@ -1575,14 +1964,15 @@ exports.
 - path glob tests.
 - malformed policy tests.
 - unauthorized policy escalation denied.
-- private linked object hidden from chat link/search/notification fixtures.
+- private linked object hidden from generic link/search/export fixtures.
 - projection writeability enforced.
 
 **Security tests:**
 
 - local policy cannot grant external access beyond server/engine auth.
-- a user cannot infer hidden file/version/chat/secret existence through links,
-  search, notification, export, or status APIs.
+- a user cannot infer hidden file/version/secret existence through links, search,
+  export, or status APIs. Chat and notification inference tests land with PR 12
+  and PR 16 after those schemas exist.
 
 **CodeRabbit focus:**
 
@@ -1594,8 +1984,8 @@ exports.
 **Acceptance:**
 
 - effective policy can be computed for any path.
-- effective policy can be computed for any link/projection/search/export
-  request.
+- effective policy can be computed for any file/version/link/projection/search/export
+  request using neutral extension hooks for future object families.
 
 ### PR 05 - Native Filesystem Capture MVP
 
@@ -1623,8 +2013,10 @@ event a visible history item.
 - delete/recreate.
 - edit while dohc is closed, then launch and reconcile.
 - missed watcher event recovered by audit.
-- rename/move preserves or reconnects stable object ID where supported.
-- local change and remote/cloud change compare against common base.
+- rename/move preserves stable object ID; if the platform cannot surface the move
+  atomically, reconciliation must reconnect the same object before this criterion
+  passes.
+- local change and same-workspace concurrent change compare against common base.
 - batch many writes into one moment.
 - ignored files do not enter tracked history.
 
@@ -1683,15 +2075,17 @@ projections.
 
 - users and agents can work in separate version folders with normal file ops.
 
-### PR 07 - Compare And Merge For Text/File Driver
+### PR 07 - Generalize The P0D Merge Engine
 
-**Goal:** Add common-base compare/merge for normal files and text.
+**Goal:** Reuse the P0D compare/merge/conflict contract and extend it to the
+broader text/file driver surfaces.
 
 **Scope:**
 
-- Implement base/current/incoming model.
-- Add clean merge.
-- Add conflict preservation.
+- Reuse P0D's frozen base/current/incoming conflict model; do not define a
+  second conflict schema.
+- Generalize clean merge beyond the Phase 0 proof path.
+- Generalize conflict preservation beyond the Phase 0 proof path.
 - Add `.dohc/conflicts/` projection or UI/API equivalent.
 - Avoid raw conflict markers as primary UX.
 
@@ -1701,12 +2095,13 @@ projections.
 - same-line conflict.
 - delete-vs-edit conflict.
 - rename or move handling if supported.
-- conflict preserves base/current/incoming.
+- conflict preserves the P0D base/current/incoming envelope.
 
 **E2E:**
 
 - two versions edit same file.
-- conflict appears and both sides are recoverable.
+- conflict appears through the generalized P0D envelope and both sides are
+  recoverable.
 
 **CodeRabbit focus:**
 
@@ -1716,7 +2111,8 @@ projections.
 
 **Acceptance:**
 
-- basic file versions can reconcile safely.
+- broader file versions reconcile safely through the P0D-owned merge/conflict
+  contract.
 
 ### PR 08 - Secret-Backed Files
 
@@ -1730,7 +2126,10 @@ encryption, redaction, and controlled materialization.
 - Redact/exclude from public export and unauthorized projections.
 - Prevent search/snippet leakage.
 - Allow authorized local materialization.
-- Add process env injection adapter if appropriate.
+- Support env injection only for dohc-managed trusted or sandboxed launch flows
+  that materialize secrets through the same authorized path, redact values from
+  logs/telemetry/errors, and never inject secret values into arbitrary existing
+  processes.
 
 **Tests:**
 
@@ -1757,7 +2156,9 @@ encryption, redaction, and controlled materialization.
 
 **Acceptance:**
 
-- dohc can "commit env files" safely.
+- dohc can version `.env` files through the defined secret boundary: encrypted at
+  rest, redacted or excluded from history, search, export, and logs, and
+  plaintext only via authorized dohc-controlled materialization.
 
 ### PR 09 - Lazy Hydration And Pinning
 
@@ -1879,7 +2280,26 @@ links, activity, read state, and reactions.
 - Add channel membership/visibility.
 - Add DMs and small group chat primitives.
 - Add message authorship with human/agent display.
-- Store chat links through stable target IDs plus optional `VersionRef`.
+- After the explicit `chat-read-state-bridge-v0` handoff from PR 01, implement the
+  final read-state storage/API behavior assigned to PR 12 by the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix):
+  monotonic cursor semantics, server-owned revision/CAS upserts, and projection
+  rebuild/invalidation alongside thread/message models. PR 01 retains bridge-v0
+  migration, projection rebuild/invalidation, and compatibility ownership until
+  that handoff is recorded.
+- Store chat links as `ThreadLink = chat storage fields + WorkspaceLinkRef`.
+  Chat storage fields include stable link ID, source thread ID,
+  read-state/search projection hooks, and chat-specific ordering. The embedded
+  `WorkspaceLinkRef` supplies source/owning workspace ID, target type, target
+  workspace ID, stable target ID, optional tagged `VersionRef`, and display
+  path/title captured at link time only when policy permits. Otherwise it stores
+  a redacted/policy-gated display label plus ACL/degraded-render behavior so
+  rename, revocation, and cross-workspace dereference remain safe.
+- Follow the
+  [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+  for chat/thread/link/read-state ownership, migration/backfill, and projection
+  rebuild/invalidation boundaries instead of restating individual symbol
+  ownership here.
 - Model live chats as workspace objects, not as files that automatically fork
   with versions.
 
@@ -1933,6 +2353,10 @@ links, activity, read state, and reactions.
 - composer send.
 - DM creation.
 - channel switching.
+- performance smoke for large message/channel lists using virtualization or list
+  windowing where needed.
+- accessibility pass for keyboard navigation, focus order, and screen-reader
+  labels.
 
 **E2E:**
 
@@ -1955,6 +2379,9 @@ links, activity, read state, and reactions.
 **Acceptance:**
 
 - chats feel fast, obvious, and natural.
+- large channels and long message lists remain responsive without visible jank.
+- keyboard navigation, focus handling, and screen-reader labels pass the PR13
+  accessibility checklist.
 
 ### PR 14 - Chats Linked To Files, Versions, And History
 
@@ -1962,8 +2389,9 @@ links, activity, read state, and reactions.
 
 **Scope:**
 
-- Add `ThreadLink` UI and APIs.
-- Link chats to files/folders/versions/moments/apps/data.
+- Add UI over the PR 12-owned canonical `ThreadLink` APIs and storage; PR 14
+  must not define a parallel link contract.
+- Link chats to files/folders/versions/moments and agent runs.
 - Show related chats in file side rail.
 - Show related chats in version/history views.
 - Add one-way Markdown/text projection for agent context.
@@ -2052,6 +2480,8 @@ collaboration.
 - followed chat notifications.
 - channel mute/unmute.
 - agent update notification controls.
+- reaction display, privacy, and notification behavior on top of the PR 12
+  reaction API.
 - quiet/digest settings if feasible.
 
 **Tests:**
@@ -2060,7 +2490,7 @@ collaboration.
 - DM notification.
 - muted channel suppresses notifications.
 - followed chat notification.
-- reaction add/remove.
+- reaction visibility does not leak hidden users.
 - presence does not leak hidden users.
 
 **E2E:**
@@ -2124,9 +2554,9 @@ dohc file/folder/version sharing.
 
 - Shared channel invitations.
 - External participant/workspace model.
-- Explicit cross-workspace share/federation objects.
+- Explicit cross-workspace share objects.
 - Resource visibility preview.
-- Share selected files/folders/versions/apps/chats.
+- Share selected files/folders/versions/chats.
 - Deny unshared workspace reads.
 - External notification/search constraints.
 
@@ -2255,10 +2685,20 @@ substrate without data loss.
 
 **Scope:**
 
-- Migrate current chat threads if any.
+- Migrate current chat threads if any, including messages, read state,
+  membership/visibility, links, read-state cursors, unread/mention projections,
+  and shared-channel metadata.
 - Migrate atoms/docs into Main version.
 - Migrate apps/sites/data into file policy defaults.
 - Preserve existing shares.
+- Rebuild, invalidate, or reindex all workspace-scoped derived projections after
+  substrate migration, including search, activity, notifications, status, and
+  linked-work projections. Chat unread/read-state projections, mention badges,
+  thread cursors, and cursor-derived notification state must be rebuilt or
+  invalidated before cutover. Projection refresh must enforce the new workspace
+  scoping rules consistently for every migrated atom, folder, entity, share,
+  capture, version, chat, message, search-index entry, export, and projection
+  before cutover.
 - Preserve current agent run history or map to moments where possible.
 - Add rollback for migration.
 
@@ -2267,7 +2707,9 @@ substrate without data loss.
 - representative old workspace fixtures.
 - migration idempotency.
 - migration rollback.
+- derived projection rebuild or invalidation after migration and rollback.
 - legacy share compatibility.
+- legacy chat membership/link/read-state compatibility.
 - legacy agent run/history compatibility.
 
 **E2E:**
@@ -2283,6 +2725,75 @@ substrate without data loss.
 **Acceptance:**
 
 - existing user work remains accessible and correct.
+
+### PR 21R - Sync Replication And Offline Rejoin
+
+**Goal:** Make the same workspace appear across machines and agents without
+turning dohc Cloud into the source of truth.
+
+**Workstream owner:** Replication and offline reconciliation.
+
+**Milestones:**
+
+21R-A - Replication Transport And Replay Ordering
+
+- Define local-engine to cloud replication protocol.
+- Queue local writes while offline and replay them with causal/idempotency
+  guards on rejoin.
+- Batch and backpressure replication so watcher bursts do not become sync floods.
+- Tests: offline edit on machine A rejoins and appears on machine B; stale
+  replica cannot overwrite newer canonical state; watcher bursts are batched.
+
+21R-B - Machine-To-Machine State Replication
+
+- Define machine-to-machine state replication through dohc Cloud.
+- Preserve stable object IDs, workspace versions, history moments, policy,
+  share grants/revocations, membership/visibility, read-state/unread cursors,
+  and chat activity across replicas.
+- Replay replicated engine state through server-authenticated workspace scope.
+- Tests: replicated grants, memberships, read cursors, and chat activity rebuild
+  consistently after rejoin.
+
+21R-C - Projection Invalidation And Rebuilds
+
+- Replicate projection invalidation records without making projections the
+  source of truth.
+- Rebuild linked-work, unread/mention, search, and file side-rail projections
+  from canonical replicated state.
+- Tests: linked-work invalidations, unread/mention projections, and search
+  indexes rebuild consistently after rejoin.
+
+21R-D - Offline Rejoin Conflict Preservation
+
+- Reconcile divergent offline edits with the same conflict-preservation model as
+  local concurrent writes.
+- Preserve conflict records and history moments across replicas.
+- Tests: offline divergent edits preserve both sides or merge deterministically.
+
+21R-E - Secret Redaction During Replication
+
+- Keep replicated secret-backed files in encrypted/opaque form and preserve
+  redaction/materialization policy.
+- Tests: replicated secret-backed files preserve redaction/materialization policy
+  and never hydrate plaintext through normal sync.
+
+**E2E:**
+
+- "Edit offline on laptop, edit online on desktop, reconnect laptop" full path
+  with file history, conflict handling, search, and chat side rail verified.
+
+**CodeRabbit focus:**
+
+- data loss.
+- idempotency and replay ordering.
+- cross-workspace leakage.
+- offline conflict preservation.
+- sync flood and backpressure.
+
+**Acceptance:**
+
+- workspace continuity works across machines without making cloud authoritative
+  over local writes.
 
 ### PR 22 - Full QA Hardening And Release Readiness
 
@@ -2334,7 +2845,8 @@ substrate without data loss.
 
 - no skipped critical E2E.
 - no unresolved P0/P1 findings.
-- CodeRabbit approved or user explicitly overrides documented non-blockers.
+- CodeRabbit approved at the current major gate or user explicitly overrides
+  documented non-blockers.
 - execution log complete.
 
 ## Workflow Loops
@@ -2350,7 +2862,7 @@ Plan PR scope
   -> run required E2E/security/perf
   -> update execution log
   -> open PR
-  -> run the canonical CodeRabbit loop
+  -> run CodeRabbit at major readiness gates
   -> merge only after acceptance criteria
 ```
 
@@ -2365,7 +2877,7 @@ Unit pass
   -> performance budget
   -> manual smoke
   -> subagent QA review
-  -> CodeRabbit
+  -> CodeRabbit gate when readiness or risk warrants it
 ```
 
 ### Conflict/Failure Loop
@@ -2382,14 +2894,9 @@ Reproduce
   -> record in execution log
 ```
 
-### CodeRabbit Loop
+### CodeRabbit Loop Reference
 
-Use the canonical `CodeRabbit Loop` section under `Agent And Review Workflow`
-above. Do not move to the next PR with unresolved CodeRabbit findings unless
-the finding is a documented non-sensitive non-blocker and the user explicitly
-approves the override in the PR and execution log. Authorization, ownership,
-workspace isolation, secrets, privacy, data-loss, and permission-boundary
-findings remain non-overridable blockers.
+See [Agent And Review Workflow -> CodeRabbit Loop](#coderabbit-loop).
 
 ## Cross-System Acceptance Scenarios
 
@@ -2419,7 +2926,9 @@ These are the product-level scenarios the full initiative must eventually pass.
 2. User edits files in that version folder.
 3. Main remains unchanged.
 4. User compares Client Version to Main.
-5. dohc shows file/data/chat differences.
+5. dohc shows file/data differences plus any version-linked chat projections;
+   Chats remain live workspace objects and are not restored or compared as
+   versioned chat history.
 
 ### Scenario D - Conflict Preservation
 
@@ -2429,7 +2938,7 @@ These are the product-level scenarios the full initiative must eventually pass.
 4. UI shows a simple choice, not raw conflict markers.
 5. Both states remain recoverable.
 
-### Scenario E - Safe `.env`
+### Scenario E - Safe `.env` (post-Phase 0 / PR 08+)
 
 1. User creates `.env`.
 2. Policy marks it tracked, encrypted, searchable false, private.
@@ -2450,7 +2959,7 @@ These are the product-level scenarios the full initiative must eventually pass.
 ### Scenario G - External Shared Channel
 
 1. User creates `#client-acme`.
-2. User shares selected file and dashboard.
+2. User shares selected files and a version.
 3. External participant can chat and view selected resources.
 4. External participant cannot search/read private notes or secret-backed files.
 5. Revoking share removes access.
@@ -2470,8 +2979,8 @@ An implementing agent may stop only when:
 - the same blocker remains after three concrete attempts.
 - continuing would violate a non-negotiable.
 - an external secret/service/user decision is genuinely required.
-- required CI or CodeRabbit service is unavailable and no local equivalent can
-  provide useful progress.
+- required CI is unavailable and no local equivalent can provide useful
+  progress.
 
 Do not stop because:
 
@@ -2498,7 +3007,7 @@ Do not claim the initiative is complete until:
 
 - every PR is merged or explicitly deferred by user decision.
 - all execution-log entries are complete.
-- CodeRabbit loops are complete for every PR.
+- required CodeRabbit gates are complete for each major readiness checkpoint.
 - subagent review loops are complete for major milestones.
 - no P0/P1 issues remain.
 - unit, integration, security, E2E, visual, migration, and performance checks
