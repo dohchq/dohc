@@ -13,12 +13,14 @@ source-control concepts with new labels.
 The user-facing promise is simple:
 
 > Use normal files. Humans and agents can edit them. Writes have two explicit
-> phases: durable recording and canonical acceptance. Writes that pass protection
-> checks become canonical immediately; writes that are durably recorded but cannot
-> yet become canonical return a `durable-pending holding record`; evaluator
-> outages or indeterminate evaluator results before a durable result can be
-> proven return `retryable-failure` without pretending the write was durably
-> accepted; and rejected/quarantined writes keep durable recovery/audit handles.
+> phases: durable recording and canonical acceptance. Writes that can be
+> canonicalized synchronously after all required protection/review checks pass
+> become canonical immediately. Writes that are durably recorded while async
+> protection checks, mandatory review, or canonicalization are still pending
+> return a `durable-pending holding record`. Evaluator outages or indeterminate
+> evaluator results before a durable result can be proven return
+> `retryable-failure` without pretending the write was durably accepted; and
+> rejected/quarantined writes keep durable recovery/audit handles.
 > dohc remembers what happened, supports parallel versions, and helps reconcile
 > conflicts.
 
@@ -27,8 +29,12 @@ single prose term for an accepted, non-canonical write held for replay,
 canonicalization, or operator disposition. `WriteResult.kind: 'durable-pending'`,
 `recordKind: 'accepted_holding_record'`, and `pendingState:
 'pending_protection' | 'pending_review' | 'pending_canonicalization' |
-'overdue_disposition'` are wire/schema values for that same lifecycle concept,
-not separate lifecycle names.
+'overdue_disposition'` are wire/schema values for that same lifecycle concept:
+`pending_protection` means durable recording succeeded before async protection
+checks finished, `pending_review` means protection passed but required review has
+not approved canonical acceptance, and `pending_canonicalization` means all
+current gates passed but canonical promotion is still in progress. They are not
+separate lifecycle names.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -408,6 +414,16 @@ write, conflict, and durable-pending results: repeated delivery with the same
 operation fingerprint returns the same `idempotencyResultId`,
 `idempotencyReplayToken`, and `commitState` until retry handling can prove and
 return a canonical/durable result or a deterministic terminal outcome.
+For every replayable non-canonical `WriteResult` with a `holdingRecordId`
+(`durable-pending`, `rejected`, `quarantined`, and retained `terminal-retired`),
+the holding record and its idempotency result metadata must be committed in the
+same durability boundary. That boundary includes the relevant timestamp
+(`acceptedAt`, `rejectedAt`, `quarantinedAt`, or `retiredAt`), `versionId`,
+`idempotencyResultId`, `idempotencyReplayToken`, `replayUntil`, and the operation
+fingerprint. If that atomic durable write cannot complete, the engine must not
+acknowledge a replayable `WriteResult`; the caller retries until both the holding
+record and replay/idempotency metadata are durable together or the engine proves
+a canonical result.
 Before acknowledging `kind: 'retryable-failure'`, the engine must durably
 persist that idempotency result state for the same workspace, version,
 idempotency key, operation fingerprint, `idempotencyResultId`,
@@ -445,8 +461,10 @@ resolved before any durable rejection record is allocated return
 `rejectedAt`, `acceptedAt`, or `quarantinedAt`.
 Durable `rejected` and `quarantined` ingests live in a non-canonical holding area
 with enough metadata to explain the decision, retry where allowed, or audit the
-outcome after evaluators recover. `rejected` means the write failed a protection
-gate before canonical acceptance, after the engine allocated a durable
+outcome after evaluators recover. Their holding record and idempotency result are
+the same atomic durable artifact for replay purposes; retries may not acknowledge
+either piece until both are durable. `rejected` means the write failed a
+protection gate before canonical acceptance, after the engine allocated a durable
 `rejected_record`, and stores `holdingRecordId`, `rejectedAt`, `retentionUntil`,
 `replayUntil`, and replay/idempotency metadata; `quarantined` means the write
 was accepted into the holding area but could not become canonical and stores

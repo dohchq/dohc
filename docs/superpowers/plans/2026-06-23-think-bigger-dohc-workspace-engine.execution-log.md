@@ -175,6 +175,7 @@ Date completed:
 - Chat/file philosophy:
 - Rust kernel boundary:
 - Async workspace/request-token gating:
+- Unresolved blockers:
 - Approval/status:
 
 ### Local Agent CLI QA
@@ -6237,7 +6238,7 @@ Two-hundred-forty-sixth pass:
 
 Two-hundred-forty-seventh pass:
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: four follow-up findings fixed; committed review rerun is
     required after this pass is pushed.
   - Test evidence: validation block below passed for this patch set before
@@ -6257,6 +6258,47 @@ Two-hundred-forty-seventh pass:
     `ChannelProjection`.
   - Added `dm_thread_relinked` as the concrete activity for immutable DM
     membership transitions, with replay/export continuity rules.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `node <repo-root>/scripts/check-think-bigger-doc-links.mjs` passed
+    for 5 discovered Think Bigger docs and the in-script fixtures from `/tmp`.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - None approved.
+
+Two-hundred-forty-eighth pass:
+
+- Live PR00 status:
+  - CodeRabbit status: seven follow-up findings fixed; committed review rerun is
+    required after this pass is pushed.
+  - Test evidence: validation block below passed for this patch set before
+    commit.
+  - Open overrides: none approved. The PR00 docs-only local-agent-CLI exception
+    remains pending human approval.
+  - Completion state: not complete or merge-ready until CodeRabbit is clean and
+    the docs-only local-agent-CLI exception is approved.
+- Fixed CodeRabbit's seven follow-up findings:
+  - Made the PR 01 baseline-import gate symbol-specific and kept chat bridge
+    symbols exempt until the PR 12 ownership boundary.
+  - Added an `Unresolved blockers` slot to the Phase 0 decision-note entry
+    template.
+  - Added history moments to the Phase 0 workspace-scope checklist.
+  - Clarified the two-phase write lifecycle for durable recording versus
+    canonical acceptance and the pending protection/review/canonicalization
+    states.
+  - Required holding records and idempotency result metadata to commit in the same
+    durability boundary before any replayable non-canonical `WriteResult` is
+    acknowledged.
+  - Added originating `ThreadLink` identity and server-owned fields to
+    `ChannelTargetActivity`.
+  - Tightened channel-target retry repair so it verifies exact linked-target
+    state and source `ThreadLink` identity before returning an idempotent result.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
@@ -6339,9 +6381,9 @@ Gate evidence:
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
 - [ ] Every atom, folder, entity, file, version, chat, thread, message, link,
-      read state, notification, activity, share, capture, event, search result,
-      projection, holding record, durability-log entry, and idempotency tombstone
-      is workspace-scoped.
+      read state, notification, activity, share, capture, event, history moment,
+      search result, projection, holding record, durability-log entry, and
+      idempotency tombstone is workspace-scoped.
 - [ ] Agent writes respect user locks, protected paths, atom/folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.

@@ -918,9 +918,13 @@ record in the execution log the commit/PR where PR 01 adopts or migrates each
 provisional symbol, and downstream code must stop importing
 `Phase0SharedSubstrateBaseline` for those symbols after that checkpoint.
 PR 01 must add a mechanical lint/test gate for this checkpoint: after each
-symbol is adopted or migrated, the check scans downstream code for imports of
-`Phase0SharedSubstrateBaseline` for that symbol and fails until consumers import
-the PR 01-owned contract instead.
+symbol is adopted or migrated by its owning PR lane, the check scans downstream
+code for imports of `Phase0SharedSubstrateBaseline` for that specific symbol and
+fails until consumers import the owning contract instead. The gate is
+symbol-specific, not a blanket removal of every baseline import on PR 01 merge:
+`ChatThread`, `ThreadMessage`, and chat `ThreadLink` remain allowed through the
+PR 01 bridge until the PR 12 chat ownership boundary explicitly adopts or
+migrates them.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 

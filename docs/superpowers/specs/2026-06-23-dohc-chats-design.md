@@ -294,13 +294,16 @@ type ChannelProjection = Channel & {
 }
 
 type ChannelTargetActivity = {
-  activityId: string
+  readonly activityId: string
   workspaceId: string
   channelId: string
   threadId: string
+  sourceThreadLinkId: string
+  sourceCanonicalThreadLinkKey: CanonicalThreadLinkKey
+  sourceThreadLinkState: 'active' | 'tombstoned'
   kind: 'channel_target_linked' | 'channel_target_unlinked'
   linkedTarget: ChannelLinkedTargetRef
-  actorId: string
+  readonly actorId: string
   createdAt: UnixMsDecimalString
 }
 ```
@@ -810,18 +813,23 @@ For a `ChannelChatThread`, the same transaction or serialized unit must also run
 `channel-target-ledger-sync`: normalize the changed `ThreadLink` target into a
 `ChannelLinkedTargetRef`, append the matching `ChannelTargetActivity`
 (`channel_target_linked` or `channel_target_unlinked`) for the thread's
-`channelId` and `threadId`, and enqueue the same durable outbox identity used
-for side rails, search, export, replay, and projection invalidation. DM threads
-do not emit `ChannelTargetActivity`. The sync step is a derived repair/output
-contract: direct writes to `ChannelTargetActivity`,
+`channelId` and `threadId`, carrying the originating `sourceThreadLinkId`,
+`sourceCanonicalThreadLinkKey`, and `sourceThreadLinkState`, and enqueue the same
+durable outbox identity used for side rails, search, export, replay, and
+projection invalidation. `activityId` and `actorId` are server-owned fields; the
+client never supplies them. DM threads do not emit `ChannelTargetActivity`. The
+sync step is a derived repair/output contract: direct writes to `ChannelTargetActivity`,
 `ChannelProjection.linkedTargets`, or `ChatThreadProjection.linkedWork` must
 never create, remove, authorize, or tombstone linked work. If a retry observes an
 already-active or tombstoned `ThreadLink`, it must verify the matching
-`ChannelTargetActivity` for the thread's `(channelId, threadId)` pair exists
-before reporting the idempotent result. If the activity is missing, the retry
-must repair it in the same transaction or serialized unit through
-`channel-target-ledger-sync`, then return success only after the `ThreadLink` and
-channel-target ledger entry are both durable.
+`ChannelTargetActivity` for the thread's `(channelId, threadId)` pair, exact
+`sourceThreadLinkId`, exact `sourceCanonicalThreadLinkKey`, normalized
+`linkedTarget`, and current source state (`active` for an active link,
+`tombstoned` for a removed link) before reporting the idempotent result. If the
+ledger entry is missing, stale, points at another `ThreadLink`, or represents the
+wrong active/tombstoned state, the retry must repair it in the same transaction
+or serialized unit through `channel-target-ledger-sync`, then return success only
+after the `ThreadLink` and channel-target ledger entry are both durable.
 Active link creation is idempotent by `CanonicalThreadLinkKey`. The key is
 derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
