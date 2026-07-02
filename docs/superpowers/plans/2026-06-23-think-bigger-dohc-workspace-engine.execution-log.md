@@ -8411,8 +8411,8 @@ Mutable status symbol: `LivePR00Status`.
     manual CodeRabbit reruns remain deferred to major readiness/material-risk
     gates under the 2026-06-29 user-directed review policy.
   - Test evidence: PR00 docs-only local validation remains green; the pushed
-    P0A-P0G proof stack is locally validated through
-    `codex/think-bigger-p0g-proof-qa` at commit `090702d7`. GitHub Actions are
+    P0A-P0G proof stack is locally validated through the current
+    `codex/think-bigger-p0g-proof-qa` branch/PR ref. GitHub Actions are
     disabled/skipped as of the 2026-07-02 user direction, so old red PR Action
     statuses are not blockers for this initiative while Actions remain disabled.
   - Open overrides: the user explicitly approved skipping GitHub PR Actions
