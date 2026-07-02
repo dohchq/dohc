@@ -68,12 +68,14 @@ const hocuspocusJwtSecret = process.env.HOCUSPOCUS_JWT_SECRET?.trim();
 
 function createHocuspocusAdminClient(): HocuspocusAdminClient {
   if (!hocuspocusJwtSecret) {
-    return {
+    const client: HocuspocusAdminClient & { disconnectTimeoutMs: number } = {
+      disconnectTimeoutMs: HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS,
       async disconnectWorkspaceUser() {
         // Collaboration token minting is disabled, so no Hocuspocus sessions
         // can be authenticated for this API process.
       },
     };
+    return client;
   }
   const baseUrl = process.env.HOCUSPOCUS_ADMIN_URL?.trim();
   const adminToken = process.env.HOCUSPOCUS_ADMIN_TOKEN?.trim();
@@ -107,7 +109,8 @@ function createHocuspocusAdminClient(): HocuspocusAdminClient {
     Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
       ? Math.min(configuredTimeoutMs, HOCUSPOCUS_ADMIN_TIMEOUT_MAX_MS)
       : HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS;
-  return {
+  const client: HocuspocusAdminClient & { disconnectTimeoutMs: number } = {
+    disconnectTimeoutMs: timeoutMs,
     async disconnectWorkspaceUser({ workspaceId, userId, signal }) {
       const url = new URL("admin/disconnect-by-workspace-user", adminBase);
       if (signal?.aborted) {
@@ -158,6 +161,7 @@ function createHocuspocusAdminClient(): HocuspocusAdminClient {
       }
     },
   };
+  return client;
 }
 
 function isLocalHocuspocusAdminHost(hostname: string): boolean {
