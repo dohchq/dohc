@@ -17,6 +17,7 @@ describe("revokeShare admin disconnect", () => {
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         queries.push({ text, params });
         if (normalized.includes("from shares s")) {
+          expect(params).toEqual(["share-1", "sharer-1"]);
           return {
             rows: [
               {
@@ -86,11 +87,12 @@ describe("revokeShare admin disconnect", () => {
     const events: string[] = [];
     const queries: Array<{ text: string; params?: unknown[] }> = [];
     const client = {
-      query: async (text: string) => {
+      query: async (text: string, params?: unknown[]) => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
-        queries.push({ text });
+        queries.push({ text, params });
         if (normalized.includes("from shares s")) {
+          expect(params).toEqual(["share-1", "sharer-1"]);
           return {
             rows: [
               {
@@ -114,10 +116,10 @@ describe("revokeShare admin disconnect", () => {
         events.push("connect");
         return client;
       },
-      query: async (text: string) => {
+      query: async (text: string, params?: unknown[]) => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
-        queries.push({ text });
+        queries.push({ text, params });
         if (normalized.startsWith("update")) {
           expect(text).toContain("claimId");
           if (normalized.includes("set kind = 'share.revocation.disconnect_pending'")) {
@@ -166,10 +168,11 @@ describe("revokeShare admin disconnect", () => {
   it("persists revocation and pending disconnect when admin disconnect is not configured", async () => {
     const events: string[] = [];
     const client = {
-      query: async (text: string) => {
+      query: async (text: string, params?: unknown[]) => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.includes("from shares s")) {
+          expect(params).toEqual(["share-1", "sharer-1"]);
           return {
             rows: [
               {
@@ -250,10 +253,11 @@ describe("revokeShare admin disconnect", () => {
   it("does not let a former workspace member revoke a share they created", async () => {
     const events: string[] = [];
     const client = {
-      query: async (text: string) => {
+      query: async (text: string, params?: unknown[]) => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.includes("from shares s")) {
+          expect(params).toEqual(["share-1", "sharer-1"]);
           return {
             rows: [
               {
@@ -297,11 +301,14 @@ describe("revokeShare admin disconnect", () => {
   it("destroys the transaction client when rollback fails", async () => {
     const events: string[] = [];
     const client = {
-      query: async (text: string) => {
+      query: async (text: string, params?: unknown[]) => {
         const normalized = text.trim().toLowerCase();
         const event = normalized.split(/\s+/u)[0] ?? "query";
         events.push(event);
-        if (event === "select") throw new Error("select failed");
+        if (event === "select") {
+          expect(params).toEqual(["share-1", "sharer-1"]);
+          throw new Error("select failed");
+        }
         if (event === "rollback") throw new Error("rollback failed");
         return { rows: [] };
       },
@@ -384,6 +391,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -560,6 +568,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -625,6 +634,90 @@ describe("revokeShare admin disconnect", () => {
       "delete",
     ]);
     expect(disconnects).toEqual([{ workspaceId: "workspace-1", userId: "recipient-from-share" }]);
+  });
+
+  it("uses the revoked share recipient when the event payload recipient mismatches", async () => {
+    const events: string[] = [];
+    const claimUpdates: unknown[][] = [];
+    const client = {
+      query: async (text: string, params?: unknown[]) => {
+        const normalized = text.trim().toLowerCase();
+        events.push(normalized.split(/\s+/u)[0] ?? "query");
+        if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
+          expect(params).toEqual([100, 300, expect.any(String)]);
+          return {
+            rows: [
+              {
+                id: "event-1",
+                workspace_id: "workspace-1",
+                target_id: "share-1",
+                payload: { recipientUserId: "stale-recipient" },
+              },
+            ],
+          };
+        }
+        if (normalized.includes("from shares")) {
+          expect(params).toEqual(["workspace-1", "share-1"]);
+          return { rows: [{ recipient_user_id: "recipient-from-share" }] };
+        }
+        if (normalized.startsWith("update")) {
+          claimUpdates.push(params ?? []);
+        }
+        return { rows: [] };
+      },
+      release: () => {
+        events.push("release");
+      },
+    };
+    const pool = {
+      connect: async () => {
+        events.push("connect");
+        return client;
+      },
+      query: async (text: string, params?: unknown[]) => {
+        const normalized = text.trim().toLowerCase();
+        events.push(normalized.split(/\s+/u)[0] ?? "query");
+        expect(params?.[0]).toBe("event-1");
+        return { rows: [] };
+      },
+    } as unknown as pg.Pool;
+    const disconnects: Array<{ workspaceId: string; userId: string }> = [];
+    const deps: SharedAtomDeps = {
+      pool,
+      hocuspocusAdmin: {
+        disconnectWorkspaceUser: async (input) => {
+          events.push("disconnect");
+          disconnects.push({ workspaceId: input.workspaceId, userId: input.userId });
+        },
+      },
+    };
+
+    await expect(retryPendingShareRevocationDisconnects(deps)).resolves.toEqual({
+      ok: true,
+      attempted: 1,
+      disconnected: 1,
+      failed: 0,
+    });
+
+    expect(disconnects).toEqual([{ workspaceId: "workspace-1", userId: "recipient-from-share" }]);
+    expect(claimUpdates).toHaveLength(1);
+    expect(claimUpdates[0]?.[0]).toBe("event-1");
+    expect(typeof claimUpdates[0]?.[1]).toBe("string");
+    expect(claimUpdates[0]?.[2]).toBe("recipient-from-share");
+    expect(claimUpdates[0]?.[3]).toBe(300);
+    expect(events).toEqual([
+      "delete",
+      "connect",
+      "begin",
+      "select",
+      "select",
+      "update",
+      "commit",
+      "release",
+      "disconnect",
+      "update",
+      "delete",
+    ]);
   });
 
   it("reclaims stale claimed revocation disconnect events exactly once", async () => {
@@ -886,6 +979,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -1051,18 +1145,40 @@ describe("revokeShare admin disconnect", () => {
     ]);
   });
 
-  it("counts disconnect success when terminal event cleanup delete fails", async () => {
+  it("counts disconnect success when terminal event cleanup delete fails and cleans it on retry", async () => {
     const events: string[] = [];
     const completedUpdates: unknown[][] = [];
+    const cleanupDeletes: unknown[][] = [];
+    let storedKind = "share.revocation.disconnect_pending";
+    let failTerminalCleanupDeletes = 1;
+    let disconnectCount = 0;
     const client = {
-      query: async (text: string) => {
+      query: async (text: string, params?: unknown[]) => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
+          expect(params).toEqual([100, 300, expect.any(String)]);
+          if (storedKind === "share.revocation.disconnect_completed") {
+            return {
+              rows: [
+                {
+                  id: "event-1",
+                  kind: "share.revocation.disconnect_completed",
+                  workspace_id: "workspace-1",
+                  target_id: "share-1",
+                  payload: { completedAt: "2026-07-01T00:00:00.000Z" },
+                },
+              ],
+            };
+          }
+          if (storedKind !== "share.revocation.disconnect_pending") {
+            return { rows: [] };
+          }
           return {
             rows: [
               {
                 id: "event-1",
+                kind: "share.revocation.disconnect_pending",
                 workspace_id: "workspace-1",
                 target_id: "share-1",
                 payload: { recipientUserId: "recipient-1" },
@@ -1071,7 +1187,16 @@ describe("revokeShare admin disconnect", () => {
           };
         }
         if (normalized.includes("from shares")) {
+          expect(params).toEqual(["workspace-1", "share-1"]);
           return { rows: [{ recipient_user_id: "recipient-1" }] };
+        }
+        if (normalized.startsWith("update")) {
+          storedKind = "share.revocation.disconnect_claimed";
+        }
+        if (normalized.startsWith("delete")) {
+          expect(params).toEqual(["event-1"]);
+          cleanupDeletes.push(params ?? []);
+          storedKind = "deleted";
         }
         return { rows: [] };
       },
@@ -1089,9 +1214,17 @@ describe("revokeShare admin disconnect", () => {
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("update")) {
           completedUpdates.push(params ?? []);
+          storedKind = "share.revocation.disconnect_completed";
           return { rows: [] };
         }
-        throw new Error("cleanup failed");
+        expect(params).toEqual(["event-1", completedUpdates[0]?.[1]]);
+        if (failTerminalCleanupDeletes > 0) {
+          failTerminalCleanupDeletes -= 1;
+          throw new Error("cleanup failed");
+        }
+        storedKind = "deleted";
+        cleanupDeletes.push(params ?? []);
+        return { rows: [] };
       },
     } as unknown as pg.Pool;
     const deps: SharedAtomDeps = {
@@ -1099,6 +1232,7 @@ describe("revokeShare admin disconnect", () => {
       hocuspocusAdmin: {
         disconnectWorkspaceUser: async () => {
           events.push("disconnect");
+          disconnectCount += 1;
         },
       },
     };
@@ -1126,5 +1260,28 @@ describe("revokeShare admin disconnect", () => {
     expect(completedUpdates).toHaveLength(1);
     expect(completedUpdates[0]?.[0]).toBe("event-1");
     expect(typeof completedUpdates[0]?.[1]).toBe("string");
+    expect(storedKind).toBe("share.revocation.disconnect_completed");
+
+    events.length = 0;
+    await expect(retryPendingShareRevocationDisconnects(deps)).resolves.toEqual({
+      ok: true,
+      attempted: 0,
+      disconnected: 0,
+      failed: 0,
+    });
+
+    expect(disconnectCount).toBe(1);
+    expect(cleanupDeletes).toEqual([["event-1"]]);
+    expect(storedKind).toBe("deleted");
+    expect(events).toEqual([
+      "delete",
+      "connect",
+      "begin",
+      "select",
+      "delete",
+      "commit",
+      "release",
+      "delete",
+    ]);
   });
 });
