@@ -200,6 +200,11 @@ than skipped.
 - Every PR must have fresh local validation before review. CodeRabbit runs at
   major readiness gates, security-sensitive diffs, architecture pivots, and
   final merge readiness, not after every small fix.
+- GitHub Actions are intentionally disabled/skipped for this initiative as of
+  the 2026-07-02 user direction. Do not wait on remote PR Actions or treat old
+  red GitHub Actions statuses as blockers until the user re-enables them. Use
+  local equivalents, focused integration/E2E checks, performance measurements,
+  and the major CodeRabbit/review gates instead.
 - Every security-sensitive PR must use subagent review.
 - Every UI PR must include Playwright/visual QA where applicable.
 - No weakening assertions or skipping tests to move forward.
@@ -2979,8 +2984,8 @@ An implementing agent may stop only when:
 - the same blocker remains after three concrete attempts.
 - continuing would violate a non-negotiable.
 - an external secret/service/user decision is genuinely required.
-- required CI is unavailable and no local equivalent can provide useful
-  progress.
+- required local validation or an equivalent external service is unavailable
+  and no alternate check can provide useful progress.
 
 Do not stop because:
 
@@ -3009,6 +3014,9 @@ Do not claim the initiative is complete until:
 - all execution-log entries are complete.
 - required CodeRabbit gates are complete for each major readiness checkpoint.
 - subagent review loops are complete for major milestones.
+- GitHub Actions are not a required gate while disabled by user direction. If
+  the user re-enables them before final release, run the relevant workflows and
+  record their results.
 - no P0/P1 issues remain.
 - unit, integration, security, E2E, visual, migration, and performance checks
   have fresh results.
