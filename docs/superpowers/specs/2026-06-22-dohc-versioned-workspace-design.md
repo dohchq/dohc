@@ -1,0 +1,1641 @@
+# dohc Versioned Workspace Design
+
+Status: exploratory architecture direction
+Cohort: dohc Think Bigger Workspace Engine
+Think Bigger Spec: true
+Date: 2026-06-22
+
+## Core thesis
+
+dohc should rethink source control as a versioned workspace, not as traditional
+source-control concepts with new labels.
+
+The user-facing promise is simple:
+
+> Use normal files. Humans and agents can edit them. Writes have two explicit
+> phases: durable recording and canonical acceptance. Writes that can be
+> canonicalized synchronously after all required protection/review checks pass
+> become canonical immediately. Writes that are durably recorded while async
+> protection checks, mandatory review, or canonicalization are still pending
+> return a `durable-pending holding record`. Evaluator outages or indeterminate
+> evaluator results before a durable result can be proven return
+> `retryable-failure` without pretending the write was durably accepted; and
+> rejected/quarantined writes keep durable recovery/audit handles.
+> dohc remembers what happened, supports parallel versions, and helps reconcile
+> conflicts.
+
+Canonical lifecycle term: **`durable-pending holding record`**. This is the
+single prose term for an accepted, non-canonical write held for replay,
+canonicalization, or operator disposition. The schema separates three axes:
+`kind` names the public write-result shape, `recordKind` names the durable row
+family when a public result needs that detail, and `lifecycleState` names the
+current accepted-holding state while the row remains non-canonical. Writers,
+retries, holding-record lookup, and status APIs all map the active accepted
+holding row to `kind: 'durable-pending'`,
+`recordKind: 'accepted_holding_record'`, and a `lifecycleState` of
+`pending_protection`, `pending_review`, `pending_canonicalization`, or
+`overdue_disposition`. `pending_protection` means durable recording succeeded
+before async protection checks finished, `pending_review` means protection
+passed but required review has not approved canonical acceptance,
+`pending_canonicalization` means all current gates passed but canonical
+promotion is still in progress, and `overdue_disposition` means the accepted
+holding row exceeded its operator-disposition window. If explicit operator
+disposition retires the retained holding row, retries and status APIs stop
+returning `durable-pending`; they return `kind: 'terminal-retired'` with the
+same `holdingRecordId` until the replay horizon expires, after which retry
+traffic returns `kind: 'idempotency-expired'` with the corresponding expired
+record kind.
+
+This keeps the dohc philosophy intact: the workspace should still feel like
+files on the user's computer. Agents should not need to know dohc-specific
+version-control concepts to work safely.
+
+## What changes from traditional source control
+
+Traditional source-control surface primitives are not the right default for
+agents or normal users:
+
+- commits force people to think about history too early.
+- branches expose implementation ceremony for parallel work.
+- worktrees are awkward, stale, and filesystem-heavy.
+- public/private is usually repo-level instead of object/path/change-level.
+- source control assumes a real OS and filesystem.
+
+dohc should keep VCS-grade robustness while replacing VCS-shaped interaction.
+
+| Traditional concept | dohc user concept |
+| --- | --- |
+| repository | workspace |
+| branch | version |
+| commit | automatic history checkpoint / moment |
+| worktree | live version view |
+| pull request | compare / merge boundary |
+| merge | reconcile versions |
+| revert | restore / undo |
+| clone | local or lazy-hydrated workspace |
+| `.env` | secret reference resolved by a broker |
+
+The important change is that dohc does not make users or agents perform source
+control rituals before doing work.
+
+## User-facing model
+
+The core user-facing primitive is a **Version**.
+
+Main is a version. A rewrite is a version. A client-safe workspace is a version.
+An agent experiment is a version. A security-fix line is a version.
+
+Each version behaves like a live file workspace:
+
+- files save immediately.
+- history is automatic.
+- humans and agents follow the same write rules.
+- if the server-derived actor identity has workspace/version/path authority and
+  every protection gate passes, the actor can edit.
+- dohc records who or what changed the workspace.
+- dohc can restore earlier states.
+
+There is no special rule that agents cannot edit Main, but Main still uses the
+same ownership, authorization, and review gates as any other protected write.
+dohc should not make agents second-class writers. Safety comes from snapshots,
+permissions, review gates where policy requires them, history, conflict
+preservation, and recovery, not from forcing all agent work through a separate
+approval flow.
+
+Immediate save is not permission bypass. Every save path must enforce
+workspace-scoped authorization, ownership/review gates required by policy,
+protected-path rules, user locks, version access, visibility boundaries, and
+skill-turn gates before applying a change. Authenticated actor identity is
+derived by the server/engine, never trusted from the caller. Humans, agents,
+automations, imports, and sync processes all pass through the same protection
+checks before a write can land. The write path is fail-closed: substantive
+authorization, ownership/review gate, policy, visibility, protected-path,
+user-lock, version-access, skill-turn, provenance, attribution, or proof
+decisions can deny a write, but an unavailable or indeterminate evaluator is
+classified as `retryable-failure`.
+`retryable-failure.commitState: 'no_canonical_commit_recorded'` means the engine
+proved no canonical mutation was applied. `retryable-failure.commitState:
+'commit_state_unknown_retry_required'` means the mutation may already be
+canonical but acknowledgement failed or cannot be proven; callers must retry with
+the same idempotency key instead of issuing a fresh write.
+
+Normative gate/retry matrix:
+
+| Gate outcome | Public result | Commit state / record |
+| --- | --- | --- |
+| Malformed request, missing/incompatible precondition, invalid path/version, or cross-workspace reference before persistence | validation error such as `invalid_request`, `malformed_request`, `missing_precondition`, `incompatible_precondition`, `invalid_path`, `invalid_version`, or `cross_workspace_reference` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Deterministically missing, ambiguous, malformed, syntactically invalid, or unparseably scoped engine capture token before persistence | validation error `capture_token_invalid` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. Well-formed tokens that resolve to another workspace use `cross_workspace_reference`; well-formed but stale or object-mismatched capture tokens route to `conflict`. |
+| Replayed idempotency key with mismatched stable actor identity, session-equivalence class when policy requires it, workspace, version context, operation type, target, secret-safe operand fingerprint, operand tuple, or causal precondition set | validation error `replay_metadata_mismatch` | Existing idempotency record is left unchanged; no new holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Authorization, ownership/review, policy, visibility, protected-path, lock, version-access, skill-turn, provenance, attribution, or proof denial before any durable rejection record is allocated | immediate denial response with `PublicDeniedReasonCode` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Same denial durably recorded before canonical acceptance | `rejected` | Durable `rejected_record` with `holdingRecordId`, `rejectedAt`, `replayUntil`, `retentionUntil`, idempotency/replay metadata, and `rejectionState: 'rejected_before_acceptance'`; no canonical commit. `retentionUntil` is an audit/replay/explanation retention horizon, not an operator-escalation deadline. |
+| Same denial after durable acceptance or during replay | `quarantined` | Non-canonical holding record with the mapped quarantine state and `replayUntil`. `retentionUntil` is a disposition/audit retention horizon, not an automatic canonicalization deadline. |
+| Evaluator/service unavailable before any canonical mutation can be recorded | `retryable-failure` | Durable retryable idempotency result with `commitState: 'no_canonical_commit_recorded'`; no holding record, quarantine record, or canonical commit is allocated. Retry with the same idempotency key. |
+| Acknowledgement or evaluator state is unknown before a durable result can be proven to the caller | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'`; canonical commit state is not trusted until retry proves the final durable result. Retry with the same idempotency key. |
+| Conflict materialization cannot be completed or replayed safely after a retryable result can be persisted | `retryable-failure` | Durable retryable idempotency result with `commitState: 'commit_state_unknown_retry_required'`; no partial conflict acknowledgement. Retry with the same idempotency key. If the retryable idempotency result itself cannot be persisted, no `retryable-failure` is returned. |
+| Durable recording succeeded but canonical acceptance is still pending | `durable-pending` | `durable-pending holding record` with `holdingRecordId` and replay metadata. |
+| Preserved base/current/incoming divergence exists | `conflict` | Conflict record; no silent last-writer-wins. |
+
+Write, replay, conflict, and proof-slice sections in this spec use this matrix
+as the source of truth for gate, retry, and `WriteResult` semantics.
+Every `retryable-failure` in the matrix is a durable replayable idempotency
+result before it is returned. If the engine cannot persist that result, callers
+receive a transport failure or timeout and must retry the same idempotency key
+until the engine can return either a durable `retryable-failure` with
+`commitState: 'no_canonical_commit_recorded'` or
+`commitState: 'commit_state_unknown_retry_required'`, or the final canonical,
+durable-pending, rejected, quarantined, conflict, terminal-retired, or expired
+outcome. The evaluator/service, unknown-acknowledgement, and conflict-envelope
+`retryable-failure` rows above all require a durable idempotency result before
+the engine responds, and their `commitState` value is the canonical statement of
+whether no canonical commit was recorded or the commit state is unknown. When a
+conflict record cannot be durably written or replayed safely, the engine returns
+a retryable failure only after durably recording the matching idempotency result
+and conflict-state/commit-state evidence instead of acknowledging a partial
+conflict.
+Canonical save success is acknowledged only after the mutation is durably
+committed to canonical workspace state and is visible to normal `read` semantics
+for that version. `watch` propagation and search indexing are eventually
+consistent from canonical state and must not gate write acknowledgment. If the
+durability path accepts a non-canonical
+`durable-pending holding record`, the response is a distinct durable-pending result, not a
+successful immediate save and not a canonical write that is merely waiting for
+read visibility. The only `durable-pending` response is the non-canonical
+`WriteResult` arm carrying `holdingRecordId`, `acceptedAt`, `replayUntil`,
+`operatorDispositionDueAt`, `lifecycleState`, and the same idempotency/replay
+metadata used to resume or retire that holding record. UIs may show that pending
+record only in explicit ingest/recovery/status surfaces marked non-canonical.
+In this spec, "files save immediately" means authorized writes become canonical
+without an extra human apply/review step once all synchronous protection and
+policy gates pass; async review or canonicalization can still return
+`durable-pending`.
+Write results are explicit:
+
+```ts
+type UnixMsDecimalString = string & { readonly __brand: 'UnixMsDecimalString' }
+type UInt64DecimalString = string & { readonly __brand: 'UInt64DecimalString' }
+
+type DeniedOrQuarantinedStatus =
+  | 'rejected_before_acceptance'
+  | 'quarantined_authorization'
+  | 'quarantined_ownership'
+  | 'quarantined_protection'
+  | 'quarantined_secret_declassification'
+  | 'quarantined_review_gate'
+  | 'quarantined_attribution'
+  | 'quarantined_policy'
+  | 'quarantined_visibility'
+  | 'quarantined_provenance'
+  | 'quarantined_proof'
+  | 'quarantined_locked'
+  | 'quarantined_version_access'
+  | 'quarantined_skill_turn'
+
+type QuarantinedStatus = Exclude<
+  DeniedOrQuarantinedStatus,
+  'rejected_before_acceptance'
+>
+
+type PublicDeniedReasonCode =
+  | 'not_authorized'
+  | 'ownership_denied'
+  | 'review_gate_denied'
+  | 'policy_denied'
+  | 'visibility_denied'
+  | 'protected_path'
+  | 'secret_declassification_denied'
+  | 'locked'
+  | 'version_access_denied'
+  | 'skill_turn_denied'
+  | 'provenance_denied'
+  | 'attribution_denied'
+  | 'proof_denied'
+
+// `not_authorized` maps to an immediate denial response before durable
+// rejection persistence, to `rejected_before_acceptance` only after the engine
+// persists a durable rejected record before canonical acceptance, and to
+// `quarantined_authorization` for replayed or post-acceptance authorization
+// failures.
+
+type PublicValidationErrorCode =
+  // missing_precondition: required guard omitted
+  // incompatible_precondition: multiple aliases supplied for one guard
+  | 'invalid_request'
+  | 'malformed_request'
+  | 'missing_precondition'
+  | 'incompatible_precondition'
+  | 'invalid_path'
+  | 'invalid_version'
+  | 'cross_workspace_reference'
+  | 'capture_token_invalid'
+  | 'replay_metadata_mismatch'
+
+type RetryableWriteFailureCode =
+  | 'service_unavailable'
+  | 'evaluator_unavailable'
+  | 'evaluator_indeterminate'
+  | 'quota_exceeded'
+  | 'rate_limited'
+
+type TerminalRetirementReason =
+  | 'operator_disposition_retired'
+  | 'retention_expired'
+
+type ExpiredRetryRecordKind =
+  | 'canonical_result'
+  | 'retryable_failure_record'
+  | 'conflict_record'
+  | 'accepted_holding_record'
+  | 'rejected_record'
+  | 'quarantined_record'
+  | 'terminal_retired_record'
+
+type HoldingExpiredRetryRecordKind = Extract<
+  ExpiredRetryRecordKind,
+  | 'accepted_holding_record'
+  | 'quarantined_record'
+  | 'terminal_retired_record'
+>
+
+type RejectedExpiredRetryRecordKind = Extract<
+  ExpiredRetryRecordKind,
+  | 'rejected_record'
+>
+
+type NonHoldingExpiredRetryRecordKind = Extract<
+  ExpiredRetryRecordKind,
+  | 'canonical_result'
+  | 'retryable_failure_record'
+  | 'conflict_record'
+>
+
+type WriteResultEnvelope = {
+  workspaceId: string
+  requestedVersionIds: readonly string[]
+  idempotencyKey: string
+  idempotencyResultId: string
+}
+
+type ReplayableWriteResultEnvelope = WriteResultEnvelope & {
+  idempotencyReplayToken: string
+}
+
+type HoldingWriteResultEnvelope = ReplayableWriteResultEnvelope & {
+  holdingRecordId: string
+  replayUntil: UnixMsDecimalString
+}
+
+type ExpiredWriteResultEnvelope = WriteResultEnvelope & {
+  expiredAt: UnixMsDecimalString
+  reasonCode: 'idempotency_expired'
+}
+
+type WriteResult =
+  | (ReplayableWriteResultEnvelope & {
+      kind: 'canonical'
+      historyMomentId: string
+      objectId: string
+    })
+  | (HoldingWriteResultEnvelope & {
+      kind: 'durable-pending'
+      recordKind: 'accepted_holding_record'
+      acceptedAt: UnixMsDecimalString
+      operatorDispositionDueAt: UnixMsDecimalString
+      lifecycleState:
+        | 'pending_protection'
+        | 'pending_review'
+        | 'pending_canonicalization'
+        | 'overdue_disposition'
+    })
+  | (ReplayableWriteResultEnvelope & {
+      kind: 'retryable-failure'
+      reasonCode: RetryableWriteFailureCode
+      failedAt: UnixMsDecimalString
+      retryAfterMs: UInt64DecimalString
+      commitState:
+        | 'no_canonical_commit_recorded'
+        | 'commit_state_unknown_retry_required'
+    })
+  | (HoldingWriteResultEnvelope & {
+      kind: 'rejected'
+      reasonCode: PublicDeniedReasonCode
+      rejectedAt: UnixMsDecimalString
+      retentionUntil: UnixMsDecimalString
+      rejectionState: 'rejected_before_acceptance'
+    })
+  | (HoldingWriteResultEnvelope & {
+      kind: 'quarantined'
+      reasonCode: PublicDeniedReasonCode
+      acceptedAt: UnixMsDecimalString
+      quarantinedAt: UnixMsDecimalString
+      operatorDispositionDueAt: UnixMsDecimalString
+      retentionUntil: UnixMsDecimalString
+      quarantineState: QuarantinedStatus
+    })
+  | (HoldingWriteResultEnvelope & {
+      kind: 'terminal-retired'
+      retiredAt: UnixMsDecimalString
+      reasonCode: TerminalRetirementReason
+      retainedMetadata: 'minimal_audit_idempotency_and_explanation_only'
+    })
+  | (ExpiredWriteResultEnvelope & {
+      kind: 'idempotency-expired'
+      recordScope: 'holding'
+      holdingRecordId: string
+      recordKind: HoldingExpiredRetryRecordKind
+    })
+  | (ExpiredWriteResultEnvelope & {
+      kind: 'idempotency-expired'
+      recordScope: 'rejected'
+      holdingRecordId: string
+      recordKind: RejectedExpiredRetryRecordKind
+    })
+  | (ExpiredWriteResultEnvelope & {
+      kind: 'idempotency-expired'
+      recordScope: 'non_holding'
+      recordKind: NonHoldingExpiredRetryRecordKind
+    })
+  | (ReplayableWriteResultEnvelope & {
+      kind: 'conflict'
+      conflictId: string
+      conflictReplayToken: string
+      recordedAt: UnixMsDecimalString
+      operationKind: 'write' | 'delete' | 'rename' | 'move' | 'replace' | 'merge' | 'restore'
+      targetObjectId?: string
+      baseObjectId?: string
+      currentObjectId?: string
+      incomingObjectId?: string
+      conflictState: 'unresolved' | 'manual_resolution_required'
+    })
+```
+
+`requestedVersionIds` is the complete canonical version role vector named by the
+initiating write-producing request, not merely the version that eventually owns a
+record. The array is ordered by semantic request role, not lexical id order:
+single-version `write`, `delete`, `rename`, `move`, `replace`, and `restore`
+operations serialize `[versionId]`; `merge` serializes
+`[targetVersionId, sourceVersionId]`; future multi-source operations serialize
+`[targetVersionId, ...sourceVersionIds]`, with `sourceVersionIds` kept in
+request order after server canonicalization. Duplicated version ids remain
+duplicated when two roles point at the same version, because the operation
+fingerprint compares positions, not a deduplicated set.
+
+Replay identity freezes one API-derived operand tuple before validation and uses
+that same tuple for writers, retries, status lookup, and conflict repair:
+
+| Operation | `requestedVersionIds` | Stable operand tuple additions |
+| --- | --- | --- |
+| `write`, `delete`, `rename`, `move` | `[versionId]` | Target path/object handles, normalized path/object preconditions, and operation-specific source/destination paths. |
+| `replace(workspaceId, versionId, fromPath, toPath, ...)` | `[versionId]` | `fromPath`, `toPath`, `sourceObjectId`, `destinationObjectId`, normalized source precondition, and normalized destination precondition. |
+| `merge(workspaceId, sourceVersionId, targetVersionId, ...)` | `[targetVersionId, sourceVersionId]` | Normalized source-version freshness guard and normalized target-version freshness guard. Internal base/current/incoming conflict handles are derived later and are not substituted into replay identity. |
+| `restore(workspaceId, versionId, checkpointId, ...)` | `[versionId]` | Stable `checkpointId` plus the normalized restore freshness guard. If restore materializes a checkpoint through an internal source version, replay identity must still serialize the same `checkpointId` and must not substitute a `restoredFromVersionId` alias. |
+
+Delayed acknowledgements and replayed idempotency results must match the full
+`requestedVersionIds` array and the stable operand tuple before clearing
+in-flight state or applying UI/cache updates.
+
+`recordKind` is a public response field only on `durable-pending` and
+`idempotency-expired` variants. Canonical, retryable-failure, and conflict
+responses do not expose `recordKind`; their backing idempotency-store rows may be
+classified internally as `canonical_result`, `retryable_failure_record`, or
+`conflict_record`, but that classification is not part of the public
+`WriteResult` payload.
+
+`visibility_denied` is an external public denial reason for visibility-boundary
+failures that are rejected before canonical acceptance. Visibility failures that
+enter holding storage use `quarantineState: 'quarantined_visibility'` and still
+carry `reasonCode: 'visibility_denied'`.
+
+Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
+stack details, policy rule names, secret/path internals, and operator notes stay
+server-side and appear only through separately authorized diagnostics. Conflict
+content hashes are never part of the public conflict shape; authorized
+diagnostics may expose current/incoming hashes for non-secret-backed objects
+only. Secret-backed objects must not expose content hashes or equality/presence
+fingerprints outside the secret broker and redacted reference model.
+Malformed requests, missing or incompatible preconditions, invalid path/version
+shapes, and replay metadata mismatches return non-persistent
+`PublicValidationErrorCode` responses before holding-area persistence. They do
+not become `rejected` or `quarantined` `WriteResult` values, do not allocate
+holding records, and do not consume denied/quarantined-write quota. Only
+server-side authorization, ownership/review gate, policy, visibility,
+protection, lock, version-access, skill-turn, provenance, attribution, and proof
+failures can enter the durable denial/quarantine flow. Visibility failures use
+`visibility_denied` externally and `quarantined_visibility` when accepted into
+holding storage.
+Transient infrastructure outages are not public denial reasons and must not be
+represented as terminal `rejected` or `quarantined` outcomes. They return the
+distinct `kind: 'retryable-failure'` shape, preserving any idempotency key for a
+later retry while preserving commit-state uncertainty when the engine cannot yet
+prove whether a canonical mutation was acknowledged.
+`retryable-failure` participates in the same idempotency-result envelope as
+write, conflict, and durable-pending results: repeated delivery with the same
+operation fingerprint returns the same `idempotencyResultId`,
+`idempotencyReplayToken`, and `commitState` until retry handling can prove and
+return a canonical/durable result or a deterministic terminal outcome.
+For every replayable non-canonical `WriteResult` with a `holdingRecordId`
+(`durable-pending`, `rejected`, `quarantined`, and retained `terminal-retired`),
+the holding record and its idempotency result metadata must be committed in the
+same durability boundary. That boundary includes the relevant timestamp
+(`acceptedAt`, `rejectedAt`, `quarantinedAt`, or `retiredAt`),
+`requestedVersionIds`,
+`idempotencyResultId`, `idempotencyReplayToken`, `replayUntil`, and the operation
+fingerprint. If that atomic durable write cannot complete, the engine must not
+acknowledge a replayable `WriteResult`; the caller retries until both the holding
+record and replay/idempotency metadata are durable together or the engine proves
+a canonical result.
+Before acknowledging `kind: 'retryable-failure'`, the engine must durably
+persist that idempotency result state for the same workspace, requested version
+set,
+idempotency key, operation fingerprint, `idempotencyResultId`,
+`idempotencyReplayToken`, and `commitState`. If the retryable-failure result
+state itself cannot be persisted, the engine must not acknowledge a replayable
+`WriteResult`. The request fails at the transport layer, or through an explicitly
+documented timeout path, without claiming durable acceptance; the caller must
+retry with the same idempotency key until the engine can durably record and
+replay the outcome or prove a canonical/durable result.
+`commitState` on `retryable-failure` is the single source of truth for whether a
+canonical mutation is known absent (`no_canonical_commit_recorded`) or unknown
+and requires retry (`commit_state_unknown_retry_required`). If retry handling
+later proves the canonical mutation was recorded, it returns the canonical or
+durable result rather than continuing to return `retryable-failure`.
+Retryable failures always carry the original `idempotencyKey` and a non-optional
+`retryAfterMs` minimum delay. Callers must not retry the same idempotency key
+before that delay elapses; the engine chooses the delay for
+`service_unavailable`, `evaluator_unavailable`, `evaluator_indeterminate`,
+`quota_exceeded`, and `rate_limited` so retry pressure is bounded by policy
+rather than by each caller. Retries must preserve the original idempotency key.
+`terminal-retired` is the canonical status/lookup state while retained
+retirement metadata for the `holdingRecordId` is addressable. Write replay is a
+separate path: retries before `replayUntil` replay `terminal-retired`; retries
+after the replay horizon return `idempotency-expired` instead of creating a fresh
+write. `idempotency-expired` is a write-time retry outcome, not the durable
+status label for a retained retired record.
+
+Non-persistent validation failures and immediate denials are separate from
+durable rejected writes:
+malformed requests, missing preconditions, invalid path/version shapes, and
+replay metadata mismatches return `PublicValidationErrorCode`, allocate no
+`holdingRecordId`, and store no `rejectedAt`, `acceptedAt`, or `quarantinedAt`.
+Authorization, ownership/review, policy, visibility, protected-path, lock,
+version-access, skill-turn, provenance, attribution, or proof denials that are
+resolved before any durable rejection record is allocated return
+`PublicDeniedReasonCode`, allocate no `holdingRecordId`, and store no
+`rejectedAt`, `acceptedAt`, or `quarantinedAt`.
+Durable `rejected` and `quarantined` ingests live in a non-canonical holding area
+with enough metadata to explain the decision, retry where allowed, or audit the
+outcome after evaluators recover. Their holding record and idempotency result are
+the same atomic durable artifact for replay purposes; retries may not acknowledge
+either piece until both are durable. `rejected` means the write failed a
+protection gate before canonical acceptance, after the engine allocated a durable
+`rejected_record`, and stores `holdingRecordId`, `rejectedAt`, `retentionUntil`,
+`replayUntil`, and replay/idempotency metadata; `quarantined` means the write
+was accepted into the holding area but could not become canonical and stores
+`acceptedAt`, `quarantinedAt`, `operatorDispositionDueAt`, `retentionUntil`,
+`quarantineState`, and `replayUntil`. `terminal-retired` is the later
+retirement state for retained rejected-before-acceptance or accepted holding
+records. These durable results carry `requestedVersionIds` for every version
+named by the initiating request, while the retained holding record separately
+stores the accepted record's canonical version binding when one exists.
+`rejected`, `quarantined`, and `terminal-retired` are addressable by
+`holdingRecordId`; operators, status APIs, retry tooling, and audit/export jobs
+use that id to correlate the response with the retained
+rejected-before-acceptance, quarantined, or retired record.
+The holding area separates rejected-before-acceptance items from accepted
+holding records. It must be abuse-resistant: enforce per-workspace and
+per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
+deterministic backpressure so ingest floods cannot exhaust storage or starve
+canonical durability paths. TTL eviction applies only to
+rejected-before-acceptance items. Accepted holding records are durable accepted
+writes, even though they are not yet canonical workspace state. They must remain
+recoverable with reconstructible payload and retry metadata until protection
+checks succeed and canonicalization completes, until explicit operator
+disposition is recorded for a record that cannot safely become canonical. For
+accepted holding records, any TTL, retry-horizon,
+compaction, or colder-storage policy may throttle retries, compact derived
+retry/index metadata, or move accepted payload bytes to colder durable storage,
+but it must preserve reconstructible payload bytes until canonicalization
+completes or explicit operator disposition retires the record. Time alone must
+not transition a still-`durable-pending` accepted holding record to
+`terminal-retired`; this protection does not prevent already rejected or
+quarantined records from retiring through their recorded retention/disposition
+paths. If a rejected-before-acceptance item expires, if a quarantined record
+retires after its disposition/audit horizon, or if an accepted record is retired
+through explicit disposition, the engine preserves durable rejection,
+disposition, retirement, or expiration evidence. Humans, agents, imports, and
+sync processes all get the same guarantee: an accepted change is not silently
+lost while it awaits canonicalization or disposition, but it also does not become
+canonical workspace state until protection checks pass.
+Accepted records still have a bounded operator-visible lifecycle. The Phase 0
+decision note in the
+[execution log](../plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md#phase-0-decision-note)
+defines `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`,
+`operatorDispositionDueAt`, and an operator escalation policy; when the
+canonicalization deadline is reached, the record must be escalated into an
+explicit disposition queue, marked overdue in status APIs, and only derived
+retry/index metadata may be compacted or moved to colder durable storage
+according to policy. Garbage collection may remove only derived retry/index
+metadata after the disposition deadline while the operator window is open; the
+reconstructible payload remains until
+canonicalization succeeds or an explicit operator disposition record retires it.
+`operatorDispositionDueAt` marks the item overdue for operator/status handling;
+it does not itself cryptoshred or compact reconstructible bytes.
+`replayUntil` is the single canonical replay-expiry term. It controls how long
+the idempotency result for a `holdingRecordId` must replay and is the only
+deadline that changes write retries to `idempotency-expired`.
+The immutable replay tuple for an accepted holding record is not compactable
+derived state. It includes `holdingRecordId`, `workspaceId`, `versionId`,
+`idempotencyKey`, `idempotencyResultId`, `idempotencyReplayToken`,
+`replayUntil`, `requestedVersionIds`, the accepted record's canonical version
+binding when one exists, the operation fingerprint, the normalized causal
+precondition tuple, and the accepted record's durable timestamp. These fields
+must remain addressable until the record is no longer replayable:
+canonicalization succeeds, an explicit terminal disposition is durably recorded,
+or `replayUntil` produces the canonical `idempotency-expired` result. Compaction
+may rebuild indexes, summaries, and retry acceleration caches, but it must not
+remove the immutable replay tuple required for same-key retries.
+For `accepted_holding_record`, `operatorDispositionDueAt` and
+`maxPendingCanonicalizationMs` are the only operator/status escalation deadlines
+inside that replay window; they do not independently expire idempotency replay
+and do not cryptoshred reconstructible bytes. They control when
+`pending_canonicalization` becomes `overdue_disposition`. `accepted_holding_record`
+does not use `retentionUntil` as an operator deadline or payload-deletion
+deadline. Only explicit operator disposition may transition a durable-pending
+holding record to `terminal-retired` with reason `operator_disposition_retired`;
+retries before `replayUntil` replay that terminal result after disposition.
+Retries after `replayUntil` return `idempotency-expired`.
+For `rejected_record`, `retentionUntil` is the minimal
+audit/replay/explanation retention horizon. For `quarantined_record`, it is the
+disposition/audit retention horizon. Payload retention for accepted holding
+records is controlled by canonicalization or explicit operator disposition, not
+by time alone.
+`rejected_record` may transition to `terminal-retired` only by a recorded
+retention-expiry job or explicit operator disposition, preserving source
+`recordKind: 'rejected_record'`, `holdingRecordId`, rejection reason,
+`rejectedAt`, and replay/idempotency metadata until replay expiry. Before
+`replayUntil`, retries replay the current `rejected` or `terminal-retired`
+state; after `replayUntil`, retries return `idempotency-expired`.
+`quarantined_record` may transition to `terminal-retired` only by explicit
+operator disposition or a recorded retention-expiry disposition after the
+quarantine's disposition/audit horizon closes. That retirement preserves source
+`recordKind: 'quarantined_record'`, quarantine state, `acceptedAt`,
+`quarantinedAt`, `holdingRecordId`, and replay/idempotency metadata until replay
+expiry. Before `replayUntil`, retries replay the current `quarantined` or
+`terminal-retired` state; after `replayUntil`, retries return
+`idempotency-expired`.
+No accepted holding record may remain unreviewed forever: if no
+workspace-specific disposition policy is configured, the engine's default finite
+operator-escalation window applies, and workspaces may only choose values inside
+the product/org maximum. When the effective maximum pending window is reached,
+still-unresolved accepted records must enter `overdue_disposition` and remain
+operator-visible until canonicalized or explicitly dispositioned. Payload bytes
+must not be deleted, cryptoshredded, or compacted into non-reconstructible
+evidence without that explicit disposition record.
+
+Durable-pending `lifecycleState` transitions are part of the write contract and
+must be reflected identically by writers, retries, holding-record lookup, and
+status APIs:
+
+| `lifecycleState` | Entry condition | Exit conditions |
+| --- | --- | --- |
+| `pending_protection` | The accepted holding record is durable, but authorization, ownership, protected-path, policy, visibility, secret-broker/declassification, provenance, attribution, proof, lock, version-access, or skill-turn evaluators still need asynchronous confirmation before canonicalization can be attempted. | Successful protection revalidation moves to `pending_review` when mandatory review is required, or `pending_canonicalization` when no review is required. Denials map one-to-one: authorization -> `quarantined_authorization`; ownership -> `quarantined_ownership`; protected-path -> `quarantined_protection`; policy -> `quarantined_policy`; visibility -> `quarantined_visibility`; secret-broker/declassification -> `quarantined_secret_declassification`; provenance -> `quarantined_provenance`; attribution -> `quarantined_attribution`; proof -> `quarantined_proof`; lock -> `quarantined_locked`; version access -> `quarantined_version_access`; skill-turn -> `quarantined_skill_turn`. Reaching `operatorDispositionDueAt` without resolution moves to `overdue_disposition`. |
+| `pending_review` | All protection checks needed to ask for review have passed, including authorization, ownership, policy, visibility, provenance, attribution, proof, lock, version-access, skill-turn, and secret-broker/declassification checks when they apply, and policy requires human or authorized workflow review before canonicalization. | Approval moves to `pending_canonicalization`; review denial moves to `quarantined_review_gate`; any evaluator recheck denial uses the same one-to-one `quarantined_*` mapping as `pending_protection`; explicit operator retirement moves to `terminal-retired`; reaching `operatorDispositionDueAt` without a decision moves to `overdue_disposition`. |
+| `pending_canonicalization` | All currently required gates have passed and the engine is durably queued or actively replaying the accepted record into canonical workspace state. | Successful canonicalization returns the canonical write result. Apply-time denials use the same one-to-one `quarantined_*` mapping as `pending_protection`. Preserved base/current/incoming divergence creates a conflict record. Reaching `operatorDispositionDueAt` before resolution moves to `overdue_disposition`. |
+| `overdue_disposition` | Any pending state exceeded the effective `operatorDispositionDueAt` or maximum pending-canonicalization window. | It remains operator-visible until canonicalization succeeds, an authorized review/policy/protection/secret revalidation moves it back to a concrete pending state with a new due time, a gate denial quarantines it under the same mapping, or explicit operator disposition retires it as `terminal-retired`. |
+
+After explicit operator disposition retires the record, status APIs and
+holding-record lookup represent that state as `terminal-retired` for the same
+`holdingRecordId` while retained retirement metadata exists; they must not
+collapse it into `rejected`, `quarantined`, conflict, `idempotency-expired`, or
+generic expiration. Write retries are different: before `replayUntil`, retry
+tooling replays the `terminal-retired`
+result; after `replayUntil`, the write API returns `idempotency-expired` for
+that idempotency identity while status lookup continues to report
+`terminal-retired` until the retained retirement metadata itself expires.
+Durable-pending holding-record retries apply only when a real `holdingRecordId`
+exists for an accepted holding record. Retries using the same idempotency key,
+`holdingRecordId`, and matching replay metadata derive the response from the
+holding record's current durable state, not only from the original `replayUntil`
+window. If the durable-pending holding record has promoted, retry returns the
+canonical result or deterministic equivalent. If it is still not promoted, retry
+returns `durable-pending` with `recordKind: 'accepted_holding_record'` while the
+idempotency/retry horizon allows key reuse. If it has become `quarantined` or
+`terminal-retired`, retry returns that current state while the corresponding
+retention or retirement metadata is still addressable. Only after `replayUntil`
+does the write API return the canonical `idempotency-expired` response for that
+accepted holding record, with `recordKind: 'accepted_holding_record'`,
+`recordKind: 'quarantined_record'`, or
+`recordKind: 'terminal_retired_record'`. The `recordKind: 'rejected_record'`
+path is reserved for records rejected before acceptance; it must not be replayed
+from an accepted durable-pending holding record.
+Canonical writes, retryable failures, and conflicts without holding records use
+the terminal idempotency replay path with the persisted `idempotencyResultId`
+and `idempotencyReplayToken` only; they do not require or accept
+`holdingRecordId`. Their internal idempotency-store rows may be classified as
+`canonical_result`, `retryable_failure_record`, or `conflict_record`, but the
+public `canonical`, `retryable-failure`, and `conflict` `WriteResult` shapes do
+not expose `recordKind`. The retryable-failure/conflict cases remain terminal
+replay records rather than holding-record retries. Disposition, expiration, and
+lookup-only details beyond that canonical terminal response live in the status
+query path, not alternate write-retry responses. A stale retry must not silently
+create a second accepted holding record or an uncorrelated denial.
+Accepted holding records are not visible through normal `read`, `watch`, or
+`search` as workspace content before canonicalization. Those paths expose the
+last canonical workspace state only. Holding records may be surfaced only through
+explicit ingest/recovery/status views that are policy-authorized for the actor,
+marked non-canonical, and scoped to the relevant workspace/version so previews do
+not masquerade as committed file, history, search, or watch results.
+This holding area follows the same secret-backed durability rules as canonical
+history: it must not persist plaintext secret values in payloads, indexes, logs,
+explanations, or retry metadata. Secret-bearing ingests are stored only as
+encrypted references, redacted forms, or broker metadata until an authorized
+read path reconstructs them.
+Replay from the holding area must be causal and fail-closed. Retry metadata must
+include `workspaceId`, `requestedVersionIds`, the accepted record's canonical
+version binding when one exists, and the captured causal guard: for
+non-secret-backed objects this may be `expectedBaseVersion`, a non-secret content
+hash, or an equivalent CAS token; for secret-backed objects it must be a
+secret-safe surrogate, keyed commitment, opaque handle, or non-hash CAS token
+that does not expose reusable plaintext equality. At apply time, the engine
+revalidates workspace scope plus server-derived visibility, authorization,
+ownership/review gate, policy, protected-path, secret-broker/declassification,
+lock, version-access, skill-turn, provenance, attribution, and proof checks.
+Each replay evaluation attempt is deterministic for the durable record's current
+metadata and the server-side facts visible to that attempt:
+
+After syntax, workspace scope, capture token, idempotency, and malformed
+cross-scope binding checks pass, fresh writes and replay attempts share the same
+canonical first-match evaluation order: visibility, authorization/permission,
+ownership, review gate, policy, protected-path, secret-broker/declassification,
+lock, version-access, skill-turn, provenance, attribution, proof, then causal
+base conflict. Once a class matches for that attempt, later checks in the same
+attempt cannot replace its `reasonCode`, `quarantineState`, or validation
+result. If multiple
+server-derived checks fail in one replay attempt, the earliest matching class in
+that order wins. Review approval, policy revalidation, protection evidence, or
+causal-base changes do not change a replay result by themselves. Later retries
+may produce a different authoritative replay outcome only after the replay-state
+helper has durably mutated the holding record, attached new validation evidence,
+or transitioned the record's durable state for the same replay metadata identity.
+The replay metadata identity remains frozen; each retry re-evaluates the record's
+current durable state through the same ordered rules.
+
+- If workspace/version binding metadata is malformed or crosses workspace scope
+  before a holding record exists, return a `PublicValidationErrorCode` before
+  holding-area persistence. If a persisted accepted record's replay metadata is
+  well-formed but stale or object-mismatched, route to `conflict` according to
+  the capture-token conflict matrix. Use `cross_workspace_reference` for
+  syntactically valid metadata that points outside the active workspace,
+  including cross-workspace atom, folder, entity, share, capture, file-object,
+  version, event, projection, history, holding, or conflict references.
+  Syntactically valid but unresolved pre-persistence binding evidence returns
+  `retryable-failure` when an evaluator is unavailable or indeterminate. Only
+  already-persisted accepted records with syntactically valid replay metadata but
+  unresolved server-side provenance or binding evidence can stay in the
+  corresponding quarantined state while resolution proceeds.
+- If server-derived authorization, permission, ownership/review gate, policy,
+  visibility, protected-path, secret-broker/declassification, lock,
+  version-access, skill-turn, provenance, attribution, or proof checks fail
+  after replay, the record resolves to the corresponding durable
+  denial/quarantine state.
+  Authorization and permission failures use `not_authorized` externally and
+  `quarantined_authorization` internally.
+  Ownership failures use `ownership_denied` externally and
+  `quarantined_ownership` internally.
+  Review-gate failures use `review_gate_denied` externally and
+  `quarantined_review_gate` internally; replay cannot become canonical until
+  the required server-side review decision is satisfied or the durable record is
+  explicitly disposed.
+  Policy failures use `policy_denied` externally and `quarantined_policy`
+  internally.
+  Protected-path failures use `protected_path` externally and
+  `quarantined_protection` internally.
+  Secret-broker/declassification failures use
+  `secret_declassification_denied` externally and
+  `quarantined_secret_declassification` internally; they must not be collapsed
+  into `policy_denied`, `not_authorized`, or `quarantined_protection`.
+  Visibility-boundary failures use `visibility_denied` externally and
+  `quarantined_visibility` internally; they must not be collapsed into
+  `policy_denied` or `not_authorized`.
+  Lock failures use `locked` externally and `quarantined_locked` internally.
+  Version-access failures use `version_access_denied` externally and
+  `quarantined_version_access` internally.
+  Skill-turn failures use `skill_turn_denied` externally and
+  `quarantined_skill_turn` internally.
+  Provenance failures use `provenance_denied` externally and
+  `quarantined_provenance` internally.
+  Attribution failures use `attribution_denied` externally and
+  `quarantined_attribution` internally.
+  Proof failures use `proof_denied` externally and `quarantined_proof`
+  internally.
+
+Review requirements and review denials are distinct outcomes:
+
+| Situation | Engine result | Canonical effect |
+| --- | --- | --- |
+| Policy requires review before canonicalization and the write is durably recorded | `durable-pending` with `lifecycleState: 'pending_review'` | No canonical commit until authorized reviewers approve or dispose the holding record. |
+| Review gate denies before any durable recording | Immediate denial with `PublicDeniedReasonCode: 'review_gate_denied'` | No holding record, quarantine record, idempotency result, or canonical commit is allocated. |
+| Review gate denies an accepted holding or replayed record | `quarantined` with `quarantineState: 'quarantined_review_gate'` | No canonical commit unless an authorized review outcome later changes disposition. |
+| Required review approves an accepted holding record | Replay/canonicalization may proceed | Canonical commit may occur only if the full enforcement matrix also passes: visibility, authorization, ownership/review, policy, protected-path, secret-broker/declassification, lock, version-access, skill-turn, provenance, attribution, proof, causal-base, and conflict-preservation gates. |
+
+- If the causal base is stale, advanced, missing, or otherwise no longer matches
+  the target version state, the retry returns a deterministic `conflict` and
+  preserves the incoming record for manual reconciliation. Stale causal state is
+  not classified as quarantine or rejection.
+- If the captured causal base still matches and apply-time policy revalidation
+  passes, the record may become canonical.
+
+The same replay metadata cannot be rewritten, rebound to another target, or
+silently reclassified inside one replay attempt. Across later attempts, the
+authoritative outcome may change only through the record's explicit durable
+state transition, such as review approval, policy/protection revalidation,
+quarantine, conflict preservation/resolution, canonicalization, or operator
+disposition.
+
+Workspace scoping is a required data-model invariant, not just an authorization
+check. Every persisted atom, folder, entity, share, capture, file object,
+version, event, chat link, projection, history record, holding record, conflict
+envelope, conflict replay token, durability-log entry, idempotency result, and
+idempotency tombstone carries `workspaceId`. Write, read, query, search, import,
+sync, and projection boundaries reject cross-workspace references by default,
+even when an actor is otherwise valid. Pre-persistence cross-workspace
+references fail with `cross_workspace_reference` rather than generic
+`invalid_request`; post-acceptance replay uses the same code before any
+canonical mutation can be promoted.
+
+Review gates are enforced whenever workspace policy, protected-path rules,
+ownership rules, skill-turn policy, or visibility policy requires them, including
+ordinary writes. Boundary-crossing cases add more review points; they are not the
+only review triggers:
+
+- merging one version into another.
+- sharing private work.
+- publishing a version or projection.
+- resolving a real conflict.
+- restoring shared or published state.
+- changing visibility or permission boundaries.
+
+Normal editing remains:
+
+```text
+authorized edit -> auto-save -> automatic history
+```
+
+Parallel work is:
+
+```text
+create/open version -> edit with automatic saves -> compare or merge when ready
+```
+
+## Actor-neutral rule
+
+dohc version control is actor-neutral.
+
+The version engine should not care whether a change came from:
+
+- a human.
+- an agent.
+- an automation.
+- a sync process.
+- an import.
+
+It should ask only:
+
+1. What server/engine-derived actor is performing the write?
+2. Does this actor have permission to write this workspace/version/path/object?
+3. Does version-access policy allow the write?
+4. Are provenance, attribution, and proof requirements satisfied?
+5. Is the path/object protected by a user lock, policy boundary, or visibility
+   boundary?
+6. Is the write allowed by the active skill-turn gate, when the actor is an
+   agent/tool/action running inside a delegated turn?
+7. Does policy require mandatory review before this write can become canonical?
+8. Can the change be recorded durably?
+9. Can the system preserve recovery and honest provenance?
+10. Does the change create a conflict or cross a visibility boundary?
+
+Immediate write evaluation is first-match using the same canonical order as
+replay evaluation. After syntax, workspace scope, capture token, idempotency, and
+malformed cross-scope binding checks pass, the write path resolves outcomes in
+that shared order:
+
+1. visibility, authorization/permission, ownership, review gate, policy,
+   protected-path, secret-broker/declassification, lock, version-access,
+   skill-turn, provenance, attribution, and proof denials return an immediate
+   `PublicDeniedReasonCode` response with no holding record, quarantine record,
+   idempotency result, or canonical commit when no durable record is being
+   created.
+2. only replayed or post-acceptance gate failures return durable `rejected` or
+   `quarantined_*` results, using the same one-to-one denial mapping recorded in
+   the durable outcome matrix.
+3. unavailable or indeterminate required evaluators return
+   `retryable-failure` with no canonical mutation.
+4. real visibility-boundary crossings return immediate `visibility_denied`
+   before durable acceptance, or `quarantined_visibility` only after a record is
+   already durably accepted/replayed, so hidden state is not leaked through
+   conflict envelopes or review queues.
+5. preserved base/current/incoming divergence, stale causal bases, or semantic
+   merge uncertainty create conflict preservation/reconciliation.
+6. mandatory review for an otherwise clean write creates a `durable-pending`
+   holding record with `lifecycleState: 'pending_review'` only after the accepted
+   write-intent record and idempotency result are durable; no canonical
+   workspace/object state is mutated yet.
+7. a clean write that passes all synchronous gates and does not require
+   deferred review or deferred canonicalization saves immediately to that
+   version.
+
+If the outcome requires a conflict record, holding record, idempotency tombstone,
+or canonical append and durable recording cannot be proven, the gate/retry matrix
+above controls the `retryable-failure` or rejection response. One input must not
+map to different states across implementations because conflict, visibility, and
+review are evaluated in the fixed order above.
+
+For raw passive local file edits observed through the normal OS filesystem,
+dohc does not need to prove whether the process was a user, an external agent
+CLI, a script, or an editor plugin. Those edits can be attributed honestly as
+unverified local/device/session edits. That provenance must not later be
+upgraded to authenticated human or agent identity without cryptographic proof,
+a trusted session boundary, or a dohc-controlled action record.
+Agent-origin-capable ingest paths are different: dohc-controlled agent
+runtimes, skill turns, MCP/tool bridges, privileged agent workspace mounts, or
+sync/import channels that carry agent/run metadata must supply verifiable
+skill-turn context before becoming canonical state. If that proof is missing,
+stale, or substantively invalid, the ingest is quarantined or rejected; if the
+required evaluator is unavailable or indeterminate, the ingest returns
+`retryable-failure` and does not become canonical. It must not be downgraded
+into unverified local/session provenance. Sync/import flows must preserve their
+original provenance class. Only truly passive ordinary OS writes with no
+dohc-controlled agent/run context may remain local/device/session provenance
+when proof is absent; import/sync ingests without proof stay quarantined until
+they can be attributed or rejected.
+Unverified local, device, or session edits still pass through server/engine-side
+workspace ownership, lock, protected-path, and visibility checks before they
+become canonical workspace state. If the engine cannot prove the required access
+or policy/skill-turn state because the evaluator is unavailable or
+indeterminate, the ingest returns `retryable-failure`; substantive denial,
+missing proof, or invalid proof is quarantined or rejected rather than trusted.
+Substantive visibility failures use the dedicated `visibility_denied` response
+reason, with the durable record marked as `quarantined_visibility` when the
+payload was accepted into holding storage for recovery or operator disposition.
+Local provenance does not bypass that evaluator when the write is being applied
+through a dohc-controlled agent/tool action.
+Agent-specific authorship is required for social actions like chat replies,
+where the message display must make clear whether the human or the user's agent
+wrote it.
+
+## Robustness invariants
+
+dohc should keep VCS-grade robustness, not VCS-shaped UX.
+
+The underlying engine must preserve:
+
+- immutable snapshots or hash-committed states.
+- clear ancestry and fork points between versions.
+- content addressing or equivalent tamper-evident commitments.
+- common-base reconciliation for divergent versions.
+- recoverability to known-good states.
+- local durability and export.
+- conflict preservation when merge safety is uncertain.
+- meaningful provenance for human, agent, and system changes.
+
+These are not tool-specific quirks. They are the physics of reliable versioned
+work.
+
+## Versions and history
+
+Version and history are separate ideas.
+
+- A **Version** is a live parallel line of work.
+- **History** is the time axis inside a version.
+
+Example:
+
+```text
+Versions
+  Main
+  Q3 Rewrite
+  Client Version
+  Agent Experiment
+
+History inside Main
+  10:05 <User Name> edited docs/plan.md
+  10:12 Agent updated apps/finance/index.html
+  10:20 CSV import added 812 rows
+```
+
+This avoids confusing "version" as both branch and point-in-time snapshot.
+
+## Two-tier history
+
+Immediate save should not mean noisy visible history.
+
+dohc should track two levels:
+
+1. **Fine-grained durability log**
+   - every save/write needed for recovery.
+   - secret-backed writes are recovery-tracked only as encrypted references,
+     redacted markers, or broker metadata instead of raw secret bytes.
+   - crash-safe and time-travel friendly.
+   - durability-ack boundary: no write result is acknowledged until the
+     durability-log record is persisted to recoverable storage, or an equivalent
+     durability guarantee exists, so acknowledged writes survive process
+     crash/restart.
+   - canonical-write-success boundary: an immediate-save success is acknowledged
+     only after the canonical mutation is durable and visible through `read`.
+     `watch` catches up asynchronously. A durability ack without canonical
+     visibility can return only `durable-pending`, `retryable-failure`,
+     `rejected`, `quarantined`, `terminal-retired`, or `conflict`, never
+     `canonical`.
+   - `idempotency-expired` belongs to retry-expiry handling, not canonical
+     visibility; it is returned when a retry arrives after the replay horizon.
+   - not necessarily the main visible timeline.
+
+2. **Meaningful moments**
+   - quiescent edit bursts.
+   - related file batches.
+   - explicit checkpoints.
+   - known dohc action boundaries, when available.
+   - imports.
+   - merges.
+   - publishes.
+   - restores.
+
+Humans usually read moments. The engine keeps the finer log for robustness.
+
+## Workspace objects and files
+
+The product should feel file-native, but the engine may understand richer
+workspace objects.
+
+A file path can be a projection or the canonical content for a workspace object.
+The rule is:
+
+> Content lives where the richest authoring happens. History, permissions,
+> provenance, and visibility live in dohc.
+
+Examples:
+
+| Workspace object | Likely content driver | File experience |
+| --- | --- | --- |
+| Markdown document | Canonical Y.Doc; Markdown body/`atoms.body` is a derived cache or projection | `docs/plan.md` |
+| code file | file/blob content | `code/fs/file.c` |
+| post | Markdown body + structured comments | `posts/q3-pricing.post.md` |
+| database | SQLite or table store | `data/transactions.sqlite` or projections |
+| app/site | file tree + manifest | `.apps/finance/index.html` |
+| agent run | execution trace + changed paths | history/timeline projection |
+
+Files remain a first-class affordance. The engine gives them stronger history,
+visibility, recovery, and merge behavior.
+
+For rich documents, the projection contract must be explicit. If a Markdown
+document is backed by a canonical Y.Doc, `docs/plan.md` is a Markdown projection
+and `atoms.body` is a derived cache. Saving that file must either translate the
+edit back through a Y.Doc transaction with the same causal precondition rules as
+API writes, or normalize benign serializer/formatter changes and preserve only
+semantic mismatches as conflicts if the driver cannot round-trip them safely.
+The driver decides clean round-trip by parsing the edited Markdown projection,
+applying the canonical serializer/formatter normalization, and comparing the
+resulting semantic Y.Doc operation against the causal base captured when the
+projection was materialized. If the normalized semantic operation applies
+cleanly to the current Y.Doc under that precondition, the write commits through a
+Y.Doc transaction. If parsing loses structure, serializer normalization changes
+meaning, or the causal base no longer matches, the write returns a semantic
+conflict with current Y.Doc state and incoming Markdown preserved for
+reconciliation.
+The engine regenerates Markdown/`atoms.body` from the canonical Y.Doc after a
+successful commit; direct file edits must not create a second authoritative body
+that can diverge from Y.Doc state.
+
+Projection safety is mandatory. Any HTML/renderable projection, including HTML
+atoms and app/site previews, must be sanitized and sandboxed before display.
+Content drivers must declare projection safety behavior as part of their
+snapshot/diff/merge/projection/export/search contract.
+
+## Filesystem/API duality
+
+Agents should not need a special dohc source-control protocol.
+
+They should be able to operate through normal files:
+
+```text
+read file
+write file
+run command
+save
+```
+
+Normal filesystem saves are translated into the same semantic write contract as
+`write(workspaceId, versionId, path, bytes, ...)`, but they do not require an
+external editor or agent to synthesize a client precondition. Browse-only reads
+and materialization do not create durable capture/replay tokens. When a
+workspace/version/path becomes edit-capable, or when a first write, create, or
+import attempt targets it, the engine records or refreshes exactly one
+authoritative engine-owned opaque capture/replay token for that
+`(workspaceId, versionId, path, targetObjectId | expectedAbsent)` tuple. API
+callers submit ordinary server-verifiable preconditions; native filesystem saves
+submit the engine-issued opaque token. Client-visible freshness guards such as
+base-version ids, etags, and absence assertions are validation evidence the
+engine may bind into the opaque capture/replay token, not substitutes for the
+token and not caller-owned token formats. Watcher sequence ids, session ids, and
+process ids are observation or correlation metadata only; they must not
+participate in filesystem dedupe identity. The opaque token is stable across
+auth refreshes, editor restarts, and session rotation; it is not a transient
+session handle. Broader multi-factor deduplication fingerprints may include
+content hashes, payload digests, or operation fingerprints, but they are not the
+authoritative capture/replay token and cannot substitute for it.
+First-write bootstrap uses an engine-owned `expectedAbsent`-equivalent token for
+a path with no prior object in that workspace/version and carries no
+`targetObjectId`; it is not a missing token. Overwrite capture/replay must carry
+the intended `targetObjectId` obtained from the engine's read/stat/list state and
+must validate that object identity before any canonical mutation, holding record,
+or quarantine allocation. When the file is saved or captured, the filesystem path
+submits that engine-owned token, the intended object identity or expected-absent
+guard, and the incoming bytes. Missing, ambiguous, malformed, syntactically
+invalid, or unparseably scoped capture tokens fail closed with
+`PublicValidationErrorCode` value `capture_token_invalid` before any holding
+record, quarantine record, or canonical mutation is allocated. Missing overwrite
+`targetObjectId` fails closed with `missing_precondition` or `invalid_request`.
+A well-formed capture token
+that resolves to a different workspace is not
+`capture_token_invalid`; it fails before persistence as
+`cross_workspace_reference` under the workspace-scoping rules. If token/object
+identity or commit state cannot currently be proven because a required evaluator,
+storage lookup, or service is unavailable or indeterminate, the write returns
+`retryable-failure` with the appropriate `commitState` from the gate/retry matrix
+instead of pretending the token is invalid. Quarantine is reserved for accepted
+holding records whose well-formed replay data reaches server-side
+policy/protection evaluation. Well-formed but stale capture tokens that still
+resolve to an old object identity return `conflict`. A well-formed but stale
+capture token, including a token whose `targetObjectId` no
+longer matches the object currently at the path because of delete/recreate,
+rename, or replacement, is a real write conflict and returns the same
+deterministic current-vs-incoming `conflict` behavior as the API write flow,
+never `capture_token_invalid`, instead of blindly overwriting canonical state.
+
+But the same workspace must also be accessible through APIs for cloud,
+in-memory, browser, and agent runtimes:
+
+```text
+read(workspaceId, versionId, path)
+write(workspaceId, versionId, path, bytes,
+  | {
+      mode: create,
+      precondition: expectedAbsent,
+      targetObjectId?: never,
+      idempotencyKey
+    }
+  | {
+      mode: overwrite,
+      precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+      targetObjectId,
+      expectedAbsent?: never,
+      idempotencyKey
+    }
+)
+delete(workspaceId, versionId, path, {
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  idempotencyKey
+})
+rename(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourceObjectId,
+  destinationPrecondition: expectedAbsent,
+  idempotencyKey
+})
+move(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  sourceObjectId,
+  destinationPrecondition: expectedAbsent,
+  idempotencyKey
+})
+replace(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash, // expectedContentHash is non-secret-backed only
+  sourceObjectId,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash, // expectedContentHash is non-secret-backed only
+  destinationObjectId,
+  idempotencyKey
+})
+list(workspaceId, versionId, path)
+stat(workspaceId, versionId, path)
+search(workspaceId, versionId, query)
+watch(workspaceId, versionId, path)
+snapshot(workspaceId, versionId)
+diff(workspaceId, versionAId, versionBId)
+merge(workspaceId, sourceVersionId, targetVersionId, {
+  sourcePrecondition: exactly one of expectedSourceSnapshot | expectedSourceVersionEtag,
+  precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
+  idempotencyKey
+})
+restore(workspaceId, versionId, checkpointId, {
+  precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
+  idempotencyKey
+})
+```
+
+Precondition names are normalized before validation. Fields in the same
+normalized guard class are equivalent guards, not separate checks that can be
+combined. `expectedAbsent` is a create/destination-absence guard, not a
+freshness proof:
+
+| Normalized guard | Accepted API fields | Applies to | Meaning |
+| --- | --- | --- | --- |
+| `path_absence` | `expectedAbsent` | `write(...)` create, `rename(...)` / `move(...)` destination | The target path has no object in the bound workspace/version. |
+| `object_freshness` | `expectedBaseVersion`, `expectedEtag`, `expectedContentHash` (non-secret-backed objects only) | `write(...)` overwrite, `delete(...)`, `rename(...)` / `move(...)` source, `replace(...)` source and destination | The named object/path is still at the caller's observed revision/content state in `versionId`. |
+| `source_version_freshness` | `expectedSourceSnapshot`, `expectedSourceVersionEtag` | `merge(...)` source version | The source version being merged is still the observed source snapshot/etag. |
+| `target_version_freshness` | `expectedTargetSnapshot`, `expectedTargetVersionEtag` | `merge(...)` target version | The target version receiving the merge is still the observed target snapshot/etag. |
+| `restore_version_freshness` | `expectedCurrentCheckpoint`, `expectedVersionEtag`, `expectedSnapshotId` | `restore(...)` target version | The version being restored is still at the observed checkpoint, etag, or snapshot. |
+
+Each guarded operand must provide exactly one field from its normalized guard
+class. `write(...)` create and `rename(...)` / `move(...)` destination operands
+use `path_absence`; overwrite, delete, source, replace, merge, and restore
+operands use their respective freshness guard classes. Supplying two aliases for
+the same guard, omitting the required guard, treating `expectedAbsent` as a
+freshness proof, or treating aliases such as `expectedBaseVersion` and
+`expectedEtag` as independent freshness checks is a malformed request/protocol
+error before conflict materialization.
+Idempotency and replay identity use the normalized guard class plus the
+server-normalized guard value, not the raw request field name. Equivalent aliases
+such as `expectedBaseVersion` and `expectedEtag` must be resolved into the same
+causal precondition tuple before computing `idempotencyReplayToken`,
+idempotency fingerprints, or `replay_metadata_mismatch` comparisons. A retry that
+changes only the alias spelling but proves the same normalized guard class/value
+is the same replay identity; a retry whose normalized guard class or value
+differs is a `replay_metadata_mismatch`.
+`expectedContentHash` is never accepted for secret-backed objects or redacted
+secret hash handles. Secret-backed overwrite, delete, rename/move source, and
+replace source/destination operands must use another permitted freshness guard,
+such as `expectedBaseVersion` or `expectedEtag`; if no non-hash guard is
+available, the request fails closed before conflict materialization.
+
+Single-operand API writes require exactly one client-supplied causal
+precondition; multi-operand API writes such as `replace(...)` and `merge(...)`
+must provide one precondition per guarded operand in the `precondition`,
+`sourcePrecondition`, or `destinationPrecondition` field that applies to that
+operand. Missing preconditions or multiple incompatible guards for the same
+operand are malformed request/protocol errors and fail closed before the
+conflict path. Filesystem capture uses the engine-owned capture/replay token
+described above instead; native local edits are not malformed merely because no
+client-supplied precondition exists.
+
+`rename(...)` is the same-directory basename-change operation: `fromPath` and
+`toPath` must share a canonical parent path, and the destination must be absent.
+`move(...)` is the cross-directory relocation operation: the canonical parent
+path changes, the destination must be absent, and the same source precondition,
+`sourceObjectId`, `destinationPrecondition`, and `idempotencyKey` rules apply.
+Destination-present path changes are not `rename(...)` or `move(...)`; they must
+use `replace(...)` with both source and destination identities.
+
+The filesystem is one interface. It should not be the only possible execution
+environment.
+
+Read-only API responses and streamed events must be bound to the requested
+`workspaceId`, every requested version identifier, and a request token, epoch, or
+equivalent correlation id. Single-version reads bind `versionId`; pairwise reads
+bind the full requested pair such as `versionAId`/`versionBId`; merge/diff
+previews bind their source and target version identifiers. Async reads such as
+`list(...)`, `stat(...)`, `search(...)`, `snapshot(...)`, and `diff(...)` must
+accept abort semantics or an equivalent request-cancellation contract, and the
+server must abort or drop any in-flight response whose token, workspace, or
+requested version no longer matches the active request; callers should still
+ignore late responses defensively. `watch(...)` events must carry the same
+binding and must stop or no-op after abort, workspace switch, or version switch.
+A stale read or watch event from one workspace or version set must never repaint
+or leak data into a newer workspace context.
+Write-producing API responses use the same request-correlation rule.
+`write(...)`, `merge(...)`, `restore(...)`, and other write-producing mutations
+that can complete after workspace/version UI context changes must bind their
+acknowledgement to the initiating `workspaceId`, every requested version
+identifier, and request token/epoch. Late `canonical`, `durable-pending`,
+`retryable-failure`, `conflict`, `rejected`, `quarantined`, or
+`terminal-retired` responses must be ignored by callers, and aborted or dropped
+by servers where possible, unless the token, workspace, and requested version set
+still match the active request. A delayed write acknowledgement must never
+repaint a newer workspace/version context or clear a newer in-flight write state.
+
+API writes are never unconditional overwrites. Create and overwrite modes are
+explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.
+Overwrite must include `targetObjectId` plus exactly one causal freshness
+precondition, such as `expectedBaseVersion`, `expectedEtag`, or
+`expectedContentHash` for non-secret-backed objects only. `targetObjectId` binds
+the intended object identity so a delete/recreate substitution cannot satisfy a
+path-only overwrite, but it is not a freshness guard by itself. If the
+precondition or target object does not match the current workspace/version/path
+state, the engine returns a deterministic secret-safe conflict envelope instead
+of mutating canonical state.
+Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
+providing multiple incompatible preconditions is a validation/protocol error that
+fails closed before conflict materialization.
+
+Conflict envelopes return only opaque object/version handles, operation kinds,
+and minimal conflict status by default. Authorized diagnostics may use
+`conflictId` or `conflictReplayToken` to request non-public details, but
+current/incoming content hashes may be revealed only for non-secret-backed
+objects after the server-side authorization path approves that caller and
+resolution session. Policy decisions, explanatory metadata, redacted previews,
+content fingerprints, and full current/incoming/restored/secret-backed bytes
+stay out of the public envelope; secret-backed content never exposes content
+hashes or equality/presence fingerprints through conflicts.
+
+`read(...)`, `list(...)`, `stat(...)`, `search(...)`, `watch(...)`,
+`snapshot(...)`, and `diff(...)` are read-only scoped views. `delete(...)`,
+`rename(...)`, `move(...)`, `replace(...)`, `merge(...)`, and `restore(...)` are
+write-producing operations and must use the same workspace/version scoping,
+causal guard, idempotency, and conflict-response rules as `write(...)`.
+Merge must guard both the source and target versions: the source snapshot/etag
+freezes what is being merged, and the target snapshot/etag freezes where it is
+being applied.
+Delete requires the path's `targetObjectId`. Rename and move require the source
+`sourceObjectId` plus exactly one source freshness precondition. Rename/move with
+`destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic overwrite uses
+`replace(...)`, which requires `sourceObjectId`, `destinationObjectId`, one
+source precondition, one destination precondition, and one idempotency key. This
+models temp-file-then-rename saves without an extra read/round trip and without
+allowing a path-only delete/recreate substitution.
+API-originated write-producing operations must carry an idempotency key bound to
+the stable actor identity, workspace, version context, operation type, target,
+secret-safe operand fingerprint, full operation operand tuple, and causal
+precondition set. A transient session handle is not part of the replay identity:
+auth refreshes, editor restarts, or equivalent session rotation remain replayable
+when the server/engine re-derives the same stable actor identity and any
+policy-required session-equivalence class. If the same idempotency key reappears
+with a different stable actor identity, required session-equivalence class,
+workspace, version context, operation type, target, operand fingerprint, operand
+tuple, or causal precondition set, return the non-persistent
+`replay_metadata_mismatch` validation error before holding-area persistence
+instead of minting a new idempotency identity. Non-secret operands may derive the
+operand fingerprint from a canonical payload digest. Secret-backed operands must
+use a server/secret-bound keyed digest, opaque handle, or equivalent
+secret-safe surrogate; raw payload bytes, reusable payload digests, plaintext
+content hashes, and equality-oracle fingerprints must never be stored or
+compared as ordinary replay metadata, returned to clients, logged, exported, or
+included in a client-visible idempotency identity. The operand tuple includes
+materially distinguishing values such as source/destination paths,
+sourceVersionId, targetVersionId, versionA/versionB identifiers, checkpointId,
+snapshot ids, merge inputs, and restore targets as applicable, so different
+`merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide under
+one key. Duplicate delivery with the same idempotency key must return the
+original result or a deterministic equivalent and must not create additional
+canonical mutations, duplicate history events, duplicate projections, or
+repeated notification/search side effects.
+Conflict results are replay-guaranteed too. Before returning `kind: 'conflict'`,
+the engine persists the conflict envelope, `conflictReplayToken`, and
+idempotency result for the same workspace/version/idempotency identity. A retry
+with matching replay metadata returns that same conflict envelope even if later
+workspace state changes. If the engine cannot persist the conflict envelope and
+idempotency tombstone durably, it must not acknowledge the conflict response.
+It returns `kind: 'retryable-failure'` for the same idempotency identity with
+`reasonCode: 'service_unavailable'`, commitState
+`'commit_state_unknown_retry_required'`, and a non-optional `retryAfterMs`
+minimum delay. A retry
+with matching replay metadata must either finish and replay the durable conflict
+result, prove and return a canonical/durable result, or continue returning the
+same retryable failure until the commit state is no longer unknown.
+Idempotency records must be persisted through the documented maximum retry
+horizon for that operation type and transport after the operation reaches a
+terminal result. The idempotency record/tombstone must be committed in the same
+transactional boundary as the canonical mutation. All derived side effects,
+including watch propagation, projections, notifications, search indexing, and
+export/index fanout, must be recorded in a durable outbox or side-effect ledger
+committed with the same workspace/version/idempotency identity. Retries replay,
+complete, or suppress side effects from that ledger exactly once; duplicate
+deliveries must not emit duplicate projections, notifications, search updates,
+export records, or other derived work. If an implementation cannot share a
+transaction boundary, it must provide an equivalent write-ahead guarantee:
+reserve the idempotency key durably before applying the mutation, make recovery
+complete either the original mutation plus side-effect ledger or tombstone the
+reserved key deterministically, and never acknowledge success until the
+idempotency result, canonical mutation, and durable outbox or side-effect ledger
+records describing required derived work are committed together. The derived side
+effects themselves remain asynchronous; completion of watch propagation,
+projection rebuilds, notifications, search indexing, or export fanout is outside
+the synchronous acknowledgement boundary once their durable ledger records exist.
+After the retry horizon, an API retry with the same key must fail closed with an
+explicit `kind: 'idempotency-expired'` response; it must not silently apply as a
+new mutation and must not convert the expired key into a conflict response.
+Before compacting a terminal idempotency record or tombstone, the engine must
+retain a durable expiry sentinel, namespace watermark, or equivalent lookup
+artifact keyed by the same workspace/version/operation namespace and
+idempotency identity. Retry lookup order is: active idempotency record, terminal
+tombstone/result record, expiry sentinel or namespace watermark, then new key
+reservation. A key covered by an expiry marker returns
+`kind: 'idempotency-expired'` and cannot be reserved as fresh work. Namespace
+rotation is allowed only if retries for the retired namespace are rejected or
+resolved through that retained expiry marker before any mutation path can
+allocate the key. Implementations may garbage-collect full expired key
+tombstones only after the expiry sentinel/watermark is durable and sufficient to
+distinguish a late retry from a new namespace key.
+
+### Idempotency Retry Horizons And WorkspaceIdempotencyPolicy
+
+This PR00 section is reference-only for retry-horizon names and invariants. It
+does not own numeric baselines. PR 01's shared `WorkspaceIdempotencyPolicy`
+contract is the sole source of truth for the numeric values of:
+`apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
+`filesystemCaptureDedupHorizonMs`, and
+`filesystemCaptureTombstoneRetentionMs`. This spec and the native filesystem
+spec may reference those policy names, but must not duplicate values before PR
+01 lands the shared contract. Implementation PRs must not ship independent
+defaults before that contract lands. Any PR that sets or changes the values must
+update the shared contract and execution log before changing implementation
+behavior.
+
+Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
+Those paths use an engine-generated capture token and engine-side deduplication
+bound to workspace, version, path, the engine-generated capture token, observed
+filesystem event sequence when available, file size/mtime where trustworthy,
+either a non-secret content hash or a secret-safe keyed commitment / opaque
+fingerprint for protected paths, and causal base token. Watcher/session ids may
+be recorded only as trace/log correlation metadata, not dedupe or replay
+identity. Deduplication may collapse duplicate native events into one canonical
+mutation, but it must not be exposed as the API idempotency-key contract and must
+still preserve conflicts when the causal base no longer matches.
+
+## Conflict behavior
+
+dohc should not block normal edits by default.
+
+If changes collide, dohc should preserve both states and surface the conflict
+only when needed.
+
+For collaborative documents, this can feel like a real-time collaborative editor:
+
+- live edits merge in the document.
+- history records who changed what.
+- if semantic conflict exists, show it as a document-level choice.
+
+For code and file trees:
+
+- preserve base, current, and incoming states.
+- use common-base merge.
+- surface conflicts without raw conflict markers by default.
+- allow power users to inspect raw diffs when useful.
+
+For databases:
+
+- prefer row identity and transactional operations.
+- preserve conflicting row/cell edits.
+- never silently corrupt invariants.
+
+For apps/sites:
+
+- merge file trees with app-aware checks.
+- run build/test/eval gates when configured.
+
+The principle:
+
+> Smart when possible. Deterministic when necessary. Honest when uncertain.
+
+## Driver robustness contract
+
+Every content driver should be evaluated against this contract:
+
+1. Take an immutable snapshot or hash-committed state.
+2. Identify the base/fork point between versions.
+3. Diff two states.
+4. Merge from a common base, or honestly produce a conflict.
+5. Project to files, UI, search, API, or export.
+6. Ingest writable projections safely.
+7. Recover or restore to a known-good state.
+
+If a driver cannot satisfy part of the contract, dohc must degrade honestly:
+
+- read-only projection.
+- lossy export label.
+- manual conflict required.
+- last-writer-wins only when explicit and recoverable.
+
+No silent robustness theater.
+
+## Visibility and sharing
+
+Visibility must not be repo-level only.
+
+dohc should support visibility at multiple scopes:
+
+- workspace.
+- version.
+- path/folder.
+- workspace object.
+- projection.
+- moment/change.
+- shared export.
+
+Possible visibility states:
+
+- private.
+- workspace.
+- shared with selected people.
+- public.
+- embargoed.
+- redacted.
+
+Visibility is resolved by intersection, not by last-writer-wins. The engine
+evaluates the applicable scopes in this order and each later scope may narrow
+but not silently broaden the effective audience:
+
+1. workspace ceiling.
+2. version ceiling.
+3. path/folder policy.
+4. workspace object policy.
+5. projection/view policy.
+6. moment/change policy.
+7. shared-export grant.
+
+`redacted` is a content-deny cap and wins for the covered payload even when a
+broader scope says `workspace` or `public`; only an authorized placeholder or
+opaque reference may render. Active `embargoed` is a time/condition cap for all
+readers, not only unauthorized readers: while the embargo is active, the
+embargo's audience is intersected with `private`, `shared with selected people`,
+`workspace`, `public`, and every other applicable cap. Only after the embargo
+expires or its condition clears does the engine recompute visibility from the
+remaining scopes. `private`, `shared with selected people`, `workspace`, and
+`public` compose as increasingly broad audiences, so the effective audience is
+the intersection of all non-redacted scopes, active embargo caps, and server-side
+authorization. A public object inside a private version is not public; a
+workspace-visible folder inside a selected-person shared export is visible only
+to the selected export participants; a public export can include a resource only
+when the export grant explicitly includes it and no
+workspace/version/path/object/projection/moment scope narrows, embargoes, or
+redacts it for that viewer. Explicit shares and shared exports are allowlists
+over the resolved resource graph, not bypasses around ordinary workspace,
+version, path, object, projection, moment, secret, and policy checks.
+
+This is how dohc supports open work without requiring 100% of all work to be
+visible 100% of the time.
+
+## Secrets
+
+Secrets should not be normal files in history.
+
+Workspace files may contain secret references, but values should live in a
+secret broker:
+
+- OS keychain.
+- dohc Cloud KMS.
+- self-hosted secret store.
+
+History, durability logs, diffs, search, watch streams, projection caches,
+exports, and agent logs must not capture raw secret values. Secret-backed
+content may be persisted only as encrypted references, redacted forms, or
+broker-managed metadata while the timeline remains crash-safe and recoverable.
+
+Secret reference resolution is workspace-scoped and fail-closed. A reference
+issued for one workspace must not be dereferenced from another workspace,
+version, share, export, capture, search, watch stream, projection cache, or
+agent-log context.
+
+## Interface sketch
+
+The default workspace surface should be calm:
+
+```text
+Version: Main
+Saved 12 seconds ago
+```
+
+Version menu:
+
+```text
+Main
+Q3 Rewrite
+Client Version
+Agent Experiment
+Create version
+View history
+```
+
+History:
+
+```text
+Today
+
+10:20 CSV import
+Added 812 rows to transactions
+
+10:12 Agent edited Finance Tracker
+Changed 6 files
+
+10:05 <User Name> edited Budget Notes
+Changed 1 document
+```
+
+Compare versions:
+
+```text
+Compare: Agent Experiment -> Main
+
+Changed
+- 6 app files
+- 812 transaction rows
+- 1 budget document
+
+Conflicts
+- none
+
+Visibility changes
+- none
+```
+
+Conflict:
+
+```text
+Budget Notes changed in both versions.
+
+Choose what to keep:
+- Main paragraph
+- Agent Experiment paragraph
+- open side-by-side editor
+```
+
+No default `commit`, `branch`, `HEAD`, `rebase`, or conflict-marker language.
+
+## Why this is still dohc
+
+This model preserves the core dohc philosophy:
+
+- text and files remain natural affordances.
+- agents can work like humans against the workspace.
+- users own inspectable local files.
+- dohc adds safety, recovery, history, permissions, and sync.
+- repeated work can become reusable structure.
+
+The engine is sophisticated, but the user experience should remain obvious:
+
+> You are editing a version of your workspace. Authorized writes save. dohc
+> preserves the audit and recovery state required by policy. You can create
+> other versions, compare them, merge them, share them, or go back.
+
+## Open questions
+
+1. What are the first supported version scopes?
+   - single file.
+   - folder.
+   - app/site.
+   - whole workspace.
+
+2. Which drivers must ship first?
+   - Markdown/Y.Doc.
+   - normal file/blob.
+   - SQLite/table.
+   - post/comment.
+
+3. How should local filesystem changes be captured?
+   - file watcher.
+   - virtual filesystem.
+   - explicit dohc sync process.
+   - all of the above in stages.
+
+4. How much of the version graph should be exportable through external VCS
+   formats?
+
+5. Which conflict UI is required for the first useful version?
+
+6. How do version permissions interact with per-path visibility?
+
+7. What is the minimal Merkle/hash commitment needed for tamper-evident history?
+
+8. How do cloud-hosted agent versions and local filesystem versions reconcile?
+
+## First proof slice
+
+The first proof should be small but real:
+
+1. A workspace has `Main` and one named version.
+2. Normal file edits save immediately inside the active version.
+3. dohc records automatic history.
+4. A user can compare the named version against Main.
+5. A clean file merge can move changes from one version to another.
+6. A conflicting text edit preserves both sides and shows a simple conflict.
+7. A restore can create a new checkpoint from an earlier point without deleting
+   intervening history.
+8. The engine records honest provenance without changing write rules:
+   dohc-authenticated actions can distinguish human/agent/system, while raw
+   local file edits may be local/device/session changes.
+9. E2E proves fail-closed behavior when authorization, ownership/review gate,
+   policy, visibility, protected-path, lock, version-access, skill-turn,
+   provenance, attribution, or proof decisions deny access, and retryable
+   no-mutation behavior when required evaluators are unavailable or
+   indeterminate.
+10. E2E proves plaintext secrets do not enter durability-log payloads, history,
+    diffs, export bundles, search indexes, or agent logs.
+11. E2E proves every persisted atom, folder, entity, share, capture, file,
+    version, event, chat link, projection, history record, holding record,
+    conflict envelope, idempotency result, idempotency tombstone, and
+    durability-log entry is workspace-scoped, and that cross-workspace
+    references are rejected by default.
+12. E2E proves holding-area replay is causal: stale base/CAS tokens degrade to
+    conflict/manual reconciliation, while malformed or cross-scope
+    workspace/version bindings fail validation before holding storage.
+13. E2E proves holding-area abuse resistance: per-workspace/per-actor quotas,
+    TTL retention bounds, payload-size caps, ingest rate limits, and
+    deterministic backpressure prevent storage exhaustion or canonical
+    durability starvation without silently dropping accepted holding records.
+14. E2E proves `write(...)`, `merge(...)`, `replace(...)`, and `restore(...)`
+    fail closed when required causal preconditions are missing or incompatible,
+    and only proceed when the operation-specific guard set is supplied and each
+    guard is individually valid.
+15. E2E proves `rename(...)` and `move(...)` enforce source identity and
+    destination-absence guards before mutating canonical state.
+
+This proves the heart of the idea without forcing a full rewrite of every
+content type on day one.
