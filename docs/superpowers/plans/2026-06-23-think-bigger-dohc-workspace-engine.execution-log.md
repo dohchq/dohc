@@ -8643,7 +8643,7 @@ Latest stack-refresh validation on 2026-07-01:
 - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres test src/db/schema.test.ts`
   passed with 1 file and 2 tests.
 - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/shares.test.ts`
-  failed because live Postgres at `127.0.0.1:54329` refused connections.
+  blocked because live Postgres at `127.0.0.1:54329` refused connections.
 - `docker compose -f docker-compose.dev.yml up -d postgres` failed because
   Docker is not installed/enabled in this WSL distro.
 
