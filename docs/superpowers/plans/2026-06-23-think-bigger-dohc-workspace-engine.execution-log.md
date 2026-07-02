@@ -8407,9 +8407,13 @@ Three-hundred-fourth pass:
 Mutable status symbol: `LivePR00Status`.
 
 - Live PR00 status:
-  - CodeRabbit status: PR00 and P0A-P0G draft PR checks currently pass. Future
-    manual CodeRabbit reruns remain deferred to major readiness/material-risk
-    gates under the 2026-06-29 user-directed review policy.
+  - CodeRabbit status: PR00 and P0A-P0G were marked ready for review on
+    2026-07-02. The ready transition triggered automatic CodeRabbit attempts;
+    PR51-PR53 reported CodeRabbit rate-limit failures rather than code
+    findings, and the remaining PRs were pending at inspection time. To align
+    with the 2026-06-29 and 2026-07-02 user direction, `.coderabbit.yaml` now
+    disables automatic and incremental CodeRabbit reviews. Future CodeRabbit
+    reviews are manual major-gate reviews only.
   - Test evidence: PR00 docs-only local validation remains green; the pushed
     P0A-P0G proof stack is locally validated through the current
     `codex/think-bigger-p0g-proof-qa` branch/PR ref. GitHub Actions are
@@ -8434,7 +8438,18 @@ Mutable status symbol: `LivePR00Status`.
   - `gh pr checks 46` still shows the historical red `Link And Anchor Check`
     and `Preflight` runs, but those are old pre-run billing-limit failures and
     no longer gate progress under the 2026-07-02 user direction.
+- CodeRabbit policy update:
+  - PR00 and P0A-P0G were moved out of draft after local P0G validation passed.
+  - Automatic CodeRabbit review attempts then hit adaptive review limits on
+    PR51, PR52, and PR53. The CodeRabbit comments report "Review limit
+    reached" and "Next review available in: 59 minutes"; no code findings were
+    reported.
+  - `.coderabbit.yaml` now sets `reviews.auto_review.enabled: false` and
+    `reviews.auto_review.auto_incremental_review: false` so future review
+    activity matches the user-requested major-gate-only policy.
 - Validation for this policy/log patch:
+  - `python3 - <<'PY' ... yaml.safe_load(pathlib.Path('.coderabbit.yaml').read_text())`
+    passed and confirmed `.coderabbit.yaml` parses.
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
     Think Bigger docs and the in-script fixtures.
