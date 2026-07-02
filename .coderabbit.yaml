@@ -209,8 +209,8 @@ reviews:
           verification.
 
   auto_review:
-    enabled: true
-    auto_incremental_review: true
+    enabled: false
+    auto_incremental_review: false
     auto_pause_after_reviewed_commits: 8
     ignore_title_keywords:
       - "wip"
