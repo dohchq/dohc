@@ -8,6 +8,7 @@ import { createWorkspaceAuth } from "./auth/betterAuth";
 import { createSessionActorResolver } from "./auth/session";
 import { withCors } from "./cors";
 import { createWorkspaceApiHandler } from "./server";
+import type { HocuspocusAdminClient } from "./routes/shared";
 
 // The dohc Cloud / self-host server process: ONE Postgres, Better Auth mounted
 // on /api/auth/*, and the workspace API behind session-resolved actors.
@@ -60,14 +61,125 @@ const auth = createWorkspaceAuth({
 const backend = createPostgresWorkspaceBackend(pool, {
   blobStore: createLocalBlobStore(),
 });
+
+const HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS = 2_000;
+const HOCUSPOCUS_ADMIN_TIMEOUT_MAX_MS = 5_000;
+const hocuspocusJwtSecret = process.env.HOCUSPOCUS_JWT_SECRET?.trim();
+
+function createHocuspocusAdminClient(): HocuspocusAdminClient {
+  if (!hocuspocusJwtSecret) {
+    const client: HocuspocusAdminClient & { disconnectTimeoutMs: number } = {
+      disconnectTimeoutMs: HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS,
+      async disconnectWorkspaceUser() {
+        // Collaboration token minting is disabled, so no Hocuspocus sessions
+        // can be authenticated for this API process.
+      },
+    };
+    return client;
+  }
+  const baseUrl = process.env.HOCUSPOCUS_ADMIN_URL?.trim();
+  const adminToken = process.env.HOCUSPOCUS_ADMIN_TOKEN?.trim();
+  if (!baseUrl || !adminToken) {
+    console.error(
+      "HOCUSPOCUS_ADMIN_URL and HOCUSPOCUS_ADMIN_TOKEN are required when HOCUSPOCUS_JWT_SECRET enables collaboration.",
+    );
+    process.exit(1);
+  }
+  let adminBase: URL;
+  try {
+    adminBase = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  } catch {
+    console.error("HOCUSPOCUS_ADMIN_URL must be a valid absolute URL.");
+    process.exit(1);
+  }
+  if (
+    adminBase.protocol !== "https:" &&
+    !(adminBase.protocol === "http:" && isLocalHocuspocusAdminHost(adminBase.hostname))
+  ) {
+    console.error(
+      "HOCUSPOCUS_ADMIN_URL must use https, or http only for localhost/loopback development endpoints.",
+    );
+    process.exit(1);
+  }
+  const configuredTimeoutMs = Number(
+    process.env.HOCUSPOCUS_ADMIN_TIMEOUT_MS ??
+      HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS,
+  );
+  const timeoutMs =
+    Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+      ? Math.min(configuredTimeoutMs, HOCUSPOCUS_ADMIN_TIMEOUT_MAX_MS)
+      : HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS;
+  const client: HocuspocusAdminClient & { disconnectTimeoutMs: number } = {
+    disconnectTimeoutMs: timeoutMs,
+    async disconnectWorkspaceUser({ workspaceId, userId, signal }) {
+      const url = new URL("admin/disconnect-by-workspace-user", adminBase);
+      const controller = new AbortController();
+      const abortFromCaller = () => controller.abort(signal?.reason);
+      if (signal?.aborted) {
+        controller.abort(signal.reason);
+      } else {
+        signal?.addEventListener("abort", abortFromCaller, { once: true });
+      }
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${adminToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ workspaceId, userId }),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`hocuspocus disconnect timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", abortFromCaller);
+      }
+      try {
+        if (!response.ok) {
+          throw new Error(`hocuspocus disconnect failed with ${response.status}`);
+        }
+      } finally {
+        await response.body?.cancel().catch(() => undefined);
+      }
+    },
+  };
+  return client;
+}
+
+function isLocalHocuspocusAdminHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  const ipv4Parts = normalized.split(".");
+  const isIpv4Loopback =
+    ipv4Parts.length === 4 &&
+    ipv4Parts[0] === "127" &&
+    ipv4Parts.every((part) => {
+      if (!/^\d{1,3}$/u.test(part)) return false;
+      return Number(part) <= 255;
+    });
+  return (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    isIpv4Loopback ||
+    normalized === "::1" ||
+    normalized === "[::1]"
+  );
+}
+
 const workspaceHandler = createWorkspaceApiHandler({
   backend,
   resolveActor: createSessionActorResolver(auth),
   createWorkspace: createPostgresWorkspaceProvisioner(pool),
   // Same secret hocuspocus verifies with; self-hosts without a collab server
   // leave it unset and POST /workspaces/:id/collab/token errors collab-disabled.
-  collab: { pool, jwtSecret: process.env.HOCUSPOCUS_JWT_SECRET },
-  shared: { pool },
+  collab: hocuspocusJwtSecret ? { pool, jwtSecret: hocuspocusJwtSecret } : undefined,
+  shared: { pool, hocuspocusAdmin: createHocuspocusAdminClient() },
 });
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded

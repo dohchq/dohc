@@ -8527,6 +8527,325 @@ Mutable status symbol: `LivePR00Status`.
 
 - Keep this log until the Think Bigger initiative is complete or superseded.
 
+## PR P0A - Current System Inventory And Decisions
+
+Status: restacked on current PR00; not approved
+Branch: codex/think-bigger-p0a-inventory
+Worktree: `/home/ice/dev/dohc-p0a-inventory`
+Implementation chat/thread: main orchestration thread + explorer subagents
+PR Link: [#47](https://github.com/dohc-ai/dohc/pull/47)
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0A worktree.
+- [x] Inventory current storage, file, atom, Y.Doc, app, search, sync, agent,
+      and sharing/collaboration code paths.
+- [x] Record current-to-target deltas.
+- [x] Record initial Phase 0 decisions for storage, filesystem
+      interposition, secrets, merge scope, chat/file philosophy, and Rust
+      kernel boundary.
+- [x] Fold in storage/Y.Doc explorer findings.
+- [x] Fold in filesystem/sync explorer findings.
+- [x] Fold in collaboration/chat explorer findings.
+- [x] Run docs sanity commands recorded below (`git diff --check`, targeted `rg`
+      evidence, and a Markdown link scan for the two touched docs).
+- [x] Align `scanWorkspaceFiles` with shared ignored-segment policy after
+      CodeRabbit review.
+- [x] Wire share revocation to configured Hocuspocus admin
+      disconnect-by-workspace-user hook after CodeRabbit review.
+- [x] Open the P0A lane PR as stacked draft
+      [#47](https://github.com/dohc-ai/dohc/pull/47) after user approval to
+      skip GitHub PR Actions for now. Do not merge P0A until its local
+      validation, required major review gate, and explicit acceptance clear.
+
+### Files Changed
+
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+- docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json
+- docs/superpowers/plans/2026-06-24-think-bigger-phase-0a-current-system-inventory.md
+- packages/workspace-fs/src/scan.ts
+- packages/workspace-fs/src/scan.test.ts
+- packages/workspace-postgres/src/db/migrations/0007_share_revocation_retry_events.sql
+- packages/workspace-postgres/src/db/migrations/0008_share_revocation_claimed_retry_events.sql
+- packages/workspace-postgres/src/db/schema.ts
+- packages/workspace-postgres/src/db/schema.test.ts
+- services/workspace-api/src/main.ts
+- services/workspace-api/src/routes/shared.ts
+- services/workspace-api/src/routes/shares.ts
+- services/workspace-api/src/routes/shares.test.ts
+- services/workspace-api/src/routes/sharesRevocation.test.ts
+
+### Tests Added Or Updated
+
+- `packages/workspace-fs/src/scan.test.ts`
+  - verifies scanner skips the same `.dohc`, `.git`, and `node_modules`
+    segments shared by watcher/export/search policy.
+- `services/workspace-api/src/routes/shares.test.ts`
+  - verifies successful share revocation calls the configured Hocuspocus admin
+    disconnect hook for the revoked recipient.
+- `services/workspace-api/src/routes/sharesRevocation.test.ts`
+  - fake-pool unit coverage for the admin disconnect hook without requiring a
+    live Postgres service.
+  - covers commit-before-disconnect ordering, pending disconnect event cleanup,
+    missing admin fail-closed behavior, and rollback failure client
+    destruction.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0a-inventory <p0a worktree> HEAD
+git status --short --branch
+find apps -maxdepth 3 -name AGENTS.md -print
+sed -n '1,260p' apps/web/AGENTS.md
+rg --files -g 'package.json' -g 'pnpm-lock.yaml' -g 'turbo.json' -g 'vite.config.*' -g 'playwright.config.*' -g 'convex.json' -g 'schema.ts' -g '*.config.ts'
+find packages/workspace-contracts packages/workspace-core packages/workspace-fs packages/workspace-history packages/workspace-sync packages/workspace-postgres services/workspace-api apps/desktop/src/workspaces apps/desktop/src/agents apps/desktop/e2e -maxdepth 2 -type f \( -name '*.ts' -o -name '*.tsx' \) | sort
+git diff --check
+rg -n "Subagent evidence|Postgres|atoms.body|write-policy parity|scanWorkspaceFiles|Startup reconciliation|MCP direct-history|ChatThread|Channel|DM|ThreadMessage|read-state|Phase 0 Decisions|P0R|DOHC_TEST_AGENT_CLI" docs/superpowers/plans/2026-06-24-think-bigger-phase-0a-current-system-inventory.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+rg -n '\[[^\]\[]+\]\([^)]+\)' docs/superpowers/plans/2026-06-24-think-bigger-phase-0a-current-system-inventory.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md || true
+git rebase codex/think-bigger-00-readiness-scaffold
+git merge origin/codex/think-bigger-00-readiness-scaffold
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --frozen-lockfile --ignore-scripts
+git diff --check
+node scripts/check-think-bigger-doc-links.mjs
+REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs typecheck
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres test src/db/schema.test.ts
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/shares.test.ts
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm install --frozen-lockfile
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-fs test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-fs typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-api typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-api test src/routes/shares.test.ts
+docker compose -f docker-compose.dev.yml up -d postgres
+```
+
+Latest stack-refresh validation on 2026-07-01:
+
+- `git diff --check` passed.
+- `node scripts/check-think-bigger-doc-links.mjs` passed for 6 discovered
+  Think Bigger docs and the in-script fixtures.
+- `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+  passed for 6 discovered Think Bigger docs and the in-script fixtures.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test`
+  passed with 6 files and 40 tests.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs typecheck`
+  passed.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts`
+  passed with 1 file and 15 tests.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck`
+  passed.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres test src/db/schema.test.ts`
+  passed with 1 file and 2 tests.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/shares.test.ts`
+  blocked because live Postgres at `127.0.0.1:54329` refused connections.
+- `docker compose -f docker-compose.dev.yml up -d postgres` failed because
+  Docker is not installed/enabled in this WSL distro.
+
+### E2E / Visual / Manual QA
+
+- Manual inventory plus focused package tests.
+- Existing direct-disk E2E identified:
+  `apps/desktop/e2e/workspace-direct-disk.spec.ts`.
+- Live Postgres share lifecycle test could not run locally because Docker is not
+  available in this WSL distro and `127.0.0.1:54329` was not accepting
+  connections. The fake-pool revocation unit test covered the new admin hook.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable for this inventory/low-level policy
+  lane.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: not applicable.
+
+### CodeRabbit
+
+- Status: deferred until the P0A major readiness/material-risk gate under the
+  2026-06-29 user-directed review policy; no per-fix rerun is required for the
+  PR00 stack-refresh merge.
+- Historical findings fixed:
+  - Major: added explicit ID-model backfill/cutover plan.
+  - Major: clarified `.dohc/chats/v1-<digest>.md` projections are surfaced
+    through engine projection/search APIs, not the normal file scan loop.
+  - Minor: set P0A PR metadata to `not opened`.
+  - Minor: changed P0A table test evidence to `docs sanity`.
+  - Minor: made rename/move semantics consistently alias-transfer over stable
+    object identity.
+  - Minor: made scan-policy gating consistent across the inventory and P0C
+    boundary.
+  - Minor: narrowed the `permissions` table note to distinguish the missing
+    permission-specific implementation from the generic workspace auth helper.
+  - Major: aligned `scanWorkspaceFiles` with shared ignored segments and removed
+    scanner-specific SQLite-sidecar expectations.
+  - Minor: wired successful share revocation to the Hocuspocus admin disconnect
+    hook.
+  - Minor: removed stale P0A approval wording while the latest rerun is pending.
+  - Minor: clarified the PR-open checklist remains gated by PR00 docs-only
+    exception approval.
+  - Major: made collaboration startup fail fast when Hocuspocus JWT auth is
+    enabled without an admin URL/token.
+  - Major: moved share revocation into a transaction for lookup/authz and the
+    durable database revoke; the Hocuspocus admin disconnect runs after commit
+    and is retried from a persisted event if it fails.
+  - Major: added a bounded timeout around Hocuspocus admin disconnect requests.
+  - Minor: preserved `HOCUSPOCUS_ADMIN_URL` path prefixes when constructing
+    admin disconnect request URLs.
+  - Major: made share revocation fail closed before deleting when the
+    Hocuspocus admin disconnect client is not configured.
+  - Minor: updated stale scan/sync risk wording to name the remaining
+    oversized-file, secret-detection, and materialization gaps.
+  - Minor: updated share-revocation inventory wording to match the configured
+    Hocuspocus admin disconnect path.
+  - Major: reordered share revocation so the database revoke commits before the
+    Hocuspocus admin disconnect, with a retryable pending disconnect event.
+  - Major: destroys the Postgres client if transaction rollback fails.
+  - Major: returns success after the durable revoke commit even if the immediate
+    admin disconnect attempt fails, leaving the pending disconnect event for
+    retry.
+  - Major: defers missing-admin failure until after share lookup and authz so
+    unauthorized callers keep uniform not-found behavior.
+  - Major: validates `HOCUSPOCUS_ADMIN_URL` at startup instead of after a share
+    revoke has already committed.
+  - Major: rejects non-HTTP(S) Hocuspocus admin URLs during startup.
+  - Major: no-collaboration deployments get a no-op admin disconnect client so
+    share revocation can still complete.
+  - Major: added a retry consumer for
+    `share.revocation.disconnect_pending` events.
+  - Major: scoped the shared mutation-ledger inventory requirement by
+    workspace.
+  - Minor: added captures to the workspace-object taxonomy.
+  - Major: reserved conflict status, chosen/current visible value, and
+    resolution metadata in the Phase 0 conflict record definition.
+  - Minor: aligned PR00 gate wording between the status-table lead-in and the
+    P0A row.
+  - Major: retry worker deletes malformed pending-disconnect events so they
+    cannot starve later valid retries.
+  - Minor: retry worker treats `NaN` limits as the safe default before
+    clamping.
+  - Trivial: retry worker claims pending disconnect events in a transaction with
+    `for update skip locked`.
+  - Major: no-collaboration startup returns the no-op admin client before
+    parsing stale Hocuspocus admin env vars.
+  - Major: retry worker commits claimed rows before Hocuspocus network
+    disconnects and performs cleanup in independent statements.
+  - Major: retry worker can reclaim stale claimed events and treats post-success
+    cleanup delete failure as best-effort instead of a failed disconnect.
+  - Major: normalized `HOCUSPOCUS_JWT_SECRET` once for collab token and admin
+    disconnect wiring.
+  - Minor: `createHocuspocusAdminClient` now returns a concrete admin client on
+    every non-exit path.
+  - Major: share revocation retry claim handles scalar legacy JSON payloads.
+  - Major: live owner-revoke test now passes the Hocuspocus admin override.
+  - Major: inline share revocation inserts a pending disconnect event, then
+    claims it after the durable revoke commit; if another worker claims first,
+    the retry worker owns the disconnect.
+  - Minor: scoped inventory gap wording to the Phase 0 paths reviewed here.
+  - Trivial: split P0C secret policy gating from the later secret-backed file
+    driver milestone.
+  - Major: share revocation retry/claim due times now use Postgres-generated UTC
+    timestamps instead of workspace-api host clocks.
+  - Major: retry worker scans by effective due time (`retryAfter` or
+    `claimExpiresAt`) before `created_at` so stale claims are not starved by
+    older pending backlog.
+  - Major: legacy claimed events without `claimExpiresAt` still apply the stale
+    claim window before retry, with regression coverage for recent claims.
+  - Major: retry worker claim batches are capped to the lease-safe maximum and
+    Hocuspocus disconnect calls are time bounded before requeue.
+  - Major: retry worker verifies each event's recipient against the
+    workspace-scoped soft-deleted share row before claiming.
+  - Major: Hocuspocus disconnect timeout now threads an `AbortSignal` through
+    the admin-client contract so the real HTTP request is canceled.
+  - Major: former workspace members who originally created a share can no
+    longer revoke it after losing access; only current owners bypass
+    membership.
+  - Major: malformed revocation-event fallback share lookup is scoped by the
+    event workspace.
+- Fixes: latest historical CodeRabbit findings are fixed in the P0A diff; the
+  next CodeRabbit run is reserved for P0A major readiness or material risk.
+- Ops note: CodeRabbit CLI hit recoverable rate limits during P0A review and was
+  retried after the reported wait windows.
+- Overrides:
+
+### Subagent Reviews
+
+- Storage/Y.Doc inventory: completed. Findings incorporated:
+  current backend is Postgres/filesystem/Hocuspocus, not Convex; `atoms.body`
+  is a derived markdown cache from the canonical Y.Doc, not writable full-body
+  source content; direct API/sync writes need lock/share/effective-policy parity
+  with Hocuspocus; folders are schema-present but not active first-class durable
+  primitives; entity primitive was not found.
+- Filesystem/sync inventory: completed. Findings incorporated:
+  scan/sync inclusion policy is weaker than watcher/export/search; closed-app
+  edits are not clearly recorded into local history; MCP direct history
+  recording may duplicate watcher-recorded mutations; raw SQLite-byte sync
+  versus structured database-operation sync needs a crisp contract.
+- Collaboration/chat inventory: completed. Findings incorporated:
+  no first-class chat/channel/DM/message/reaction/read-state substrate exists
+  yet; current collaboration primitives are shares, data fragments,
+  Hocuspocus awareness, local history, operational notices, and bounded agent
+  session streams; chats need storage/actions/policy before UI.
+
+### Security / Privacy Notes
+
+- P0A identified that current cloud identity is server-derived through
+  workspace-api session resolution and Postgres membership checks.
+- P0A identified stale documentation risk:
+  `docs/security/authz-boundaries.md` still describes Convex-era boundaries.
+- P0A keeps generic external local file writes identity-light; they must not
+  become authenticated human/agent attribution without trusted run context.
+- P0A identified write-policy parity risk between direct API/sync writes and
+  Hocuspocus writes.
+- P0A fixed `scanWorkspaceFiles` parity for shared ignored segments `.dohc`,
+  `.git`, and `node_modules`; raw SQLite file handling remains covered by the
+  database-object sync contract.
+- P0A wired share revocation so the delete commits first, a pending disconnect
+  event remains retryable, and the configured Hocuspocus admin disconnect hook
+  is attempted afterward.
+- P0A identified startup reconciliation and duplicate-history risks for
+  local filesystem mutations.
+
+### Performance Notes
+
+- Budget areas touched: planning plus `scanWorkspaceFiles` traversal filtering.
+- Metrics: workspace-fs tests passed 40 tests in 2.74s locally after scanner
+  filtering; no scaled scan benchmark yet.
+- Existing performance budgets identified in `packages/performance/src/budgets.ts`.
+- P0R must benchmark scan/reconcile/hash before deep engine implementation.
+- Search and sync changes in later PRs must include measured evidence.
+- Scan-policy hardening and startup reconciliation are performance-sensitive
+  and must record measurements when implemented.
+
+### Migration Notes
+
+- P0A recommends extending existing workspace packages instead of introducing
+  an unrelated second source of truth.
+- Adds two Postgres migration files for share-revocation retry indexes on
+  `workspace_events` pending and claimed disconnect events.
+- Operators that want immediate Hocuspocus disconnects on share revocation must
+  configure `HOCUSPOCUS_ADMIN_URL` and `HOCUSPOCUS_ADMIN_TOKEN` for
+  `workspace-api`.
+
+### Remaining Risk
+
+- PR00 docs-only local-agent-CLI exception still needs explicit human approval
+  before PR00 is marked complete or merge-ready.
+- P0A is restacked on PR00 because it depends on the plan/log files introduced
+  there.
+- P0A still needs its own lane PR, required CodeRabbit major-gate review, and
+  final approval before it can be considered complete.
+
+### Follow-Up / Deletion Conditions
+
+- Keep this note until Phase 0 decisions are either implemented or superseded
+  by a later architecture decision record.
+
 ### Phase 0 Proof Arc
 
 PR00 remains a docs-only orchestration PR. The checked proof items below refer

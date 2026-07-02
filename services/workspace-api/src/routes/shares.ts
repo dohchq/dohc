@@ -31,6 +31,13 @@ export type ShareRow = {
   capability: ShareCapability;
 };
 
+const SHARE_REVOCATION_RETRY_DELAY_SECONDS = 30;
+const SHARE_REVOCATION_CLAIM_STALE_SECONDS = 5 * 60;
+const SHARE_REVOCATION_DISCONNECT_TIMEOUT_MAX_MS = 5_000;
+const SHARE_REVOCATION_WORKER_MAX_BATCH = 100;
+const POSTGRES_UTC_ISO_FORMAT = `YYYY-MM-DD"T"HH24:MI:SS.MS"Z"`;
+const POSTGRES_UTC_ISO_NOW_SQL = `to_char(clock_timestamp() at time zone 'UTC', '${POSTGRES_UTC_ISO_FORMAT}')`;
+
 export async function createShare(
   deps: SharedAtomDeps | undefined,
   actor: Actor,
@@ -146,32 +153,439 @@ export async function revokeShare(
   shareId: string,
 ): Promise<{ ok: true; revoked: true }> {
   const pool = requirePool(deps);
-  const { rows } = await pool.query<{
-    created_by: string | null;
-    is_owner: boolean;
-    is_member: boolean;
-  }>(
-    `select s.created_by,
-       exists(select 1 from workspaces w
-         where w.workspace_id = s.workspace_id and w.owner_user_id = $2
-           and w.deleted_at is null) as is_owner,
-       exists(select 1 from workspace_members m
-         where m.workspace_id = s.workspace_id and m.user_id = $2
-           and m.deleted_at is null) as is_member
-     from shares s where s.id = $1 and s.deleted_at is null`,
-    [shareId, userId],
-  );
-  if (!rows[0]) throw coded("not-found", "share not found");
-  if (rows[0].created_by !== userId && !rows[0].is_owner) {
-    // Members already see the share via listWorkspaceShares, so an honest
-    // 403 leaks nothing to them; strangers must not learn the id is live.
-    if (!rows[0].is_member) throw coded("not-found", "share not found");
-    throw coded("forbidden", "only the sharer or the workspace owner may revoke");
+  const client = await pool.connect();
+  let destroyClient = false;
+  let disconnect:
+    | {
+        eventId: string;
+        hocuspocusAdmin: NonNullable<SharedAtomDeps["hocuspocusAdmin"]>;
+        workspaceId: string;
+        userId: string;
+      }
+    | undefined;
+  try {
+    await client.query("begin");
+    const { rows } = await client.query<{
+      created_by: string | null;
+      is_owner: boolean;
+      is_member: boolean;
+      recipient_user_id: string;
+      workspace_id: string;
+    }>(
+      `select s.created_by, s.recipient_user_id, s.workspace_id,
+         exists(select 1 from workspaces w
+           where w.workspace_id = s.workspace_id and w.owner_user_id = $2
+             and w.deleted_at is null) as is_owner,
+         exists(select 1 from workspace_members m
+           where m.workspace_id = s.workspace_id and m.user_id = $2
+             and m.deleted_at is null) as is_member
+       from shares s where s.id = $1 and s.deleted_at is null
+       for update`,
+      [shareId, userId],
+    );
+    if (!rows[0]) throw coded("not-found", "share not found");
+    const isSharer = rows[0].created_by === userId;
+    if (!rows[0].is_owner && !(isSharer && rows[0].is_member)) {
+      // Members already see the share via listWorkspaceShares, so an honest
+      // 403 leaks nothing to them; strangers must not learn the id is live.
+      if (!rows[0].is_member) throw coded("not-found", "share not found");
+      throw coded("forbidden", "only the sharer or the workspace owner may revoke");
+    }
+    const hocuspocusAdmin = deps?.hocuspocusAdmin;
+    if (!hocuspocusAdmin) {
+      throw coded("failed-precondition", "Hocuspocus admin disconnect is not configured");
+    }
+    await client.query("update shares set deleted_at = now(), updated_at = now() where id = $1", [
+      shareId,
+    ]);
+    disconnect = {
+      eventId: randomUUID(),
+      hocuspocusAdmin,
+      workspaceId: rows[0].workspace_id,
+      userId: rows[0].recipient_user_id,
+    };
+    await client.query(
+      `insert into workspace_events (
+         id, workspace_id, actor_user_id, kind, target_kind, target_id, payload
+       ) values (
+         $1,
+         $2,
+         $3,
+         'share.revocation.disconnect_pending',
+         'share',
+         $4,
+         jsonb_build_object(
+           'retryAfter', ${POSTGRES_UTC_ISO_NOW_SQL},
+           'recipientUserId', $5::text
+         )
+       )`,
+      [
+        disconnect.eventId,
+        disconnect.workspaceId,
+        userId,
+        shareId,
+        disconnect.userId,
+      ],
+    );
+    await client.query("commit");
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+      destroyClient = true;
+    }
+    throw error;
+  } finally {
+    client.release(destroyClient);
   }
-  await pool.query("update shares set deleted_at = now(), updated_at = now() where id = $1", [
-    shareId,
-  ]);
+  if (!disconnect) throw new Error("share revocation disconnect target was not recorded");
+  let claimId: string | undefined;
+  try {
+    claimId = await claimRevocationDisconnectEvent(pool, disconnect.eventId, disconnect.userId);
+  } catch {
+    return { ok: true, revoked: true };
+  }
+  if (!claimId) return { ok: true, revoked: true };
+  try {
+    await disconnectWorkspaceUserWithinLease(disconnect.hocuspocusAdmin, {
+      workspaceId: disconnect.workspaceId,
+      userId: disconnect.userId,
+    });
+  } catch {
+    await requeueRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
+    return { ok: true, revoked: true };
+  }
+  await completeRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
   return { ok: true, revoked: true };
+}
+
+async function claimRevocationDisconnectEvent(
+  pool: pg.Pool,
+  eventId: string,
+  recipientUserId: string,
+): Promise<string | undefined> {
+  const claimId = randomUUID();
+  const { rowCount } = await pool.query(
+    `update workspace_events
+     set kind = 'share.revocation.disconnect_claimed',
+         payload = case
+           when jsonb_typeof(payload) = 'object' then
+             payload || jsonb_build_object(
+               'claimedAt', ${POSTGRES_UTC_ISO_NOW_SQL},
+               'claimExpiresAt',
+                 to_char(
+                   (clock_timestamp() + $4::integer * interval '1 second') at time zone 'UTC',
+                   '${POSTGRES_UTC_ISO_FORMAT}'
+                 ),
+               'claimId', $2::text,
+               'recipientUserId', $3::text
+             )
+           else jsonb_build_object(
+             'recipientUserId', $3::text,
+             'claimedAt', ${POSTGRES_UTC_ISO_NOW_SQL},
+             'claimExpiresAt',
+               to_char(
+                 (clock_timestamp() + $4::integer * interval '1 second') at time zone 'UTC',
+                 '${POSTGRES_UTC_ISO_FORMAT}'
+               ),
+             'claimId', $2::text
+           )
+         end
+     where id = $1
+       and kind = 'share.revocation.disconnect_pending'
+       and coalesce(payload->>'retryAfter', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}`,
+    [eventId, claimId, recipientUserId, SHARE_REVOCATION_CLAIM_STALE_SECONDS],
+  );
+  return rowCount ? claimId : undefined;
+}
+
+async function completeRevocationDisconnectEvent(
+  pool: pg.Pool,
+  eventId: string,
+  claimId: string,
+): Promise<void> {
+  try {
+    await pool.query(
+      `update workspace_events
+       set kind = 'share.revocation.disconnect_completed',
+           payload = case
+             when jsonb_typeof(payload) = 'object' then
+               jsonb_set(payload, '{completedAt}', to_jsonb(${POSTGRES_UTC_ISO_NOW_SQL}), true)
+             else jsonb_build_object('completedAt', ${POSTGRES_UTC_ISO_NOW_SQL})
+           end
+       where id = $1
+         and kind = 'share.revocation.disconnect_claimed'
+         and payload->>'claimId' = $2`,
+      [eventId, claimId],
+    );
+  } catch {
+    await pool
+      .query(
+        `delete from workspace_events
+         where id = $1
+           and kind = 'share.revocation.disconnect_claimed'
+           and payload->>'claimId' = $2`,
+        [eventId, claimId],
+      )
+      .catch(() => undefined);
+    return;
+  }
+  await pool
+    .query(
+      `delete from workspace_events
+       where id = $1
+         and kind = 'share.revocation.disconnect_completed'
+         and payload->>'claimId' = $2`,
+      [eventId, claimId],
+    )
+    .catch(() => undefined);
+}
+
+async function requeueRevocationDisconnectEvent(
+  pool: pg.Pool,
+  eventId: string,
+  claimId: string,
+): Promise<void> {
+  await pool
+    .query(
+      `update workspace_events
+       set kind = 'share.revocation.disconnect_pending',
+           payload = case
+             when jsonb_typeof(payload) = 'object' then
+               payload || jsonb_build_object(
+                 'retryAfter',
+                 to_char(
+                   (clock_timestamp() + $3::integer * interval '1 second') at time zone 'UTC',
+                   '${POSTGRES_UTC_ISO_FORMAT}'
+                 )
+               )
+             else jsonb_build_object(
+               'retryAfter',
+               to_char(
+                 (clock_timestamp() + $3::integer * interval '1 second') at time zone 'UTC',
+                 '${POSTGRES_UTC_ISO_FORMAT}'
+               )
+             )
+           end
+       where id = $1
+         and kind = 'share.revocation.disconnect_claimed'
+         and payload->>'claimId' = $2`,
+      [eventId, claimId, SHARE_REVOCATION_RETRY_DELAY_SECONDS],
+    )
+    .catch(() => undefined);
+}
+
+export async function retryPendingShareRevocationDisconnects(
+  deps: SharedAtomDeps | undefined,
+  limit = 100,
+): Promise<{ ok: true; attempted: number; disconnected: number; failed: number }> {
+  const pool = requirePool(deps);
+  const hocuspocusAdmin = deps?.hocuspocusAdmin;
+  if (!hocuspocusAdmin) {
+    throw coded("failed-precondition", "Hocuspocus admin disconnect is not configured");
+  }
+  const numericLimit = Number(limit);
+  const normalizedLimit = Number.isFinite(numericLimit) ? Math.trunc(numericLimit) : 100;
+  const boundedLimit = Math.max(1, Math.min(normalizedLimit, SHARE_REVOCATION_WORKER_MAX_BATCH));
+  let disconnected = 0;
+  let failed = 0;
+  const client = await pool.connect();
+  let destroyClient = false;
+  let attempted = 0;
+  const claimed: Array<{
+    eventId: string;
+    claimId: string;
+    workspaceId: string;
+    userId: string;
+  }> = [];
+  try {
+    await client.query("begin");
+    const { rows } = await client.query<{
+      id: string;
+      kind: string;
+      workspace_id: string;
+      target_id: string;
+      payload: unknown;
+    }>(
+      `select id, kind, workspace_id, target_id, payload
+       from workspace_events
+       where (
+            kind = 'share.revocation.disconnect_pending'
+            and coalesce(payload->>'retryAfter', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}
+          )
+          or (
+            kind = 'share.revocation.disconnect_claimed'
+            and (
+              (
+                payload->>'claimExpiresAt' is not null
+                and payload->>'claimExpiresAt' <= ${POSTGRES_UTC_ISO_NOW_SQL}
+              )
+              or (
+                payload->>'claimExpiresAt' is null
+                and coalesce(payload->>'claimedAt', '') <= to_char(
+                  (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
+                  '${POSTGRES_UTC_ISO_FORMAT}'
+                )
+              )
+            )
+          )
+          or kind = 'share.revocation.disconnect_completed'
+       order by
+         case
+           when kind = 'share.revocation.disconnect_pending' then coalesce(payload->>'retryAfter', '')
+           when kind = 'share.revocation.disconnect_claimed' then coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '')
+           when kind = 'share.revocation.disconnect_completed' then coalesce(payload->>'completedAt', '')
+           else ''
+         end asc,
+         created_at asc
+       limit $1
+       for update skip locked`,
+      [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS],
+    );
+    for (const row of rows) {
+      if (row.kind === "share.revocation.disconnect_completed") {
+        await client.query(
+          `delete from workspace_events
+           where id = $1
+             and kind = 'share.revocation.disconnect_completed'`,
+          [row.id],
+        );
+        continue;
+      }
+      attempted += 1;
+      const recipientUserIdFromShare = await readRevokedShareRecipientUserId(
+        client,
+        row.workspace_id,
+        row.target_id,
+      );
+      if (!recipientUserIdFromShare) {
+        failed += 1;
+        await client.query("delete from workspace_events where id = $1", [row.id]);
+        continue;
+      }
+      const claimId = randomUUID();
+      await client.query(
+        `update workspace_events
+         set kind = 'share.revocation.disconnect_claimed',
+             payload = case
+               when jsonb_typeof(payload) = 'object' then
+                 payload || jsonb_build_object(
+                   'recipientUserId', $3::text,
+                   'claimedAt', ${POSTGRES_UTC_ISO_NOW_SQL},
+                   'claimExpiresAt',
+                     to_char(
+                       (clock_timestamp() + $4::integer * interval '1 second') at time zone 'UTC',
+                       '${POSTGRES_UTC_ISO_FORMAT}'
+                     ),
+                   'claimId', $2::text
+                 )
+               else jsonb_build_object(
+                 'recipientUserId', $3::text,
+                 'claimedAt', ${POSTGRES_UTC_ISO_NOW_SQL},
+                 'claimExpiresAt',
+                   to_char(
+                     (clock_timestamp() + $4::integer * interval '1 second') at time zone 'UTC',
+                     '${POSTGRES_UTC_ISO_FORMAT}'
+                   ),
+                 'claimId', $2::text
+               )
+             end
+         where id = $1`,
+        [row.id, claimId, recipientUserIdFromShare, SHARE_REVOCATION_CLAIM_STALE_SECONDS],
+      );
+      claimed.push({
+        eventId: row.id,
+        claimId,
+        workspaceId: row.workspace_id,
+        userId: recipientUserIdFromShare,
+      });
+    }
+    await client.query("commit");
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+      destroyClient = true;
+    }
+    throw error;
+  } finally {
+    client.release(destroyClient);
+  }
+  for (const row of claimed) {
+    try {
+      await disconnectWorkspaceUserWithinLease(hocuspocusAdmin, {
+        workspaceId: row.workspaceId,
+        userId: row.userId,
+      });
+    } catch {
+      failed += 1;
+      await requeueRevocationDisconnectEvent(pool, row.eventId, row.claimId);
+      continue;
+    }
+    disconnected += 1;
+    await completeRevocationDisconnectEvent(pool, row.eventId, row.claimId);
+  }
+  return { ok: true, attempted, disconnected, failed };
+}
+
+async function disconnectWorkspaceUserWithinLease(
+  hocuspocusAdmin: SharedAtomDeps["hocuspocusAdmin"],
+  input: { workspaceId: string; userId: string },
+): Promise<void> {
+  if (!hocuspocusAdmin) {
+    throw new Error("Hocuspocus admin disconnect is not configured");
+  }
+  const leaseTimeoutMs = readHocuspocusAdminDisconnectTimeoutMs(hocuspocusAdmin);
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const disconnect = hocuspocusAdmin.disconnectWorkspaceUser({
+    ...input,
+    signal: controller.signal,
+  });
+  disconnect.catch(() => undefined);
+  try {
+    await Promise.race([
+      disconnect,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => {
+            controller.abort(new Error("Hocuspocus admin disconnect timed out"));
+            reject(new Error("Hocuspocus admin disconnect timed out"));
+          },
+          leaseTimeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function readHocuspocusAdminDisconnectTimeoutMs(
+  hocuspocusAdmin: NonNullable<SharedAtomDeps["hocuspocusAdmin"]>,
+): number {
+  const configuredTimeoutMs = Number(
+    (hocuspocusAdmin as { disconnectTimeoutMs?: unknown }).disconnectTimeoutMs,
+  );
+  if (Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0) {
+    return Math.ceil(configuredTimeoutMs);
+  }
+  return SHARE_REVOCATION_DISCONNECT_TIMEOUT_MAX_MS;
+}
+
+async function readRevokedShareRecipientUserId(
+  client: pg.PoolClient,
+  workspaceId: string,
+  shareId: string,
+): Promise<string | undefined> {
+  const { rows } = await client.query<{ recipient_user_id: string }>(
+    `select recipient_user_id
+     from shares
+     where workspace_id = $1 and id = $2 and deleted_at is not null
+     limit 1`,
+    [workspaceId, shareId],
+  );
+  return rows[0]?.recipient_user_id || undefined;
 }
 
 // GET /workspaces/:workspaceId/shares — live shares, members/owners only.
