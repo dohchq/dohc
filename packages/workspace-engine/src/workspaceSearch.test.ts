@@ -1,0 +1,204 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createLinkedChatStore, linkedChatProjectionPath } from "./linkedChatStore";
+import { createVersionedTextStore } from "./versionedTextStore";
+import { searchWorkspaceEngine } from "./workspaceSearch";
+
+let root: string;
+let now = 1000;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), "dohc-workspace-search-"));
+  now = 1000;
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+function versionStore() {
+  const counters = { conflict: 0, moment: 0, object: 0, version: 0 };
+  return createVersionedTextStore(root, {
+    nowMs: () => {
+      now += 10;
+      return now;
+    },
+    createId: (kind) => {
+      counters[kind] += 1;
+      return `${kind}-${counters[kind]}`;
+    },
+  });
+}
+
+function chatStore() {
+  const counters = { message: 0, thread: 0 };
+  return createLinkedChatStore(root, {
+    nowMs: () => {
+      now += 10;
+      return now;
+    },
+    createId: (kind) => {
+      counters[kind] += 1;
+      return `${kind}-${counters[kind]}`;
+    },
+  });
+}
+
+async function seededStores() {
+  const versions = versionStore();
+  const chats = chatStore();
+  const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+  const file = await versions.writeTextFile({
+    workspaceId: "workspace-a",
+    versionId: main.id,
+    path: "docs/plan.md",
+    text: "Launch plan\n\nThe alpha keyword lives here.\n",
+    metadata: { origin: "local-file", summary: "seed plan" },
+  });
+  await versions.writeTextFile({
+    workspaceId: "workspace-a",
+    versionId: main.id,
+    path: ".env",
+    text: "ALPHA_SECRET=do-not-index\n",
+    metadata: { origin: "local-file", summary: "seed secret" },
+  });
+  const thread = await chats.createThread({
+    workspaceId: "workspace-a",
+    title: "Plan discussion",
+    linkedFile: { objectId: file.object.id, pathHint: "docs/plan.md" },
+  });
+  await chats.sendMessage({
+    workspaceId: "workspace-a",
+    threadId: thread.id,
+    author: { kind: "human", displayName: "Ice" },
+    body: "The chat alpha keyword should also search.",
+  });
+  return { chats, file, main, thread, versions };
+}
+
+describe("workspace engine search", () => {
+  it("returns file and linked chat hits through one bounded result list", async () => {
+    const { chats, main, thread, versions } = await seededStores();
+
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "alpha",
+      versions,
+      chats,
+    });
+
+    expect(results).toMatchObject([
+      {
+        surface: "file",
+        path: "docs/plan.md",
+        line: 3,
+        objectId: "object-1",
+      },
+      {
+        surface: "chat",
+        path: linkedChatProjectionPath({ workspaceId: "workspace-a", threadId: thread.id }),
+        threadId: thread.id,
+      },
+    ]);
+    expect(results[0]?.preview).toContain("alpha keyword");
+    expect(results[1]?.preview).toContain("chat alpha keyword");
+  });
+
+  it("defaults .env files to excluded from search", async () => {
+    const { chats, main, versions } = await seededStores();
+
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "ALPHA_SECRET",
+      versions,
+      chats,
+    });
+
+    expect(results).toEqual([]);
+  });
+
+  it("lets policy hide individual files while still searching visible chats", async () => {
+    const { chats, main, versions } = await seededStores();
+
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "alpha",
+      versions,
+      chats,
+      policy: {
+        fileVisibility: (file) =>
+          file.path === "docs/plan.md"
+            ? { searchable: false, reason: "permission-denied" }
+            : { searchable: true },
+      },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ surface: "chat" });
+  });
+
+  it("does not leak denied linked file metadata through chat search", async () => {
+    const { chats, main, thread, versions } = await seededStores();
+
+    await chats.sendMessage({
+      workspaceId: "workspace-a",
+      threadId: thread.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Look for the unavailable marker.",
+    });
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "Linked file: unavailable",
+      versions,
+      chats,
+      policy: {
+        chatVisibility: () => ({
+          searchable: true,
+          projectionFileAccess: { kind: "denied" },
+        }),
+      },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ surface: "chat", threadId: thread.id });
+    expect(results[0]?.preview).toContain("Linked file: unavailable");
+    expect(JSON.stringify(results)).not.toContain("docs/plan.md");
+    expect(JSON.stringify(results)).not.toContain("object-1");
+  });
+
+  it("honors the result limit across files and chats", async () => {
+    const { chats, main, versions } = await seededStores();
+
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "alpha",
+      versions,
+      chats,
+      limit: 1,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ surface: "file" });
+  });
+
+  it("returns no results for blank queries", async () => {
+    const { chats, main, versions } = await seededStores();
+
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "   ",
+        versions,
+        chats,
+      }),
+    ).resolves.toEqual([]);
+  });
+});

@@ -12751,6 +12751,153 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspa
 - P0G must add integrated E2E/local-agent QA showing a chat linked to a file in
   the usable surface.
 
+## PR P0F - Search And Policy Smoke
+
+Status: restacked on P0E; not approved
+Branch: codex/think-bigger-p0f-search-policy
+Worktree: `/home/ice/dev/dohc-p0f-search-policy`
+Implementation workstream, if used: main orchestration thread
+PR Link: [#53](https://github.com/dohc-ai/dohc/pull/53)
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0F worktree stacked after P0E.
+- [x] Add package-level search across versioned text file snapshots.
+- [x] Add package-level search across read-only linked chat projections.
+- [x] Apply default `.env` secret exclusion as a hard floor.
+- [x] Allow policy to hide individual visible files.
+- [x] Redact linked-file metadata from denied chat projection search results.
+- [x] Bound result counts.
+- [ ] Open PR after PR00 docs-only exception approval and upstream lane PR
+      decisions are settled, or use a stacked PR target.
+
+### Files Changed
+
+- packages/workspace-engine/package.json
+- packages/workspace-engine/src/index.ts
+- packages/workspace-engine/src/workspaceSearch.ts
+- packages/workspace-engine/src/workspaceSearch.test.ts
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- `packages/workspace-engine/src/workspaceSearch.test.ts`
+  - returns file and linked chat hits through one result list.
+  - defaults `.env` files to excluded from search.
+  - policy can hide individual files while still searching visible chats.
+  - denied linked-file projection does not leak path or object ID.
+  - result limit is honored across files and chats.
+  - blank queries return no results.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0f-search-policy /home/ice/dev/dohc-p0f-search-policy codex/think-bigger-p0e-linked-chat
+pnpm install --frozen-lockfile
+pnpm --filter @dohc/workspace-engine test
+pnpm --filter @dohc/workspace-engine typecheck
+git diff --check
+git rebase --onto codex/think-bigger-p0e-linked-chat 3842d53 codex/think-bigger-p0f-search-policy
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+# 2026-06-29 P0E stack refresh / major-gate review policy validation
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --frozen-lockfile --ignore-scripts
+git diff --check
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" node scripts/check-think-bigger-doc-links.mjs
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" REPO_ROOT="$(git rev-parse --show-toplevel)" sh -c 'cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs"'
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/workspaceSearch.test.ts src/linkedChatStore.test.ts src/versionedTextMerge.test.ts src/versionedTextStore.test.ts src/versionedFileWorkspace.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+```
+
+### E2E / Visual / Manual QA
+
+- No desktop E2E yet. P0F proves the search/policy loop at package level.
+- P0G must wire integrated search smoke through the usable surface or record
+  the precise blocker if the desktop search path is not yet connected to the
+  engine substrate.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable until P0G wires the local agent loop
+  against the proof arc.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: `.env` files are excluded as a hard floor; denied
+  linked chat projections hide object IDs and stored path hints.
+
+### CodeRabbit
+
+- Status: deferred until the P0F major readiness/material-risk gate under the
+  2026-06-29 user-directed review policy; no per-fix rerun is required for the
+  P0E stack-refresh merge.
+- Findings: none solicited for this stack-refresh merge.
+- Fixes: not applicable for this stack-refresh merge.
+- Overrides:
+
+### Subagent Reviews
+
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+
+### Security / Privacy Notes
+
+- Search runs over canonical engine snapshots/projections rather than raw
+  `.dohc` files.
+- `.env` exclusion is enforced before caller-provided file policy, so custom
+  policy cannot accidentally re-include secrets.
+- Chat projection search receives a policy-controlled linked-file access state;
+  denied projections return only `Linked file: unavailable`.
+- Search result objects for chat hits do not include file object IDs.
+- Ignored/reserved path segments are filtered before file search.
+
+### Performance Notes
+
+- Budget areas touched: package-level in-memory search over small Phase 0
+  engine snapshots and projections.
+- Metrics:
+  - workspace-engine tests: 36 tests in 1.71s locally.
+  - Latest 2026-06-29 P0E stack refresh with Node v24.18.0 and `TMPDIR=/tmp`:
+    docs link/anchor checks in repo and from `/tmp` passed for 7 files;
+    workspace-engine `workspaceSearch.test.ts`, `linkedChatStore.test.ts`,
+    `versionedTextMerge.test.ts`, `versionedTextStore.test.ts`, and
+    `versionedFileWorkspace.test.ts` passed 175 tests in 30.55s;
+    workspace-history passed 47 tests in 11.64s; workspace-engine and
+    workspace-history typechecks passed.
+- Machine/CI context: local Codex machine; latest rerun happened after the P0E
+  restack and used Linux Node v24.18.0/Corepack for the first rerun, then the
+  local Node v24.18.0/pnpm toolchain for the 2026-06-29 P0E stack refresh.
+- Budget pass/fail: no renderer/startup/watch budget applies yet.
+- Jank/blocking notes: no renderer integration or full-workspace scan ships in
+  this PR.
+
+### Migration Notes
+
+- Adds a package subpath export `@dohc/workspace-engine/workspaceSearch`.
+- No production app path calls this search layer yet.
+
+### Remaining Risk
+
+- This is a package-level smoke, not the final desktop ripgrep/search UI path.
+- Effective policy is intentionally minimal; full share/member/file policy
+  resolver remains for the later architecture PRs.
+- Result ranking and multi-match-per-line behavior are minimal.
+- PR00 docs-only local-agent-CLI exception and upstream lane PR approvals remain
+  gates before P0F can be marked complete.
+- Required CodeRabbit major-gate review and stacked PR review are still pending.
+
+### Follow-Up / Deletion Conditions
+
+- P0G must prove the integrated search/policy flow with files, linked chats,
+  and local agent QA or record what blocks integration.
+- Later search architecture should either promote this API or replace it with a
+  shared policy-aware indexer.
+
 ### Phase 0 Proof Arc
 
 PR00 remains a docs-only orchestration PR. The checked proof items below refer

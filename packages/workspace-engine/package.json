@@ -6,6 +6,7 @@
     ".": "./src/index.ts",
     "./linkedChatStore": "./src/linkedChatStore.ts",
     "./versioned-file-workspace": "./src/versionedFileWorkspace.ts",
+    "./workspaceSearch": "./src/workspaceSearch.ts",
     "./testing": "./src/testing.ts"
   },
   "scripts": {
