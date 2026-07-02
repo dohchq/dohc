@@ -370,6 +370,12 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../workspace-core
+      '@dohc/workspace-fs':
+        specifier: workspace:*
+        version: link:../workspace-fs
+      '@dohc/workspace-history':
+        specifier: workspace:*
+        version: link:../workspace-history
     devDependencies:
       '@types/node':
         specifier: ^22.19.19

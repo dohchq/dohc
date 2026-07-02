@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  MAX_VERSIONED_TEXT_FILE_BYTES,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
   createVersionedTextStore,
@@ -234,6 +235,563 @@ describe("versioned text store", () => {
     ).resolves.toMatchObject({ objectId: write.object.id, text: "Keep this identity\n" });
   });
 
+  it("rolls back a rename mutation to the original source path without recording a new moment", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Keep this identity\n",
+      metadata: localFileWrite,
+    });
+    const rename = await store.renameTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      fromPath: "notes/today.md",
+      toPath: "archive/today.md",
+      metadata: { origin: "local-file", summary: "renamed in main" },
+    });
+
+    await store.rollbackTextFileMutation({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "archive/today.md",
+      mutationMomentId: rename.moment.id,
+    });
+
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: write.object.id,
+      latestMomentId: write.moment.id,
+      text: "Keep this identity\n",
+    });
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "archive/today.md",
+      }),
+    ).resolves.toBeNull();
+    const reloadedAfterRenameRollback = createVersionedTextStore(root);
+    await expect(
+      reloadedAfterRenameRollback.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: write.object.id,
+      latestMomentId: write.moment.id,
+      text: "Keep this identity\n",
+    });
+    await expect(
+      reloadedAfterRenameRollback.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "archive/today.md",
+      }),
+    ).resolves.toBeNull();
+    const raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+    expect(
+      raw.workspaces["workspace-a"].moments.map(
+        (moment: { operation: string }) => moment.operation,
+      ),
+    ).toEqual(["write"]);
+  });
+
+  it("rolls back write mutations without recording a new moment", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const created = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/new.md",
+      text: "New draft\n",
+      metadata: localFileWrite,
+    });
+
+    await store.rollbackTextFileMutation({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/new.md",
+      mutationMomentId: created.moment.id,
+    });
+
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/new.md",
+      }),
+    ).resolves.toBeNull();
+    const reloadedAfterCreateRollback = createVersionedTextStore(root);
+    await expect(
+      reloadedAfterCreateRollback.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/new.md",
+      }),
+    ).resolves.toBeNull();
+    let raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+    expect(raw.workspaces["workspace-a"].moments).toHaveLength(0);
+
+    const base = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/existing.md",
+      text: "Original\n",
+      metadata: localFileWrite,
+    });
+    const overwrite = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/existing.md",
+      text: "Overwritten\n",
+      metadata: apiWrite,
+    });
+
+    await store.rollbackTextFileMutation({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/existing.md",
+      mutationMomentId: overwrite.moment.id,
+    });
+
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/existing.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: base.object.id,
+      latestMomentId: base.moment.id,
+      text: "Original\n",
+    });
+    const reloadedAfterOverwriteRollback = createVersionedTextStore(root);
+    await expect(
+      reloadedAfterOverwriteRollback.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/existing.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: base.object.id,
+      latestMomentId: base.moment.id,
+      text: "Original\n",
+    });
+    raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+    expect(
+      raw.workspaces["workspace-a"].moments.map(
+        (moment: { id: string; operation: string }) => [moment.id, moment.operation],
+      ),
+    ).toEqual([[base.moment.id, "write"]]);
+  });
+
+  it("does not validate unused legacy rollback text for modern mutation moments", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const base = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/existing.md",
+      text: "Original\n",
+      metadata: localFileWrite,
+    });
+    const overwrite = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/existing.md",
+      text: "Overwritten\n",
+      metadata: apiWrite,
+    });
+
+    await store.rollbackTextFileMutation({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/existing.md",
+      mutationMomentId: overwrite.moment.id,
+      legacyBeforeText: "x".repeat(MAX_VERSIONED_TEXT_FILE_BYTES + 1),
+    });
+
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/existing.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: base.object.id,
+      latestMomentId: base.moment.id,
+      text: "Original\n",
+    });
+  });
+
+  it("rolls back a delete mutation without recording a new moment", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Restore me\n",
+      metadata: localFileWrite,
+    });
+    const deleted = await store.deleteTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      metadata: localFileWrite,
+    });
+
+    await store.rollbackTextFileMutation({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      mutationMomentId: deleted.moment.id,
+    });
+
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: write.object.id,
+      latestMomentId: write.moment.id,
+      text: "Restore me\n",
+    });
+    const reloadedAfterDeleteRollback = createVersionedTextStore(root);
+    await expect(
+      reloadedAfterDeleteRollback.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: write.object.id,
+      latestMomentId: write.moment.id,
+      text: "Restore me\n",
+    });
+    const raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+    expect(
+      raw.workspaces["workspace-a"].moments.map(
+        (moment: { operation: string }) => moment.operation,
+      ),
+    ).toEqual(["write"]);
+  });
+
+  it("rolls back legacy fork mutations against inherited ancestor snapshots", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const base = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Inherited base\n",
+      metadata: localFileWrite,
+    });
+    const named = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      fromVersionId: main.id,
+      name: "Forked work",
+    });
+    const namedWrite = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: named.id,
+      path: "notes/today.md",
+      text: "Failed fork write\n",
+      metadata: apiWrite,
+    });
+    const statePath = join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+    const raw = JSON.parse(await readFile(statePath, "utf8"));
+    const rawMoment = raw.workspaces["workspace-a"].moments.find(
+      (moment: { id: string }) => moment.id === namedWrite.moment.id,
+    );
+    delete rawMoment.before;
+    await writeFile(statePath, `${JSON.stringify(raw)}\n`);
+
+    const reloaded = createVersionedTextStore(root);
+    await reloaded.rollbackTextFileMutation({
+      workspaceId: "workspace-a",
+      versionId: named.id,
+      path: "notes/today.md",
+      mutationMomentId: namedWrite.moment.id,
+      legacyBeforeText: "Inherited base\n",
+    });
+
+    await expect(
+      reloaded.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({
+      objectId: base.object.id,
+      latestMomentId: base.moment.id,
+      text: "Inherited base\n",
+    });
+  });
+
+  it("rejects rollback when a named version depends on the mutation moment", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Fork point\n",
+      metadata: localFileWrite,
+    });
+    const named = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Depends on write",
+      fromVersionId: main.id,
+    });
+
+    await expectStoreError(
+      store.rollbackTextFileMutation({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+        mutationMomentId: write.moment.id,
+      }),
+      "invalid-input",
+    );
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Fork point\n" });
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Fork point\n" });
+  });
+
+  it("rejects rollback when a child forks exactly at the mutation moment", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Fork point\n",
+      metadata: localFileWrite,
+    });
+    const named = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Fork point child",
+      fromVersionId: main.id,
+    });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: named.id,
+      path: "notes/other.md",
+      text: "Independent child work\n",
+      metadata: apiWrite,
+    });
+
+    await expectStoreError(
+      store.rollbackTextFileMutation({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+        mutationMomentId: write.moment.id,
+      }),
+      "invalid-input",
+    );
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Fork point\n" });
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/other.md",
+      }),
+    ).resolves.toMatchObject({ text: "Independent child work\n" });
+  });
+
+  it("rejects delete rollback when a later fork depends on the tombstone", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Will be deleted\n",
+      metadata: localFileWrite,
+    });
+    const deleted = await store.deleteTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      metadata: localFileWrite,
+    });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/other.md",
+      text: "Fork after delete\n",
+      metadata: localFileWrite,
+    });
+    const named = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Depends on delete tombstone",
+      fromVersionId: main.id,
+    });
+
+    await expectStoreError(
+      store.rollbackTextFileMutation({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+        mutationMomentId: deleted.moment.id,
+      }),
+      "invalid-input",
+    );
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/other.md",
+      }),
+    ).resolves.toMatchObject({ objectId: expect.any(String), text: "Fork after delete\n" });
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/other.md",
+      }),
+    ).resolves.toMatchObject({ objectId: expect.any(String), text: "Fork after delete\n" });
+    expect(write.object.id).toBe(deleted.object.id);
+  });
+
+  it("rejects rollback when another version keeps the moment as a mutation preimage", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const first = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Shared base\n",
+      metadata: localFileWrite,
+    });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/other.md",
+      text: "Fork marker\n",
+      metadata: localFileWrite,
+    });
+    const named = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Local rewrite",
+      fromVersionId: main.id,
+    });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: named.id,
+      path: "notes/today.md",
+      text: "Named rewrite\n",
+      metadata: apiWrite,
+    });
+
+    await expectStoreError(
+      store.rollbackTextFileMutation({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+        mutationMomentId: first.moment.id,
+      }),
+      "invalid-input",
+    );
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Named rewrite\n" });
+  });
+
+  it("rejects rollback when a descendant inherits an ancestor object mutation", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Shared base\n",
+      metadata: localFileWrite,
+    });
+    const ancestor = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Ancestor rewrite",
+      fromVersionId: main.id,
+    });
+    const ancestorWrite = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: ancestor.id,
+      path: "notes/today.md",
+      text: "Ancestor text\n",
+      metadata: apiWrite,
+    });
+    const descendant = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Descendant rewrite",
+      fromVersionId: ancestor.id,
+    });
+
+    await expectStoreError(
+      store.rollbackTextFileMutation({
+        workspaceId: "workspace-a",
+        versionId: ancestor.id,
+        path: "notes/today.md",
+        mutationMomentId: ancestorWrite.moment.id,
+      }),
+      "invalid-input",
+    );
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: descendant.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Ancestor text\n" });
+  });
+
   it("rejects same-path renames without recording history", async () => {
     const store = storeWithDeterministicIds();
     const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
@@ -364,6 +922,22 @@ describe("versioned text store", () => {
       }),
     ).rejects.toMatchObject({ code: "workspace-mismatch" });
     await expect(
+      store.deleteTextFile({
+        workspaceId: "workspace-b",
+        versionId: named.id,
+        path: "notes/private.md",
+        metadata: localFileWrite,
+      }),
+    ).rejects.toMatchObject({ code: "workspace-mismatch" });
+    await expect(
+      store.rollbackTextFileMutation({
+        workspaceId: "workspace-b",
+        versionId: named.id,
+        path: "notes/private.md",
+        mutationMomentId: write.moment.id,
+      }),
+    ).rejects.toMatchObject({ code: "workspace-mismatch" });
+    await expect(
       store.listTextFiles({
         workspaceId: "workspace-b",
         versionId: named.id,
@@ -450,6 +1024,15 @@ describe("versioned text store", () => {
         path: "notes/today.md",
         text: "Bad metadata\n",
         metadata: { origin: "api", summary: 123 } as unknown as typeof apiWrite,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-metadata" });
+    await expect(
+      store.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+        text: "Bad metadata\n",
+        metadata: { origin: "api", summary: "x".repeat(16 * 1024 + 1) },
       }),
     ).rejects.toMatchObject({ code: "invalid-metadata" });
     await expect(
@@ -553,6 +1136,73 @@ describe("versioned text store", () => {
         metadata: apiWrite,
       }),
     ).rejects.toMatchObject({ code: "invalid-text" });
+
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      store.listTextFiles({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+      }),
+    ).resolves.toEqual([]);
+    const raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+    expect(raw.workspaces["workspace-a"].moments).toHaveLength(0);
+  });
+
+  it("rejects oversized or non-round-trippable text before persisting", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    async function expectNoInvalidWritesPersisted() {
+      await expect(
+        store.readTextFile({
+          workspaceId: "workspace-a",
+          versionId: main.id,
+          path: "notes/huge.md",
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        store.readTextFile({
+          workspaceId: "workspace-a",
+          versionId: main.id,
+          path: "notes/bad-string.md",
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        store.listTextFiles({
+          workspaceId: "workspace-a",
+          versionId: main.id,
+        }),
+      ).resolves.toEqual([]);
+      const raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+      expect(raw.workspaces["workspace-a"].moments).toHaveLength(0);
+    }
+
+    await expect(
+      store.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/huge.md",
+        text: "x".repeat(MAX_VERSIONED_TEXT_FILE_BYTES + 1),
+        metadata: apiWrite,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-text" });
+    await expectNoInvalidWritesPersisted();
+
+    await expect(
+      store.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/bad-string.md",
+        text: "bad \uD800\n",
+        metadata: apiWrite,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-text" });
+    await expectNoInvalidWritesPersisted();
   });
 
   it("rejects non-string workspace, version name, and path inputs with typed errors", async () => {
@@ -699,6 +1349,8 @@ describe("versioned text store", () => {
     await expectStoreError(store.readTextFile(missingInput), "invalid-input");
     await expectStoreError(store.listTextFiles(missingInput), "invalid-input");
     await expectStoreError(store.renameTextFile(missingInput), "invalid-input");
+    await expectStoreError(store.deleteTextFile(missingInput), "invalid-input");
+    await expectStoreError(store.rollbackTextFileMutation(missingInput), "invalid-input");
     await expectStoreError(store.getObject(missingInput), "invalid-input");
   });
 
@@ -1268,6 +1920,42 @@ describe("versioned text store", () => {
     expect(snapshot?.metadata).not.toHaveProperty("extra");
   });
 
+  it("loads legacy persisted paths under ignored scan segments", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Legacy path\n",
+      metadata: apiWrite,
+    });
+    const statePath = join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+    const raw = JSON.parse(await readFile(statePath, "utf8"));
+    const legacyPath = "pkg/node_modules/legacy.md";
+    const workspace = raw.workspaces["workspace-a"];
+    delete workspace.pathAliases.main["notes/today.md"];
+    workspace.pathAliases.main[legacyPath] = write.object.id;
+    workspace.snapshots.main[write.object.id].path = legacyPath;
+    workspace.moments[0].path = legacyPath;
+    workspace.moments[0].payload.after.path = legacyPath;
+    await writeFile(statePath, `${JSON.stringify(raw)}\n`);
+    const reloaded = createVersionedTextStore(root);
+
+    await expect(
+      reloaded.listTextFiles({ workspaceId: "workspace-a", versionId: main.id }),
+    ).resolves.toMatchObject([{ path: legacyPath, text: "Legacy path\n" }]);
+    await expect(
+      reloaded.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: legacyPath,
+        text: "still blocked for new writes\n",
+        metadata: apiWrite,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-path" });
+  });
+
   it("rejects persisted object and moment ids that are blank", async () => {
     const store = storeWithDeterministicIds();
     const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
@@ -1443,6 +2131,46 @@ describe("versioned text store", () => {
     );
   });
 
+  it("rejects oversized or non-round-trippable persisted text", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Safe text\n",
+      metadata: apiWrite,
+    });
+    const rewrite = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Rewritten text\n",
+      metadata: apiWrite,
+    });
+    const statePath = join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+    const raw = JSON.parse(await readFile(statePath, "utf8"));
+    const legacyOversizedText = "x".repeat(MAX_VERSIONED_TEXT_FILE_BYTES + 1);
+    raw.workspaces["workspace-a"].snapshots.main[write.object.id].text = legacyOversizedText;
+    await writeFile(statePath, `${JSON.stringify(raw)}\n`);
+    const snapshotReload = createVersionedTextStore(root);
+    await expect(
+      snapshotReload.getMainVersion({ workspaceId: "workspace-a" }),
+    ).rejects.toMatchObject({ code: "state-corrupt" });
+
+    raw.workspaces["workspace-a"].snapshots.main[write.object.id].text = "Rewritten text\n";
+    const rawRewriteMoment = raw.workspaces["workspace-a"].moments.find(
+      (moment: { id: string }) => moment.id === rewrite.moment.id,
+    );
+    expect(rawRewriteMoment).toBeDefined();
+    rawRewriteMoment!.before.text = "\uD800";
+    await writeFile(statePath, `${JSON.stringify(raw)}\n`);
+    const momentReload = createVersionedTextStore(root);
+    await expect(momentReload.getMainVersion({ workspaceId: "workspace-a" })).rejects.toMatchObject(
+      { code: "state-corrupt" },
+    );
+  });
+
   it("rejects snapshots with stale same-version latest moments", async () => {
     const store = storeWithDeterministicIds();
     const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
@@ -1541,6 +2269,42 @@ describe("versioned text store", () => {
     ).rejects.toMatchObject({ code: "state-corrupt" });
   });
 
+  it("rejects explicit null before snapshots that erase inherited history", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Inherited text\n",
+      metadata: apiWrite,
+    });
+    const version = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      fromVersionId: main.id,
+      name: "Fork",
+    });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: version.id,
+      path: "notes/today.md",
+      text: "Fork rewrite\n",
+      metadata: apiWrite,
+    });
+    const statePath = join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+    const raw = JSON.parse(await readFile(statePath, "utf8"));
+    const rawMoment = raw.workspaces["workspace-a"].moments.find(
+      (moment: { id: string }) => moment.id === write.moment.id,
+    );
+    rawMoment.before = null;
+    await writeFile(statePath, `${JSON.stringify(raw)}\n`);
+    const reloaded = createVersionedTextStore(root);
+
+    await expect(
+      reloaded.listTextFiles({ workspaceId: "workspace-a", versionId: version.id }),
+    ).rejects.toMatchObject({ code: "state-corrupt" });
+  });
+
   it("maps malformed nested workspace state to the store corruption error", async () => {
     await ensureStoreStateDir();
     await writeFile(
@@ -1592,7 +2356,7 @@ describe("versioned text store", () => {
     });
   });
 
-  it("fails closed without deleting stale lock owners", async () => {
+  it("reclaims stale lock owners before writing", async () => {
     await ensureStoreStateDir();
     const lockDir = storeLockDir();
     const ownerPath = join(lockDir, "owner.json");
@@ -1609,14 +2373,240 @@ describe("versioned text store", () => {
     const store = createTestableVersionedTextStore({
       testHooks: {
         lockStaleMs: 1,
-        lockTimeoutMs: 1,
+        lockTimeoutMs: 1000,
+      },
+    });
+
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).resolves.toMatchObject({
+      workspaceId: "workspace-a",
+    });
+    await expect(readFile(ownerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("treats unreadable stale lock owners as missing owners", async () => {
+    await ensureStoreStateDir();
+    const lockDir = storeLockDir();
+    const ownerPath = join(lockDir, "owner.json");
+    await mkdir(ownerPath, { recursive: true });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockDir, old, old);
+    await utimes(ownerPath, old, old);
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        lockStaleMs: 1,
+        lockTimeoutMs: 1000,
+      },
+    });
+
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).resolves.toMatchObject({
+      workspaceId: "workspace-a",
+    });
+    await expect(stat(ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("waits behind malformed fresh lock owners", async () => {
+    await ensureStoreStateDir();
+    const lockDir = storeLockDir();
+    const ownerPath = join(lockDir, "owner.json");
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(ownerPath, "{not-json", "utf8");
+    const fresh = new Date();
+    await utimes(lockDir, fresh, fresh);
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        lockStaleMs: 60_000,
+        lockTimeoutMs: 75,
       },
     });
 
     await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).rejects.toMatchObject({
       code: "persist-failed",
     });
-    await expect(readFile(ownerPath, "utf8")).resolves.toContain("stale-token");
+    await expect(readFile(ownerPath, "utf8")).resolves.toBe("{not-json");
+  });
+
+  it("waits behind a fresh store-lock reclaimer lease", async () => {
+    await ensureStoreStateDir();
+    const reclaimerPath = `${storeLockDir()}.reclaimer`;
+    await mkdir(reclaimerPath, { recursive: true });
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        lockStaleMs: 60_000,
+        lockTimeoutMs: 75,
+      },
+    });
+
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).rejects.toMatchObject({
+      code: "persist-failed",
+    });
+
+    await rm(reclaimerPath, { recursive: true, force: true });
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).resolves.toMatchObject({
+      workspaceId: "workspace-a",
+    });
+  });
+
+  it("expires stale store-lock reclaimer leases before writing", async () => {
+    await ensureStoreStateDir();
+    const reclaimerPath = `${storeLockDir()}.reclaimer`;
+    await mkdir(reclaimerPath, { recursive: true });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(reclaimerPath, old, old);
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        lockStaleMs: 1_000,
+        lockTimeoutMs: 1000,
+      },
+    });
+
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).resolves.toMatchObject({
+      workspaceId: "workspace-a",
+    });
+    await expect(stat(reclaimerPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("expires stale store-lock reclaimers with unreadable owner metadata", async () => {
+    await ensureStoreStateDir();
+    const reclaimerPath = `${storeLockDir()}.reclaimer`;
+    const ownerPath = join(reclaimerPath, "owner.json");
+    await mkdir(ownerPath, { recursive: true });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(ownerPath, old, old);
+    await utimes(reclaimerPath, old, old);
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        lockStaleMs: 1_000,
+        lockTimeoutMs: 1000,
+      },
+    });
+
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).resolves.toMatchObject({
+      workspaceId: "workspace-a",
+    });
+    await expect(stat(reclaimerPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("waits behind a stale-looking store-lock reclaimer with a fresh owner", async () => {
+    await ensureStoreStateDir();
+    const reclaimerPath = `${storeLockDir()}.reclaimer`;
+    const ownerPath = join(reclaimerPath, "owner.json");
+    await mkdir(reclaimerPath, { recursive: true });
+    const freshOwnerNow = Date.now();
+    await writeFile(
+      ownerPath,
+      `${JSON.stringify({
+        token: "active-reclaimer",
+        pid: process.pid,
+        createdAtMs: freshOwnerNow,
+        heartbeatAtMs: freshOwnerNow,
+      })}\n`,
+    );
+    const old = new Date(freshOwnerNow - 120_000);
+    await utimes(reclaimerPath, old, old);
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        lockStaleMs: 60_000,
+        lockTimeoutMs: 75,
+      },
+    });
+
+    await expect(store.ensureMainVersion({ workspaceId: "workspace-a" })).rejects.toMatchObject({
+      code: "persist-failed",
+    });
+    expect((await stat(reclaimerPath)).isDirectory()).toBe(true);
+  });
+
+  it("does not release a lock directory that was replaced after acquisition", async () => {
+    let replaceLockOnPersist = false;
+    const lockDir = storeLockDir();
+    const ownerPath = join(lockDir, "owner.json");
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        beforePersist: async () => {
+          if (!replaceLockOnPersist) return;
+          replaceLockOnPersist = false;
+          const originalOwner = await readFile(ownerPath, "utf8");
+          await rename(lockDir, `${lockDir}.replaced-test`);
+          await mkdir(lockDir, { recursive: true });
+          await writeFile(ownerPath, originalOwner, "utf8");
+        },
+      },
+    });
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+
+    replaceLockOnPersist = true;
+    await expect(
+      store.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/replaced-lock.md",
+        text: "Should not persist\n",
+        metadata: localFileWrite,
+      }),
+    ).rejects.toMatchObject({ code: "persist-failed" });
+    expect((await stat(lockDir)).isDirectory()).toBe(true);
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/replaced-lock.md",
+      }),
+    ).resolves.toBeNull();
+    const reloaded = createVersionedTextStore(root);
+    await expect(
+      reloaded.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/replaced-lock.md",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("fences atomic publish against lock replacement after temp write", async () => {
+    let replaceLockBeforePublish = false;
+    const lockDir = storeLockDir();
+    const ownerPath = join(lockDir, "owner.json");
+    const store = createTestableVersionedTextStore({
+      testHooks: {
+        beforeAtomicPublish: async () => {
+          if (!replaceLockBeforePublish) return;
+          replaceLockBeforePublish = false;
+          const originalOwner = await readFile(ownerPath, "utf8");
+          await rename(lockDir, `${lockDir}.publish-replaced-test`);
+          await mkdir(lockDir, { recursive: true });
+          await writeFile(ownerPath, originalOwner, "utf8");
+        },
+      },
+    });
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+
+    replaceLockBeforePublish = true;
+    await expect(
+      store.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/fenced-publish.md",
+        text: "Should not publish\n",
+        metadata: localFileWrite,
+      }),
+    ).rejects.toMatchObject({ code: "persist-failed" });
+    expect((await stat(lockDir)).isDirectory()).toBe(true);
+    await expect(
+      store.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/fenced-publish.md",
+      }),
+    ).resolves.toBeNull();
+    const reloaded = createVersionedTextStore(root);
+    await expect(
+      reloaded.readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/fenced-publish.md",
+      }),
+    ).resolves.toBeNull();
   });
 
   it("serializes writes across store instances for the same root", async () => {

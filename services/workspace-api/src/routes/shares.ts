@@ -31,12 +31,26 @@ export type ShareRow = {
   capability: ShareCapability;
 };
 
+export type ShareRevocationDisconnectBacklogStats = {
+  pendingCount: number;
+  claimedCount: number;
+  oldestPendingAgeSeconds: number | null;
+  oldestClaimedAgeSeconds: number | null;
+};
+
 const SHARE_REVOCATION_RETRY_DELAY_SECONDS = 30;
 const SHARE_REVOCATION_CLAIM_STALE_SECONDS = 5 * 60;
 const SHARE_REVOCATION_DISCONNECT_TIMEOUT_MAX_MS = 5_000;
 const SHARE_REVOCATION_WORKER_MAX_BATCH = 100;
+const SHARE_REVOCATION_COMPLETED_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 const POSTGRES_UTC_ISO_FORMAT = `YYYY-MM-DD"T"HH24:MI:SS.MS"Z"`;
 const POSTGRES_UTC_ISO_NOW_SQL = `to_char(clock_timestamp() at time zone 'UTC', '${POSTGRES_UTC_ISO_FORMAT}')`;
+const POSTGRES_UTC_ISO_YEAR_RE =
+  "(?:[0-9]{3}[1-9]|[0-9]{2}[1-9][0-9]|[0-9][1-9][0-9]{2}|[1-9][0-9]{3})";
+const POSTGRES_UTC_ISO_DATE_RE =
+  `(?:(?:${POSTGRES_UTC_ISO_YEAR_RE}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8])))|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29))`;
+const POSTGRES_UTC_ISO_TIME_RE = "(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9][.][0-9]{3}";
+const POSTGRES_UTC_ISO_TEXT_RE = `^${POSTGRES_UTC_ISO_DATE_RE}T${POSTGRES_UTC_ISO_TIME_RE}Z$`;
 
 export async function createShare(
   deps: SharedAtomDeps | undefined,
@@ -147,18 +161,22 @@ export async function createShare(
 // Fellow members get a 403; callers with NO relationship to the share's
 // workspace get the same 404 as a missing id, so the response never confirms
 // a foreign shareId exists (security review P3 cross-tenant oracle).
+export type RevokeShareResult =
+  | { ok: true; revoked: true }
+  | { ok: true; revoked: true; disconnectDeferred: true };
+
 export async function revokeShare(
   deps: SharedAtomDeps | undefined,
   userId: string,
   shareId: string,
-): Promise<{ ok: true; revoked: true }> {
+): Promise<RevokeShareResult> {
   const pool = requirePool(deps);
   const client = await pool.connect();
   let destroyClient = false;
   let disconnect:
     | {
         eventId: string;
-        hocuspocusAdmin: NonNullable<SharedAtomDeps["hocuspocusAdmin"]>;
+        hocuspocusAdmin: SharedAtomDeps["hocuspocusAdmin"];
         workspaceId: string;
         userId: string;
       }
@@ -192,9 +210,6 @@ export async function revokeShare(
       throw coded("forbidden", "only the sharer or the workspace owner may revoke");
     }
     const hocuspocusAdmin = deps?.hocuspocusAdmin;
-    if (!hocuspocusAdmin) {
-      throw coded("failed-precondition", "Hocuspocus admin disconnect is not configured");
-    }
     await client.query("update shares set deleted_at = now(), updated_at = now() where id = $1", [
       shareId,
     ]);
@@ -239,13 +254,19 @@ export async function revokeShare(
     client.release(destroyClient);
   }
   if (!disconnect) throw new Error("share revocation disconnect target was not recorded");
+  if (!disconnect.hocuspocusAdmin) {
+    // The pending event above is the durable queue; deployments can start the
+    // retry worker after Hocuspocus admin disconnect is configured. Ops should
+    // alert on getShareRevocationDisconnectBacklogStats() count/age growth.
+    return { ok: true, revoked: true, disconnectDeferred: true };
+  }
   let claimId: string | undefined;
   try {
     claimId = await claimRevocationDisconnectEvent(pool, disconnect.eventId, disconnect.userId);
   } catch {
-    return { ok: true, revoked: true };
+    return { ok: true, revoked: true, disconnectDeferred: true };
   }
-  if (!claimId) return { ok: true, revoked: true };
+  if (!claimId) return { ok: true, revoked: true, disconnectDeferred: true };
   try {
     await disconnectWorkspaceUserWithinLease(disconnect.hocuspocusAdmin, {
       workspaceId: disconnect.workspaceId,
@@ -253,7 +274,7 @@ export async function revokeShare(
     });
   } catch {
     await requeueRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
-    return { ok: true, revoked: true };
+    return { ok: true, revoked: true, disconnectDeferred: true };
   }
   await completeRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
   return { ok: true, revoked: true };
@@ -293,7 +314,11 @@ async function claimRevocationDisconnectEvent(
          end
      where id = $1
        and kind = 'share.revocation.disconnect_pending'
-       and coalesce(payload->>'retryAfter', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}`,
+       and (
+         payload->>'retryAfter' is null
+         or payload->>'retryAfter' !~ '${POSTGRES_UTC_ISO_TEXT_RE}'
+         or payload->>'retryAfter' <= ${POSTGRES_UTC_ISO_NOW_SQL}
+       )`,
     [eventId, claimId, recipientUserId, SHARE_REVOCATION_CLAIM_STALE_SECONDS],
   );
   return rowCount ? claimId : undefined;
@@ -330,15 +355,6 @@ async function completeRevocationDisconnectEvent(
       .catch(() => undefined);
     return;
   }
-  await pool
-    .query(
-      `delete from workspace_events
-       where id = $1
-         and kind = 'share.revocation.disconnect_completed'
-         and payload->>'claimId' = $2`,
-      [eventId, claimId],
-    )
-    .catch(() => undefined);
 }
 
 async function requeueRevocationDisconnectEvent(
@@ -380,6 +396,7 @@ export async function retryPendingShareRevocationDisconnects(
   limit = 100,
 ): Promise<{ ok: true; attempted: number; disconnected: number; failed: number }> {
   const pool = requirePool(deps);
+  await cleanupStaleShareRevocationDisconnectEvents(pool).catch(() => undefined);
   const hocuspocusAdmin = deps?.hocuspocusAdmin;
   if (!hocuspocusAdmin) {
     throw coded("failed-precondition", "Hocuspocus admin disconnect is not configured");
@@ -407,40 +424,75 @@ export async function retryPendingShareRevocationDisconnects(
       target_id: string;
       payload: unknown;
     }>(
-      `select id, kind, workspace_id, target_id, payload
+      `select workspace_events.id,
+              workspace_events.kind,
+              workspace_events.workspace_id,
+              workspace_events.target_id,
+              workspace_events.payload
        from workspace_events
-       where (
-            kind = 'share.revocation.disconnect_pending'
-            and coalesce(payload->>'retryAfter', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}
-          )
-          or (
-            kind = 'share.revocation.disconnect_claimed'
-            and (
-              (
-                payload->>'claimExpiresAt' is not null
-                and payload->>'claimExpiresAt' <= ${POSTGRES_UTC_ISO_NOW_SQL}
-              )
-              or (
-                payload->>'claimExpiresAt' is null
-                and coalesce(payload->>'claimedAt', '') <= to_char(
-                  (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
-                  '${POSTGRES_UTC_ISO_FORMAT}'
-                )
-              )
-            )
-          )
-          or kind = 'share.revocation.disconnect_completed'
-       order by
-         case
-           when kind = 'share.revocation.disconnect_pending' then coalesce(payload->>'retryAfter', '')
-           when kind = 'share.revocation.disconnect_claimed' then coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '')
-           when kind = 'share.revocation.disconnect_completed' then coalesce(payload->>'completedAt', '')
-           else ''
-         end asc,
-         created_at asc
+       join (
+         select id,
+                case
+                  when payload->>'retryAfter' ~ $3 then payload->>'retryAfter'
+                  else ${POSTGRES_UTC_ISO_NOW_SQL}
+                end as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_pending'
+           and (
+             payload->>'retryAfter' is null
+             or payload->>'retryAfter' !~ $3
+             or payload->>'retryAfter' <= ${POSTGRES_UTC_ISO_NOW_SQL}
+           )
+         union all
+         select id,
+                case
+                  when payload->>'claimExpiresAt' ~ $3 then payload->>'claimExpiresAt'
+                  else ${POSTGRES_UTC_ISO_NOW_SQL}
+                end as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_claimed'
+           and payload->>'claimExpiresAt' is not null
+           and (
+             payload->>'claimExpiresAt' !~ $3
+             or payload->>'claimExpiresAt' <= ${POSTGRES_UTC_ISO_NOW_SQL}
+           )
+         union all
+         select id,
+                case
+                  when payload->>'claimedAt' ~ $3 then payload->>'claimedAt'
+                  else to_char(created_at at time zone 'UTC', '${POSTGRES_UTC_ISO_FORMAT}')
+                end as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_claimed'
+           and payload->>'claimExpiresAt' is null
+           and (
+             payload->>'claimedAt' is null
+             or payload->>'claimedAt' !~ $3
+             or payload->>'claimedAt' <=
+               to_char(
+                 (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
+                 '${POSTGRES_UTC_ISO_FORMAT}'
+               )
+           )
+         union all
+         select id,
+                case
+                  when payload->>'completedAt' ~ $3 then payload->>'completedAt'
+                  else ${POSTGRES_UTC_ISO_NOW_SQL}
+                end as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_completed'
+       ) as due_revocation_disconnects
+         on due_revocation_disconnects.id = workspace_events.id
+       order by due_revocation_disconnects.sort_at asc,
+                due_revocation_disconnects.created_at asc
        limit $1
-       for update skip locked`,
-      [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS],
+       for update of workspace_events skip locked`,
+      [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS, POSTGRES_UTC_ISO_TEXT_RE],
     );
     for (const row of rows) {
       if (row.kind === "share.revocation.disconnect_completed") {
@@ -525,7 +577,92 @@ export async function retryPendingShareRevocationDisconnects(
     disconnected += 1;
     await completeRevocationDisconnectEvent(pool, row.eventId, row.claimId);
   }
+  await cleanupStaleShareRevocationDisconnectEvents(pool).catch(() => undefined);
   return { ok: true, attempted, disconnected, failed };
+}
+
+export async function getShareRevocationDisconnectBacklogStats(
+  deps: SharedAtomDeps | undefined,
+): Promise<ShareRevocationDisconnectBacklogStats> {
+  const pool = requirePool(deps);
+  const { rows } = await pool.query<{
+    pending_count: string | number | null;
+    claimed_count: string | number | null;
+    oldest_pending_age_seconds: string | number | null;
+    oldest_claimed_age_seconds: string | number | null;
+  }>(
+    `select
+       count(*) filter (
+         where kind = 'share.revocation.disconnect_pending'
+       ) as pending_count,
+       count(*) filter (
+         where kind = 'share.revocation.disconnect_claimed'
+       ) as claimed_count,
+       extract(epoch from (
+         now() - min(created_at) filter (
+           where kind = 'share.revocation.disconnect_pending'
+         )
+       )) as oldest_pending_age_seconds,
+       extract(epoch from (
+         now() - min(
+           case
+             when kind = 'share.revocation.disconnect_claimed'
+              and payload->>'claimedAt' ~ '${POSTGRES_UTC_ISO_TEXT_RE}'
+               then (payload->>'claimedAt')::timestamptz
+             when kind = 'share.revocation.disconnect_claimed' then created_at
+             else null
+           end
+         )
+       )) as oldest_claimed_age_seconds
+     from workspace_events
+     where kind in (
+       'share.revocation.disconnect_pending',
+       'share.revocation.disconnect_claimed'
+     )`,
+  );
+  const row = rows[0];
+  return {
+    pendingCount: numericStat(row?.pending_count, 0),
+    claimedCount: numericStat(row?.claimed_count, 0),
+    oldestPendingAgeSeconds: nullableNumericStat(row?.oldest_pending_age_seconds),
+    oldestClaimedAgeSeconds: nullableNumericStat(row?.oldest_claimed_age_seconds),
+  };
+}
+
+function numericStat(value: string | number | null | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function nullableNumericStat(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function cleanupStaleShareRevocationDisconnectEvents(pool: pg.Pool): Promise<void> {
+  await pool.query(
+    `delete from workspace_events
+      where id in (
+        select id
+        from workspace_events
+        where kind = 'share.revocation.disconnect_completed'
+          and nullif(payload->>'completedAt', '') is not null
+          and payload->>'completedAt' ~ $3
+          and nullif(payload->>'completedAt', '') <
+            to_char(
+              (now() - $1::integer * interval '1 second') at time zone 'UTC',
+              $4
+            )
+        limit $2
+      )`,
+    [
+      SHARE_REVOCATION_COMPLETED_RETENTION_SECONDS,
+      SHARE_REVOCATION_WORKER_MAX_BATCH,
+      POSTGRES_UTC_ISO_TEXT_RE,
+      POSTGRES_UTC_ISO_FORMAT,
+    ],
+  );
 }
 
 async function disconnectWorkspaceUserWithinLease(

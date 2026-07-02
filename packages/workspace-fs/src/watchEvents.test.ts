@@ -17,7 +17,8 @@ describe("shouldIgnoreWatchPath", () => {
     expect(shouldIgnoreWatchPath(".dohc/registry.json")).toBe(true);
     expect(shouldIgnoreWatchPath(".dohc/cache/blob-0001")).toBe(true);
     expect(shouldIgnoreWatchPath(".dohc/cache/nested/deep/file")).toBe(true);
-    // Case-insensitive: on macOS/Windows .DOHC aliases .dohc.
+    // Case-insensitive: on macOS/Windows .DOHC aliases .dohc, so the
+    // portable workspace contract reserves all case variants.
     expect(shouldIgnoreWatchPath(".DOHC/cache/x")).toBe(true);
     expect(shouldIgnoreWatchPath(".Dohc")).toBe(true);
   });
@@ -29,6 +30,8 @@ describe("shouldIgnoreWatchPath", () => {
   });
 
   it("ignores editor temp / swap / autosave files", () => {
+    expect(shouldIgnoreWatchPath(".dohc-write-123.tmp")).toBe(true);
+    expect(shouldIgnoreWatchPath("notes/.dohc-write-456.tmp")).toBe(true);
     expect(shouldIgnoreWatchPath("notes/draft.tmp")).toBe(true);
     expect(shouldIgnoreWatchPath("notes/draft.tmp.1234")).toBe(true);
     expect(shouldIgnoreWatchPath("notes/today.md.swp")).toBe(true);

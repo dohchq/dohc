@@ -147,6 +147,12 @@ jobs:
       - name: Desktop tests
         run: pnpm test:desktop
 
+      - name: Workspace engine tests
+        run: pnpm --filter @dohc/workspace-engine test
+
+      - name: Workspace engine typecheck
+        run: pnpm --filter @dohc/workspace-engine typecheck
+
   build:
     name: Package ${{ matrix.label }}
     needs: preflight

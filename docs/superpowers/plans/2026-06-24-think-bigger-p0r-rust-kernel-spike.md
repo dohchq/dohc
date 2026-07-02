@@ -3,7 +3,7 @@
 Status: ready for review
 Date: 2026-06-24
 Branch: `codex/think-bigger-p0r-rust-kernel`
-Worktree: `/home/ice/dev/dohc-p0r-rust-kernel`
+Worktree: `$REPO_PARENT/dohc-p0r-rust-kernel`
 
 ## Question
 
@@ -25,7 +25,12 @@ It does not introduce production runtime behavior.
 Rust prototype:
 
 - `crates/workspace-kernel-spike`
-- command: `dohc-workspace-kernel-spike scan --root <workspace-root> --json`
+- command:
+
+  ```bash
+  WORKSPACE_ROOT=/path/to/workspace
+  dohc-workspace-kernel-spike scan --root "$WORKSPACE_ROOT" --json
+  ```
 
 TypeScript comparison:
 
@@ -138,13 +143,29 @@ Commands:
 ```bash
 cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
 node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
-PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
-git rebase codex/think-bigger-p0a-inventory
-cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
-PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
 ```
 
-Results on the local Codex machine:
+Benchmark provenance:
+
+| Field | Value |
+| --- | --- |
+| Commit | `b7550602038840982eb73d850955850c8e256dee` |
+| Fixture | deterministic harness output: 1,000 files, 1,024 repeated `x` bytes each plus `${index}:` prefix and trailing newline, 50 directory buckets, path pattern `dir-${index % 50}/file-${index}.txt` |
+| Durable replay artifact | `scripts/workspace-kernel-spike/bench.mjs` at the recorded commit; the command above regenerates the same corpus deterministically from the checked-in script and flags. |
+| Iterations | 3 |
+| CPU | AMD Ryzen 9 7950X 16-Core Processor |
+| Core count | 16 physical cores / 32 logical CPUs |
+| OS/kernel | WSL2 Linux `6.18.33.1-microsoft-standard-WSL2` |
+| Filesystem | ext4 on `/dev/sdd`, mounted at `/` with `rw,relatime,discard,errors=remount-ro,data=ordered` |
+| Toolchain | Node v24.18.0 via downloaded Node/Corepack for the recorded benchmark; Cargo 1.82.0; rustc 1.82.0; release Rust binary |
+| Benchmark launcher | `node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3`, executed with Node v24.18.0 temporarily prepended to `PATH`; Corepack came from the same Node v24.18.0 download for pnpm validation commands. |
+| Fixture root | regenerated per run in a temporary directory; no host-specific temp path is required for replay because the durable artifact is the checked-in generator plus flags. |
+
+The recorded numbers are only comparable when replayed with the captured Node
+v24.18.0/Corepack toolchain above. Runs with repo-default or system Node are
+useful smoke checks, but they should be reported as a different toolchain.
+
+Results:
 
 | Scanner | Files Seen | Bytes | Min | Max | Average |
 | --- | ---: | ---: | ---: | ---: | ---: |

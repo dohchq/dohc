@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./versioned-file-workspace": "./src/versionedFileWorkspace.ts",
     "./testing": "./src/testing.ts"
   },
   "scripts": {
@@ -12,7 +13,9 @@
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*",
-    "@dohc/workspace-core": "workspace:*"
+    "@dohc/workspace-core": "workspace:*",
+    "@dohc/workspace-fs": "workspace:*",
+    "@dohc/workspace-history": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

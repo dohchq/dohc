@@ -1,4 +1,4 @@
-import { isNull } from "drizzle-orm";
+import { isNull, sql } from "drizzle-orm";
 import {
   index,
   integer,
@@ -50,6 +50,8 @@ export const migrationIndexes = [
   "data_fragment_shares_recipient_created_idx",
   "workspace_events_share_revocation_pending_retry_idx",
   "workspace_events_share_revocation_claimed_retry_idx",
+  "workspace_events_share_revocation_active_backlog_idx",
+  "workspace_events_share_revocation_completed_cleanup_idx",
 ] as const;
 
 const scopedTimestamps = {
@@ -392,5 +394,22 @@ export const workspaceEvents = pgTable(
       table.workspaceId,
       table.createdAt,
     ),
+    index("workspace_events_share_revocation_pending_retry_idx")
+      .on(sql`coalesce(${table.payload}->>'retryAfter', '')`, table.createdAt)
+      .where(sql`${table.kind} = 'share.revocation.disconnect_pending'`),
+    index("workspace_events_share_revocation_claimed_retry_idx")
+      .on(
+        sql`coalesce(${table.payload}->>'claimExpiresAt', ${table.payload}->>'claimedAt', '')`,
+        table.createdAt,
+      )
+      .where(sql`${table.kind} = 'share.revocation.disconnect_claimed'`),
+    index("workspace_events_share_revocation_active_backlog_idx")
+      .on(table.kind, table.createdAt)
+      .where(
+        sql`${table.kind} in ('share.revocation.disconnect_pending', 'share.revocation.disconnect_claimed')`,
+      ),
+    index("workspace_events_share_revocation_completed_cleanup_idx")
+      .on(sql`nullif(${table.payload}->>'completedAt', '')`)
+      .where(sql`${table.kind} = 'share.revocation.disconnect_completed'`),
   ],
 );

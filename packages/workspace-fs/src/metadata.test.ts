@@ -25,6 +25,7 @@ describe("workspace filesystem metadata", () => {
     expect(isSqliteMediaType("text/markdown", "notes/sqlite-migration.md")).toBe(false);
     expect(isSqliteMediaType("text/plain", "plans/use-sqlite.txt")).toBe(false);
     expect(isTextMediaType("text/markdown", "notes/sqlite-migration.md")).toBe(true);
+    expect(isTextMediaType("application/octet-stream", "scripts/run.sh")).toBe(true);
     expect(assetKindForMediaType("text/plain", "plans/use-sqlite.txt")).toBe("file");
   });
 

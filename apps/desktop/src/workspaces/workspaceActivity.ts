@@ -1,4 +1,5 @@
 import { deriveSyncStatus, type FileChange } from "@dohc/workspace-core";
+import type { ChangeSetStore, HistoryRecord } from "@dohc/workspace-history";
 import type {
   ChangeSetLineStats,
   ReadChangeSetResult,
@@ -8,6 +9,7 @@ import type {
 import type { CloudSyncEngine } from "./cloudSyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
+  DESKTOP_HISTORY_STORE_OPTIONS,
   createChangeSetStore,
   humanSummary,
   activeLocalOperationMatchesBatch,
@@ -36,6 +38,15 @@ interface PendingLocalOperation extends ActiveLocalOperation {
 const HISTORY_FILE_PREVIEW_LIMIT = 4;
 const HISTORY_BOUNDARY_PREVIEW_LIMIT = 3;
 const HISTORY_LIST_DIFF_CELL_LIMIT = 60_000;
+const desktopHistoryFallbackStores = new Map<string, ChangeSetStore>();
+
+function desktopHistoryFallbackStore(rootPath: string): ChangeSetStore {
+  const existing = desktopHistoryFallbackStores.get(rootPath);
+  if (existing) return existing;
+  const store = createChangeSetStore(rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+  desktopHistoryFallbackStores.set(rootPath, store);
+  return store;
+}
 
 function splitHistoryLines(text: string): string[] {
   const normalized = text.replace(/\r\n?/g, "\n");
@@ -123,6 +134,56 @@ export interface WorkspaceActivityOptions {
   // Builds a sync engine for a workspace when it is enabled AND connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
   engineFor?: (workspace: CreatedWorkspace) => CloudSyncEngine | null;
+}
+
+function mergeHistoryRecords(
+  records: HistoryRecord[],
+  order: "newest-first" | "oldest-first",
+): HistoryRecord[] {
+  const unique = new Map<string, HistoryRecord>();
+  for (const record of records) {
+    if (!unique.has(record.id)) unique.set(record.id, record);
+  }
+  return [...unique.values()].sort((a, b) => {
+    const time = a.recordedAtMs - b.recordedAtMs;
+    const id = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    return order === "oldest-first" ? time || id : -(time || id);
+  });
+}
+
+function historyReadStores(rootPath: string) {
+  const durable = createChangeSetStore(rootPath);
+  const fallback = desktopHistoryFallbackStore(rootPath);
+  const recordsOrEmpty = async (
+    read: () => Promise<HistoryRecord[]>,
+  ): Promise<HistoryRecord[]> => {
+    try {
+      return await read();
+    } catch {
+      return [];
+    }
+  };
+  return {
+    async list() {
+      const [fallbackRecords, durableRecords] = await Promise.all([
+        recordsOrEmpty(() => fallback.list()),
+        recordsOrEmpty(() => durable.list()),
+      ]);
+      return mergeHistoryRecords(
+        [...fallbackRecords, ...durableRecords],
+        "newest-first",
+      );
+    },
+    async get(id: string) {
+      const fallbackRecord = await fallback.get(id).catch(() => null);
+      if (fallbackRecord) return fallbackRecord;
+      try {
+        return await durable.get(id);
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 // Owns the live file-watch → history pipeline per workspace, the optional
@@ -268,7 +329,7 @@ export function createWorkspaceActivity(
   async function listChangeSets(
     workspace: CreatedWorkspace,
   ): Promise<ChangeSetRecord[]> {
-    const store = createChangeSetStore(workspace.rootPath);
+    const store = historyReadStores(workspace.rootPath);
     const records = await store.list();
     return records.map((record) => ({
       id: record.id,
@@ -295,7 +356,7 @@ export function createWorkspaceActivity(
     workspace: CreatedWorkspace,
     id: string,
   ): Promise<ReadChangeSetResult> {
-    const store = createChangeSetStore(workspace.rootPath);
+    const store = historyReadStores(workspace.rootPath);
     const record = await store.get(id);
     return {
       changeSet: record

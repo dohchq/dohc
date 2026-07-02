@@ -60,6 +60,21 @@ describe("reserved paths", () => {
     if (!result.ok) expect(result.reason).toBe("reserved");
   });
 
+  it("rejects user writes into ignored scan space", () => {
+    for (const candidate of [
+      ".git/config",
+      ".Git/config",
+      "pkg/node_modules/x/index.js",
+      "pkg/NODE_MODULES/x/index.js",
+      ".dohc-write-123.tmp",
+      "notes/.dohc-write-456.tmp",
+    ]) {
+      const result = validateUserWritePath(candidate);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("reserved");
+    }
+  });
+
   it("reserves the top-level shared-with-me sync folder", () => {
     expect(isReservedPath("shared-with-me/alex/brief.md")).toBe(true);
     expect(isReservedPath("Shared-With-Me./alex/brief.md")).toBe(true);
@@ -225,7 +240,9 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
   it("ignores .dohc, .git, and node_modules at any depth", () => {
     expect(hasIgnoredSegment(".dohc/history/index.json")).toBe(true);
     expect(hasIgnoredSegment("sub/.dohc/manifest.json")).toBe(true);
+    expect(hasIgnoredSegment(".DOHC/history/index.json")).toBe(true);
     expect(hasIgnoredSegment(".git/objects/ab")).toBe(true);
+    expect(hasIgnoredSegment("sub/.GIT/config")).toBe(true);
     expect(hasIgnoredSegment("pkg/node_modules/x/index.js")).toBe(true);
     expect(hasIgnoredSegment("NODE_MODULES/x")).toBe(true);
   });
@@ -282,6 +299,7 @@ describe("mediaTypeForPath (shared extension -> media-type table)", () => {
     expect(mediaTypeForPath("sites/portal/src/main.mts")).toBe("application/typescript");
     expect(mediaTypeForPath("sites/portal/script.cjs")).toBe("text/javascript");
     expect(mediaTypeForPath("sites/portal/styles.scss")).toBe("text/css");
+    expect(mediaTypeForPath("scripts/run.sh")).toBe("text/plain");
   });
 
   it("returns null for unknown or missing extensions (fallback is the caller's)", () => {

@@ -3,6 +3,8 @@ import {
   addBoundaryCrossing,
   addFileChanges,
   createChangeSet,
+  createLocalChangeAuthor,
+  parseChangeAuthor,
   requiresReview,
   type BoundaryCrossing,
 } from "./changeSet";
@@ -29,6 +31,74 @@ describe("change set grouping", () => {
     expect(grouped.files).toHaveLength(18);
     expect(grouped.kind).toBe("agent-run");
     expect(grouped.author).toEqual(agentAuthor);
+  });
+});
+
+describe("change authors", () => {
+  it("normalizes local author labels and rejects empty labels", () => {
+    expect(createLocalChangeAuthor(" Local file edit ")).toEqual({
+      kind: "local",
+      label: "Local file edit",
+    });
+    expect(() => createLocalChangeAuthor("  ")).toThrow(/non-empty/i);
+  });
+
+  it("parses persisted author values through the same runtime contract", () => {
+    expect(parseChangeAuthor({ kind: "user", userId: "user-1" })).toEqual({
+      kind: "user",
+      userId: "user-1",
+    });
+    expect(
+      parseChangeAuthor({
+        kind: "agent",
+        agentId: "codex-local",
+        onBehalfOf: "user-1",
+      }),
+    ).toEqual({
+      kind: "agent",
+      agentId: "codex-local",
+      onBehalfOf: "user-1",
+    });
+    expect(parseChangeAuthor({ kind: "local", label: " Local file edit " })).toEqual({
+      kind: "local",
+      label: "Local file edit",
+    });
+    expect(() => parseChangeAuthor({ kind: "local", label: "  " })).toThrow(/non-empty/i);
+    expect(() => parseChangeAuthor({ kind: "user", userId: " user-1 " })).toThrow(/canonical/i);
+    expect(() =>
+      parseChangeAuthor({
+        kind: "agent",
+        agentId: " codex-local ",
+        onBehalfOf: "user-1",
+      }),
+    ).toThrow(/canonical/i);
+    expect(() => parseChangeAuthor({ kind: "agent", agentId: "codex-local" })).toThrow(
+      /on-behalf-of/i,
+    );
+  });
+
+  it("validates change set authors before storing them", () => {
+    expect(() =>
+      createChangeSet({
+        kind: "user-edit",
+        author: { kind: "user", userId: " user-1 " },
+        summary: "Edited notes",
+      }),
+    ).toThrow(/canonical/i);
+    expect(() =>
+      createChangeSet({
+        kind: "agent-run",
+        author: { kind: "agent", agentId: "codex-local", onBehalfOf: " user-1 " },
+        summary: "Agent edit",
+      }),
+    ).toThrow(/canonical/i);
+    expect(
+      createChangeSet({
+        kind: "user-edit",
+        author: { kind: "local", label: " Local file edit " } as never,
+        summary: "External edit",
+      }).author,
+    ).toEqual({ kind: "local", label: "Local file edit" });
   });
 });
 
@@ -81,6 +151,21 @@ describe("change provenance", () => {
         provenance: { source: "history-restore", restoreOfChangeSetId: "change-1" },
       }),
     ).not.toThrow();
+    const redoSet = createChangeSet({
+      kind: "history-restore",
+      author: { kind: "user", userId: "user-1" },
+      summary: "Redid a restore",
+      provenance: {
+        source: "history-restore",
+        restoreOfChangeSetId: "change-1",
+        restoreDirection: "redo",
+      },
+    });
+    expect(redoSet.provenance).toMatchObject({
+      source: "history-restore",
+      restoreOfChangeSetId: "change-1",
+      restoreDirection: "redo",
+    });
   });
 
   it("rejects provenance whose source does not match the change set kind", () => {

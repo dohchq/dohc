@@ -313,11 +313,39 @@ Current gap:
   skips. Remaining scan-policy gates for P0C are oversized-file handling,
   secret/materialization policy, and database-object sync boundaries.
 - Database-object sync has exactly one canonical lane: structured database
-  operations owned by the database object. Raw `.sqlite`/`.db` files may be
+  operations owned by the database object. The shared `classifyDatabaseFile` /
+  `databaseSyncStrategy` selector in `@dohc/workspace-core` is the source of
+  truth for scan, watch, sync, export, and search routing; components must not
+  re-implement the lane decision independently. Raw `.sqlite`/`.db` files may be
   tracked only as explicit ordinary file artifacts with separate identity and no
   database-object binding. The same database object must never be represented in
   both lanes, or it can double-apply, partially-sync, or bypass
-  operation-level policy.
+  operation-level policy. Before database-object routing is enabled for an
+  existing workspace, every pre-existing raw database artifact must be
+  deterministically classified by that same shared selector, then upgraded
+  in-place into the database-object lane or quarantined as a raw artifact with a
+  distinct identity in one uninterrupted transition. The cutover is a
+  single-claim transaction with an explicit `database-object-upgrade-in-flight`
+  state: claim the path/object identity, record the in-flight state with the
+  chosen lane, selector version/result, claim owner, monotonic lease generation,
+  heartbeat time, and lease expiry, write the tombstone or quarantine marker for
+  the raw lane, durably install the database-object binding, then expose the
+  database-object lane and mark the claim complete. Scans and watchers that see
+  the in-flight state must read and honor the persisted lane decision and
+  selector metadata, resuming the claimed upgrade path instead of reclassifying
+  the artifact from scratch. If the heartbeat is stale past the TTL, a later
+  scan/watch worker may atomically advance the lease generation and reclaim the
+  claim, but it must keep the persisted selector decision and chosen lane intact
+  and retry from the claim step. They must not reclassify the same path while the
+  old raw artifact remains at the database-object path, and failed claims leave
+  the path in its previous visible lane until the transition can be retried from
+  the start with the same persisted selector decision. Any failure while writing
+  the tombstone/quarantine marker, installing the binding, or exposing the new
+  lane must roll back to the prior visible state or leave a durable retryable
+  claim that hides nothing from the previous lane. A path must never be
+  half-applied, temporarily invisible, or routable by both scan/watch/sync lanes;
+  failed or reclaimed transitions restart from the claim step with the same
+  selector rules and lease metadata.
 
 ### Search
 
@@ -523,21 +551,83 @@ Phase 0 implementation requirement:
 - Startup reconciliation must record closed-period local edits into history,
   not only show them in the file tree.
 - Scan/sync inclusion policy must be brought to parity with watcher, export,
-  and search before Dropbox-for-agents claims are made.
+  and search before dohc-native filesystem claims are made.
+- Pending implementation clarification: the following ledger flow is the Phase 0
+  target, not current behavior. Today `workspaceWatcher`, MCP/tool writes, and
+  `createChangeSetStore` still rely on local generated record IDs and do not yet
+  implement a shared `writeObservationId` insert/claim/reclaim flow.
 - Startup reconciliation, MCP direct-history recording, and watcher observation
   need one shared persisted mutation ledger per workspace with one owner per
-  physical write. The authoritative mutation/event ID is a per-write claim ID
-  minted by the first recorder, with workspace ID, normalized path, content
-  digest, file size, and observed mtime/ctime window stored as lookup fields.
-  Closed-period local edits from Notepad, shell tools, or agents receive that ID
-  during startup reconciliation before history emission. Live non-dohc editor
-  writes receive it when `workspaceWatcher` claims the filesystem event. MCP
-  tools create or reuse the same ledger row before recording direct-history
-  output. `createChangeSetStore`, `workspaceWatcher`, and the MCP tools flow
-  must all persist and look up that same workspace-scoped ledger entry before
-  emitting user-visible history. If two recorders observe the same workspace,
-  path, content digest, mtime window, and ledger ID, exactly one history entry
-  is created.
+  physical write. The first observer computes a deterministic internal pre-mint
+  claim key from stable workspace/object identity inputs, then claims or
+  attaches to a pending row by a single atomic insert-or-claim step on the
+  unique workspace-scoped key `(workspaceId, preMintClaimKey)`. That key is used
+  only for lookup, reattach, and tie-breaking before a durable token exists. Only
+  the winner of that claim mints or reserves the durable `writeObservationId` on
+  the row; UUIDs or durable monotonic sequences are valid for that minted
+  `writeObservationId`, not for the pre-mint claim key. For dohc-controlled
+  writes, including MCP tool writes and any future direct engine write path, the
+  pending ledger row must be inserted or claimed before the disk mutation is
+  committed; the write proceeds only with the reserved workspace-scoped
+  `writeObservationId`.
+  `createChangeSetStore` records the supplied token and must not mint one after a
+  physical write already happened. For external writes from Notepad, shell tools,
+  or agents that occur outside dohc, startup reconciliation and
+  `workspaceWatcher` first compute a stable pre-mint claim key for the physical
+  write, then atomically claim or attach to that row before history emission. The
+  key is workspace-scoped and derived only from stable workspace/object identity
+  inputs: normalized path, content digest, file size, and the strongest local
+  file identity available for the platform, such as device/inode when present.
+  Observed mtime/ctime windows are stored only as correlation metadata on the
+  row; they must not participate in compare-and-swap identity or token minting.
+  That key is not displayed as the public `writeObservationId`; it exists only
+  to make two live observers race through one compare-and-swap/tie-breaker
+  before either can mint the token. The winner mints and reserves the durable
+  `writeObservationId`; losers re-read the row and reuse the winner's token. If
+  the stable claim key collides ambiguously, the row must be marked
+  conflict/pending-review instead of minting competing history entries. The
+  ledger row stores workspace ID, pre-mint claim key, write observation ID,
+  normalized path, content digest, file size, observed mtime/ctime window, local
+  file identity, and observer/tie-breaker metadata. Timestamp fields remain
+  correlation-only once the pre-mint claim has chosen a winner; path, digest,
+  size, and local file identity are stable identity inputs, but they still cannot
+  authorize minting a replacement token after a row exists. MCP tools create the
+  ID only for the
+  physical write they initiate, or carry an existing `writeObservationId` when
+  they are recording a write already observed by the watcher or startup
+  reconciliation. The first observer of an external physical write is the only
+  subsystem allowed to win the pre-mint claim: startup reconciliation for
+  closed-period edits and `workspaceWatcher` for live raw filesystem events.
+  Later observers reattach by querying the workspace-scoped ledger for the stable
+  claim row or a non-terminal row whose stored `writeObservationId` was supplied
+  by the event, MCP operation, startup reconciliation cursor, or persisted
+  pending work item. Observers must claim the existing pending row by its stable
+  claim key or by `(workspaceId, writeObservationId)` and reuse that exact token
+  before emitting history or finalizing failure. The claimed token is persisted
+  in the workspace-scoped ledger row as the durable `writeObservationId`;
+  `createChangeSetStore`, `workspaceWatcher`, and the MCP tools flow must all
+  read, create, or reclaim that same row before emitting user-visible history.
+  `createChangeSetStore` records the supplied ledger token with the history
+  entry; it does not mint a new token for an already claimed physical write. The
+  ledger row must include a durable recovery state plus an exclusive recovery
+  owner/lease, compare-and-swap token, or equivalent atomic claim for `pending`
+  rows: `pending` after claim/insert, `emitted` only after the history record ID
+  is durably written, and `failed`/`abandoned` when
+  recovery conclusively gives up with an explainable error. A crash after claim
+  but before history emission must leave a `pending` row that startup
+  reconciliation or the next recorder can atomically claim, resume using the
+  same `writeObservationId`, complete, or transition to `failed` with a durable
+  reason; it must not be skipped as already handled, replaced with a new token,
+  or left in limbo. Only the actor that wins the pending-row recovery claim may
+  emit history or mark failure; losers must re-read the row and skip it after
+  detecting another owner. The claim-and-emit sequence may instead be one atomic
+  transaction, but if it is split across `workspaceWatcher`, MCP tools, and
+  `createChangeSetStore`, retries must reconcile `pending` rows and either
+  complete/finalize the same claim's missing history entry or mark that claim
+  failed before advancing.
+  If two recorders observe the same workspace and exact write observation ID,
+  exactly one history entry is created; matching path, digest, size, or mtime
+  alone is insufficient.
 
 Long term, this should evolve into a managed filesystem projection or mount.
 The P0R Rust spike decides how soon that boundary should move native.
@@ -587,12 +677,34 @@ Current evidence:
   `services/workspace-api/src/routes/shared.ts` are not shared write-policy
   evaluators for the new versioned write paths; they do not by themselves prove
   Hocuspocus-equivalent lock/share enforcement.
+- Current `authorize` and shared route handling still center on userId-based
+  membership/share checks and do not yet normalize every caller into the shared
+  principal envelope with separate delegated grant/resource scope described
+  below.
 
 Phase 0 implication:
 
 - P0B/P0C write paths must either use Hocuspocus-equivalent semantics from
   `services/hocuspocus/src/postgres-acl.ts` through a shared effective policy
   resolver or explicitly prove matching lock/share/protected-path enforcement.
+- The shared effective-policy resolver must derive actor identity only from the
+  authenticated server session/token. Browser/client-provided user ids are
+  untrusted hints and must never select authorization scope. The resolver must
+  normalize every non-browser caller into the same canonical principal envelope,
+  while keeping authenticated actor identity and delegated grant/resource scope
+  as separate policy inputs. User sessions, service accounts, share-link
+  requests, and other server-auth principals retain their actor type and
+  server-derived identity; delegated access carries its own grant id, target
+  resource, visibility scope, expiry/revocation state, and lock/share
+  capabilities. The Hocuspocus ACL path in
+  `services/hocuspocus/src/postgres-acl.ts`, the write-policy flow in
+  `packages/workspace-postgres`, and `services/workspace-api/src/routes/shared.ts`
+  must consume that same server-authenticated principal envelope plus any
+  delegated grant scope and produce the same workspace-scoped
+  lock/share/protected-path decision. A client-provided user id may help
+  correlate logs, but it must never override the server principal, select a
+  different grant scope, or widen access for service-account, share-link, or
+  browser requests.
 - If the policy evaluator is unavailable or indeterminate, writes must fail
   closed.
 

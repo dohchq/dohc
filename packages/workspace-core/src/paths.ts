@@ -49,13 +49,23 @@ export function isReservedPath(relativePath: string): boolean {
 // Path segments that are dohc/system internals at ANY depth — hidden from the
 // file tree and never recorded into history. One predicate shared by the
 // tree walker and the watcher so the two views of "what exists" cannot drift.
+// The `.dohc-write-*` prefix is reserved for visible-directory atomic staging:
+// it can briefly exist beside user files, but scanners/watchers must treat it
+// as dohc noise, never a workspace artifact.
 const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
+const IGNORED_FILE_PREFIXES = [".dohc-write-"];
 export function hasIgnoredSegment(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
     .split("/")
-    .some((segment) => IGNORED_SEGMENTS.has(stripWindowsAliasSuffix(segment)));
+    .some((segment) => {
+      const normalized = stripWindowsAliasSuffix(segment);
+      return (
+        IGNORED_SEGMENTS.has(normalized) ||
+        IGNORED_FILE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+      );
+    });
 }
 
 export function isSiteSourcePath(relativePath: string): boolean {
@@ -73,7 +83,10 @@ export type WritePathValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: "traversal" | "absolute" | "reserved" | "invalid" };
 
-export function validateUserWritePath(relativePath: string): WritePathValidation {
+export function validateUserWritePath(
+  relativePath: string,
+  options: { allowIgnoredSegments?: boolean } = {},
+): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
   if (isAbsolutePathLike(relativePath)) return { ok: false, reason: "absolute" };
   // Percent-encoded dots/separators are traversal in disguise; decode until
@@ -110,6 +123,9 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
     .join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
   if (isReservedPath(normalized)) return { ok: false, reason: "reserved" };
+  if (!options.allowIgnoredSegments && hasIgnoredSegment(normalized)) {
+    return { ok: false, reason: "reserved" };
+  }
   return { ok: true, normalized };
 }
 
@@ -212,6 +228,7 @@ const MEDIA_TYPES: Record<string, string> = {
   pdf: "application/pdf",
   png: "image/png",
   scss: "text/css",
+  sh: "text/plain",
   sqlite: "application/vnd.sqlite3",
   sqlite3: "application/vnd.sqlite3",
   txt: "text/plain",

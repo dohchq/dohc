@@ -3,6 +3,7 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+export { VersionedFileWorkspaceError } from "./versionedFileWorkspace";
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
@@ -11,6 +12,7 @@ export type {
   VersionId,
   VersionKind,
   VersionRecord,
+  VersionedTextDeleteResult,
   VersionedTextMoment,
   VersionedTextMomentId,
   VersionedTextRenameResult,
@@ -21,3 +23,16 @@ export type {
   WorkspaceId,
   WorkspaceObjectId,
 } from "./versionedTextStore";
+export type {
+  VersionedFileDeleteResult,
+  VersionedFileHistoryReader,
+  VersionedFileListResult,
+  VersionedFileReadResult,
+  VersionedFileRestoreResult,
+  VersionedFileStat,
+  VersionedFileVersionReader,
+  VersionedFileWorkspace,
+  VersionedFileWorkspaceErrorCode,
+  VersionedFileWorkspaceOptions,
+  VersionedFileWriteResult,
+} from "./versionedFileWorkspace";

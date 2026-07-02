@@ -29,7 +29,9 @@ import {
 } from "@dohc/workspace-core";
 import {
   createChangeSetStore,
+  isDurableChangeSetRecordingSupported,
   mergeMarkdown,
+  type ChangeSetStore,
   type HistoryRecord,
 } from "@dohc/workspace-history";
 import {
@@ -42,6 +44,8 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
+  chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -49,6 +53,7 @@ import {
   readdir,
   realpath,
   rename,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -67,11 +72,105 @@ export interface ToolContext {
   sdkDependencyRange?: string;
 }
 
+function historyWriteStoreFor(ctx: ToolContext) {
+  // Mutating tools require the durable writer; ensureRecordable fails closed
+  // before visible disk changes on unsupported platforms.
+  return createChangeSetStore(ctx.root);
+}
+
+function mergeHistoryRecords(
+  records: HistoryRecord[],
+  order: "newest-first" | "oldest-first",
+): HistoryRecord[] {
+  const unique = new Map<string, HistoryRecord>();
+  for (const record of records) {
+    if (!unique.has(record.id)) unique.set(record.id, record);
+  }
+  return [...unique.values()].sort((a, b) => {
+    const time = a.recordedAtMs - b.recordedAtMs;
+    const id = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    return order === "oldest-first" ? time || id : -(time || id);
+  });
+}
+
+function mergedReadStore(durable: ChangeSetStore, ephemeral: ChangeSetStore): ChangeSetStore {
+  const durableRecordsOrEmpty = async (
+    read: () => Promise<HistoryRecord[]>,
+  ): Promise<HistoryRecord[]> => {
+    try {
+      return await read();
+    } catch {
+      return [];
+    }
+  };
+
+  return {
+    record: durable.record,
+    async listIndexed() {
+      const records = mergeHistoryRecords(
+        [...(await ephemeral.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
+        "newest-first",
+      );
+      return records.map((record, index) => ({ index, record }));
+    },
+    async list() {
+      return mergeHistoryRecords(
+        [...(await ephemeral.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
+        "newest-first",
+      );
+    },
+    async listSince(afterMs) {
+      return mergeHistoryRecords(
+        [
+          ...(await ephemeral.listSince(afterMs)),
+          ...(await durableRecordsOrEmpty(() => durable.listSince(afterMs))),
+        ],
+        "oldest-first",
+      );
+    },
+    async maxRecordedAtMs() {
+      try {
+        return Math.max(await ephemeral.maxRecordedAtMs(), await durable.maxRecordedAtMs());
+      } catch {
+        return ephemeral.maxRecordedAtMs();
+      }
+    },
+    async get(id) {
+      const ephemeralRecord = await ephemeral.get(id);
+      if (ephemeralRecord) return ephemeralRecord;
+      try {
+        return await durable.get(id);
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+function historyReadStoreFor(ctx: ToolContext) {
+  if (isDurableChangeSetRecordingSupported()) return createChangeSetStore(ctx.root);
+  // Read-only MCP status/history views should remain useful in the same process
+  // as the desktop watcher when durable recording is unavailable, while still
+  // preserving access to any existing readable disk history.
+  return mergedReadStore(
+    createChangeSetStore(ctx.root),
+    createChangeSetStore(ctx.root, { ephemeralIfUnsupported: true }),
+  );
+}
+
+function isStaleRecordedAtError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("is not newer than the latest committed timestamp")
+  );
+}
+
 const MCP_AUTHOR: ChangeAuthor = {
   kind: "agent",
   agentId: "dohc-mcp",
   onBehalfOf: "local",
 };
+const historyRecordedAtMsByRoot = new Map<string, number>();
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
 const HARD_READ_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SEARCH_MAX_RESULTS = 100;
@@ -123,6 +222,17 @@ async function safeResolve(
     return { ok: false, reason: `path rejected (symlink escapes workspace): ${relativePath}` };
   }
   return { ok: true, absolute, normalized: validated.normalized };
+}
+
+async function safeResolveForMutation(
+  ctx: ToolContext,
+  normalizedPath: string,
+): Promise<{ absolute: string; normalized: string }> {
+  const resolved = await safeResolve(ctx, normalizedPath);
+  if (!resolved.ok) {
+    throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
+  }
+  return resolved;
 }
 
 function sha256(bytes: Uint8Array | string): string {
@@ -177,6 +287,7 @@ async function recordChange(
   },
 ) {
   await safeMetadataDir(ctx);
+  const store = historyWriteStoreFor(ctx);
   const set = addFileChanges(
     createChangeSet({
       kind: input.kind ?? "agent-run",
@@ -186,10 +297,23 @@ async function recordChange(
     }),
     input.files,
   );
-  return createChangeSetStore(ctx.root).record(set, {
-    id: randomUUID(),
-    recordedAtMs: Date.now(),
-  });
+  const id = randomUUID();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const recordedAtMs = Math.max(
+      Date.now(),
+      (await store.maxRecordedAtMs()) + 1,
+      (historyRecordedAtMsByRoot.get(ctx.root) ?? 0) + 1,
+    );
+    historyRecordedAtMsByRoot.set(ctx.root, recordedAtMs);
+    try {
+      return await store.record(set, { id, recordedAtMs });
+    } catch (error) {
+      if (!isStaleRecordedAtError(error)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 function failureReason(error: unknown, fallback: string): string {
@@ -197,6 +321,12 @@ function failureReason(error: unknown, fallback: string): string {
 }
 
 async function ensureRecordable(ctx: ToolContext) {
+  if (!isDurableChangeSetRecordingSupported()) {
+    return {
+      ok: false as const,
+      reason: "durable history recording is not supported on this platform",
+    };
+  }
   try {
     await safeMetadataDir(ctx);
     return null;
@@ -231,12 +361,102 @@ async function safeTrashDir(ctx: ToolContext): Promise<string> {
   return dir;
 }
 
-async function bestEffortRename(from: string, to: string): Promise<void> {
+function mutationRetainedReason(error: unknown, fallback: string): string {
+  return `${failureReason(error, fallback)}; visible mutation retained because rollback cannot be made atomic`;
+}
+
+function expectedSha256Mismatch(currentSha256: string): Error & { currentSha256: string } {
+  return Object.assign(new Error("expectedSha256 does not match current file"), {
+    code: "ESTALE",
+    currentSha256,
+  });
+}
+
+function isExpectedSha256Mismatch(
+  error: unknown,
+): error is Error & { currentSha256: string } {
+  return (
+    error instanceof Error &&
+    typeof (error as { currentSha256?: unknown }).currentSha256 === "string"
+  );
+}
+
+async function writeFileAtomicallyForTool(
+  ctx: ToolContext,
+  normalizedPath: string,
+  data: string | Buffer,
+  options: { expectedSha256?: string; overwrite?: boolean } = {},
+): Promise<void> {
+  const target = await safeResolveForMutation(ctx, normalizedPath);
+  const absolutePath = target.absolute;
+  const parentDir = dirname(target.absolute);
+  const tempPath = join(parentDir, `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
+  let published = false;
+  let existingMode: number | undefined;
+  const publishTarget = async (): Promise<string> => {
+    const current = await safeResolveForMutation(ctx, normalizedPath);
+    if (current.absolute !== absolutePath) {
+      throw Object.assign(new Error(`path changed before publish: ${normalizedPath}`), {
+        code: "EINVAL",
+      });
+    }
+    return current.absolute;
+  };
+  const assertExpectedCurrent = async (): Promise<void> => {
+    if (options.expectedSha256 === undefined) return;
+    const finalPath = await publishTarget();
+    const existing = await lstat(finalPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing?.isSymbolicLink()) {
+      throw Object.assign(new Error(`refusing to overwrite symlink: ${absolutePath}`), {
+        code: "ELOOP",
+      });
+    }
+    if (existing && !existing.isFile()) {
+      throw Object.assign(new Error(`refusing to overwrite non-file: ${absolutePath}`), {
+        code: "EISDIR",
+      });
+    }
+    const currentBytes = existing ? await readFile(finalPath) : Buffer.alloc(0);
+    const currentSha256 = sha256(currentBytes);
+    if (currentSha256 !== options.expectedSha256) {
+      throw expectedSha256Mismatch(currentSha256);
+    }
+  };
+  if (options.overwrite !== false) {
+    const existing = await lstat(await publishTarget()).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing?.isSymbolicLink()) {
+      throw Object.assign(new Error(`refusing to overwrite symlink: ${absolutePath}`), {
+        code: "ELOOP",
+      });
+    }
+    if (existing && !existing.isFile()) {
+      throw Object.assign(new Error(`refusing to overwrite non-file: ${absolutePath}`), {
+        code: "EISDIR",
+      });
+    }
+    existingMode = existing ? existing.mode & 0o777 : undefined;
+  }
   try {
-    await rename(from, to);
-  } catch {
-    // Preserve the original failure. The caller returns a conservative error
-    // rather than claiming success for an unrecorded workspace mutation.
+    await writeFile(tempPath, data, { flag: "wx" });
+    if (existingMode !== undefined) await chmod(tempPath, existingMode);
+    await assertExpectedCurrent();
+    const finalPath = await publishTarget();
+    if (options.overwrite === false) {
+      await link(tempPath, finalPath);
+      published = true;
+      await rm(tempPath, { force: true }).catch(() => undefined);
+    } else {
+      await rename(tempPath, finalPath);
+      published = true;
+    }
+  } finally {
+    if (!published) await rm(tempPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -635,28 +855,46 @@ export async function writeWorkspaceFile(
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
-  const existing = await readFile(resolved.absolute).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  });
-  if (args.expectedSha256 && sha256(existing ?? new Uint8Array()) !== args.expectedSha256) {
-    return {
-      ok: false as const,
-      reason: "expectedSha256 does not match current file",
-      currentSha256: existing ? sha256(existing) : sha256(new Uint8Array()),
-    };
-  }
-
   const bytes =
     args.encoding === "base64"
       ? Buffer.from(args.content, "base64")
       : Buffer.from(args.content, "utf8");
-  await mkdir(dirname(resolved.absolute), { recursive: true });
-  await writeFile(resolved.absolute, bytes);
-  const record = await recordChange(ctx, {
-    files: [{ path: resolved.normalized, operation: "write" }],
-    summary: args.summary ?? `MCP wrote ${resolved.normalized}`,
-  });
+  const parentDir = dirname(resolved.absolute);
+  let visibleMutationStarted = false;
+  try {
+    const createdParent = await mkdir(parentDir, { recursive: true });
+    if (createdParent) visibleMutationStarted = true;
+    await writeFileAtomicallyForTool(ctx, resolved.normalized, bytes, {
+      expectedSha256: args.expectedSha256,
+    });
+    visibleMutationStarted = true;
+  } catch (error) {
+    if (isExpectedSha256Mismatch(error)) {
+      return {
+        ok: false as const,
+        reason: error.message,
+        currentSha256: error.currentSha256,
+      };
+    }
+    return {
+      ok: false as const,
+      reason: visibleMutationStarted
+        ? mutationRetainedReason(error, `failed to write: ${args.path}`)
+        : failureReason(error, `failed to write: ${args.path}`),
+    };
+  }
+  let record: HistoryRecord;
+  try {
+    record = await recordChange(ctx, {
+      files: [{ path: resolved.normalized, operation: "write" }],
+      summary: args.summary ?? `MCP wrote ${resolved.normalized}`,
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: mutationRetainedReason(error, `failed to record write: ${args.path}`),
+    };
+  }
   return {
     ok: true as const,
     path: resolved.normalized,
@@ -675,11 +913,45 @@ export async function createWorkspaceDirectory(
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
-  await mkdir(resolved.absolute, { recursive: true });
-  const record = await recordChange(ctx, {
-    files: [{ path: resolved.normalized, operation: "write" }],
-    summary: args.summary ?? `MCP created ${resolved.normalized}`,
-  });
+  try {
+    const existing = await lstat(resolved.absolute).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing) {
+      if (existing.isDirectory()) {
+        return { ok: true as const, path: resolved.normalized, unchanged: true as const };
+      }
+      return {
+        ok: false as const,
+        reason: `path already exists and is not a directory: ${args.path}`,
+      };
+    }
+    const createdPath = await mkdir(resolved.absolute, { recursive: true });
+    if (!createdPath) {
+      return { ok: true as const, path: resolved.normalized, unchanged: true as const };
+    }
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: failureReason(error, `failed to create directory: ${args.path}`),
+    };
+  }
+  let record: HistoryRecord;
+  try {
+    record = await recordChange(ctx, {
+      files: [{ path: resolved.normalized, operation: "write" }],
+      summary: args.summary ?? `MCP created ${resolved.normalized}`,
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: mutationRetainedReason(
+        error,
+        `failed to record directory create: ${args.path}`,
+      ),
+    };
+  }
   return {
     ok: true as const,
     path: resolved.normalized,
@@ -727,10 +999,9 @@ export async function moveWorkspacePath(
         recordedAtMs: record.recordedAtMs,
       };
     } catch (error) {
-      await bestEffortRename(to.absolute, from.absolute);
       return {
         ok: false as const,
-        reason: failureReason(error, `failed to record move: ${args.fromPath}`),
+        reason: mutationRetainedReason(error, `failed to record move: ${args.fromPath}`),
       };
     }
   } catch (error) {
@@ -770,10 +1041,9 @@ export async function deleteWorkspacePath(
         recordedAtMs: record.recordedAtMs,
       };
     } catch (error) {
-      await bestEffortRename(trashedTo, resolved.absolute);
       return {
         ok: false as const,
-        reason: failureReason(error, `failed to record delete: ${args.path}`),
+        reason: mutationRetainedReason(error, `failed to record delete: ${args.path}`),
       };
     }
   } catch (error) {
@@ -1001,7 +1271,7 @@ export async function workspaceStatus(ctx: ToolContext) {
 // would be pushed) rather than performing a network push. A clean state means
 // nothing pending.
 export async function syncNow(ctx: ToolContext, args: { sinceMs?: number }) {
-  const store = createChangeSetStore(ctx.root);
+  const store = historyReadStoreFor(ctx);
   const pending = await store.listSince(args.sinceMs ?? 0);
   const latest = pending.at(-1);
   return {
@@ -1097,10 +1367,11 @@ export async function syncCloud(
     };
   }
 
-  const recordable = await ensureRecordable(ctx);
-  if (recordable) return recordable;
-
   const direction = args.direction ?? "push-pull";
+  if (direction !== "push") {
+    const recordable = await ensureRecordable(ctx);
+    if (recordable) return recordable;
+  }
   const sync = createMergeSync({
     rootDir: ctx.root,
     remoteWorkspaceId: remote.remoteWorkspaceId,
@@ -1176,7 +1447,7 @@ export async function listChanges(
   ctx: ToolContext,
   args: { sinceMs?: number; limit?: number; includeFiles?: boolean } = {},
 ) {
-  const store = createChangeSetStore(ctx.root);
+  const store = historyReadStoreFor(ctx);
   const records =
     args.sinceMs === undefined ? await store.list() : await store.listSince(args.sinceMs);
   const limit = Math.min(500, Math.max(1, Math.floor(args.limit ?? 50)));
@@ -1195,7 +1466,7 @@ export async function listChanges(
 }
 
 export async function readChange(ctx: ToolContext, args: { id: string }) {
-  const record = await createChangeSetStore(ctx.root).get(args.id);
+  const record = await historyReadStoreFor(ctx).get(args.id);
   if (!record) return { ok: false as const, reason: `change set not found: ${args.id}` };
   return { ok: true as const, change: changeSummary(record, true) };
 }
@@ -1691,15 +1962,40 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     resolvedFiles.push({ ...file, ...resolved });
   }
 
-  await mkdir(root.absolute, { recursive: true });
-  for (const file of resolvedFiles) {
-    await mkdir(dirname(file.absolute), { recursive: true });
-    await writeFile(file.absolute, file.content, { flag: "wx" });
+  let visibleMutationStarted = false;
+  let record: HistoryRecord;
+  try {
+    await mkdir(root.absolute, { recursive: true });
+    if (!existing) visibleMutationStarted = true;
+    for (const file of resolvedFiles) {
+      const parentDir = dirname(file.absolute);
+      const createdParent = await mkdir(parentDir, { recursive: true });
+      if (createdParent) visibleMutationStarted = true;
+      await writeFileAtomicallyForTool(ctx, file.normalized, file.content, { overwrite: false });
+      visibleMutationStarted = true;
+    }
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: visibleMutationStarted
+        ? mutationRetainedReason(error, `failed to create site: ${root.normalized}`)
+        : failureReason(error, `failed to create site: ${root.normalized}`),
+    };
   }
-  const record = await recordChange(ctx, {
-    files: resolvedFiles.map((file) => ({ path: file.normalized, operation: "write" })),
-    summary: `MCP created site ${root.normalized}`,
-  });
+  try {
+    record = await recordChange(ctx, {
+      files: resolvedFiles.map((file) => ({ path: file.normalized, operation: "write" })),
+      summary: `MCP created site ${root.normalized}`,
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: mutationRetainedReason(
+        error,
+        `failed to record site create: ${root.normalized}`,
+      ),
+    };
+  }
 
   return {
     ok: true as const,
@@ -2016,15 +2312,36 @@ export async function importData(
   });
   if (!result.ok) return { ok: false as const, reason: `${result.code}: ${result.message}` };
 
-  await mkdir(dirname(dbRel.absolute), { recursive: true });
-  // wx: never overwrite an existing database (its bytes are canonical).
-  await writeFile(dbRel.absolute, Buffer.from(result.bytesBase64, "base64"), { flag: "wx" });
-  const record = await recordChange(ctx, {
-    kind: "import",
-    provenance: { source: "import", importPath: sourceRel.normalized },
-    files: [{ path: dbRel.normalized, operation: "write" }],
-    summary: `MCP imported ${sourceRel.normalized} to ${dbRel.normalized}`,
-  });
+  const parentDir = dirname(dbRel.absolute);
+  let visibleMutationStarted = false;
+  try {
+    const createdParent = await mkdir(parentDir, { recursive: true });
+    if (createdParent) visibleMutationStarted = true;
+    const dbBytes = Buffer.from(result.bytesBase64, "base64");
+    await writeFileAtomicallyForTool(ctx, dbRel.normalized, dbBytes, { overwrite: false });
+    visibleMutationStarted = true;
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: visibleMutationStarted
+        ? mutationRetainedReason(error, `failed to write import: ${dbRel.normalized}`)
+        : failureReason(error, `failed to write import: ${dbRel.normalized}`),
+    };
+  }
+  let record: HistoryRecord;
+  try {
+    record = await recordChange(ctx, {
+      kind: "import",
+      provenance: { source: "import", importPath: sourceRel.normalized },
+      files: [{ path: dbRel.normalized, operation: "write" }],
+      summary: `MCP imported ${sourceRel.normalized} to ${dbRel.normalized}`,
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: mutationRetainedReason(error, `failed to record import: ${dbRel.normalized}`),
+    };
+  }
   return {
     ok: true as const,
     path: dbRel.normalized,

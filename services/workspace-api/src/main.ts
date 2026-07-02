@@ -113,14 +113,21 @@ function createHocuspocusAdminClient(): HocuspocusAdminClient {
     disconnectTimeoutMs: timeoutMs,
     async disconnectWorkspaceUser({ workspaceId, userId, signal }) {
       const url = new URL("admin/disconnect-by-workspace-user", adminBase);
-      const controller = new AbortController();
-      const abortFromCaller = () => controller.abort(signal?.reason);
       if (signal?.aborted) {
-        controller.abort(signal.reason);
-      } else {
-        signal?.addEventListener("abort", abortFromCaller, { once: true });
+        throw signal.reason ?? new Error("hocuspocus disconnect aborted");
       }
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      const controller = new AbortController();
+      let callerAbortReason: unknown;
+      let timeoutAborted = false;
+      const abortFromCaller = () => {
+        callerAbortReason = signal?.reason ?? new Error("hocuspocus disconnect aborted");
+        controller.abort(callerAbortReason);
+      };
+      signal?.addEventListener("abort", abortFromCaller, { once: true });
+      const timeout = setTimeout(() => {
+        timeoutAborted = true;
+        controller.abort();
+      }, timeoutMs);
       let response: Response;
       try {
         response = await fetch(url, {
@@ -134,6 +141,10 @@ function createHocuspocusAdminClient(): HocuspocusAdminClient {
         });
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
+          if (callerAbortReason !== undefined || signal?.aborted) {
+            throw callerAbortReason ?? signal?.reason ?? error;
+          }
+          if (!timeoutAborted) throw error;
           throw new Error(`hocuspocus disconnect timed out after ${timeoutMs}ms`);
         }
         throw error;

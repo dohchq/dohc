@@ -8,6 +8,7 @@ use std::time::Instant;
 use walkdir::{DirEntry, WalkDir};
 
 const IGNORED_SEGMENTS: &[&str] = &[".dohc", ".git", "node_modules"];
+const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
 
 #[derive(Debug, Serialize)]
 struct ScanOutput {
@@ -182,6 +183,9 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
         if !file_type.is_file() {
             continue;
         }
+        if is_database_sidecar(entry.path()) {
+            continue;
+        }
 
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
@@ -233,7 +237,7 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
 
 fn should_descend(entry: &DirEntry) -> bool {
     let name = normalize_ignored_segment(&entry.file_name().to_string_lossy());
-    !IGNORED_SEGMENTS.contains(&name.as_str())
+    !segment_is_ignored(&name)
 }
 
 fn relative_display(root: &Path, path: &Path) -> String {
@@ -247,7 +251,28 @@ fn has_ignored_segment(path: &str) -> bool {
     path.replace('\\', "/")
         .split('/')
         .map(normalize_ignored_segment)
-        .any(|segment| IGNORED_SEGMENTS.contains(&segment.as_str()))
+        .any(|segment| segment_is_ignored(&segment))
+}
+
+fn segment_is_ignored(segment: &str) -> bool {
+    IGNORED_SEGMENTS.contains(&segment)
+        || IGNORED_FILE_PREFIXES
+            .iter()
+            .any(|prefix| segment.starts_with(prefix))
+}
+
+fn is_database_sidecar(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+    let lower = file_name.to_lowercase();
+    ["-wal", "-shm", "-journal"].iter().any(|suffix| {
+        if !lower.ends_with(suffix) {
+            return false;
+        }
+        let base = &lower[..lower.len() - suffix.len()];
+        base.ends_with(".db") || base.ends_with(".sqlite") || base.ends_with(".sqlite3")
+    })
 }
 
 fn normalize_ignored_segment(segment: &str) -> String {
@@ -285,7 +310,8 @@ fn sha256_file(path: &Path) -> io::Result<HashedFile> {
 }
 
 fn media_type_for_path(path: &str) -> &'static str {
-    let extension = path
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let extension = basename
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_lowercase())
         .unwrap_or_default();
@@ -303,7 +329,7 @@ fn media_type_for_path(path: &str) -> &'static str {
         "markdown" | "md" => "text/markdown",
         "pdf" => "application/pdf",
         "png" => "image/png",
-        "txt" => "text/plain",
+        "sh" | "txt" => "text/plain",
         _ => "application/octet-stream",
     }
 }
@@ -317,20 +343,88 @@ mod tests {
     fn scans_files_and_skips_internal_segments() {
         let temp = tempfile::tempdir().unwrap();
         write_file(temp.path().join("notes/a.md"), b"# A\n");
+        write_file(temp.path().join("scripts/run.sh"), b"#!/bin/sh\ntrue\n");
         write_file(temp.path().join(".dohc/history.json"), b"hidden");
         write_file(temp.path().join(".git/config"), b"hidden");
+        write_file(temp.path().join(".DOHC/history.json"), b"hidden");
+        write_file(temp.path().join(".GIT/config"), b"hidden");
         write_file(temp.path().join("node_modules/pkg/index.js"), b"hidden");
         write_file(temp.path().join("node_modules /pkg/index.js"), b"hidden");
         write_file(temp.path().join(".git./config"), b"hidden");
+        write_file(temp.path().join(".dohc-write-123.tmp"), b"hidden");
+        write_file(temp.path().join("notes/.dohc-write-456.tmp"), b"hidden");
+        write_file(
+            temp.path().join("finance/ledger.sqlite"),
+            b"SQLite format 3\0",
+        );
+        write_file(temp.path().join("finance/ledger.sqlite-wal"), b"transient");
+        write_file(temp.path().join("finance/ledger.sqlite-shm"), b"transient");
+        write_file(
+            temp.path().join("finance/ledger.sqlite-journal"),
+            b"transient",
+        );
+        write_file(temp.path().join("finance/cache"), b"SQLite format 3\0");
+        write_file(temp.path().join("finance/cache-wal"), b"transient");
+        write_file(temp.path().join("finance/cache-shm"), b"transient");
+        write_file(temp.path().join("finance/cache-journal"), b"transient");
+        write_file(temp.path().join("finance/archive.db"), b"plain export");
+        write_file(temp.path().join("finance/archive.db-journal"), b"transient");
+        write_file(temp.path().join("notes/draft-wal"), b"not a sqlite sidecar");
 
         let output = scan_workspace(temp.path()).unwrap();
-        assert_eq!(output.files.len(), 1);
+        let paths: Vec<_> = output.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "finance/archive.db",
+                "finance/cache",
+                "finance/cache-journal",
+                "finance/cache-shm",
+                "finance/cache-wal",
+                "finance/ledger.sqlite",
+                "notes/a.md",
+                "notes/draft-wal",
+                "scripts/run.sh"
+            ]
+        );
         assert_eq!(output.root, ".");
-        assert_eq!(output.files[0].path, "notes/a.md");
-        assert_eq!(output.files[0].size, 4);
-        assert_eq!(output.files[0].media_type, "text/markdown");
-        assert_eq!(output.metrics.files, 1);
-        assert_eq!(output.metrics.bytes, 4);
+        assert_eq!(
+            output
+                .files
+                .iter()
+                .find(|file| file.path == "finance/ledger.sqlite")
+                .unwrap()
+                .media_type,
+            "application/vnd.sqlite3"
+        );
+        assert_eq!(
+            output
+                .files
+                .iter()
+                .find(|file| file.path == "notes/a.md")
+                .unwrap()
+                .media_type,
+            "text/markdown"
+        );
+        assert_eq!(
+            output
+                .files
+                .iter()
+                .find(|file| file.path == "scripts/run.sh")
+                .unwrap()
+                .media_type,
+            "text/plain"
+        );
+        assert_eq!(
+            output
+                .files
+                .iter()
+                .find(|file| file.path == "notes/a.md")
+                .unwrap()
+                .size,
+            4
+        );
+        assert_eq!(output.metrics.files, 9);
     }
 
     #[test]

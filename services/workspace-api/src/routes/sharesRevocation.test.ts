@@ -1,7 +1,11 @@
 import type pg from "pg";
 import { describe, expect, it } from "vitest";
 import type { SharedAtomDeps } from "./shared";
-import { retryPendingShareRevocationDisconnects, revokeShare } from "./shares";
+import {
+  getShareRevocationDisconnectBacklogStats,
+  retryPendingShareRevocationDisconnects,
+  revokeShare,
+} from "./shares";
 
 describe("revokeShare admin disconnect", () => {
   it("soft-deletes the share and disconnects the revoked recipient workspace session", async () => {
@@ -76,7 +80,6 @@ describe("revokeShare admin disconnect", () => {
       "update",
       "disconnect",
       "update",
-      "delete",
     ]);
   });
 
@@ -140,6 +143,7 @@ describe("revokeShare admin disconnect", () => {
     await expect(revokeShare(deps, "sharer-1", "share-1")).resolves.toEqual({
       ok: true,
       revoked: true,
+      disconnectDeferred: true,
     });
 
     expect(events).toEqual([
@@ -161,7 +165,7 @@ describe("revokeShare admin disconnect", () => {
     ).toBe(true);
   });
 
-  it("fails closed before deleting the share when admin disconnect is not configured", async () => {
+  it("persists revocation and pending disconnect when admin disconnect is not configured", async () => {
     const events: string[] = [];
     const client = {
       query: async (text: string, params?: unknown[]) => {
@@ -200,11 +204,50 @@ describe("revokeShare admin disconnect", () => {
     } as unknown as pg.Pool;
     const deps: SharedAtomDeps = { pool };
 
-    await expect(revokeShare(deps, "sharer-1", "share-1")).rejects.toThrow(
-      "Hocuspocus admin disconnect is not configured",
-    );
+    await expect(revokeShare(deps, "sharer-1", "share-1")).resolves.toEqual({
+      ok: true,
+      revoked: true,
+      disconnectDeferred: true,
+    });
 
-    expect(events).toEqual(["connect", "begin", "select", "rollback", "release"]);
+    expect(events).toEqual(["connect", "begin", "select", "update", "insert", "commit", "release"]);
+  });
+
+  it("exposes revocation disconnect backlog stats for monitoring", async () => {
+    const queries: Array<{ text: string; params?: unknown[] }> = [];
+    const pool = {
+      query: async (text: string, params?: unknown[]) => {
+        queries.push({ text, params });
+        return {
+          rows: [
+            {
+              pending_count: "2",
+              claimed_count: "1",
+              oldest_pending_age_seconds: "120.5",
+              oldest_claimed_age_seconds: "360",
+            },
+          ],
+        };
+      },
+    } as unknown as pg.Pool;
+
+    await expect(getShareRevocationDisconnectBacklogStats({ pool })).resolves.toEqual({
+      pendingCount: 2,
+      claimedCount: 1,
+      oldestPendingAgeSeconds: 120.5,
+      oldestClaimedAgeSeconds: 360,
+    });
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.text).toContain("share.revocation.disconnect_pending");
+    expect(queries[0]?.text).toContain("share.revocation.disconnect_claimed");
+    expect(queries[0]?.text).toContain("oldest_pending_age_seconds");
+    expect(queries[0]?.text).toContain("oldest_claimed_age_seconds");
+    expect(queries[0]?.text).toContain("payload->>'claimedAt' ~");
+    expect(queries[0]?.text).toContain("(payload->>'claimedAt')::timestamptz");
+    expect(queries[0]?.text).toContain(
+      "when kind = 'share.revocation.disconnect_claimed' then created_at",
+    );
   });
 
   it("does not let a former workspace member revoke a share they created", async () => {
@@ -293,6 +336,54 @@ describe("revokeShare admin disconnect", () => {
     expect(events).toEqual(["connect", "begin", "select", "rollback", "release:destroy"]);
   });
 
+  it("cleans up terminal disconnect events before failing when admin is missing", async () => {
+    const queries: Array<{ text: string; params?: unknown[] }> = [];
+    const pool = {
+      query: async (text: string, params?: unknown[]) => {
+        queries.push({ text, params });
+        return { rows: [] };
+      },
+    } as unknown as pg.Pool;
+    const deps: SharedAtomDeps = { pool };
+
+    await expect(retryPendingShareRevocationDisconnects(deps)).rejects.toMatchObject({
+      code: "failed-precondition",
+    });
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.text).toContain("delete from workspace_events");
+    expect(queries[0]?.text).toContain("where id in");
+    expect(queries[0]?.text).toContain("select id");
+    expect(queries[0]?.text).toContain("limit $2");
+    expect(queries[0]?.text).toContain("~ $3");
+    expect(queries[0]?.text).toContain("$4");
+    expect(queries[0]?.text).toContain("share.revocation.disconnect_completed");
+    expect(queries[0]?.text).not.toContain("share.revocation.disconnect_pending");
+    expect(queries[0]?.text).not.toContain("share.revocation.disconnect_claimed");
+    expect(queries[0]?.params).toEqual([
+      7 * 24 * 60 * 60,
+      100,
+      expect.any(String),
+      expect.any(String),
+    ]);
+  });
+
+  it("still reports failed precondition when missing-admin cleanup fails", async () => {
+    let cleanupAttempted = false;
+    const pool = {
+      query: async () => {
+        cleanupAttempted = true;
+        throw new Error("cleanup failed");
+      },
+    } as unknown as pg.Pool;
+    const deps: SharedAtomDeps = { pool };
+
+    await expect(retryPendingShareRevocationDisconnects(deps)).rejects.toMatchObject({
+      code: "failed-precondition",
+    });
+    expect(cleanupAttempted).toBe(true);
+  });
+
   it("retries pending revocation disconnect events", async () => {
     const events: string[] = [];
     const client = {
@@ -300,7 +391,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -364,6 +455,7 @@ describe("revokeShare admin disconnect", () => {
 
     expect(disconnects).toEqual([{ workspaceId: "workspace-1", userId: "recipient-1" }]);
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -385,9 +477,15 @@ describe("revokeShare admin disconnect", () => {
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
           expect(text).toContain("retryAfter");
+          expect(text).toContain("as due_revocation_disconnects");
+          expect(text).toContain("payload->>'retryAfter' is null");
+          expect(text).toContain("payload->>'retryAfter' !~ $3");
+          expect(text).toContain("due_revocation_disconnects.sort_at");
           expect(text).toContain("clock_timestamp()");
           expect(text).toContain("order by");
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
+          expect(params?.[2]).toEqual(expect.stringContaining("T"));
         }
         return { rows: [] };
       },
@@ -427,7 +525,8 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
           expect(text).toContain("limit $1");
           return { rows: [] };
         }
@@ -469,7 +568,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -503,11 +602,13 @@ describe("revokeShare admin disconnect", () => {
         return { rows: [] };
       },
     } as unknown as pg.Pool;
+    const disconnects: Array<{ workspaceId: string; userId: string }> = [];
     const deps: SharedAtomDeps = {
       pool,
       hocuspocusAdmin: {
-        disconnectWorkspaceUser: async () => {
+        disconnectWorkspaceUser: async (input) => {
           events.push("disconnect");
+          disconnects.push({ workspaceId: input.workspaceId, userId: input.userId });
         },
       },
     };
@@ -520,6 +621,7 @@ describe("revokeShare admin disconnect", () => {
     });
 
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -531,6 +633,7 @@ describe("revokeShare admin disconnect", () => {
       "update",
       "delete",
     ]);
+    expect(disconnects).toEqual([{ workspaceId: "workspace-1", userId: "recipient-from-share" }]);
   });
 
   it("uses the revoked share recipient when the event payload recipient mismatches", async () => {
@@ -541,7 +644,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -603,6 +706,7 @@ describe("revokeShare admin disconnect", () => {
     expect(claimUpdates[0]?.[2]).toBe("recipient-from-share");
     expect(claimUpdates[0]?.[3]).toBe(300);
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -624,9 +728,17 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
+          expect(params?.[2]).toEqual(expect.stringContaining("Z$"));
           expect(text).toContain("share.revocation.disconnect_claimed");
           expect(text).toContain("claimExpiresAt");
+          expect(text).toContain("as due_revocation_disconnects");
+          expect(text).toContain("payload->>'claimExpiresAt' is not null");
+          expect(text).toContain("payload->>'claimExpiresAt' is null");
+          expect(text).toContain("payload->>'claimExpiresAt' !~ $3");
+          expect(text).toContain("payload->>'claimedAt' !~ $3");
+          expect(text).toContain("due_revocation_disconnects.sort_at");
           expect(text).toContain("clock_timestamp()");
           expect(text).toContain("order by");
           return {
@@ -695,6 +807,7 @@ describe("revokeShare admin disconnect", () => {
     expect(claimUpdates[0]?.[3]).toBe(300);
     expect(events.filter((event) => event === "disconnect")).toHaveLength(1);
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -716,8 +829,11 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toHaveLength(3);
+          expect(params?.slice(0, 2)).toEqual([100, 300]);
           expect(text).toContain("payload->>'claimExpiresAt' is null");
+          expect(text).toContain("payload->>'claimedAt' is null");
+          expect(text).toContain("payload->>'claimedAt' !~ $3");
           expect(text).toContain("clock_timestamp() - $2::integer * interval '1 second'");
           return { rows: [] };
         }
@@ -840,6 +956,7 @@ describe("revokeShare admin disconnect", () => {
     expect(storedClaimId).toBe("newer-claim");
     expect(Date.parse(storedClaimedAt)).toBeGreaterThan(0);
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -849,6 +966,7 @@ describe("revokeShare admin disconnect", () => {
       "release",
       "disconnect",
       "update",
+      "delete",
     ]);
   });
 
@@ -861,7 +979,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toEqual([100, 300, expect.any(String)]);
           return {
             rows: [
               {
@@ -938,8 +1056,10 @@ describe("revokeShare admin disconnect", () => {
     expect(claimUpdates[0]?.[0]).toBe("bad-event");
     expect(claimUpdates[0]?.[2]).toBe("recipient-from-share");
     expect(claimUpdates[0]?.[3]).toBe(300);
-    expect(deleted.map((params) => params[0])).toEqual(["bad-event", "event-1"]);
+    expect(deleted.map((params) => params[0]).filter((param) => typeof param === "string"))
+      .toEqual([]);
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -951,7 +1071,6 @@ describe("revokeShare admin disconnect", () => {
       "release",
       "disconnect",
       "update",
-      "delete",
       "disconnect",
       "update",
       "delete",
@@ -1038,7 +1157,7 @@ describe("revokeShare admin disconnect", () => {
         const normalized = text.trim().toLowerCase();
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select") && normalized.includes("from workspace_events")) {
-          expect(params).toEqual([100, 300]);
+          expect(params).toEqual([100, 300, expect.any(String)]);
           if (storedKind === "share.revocation.disconnect_completed") {
             return {
               rows: [
@@ -1126,6 +1245,7 @@ describe("revokeShare admin disconnect", () => {
     });
 
     expect(events).toEqual([
+      "delete",
       "connect",
       "begin",
       "select",
@@ -1153,6 +1273,15 @@ describe("revokeShare admin disconnect", () => {
     expect(disconnectCount).toBe(1);
     expect(cleanupDeletes).toEqual([["event-1"]]);
     expect(storedKind).toBe("deleted");
-    expect(events).toEqual(["connect", "begin", "select", "delete", "commit", "release"]);
+    expect(events).toEqual([
+      "delete",
+      "connect",
+      "begin",
+      "select",
+      "delete",
+      "commit",
+      "release",
+      "delete",
+    ]);
   });
 });

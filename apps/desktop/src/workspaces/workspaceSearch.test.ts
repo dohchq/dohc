@@ -166,9 +166,8 @@ describe("toSearchEntries", () => {
   });
 
   it("refuses ignored-segment paths at any depth — the backstop when rg globs are out-voted", () => {
-    // validateUserWritePath alone rejects only `.dohc`; .git and node_modules
-    // are valid relative paths. If a user include glob out-votes the built-in
-    // rg exclusions, this engine-level check still keeps them out.
+    // validateUserWritePath rejects these today; this test also pins the
+    // search-layer backstop in case rg include globs surface ignored paths.
     for (const path of [
       ".git/config",
       "sub/.git/HEAD",
