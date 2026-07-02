@@ -12585,6 +12585,172 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspa
 - P0G must add integrated E2E and local agent CLI QA for the compare/conflict
   loop.
 
+## PR P0E - Minimal Chat Linked To File
+
+Status: restacked on P0D; not approved
+Branch: codex/think-bigger-p0e-linked-chat
+Worktree: `/home/ice/dev/dohc-p0e-linked-chat`
+Implementation workstream, if used: main orchestration thread
+PR Link: [#52](https://github.com/dohc-ai/dohc/pull/52)
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0E worktree stacked after P0D.
+- [x] Add canonical workspace chat threads and messages in
+      `@dohc/workspace-engine`.
+- [x] Link one thread to a stable file object ID.
+- [x] Send human and agent messages with explicit chat authorship.
+- [x] Keep the link stable when the file path display changes.
+- [x] Produce a read-only text projection for agent context.
+- [x] Redact linked-file path/object metadata from denied projections.
+- [x] Fail closed on corrupt chat state and wrong-workspace access.
+- [ ] Mount related chat beside the file in the desktop UI or equivalent
+      integrated surface.
+- [ ] Open PR after PR00 docs-only exception approval and upstream lane PR
+      decisions are settled, or use a stacked PR target.
+
+### Files Changed
+
+- packages/workspace-engine/package.json
+- packages/workspace-engine/src/index.ts
+- packages/workspace-engine/src/linkedChatStore.ts
+- packages/workspace-engine/src/linkedChatStore.test.ts
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- `packages/workspace-engine/src/linkedChatStore.test.ts`
+  - create a thread linked to a stable versioned text file object.
+  - send and list messages.
+  - link survives file path rename by object ID.
+  - read-only projection includes human and agent messages.
+  - denied linked-file projection hides path and object ID.
+  - wrong-workspace message read/write is denied.
+  - unsafe linked file path hints are denied.
+  - corrupt state fails closed.
+  - inspectable JSON reload preserves thread and messages.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0e-linked-chat /home/ice/dev/dohc-p0e-linked-chat codex/think-bigger-p0d-merge-conflicts
+pnpm install --frozen-lockfile
+pnpm --filter @dohc/workspace-engine test
+pnpm --filter @dohc/workspace-engine typecheck
+git diff --check
+git rebase --onto codex/think-bigger-p0d-merge-conflicts 96dd4be codex/think-bigger-p0e-linked-chat
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+# 2026-06-29 P0D stack refresh / major-gate review policy validation
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --frozen-lockfile --ignore-scripts
+git diff --check
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" node scripts/check-think-bigger-doc-links.mjs
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" REPO_ROOT="$(git rev-parse --show-toplevel)" sh -c 'cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs"'
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/linkedChatStore.test.ts src/versionedTextMerge.test.ts src/versionedTextStore.test.ts src/versionedFileWorkspace.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+```
+
+### E2E / Visual / Manual QA
+
+- No desktop E2E yet. P0E proves the canonical chat substrate and projection
+  at package level.
+- The file-adjacent UI requirement remains open for P0G or a follow-up UI
+  integration lane because current desktop file paths are not yet consistently
+  backed by P0B/P0C stable file object IDs.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable until P0G wires the local agent loop
+  against the proof arc.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: denied linked-file projection hides path/object ID.
+
+### CodeRabbit
+
+- Status: deferred until the P0E major readiness/material-risk gate under the
+  2026-06-29 user-directed review policy; no per-fix rerun is required for the
+  P0D stack-refresh merge.
+- Findings: none solicited for this stack-refresh merge.
+- Fixes: not applicable for this stack-refresh merge.
+- Overrides:
+
+### Subagent Reviews
+
+- UI seam explorer: complete.
+  - Confirmed stable file object IDs already exist in `versionedTextStore`.
+  - Recommended canonical chat objects in the engine, not editable files.
+  - Recommended a future desktop wrapper plus `RelatedChatRail` inside
+    `FileInspector` as the smallest UI integration path.
+  - Warned that desktop file operations mostly still use raw path/disk helpers,
+    so rename survival is engine-proven here but needs desktop move wiring
+    before a rename-survival E2E is honest.
+  - Recommended async workspace/path/request-token guards for any future rail.
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+
+### Security / Privacy Notes
+
+- Threads and messages are scoped by workspace ID.
+- Wrong-workspace thread access fails with `workspace-mismatch`.
+- Linked file path hints run through `validateUserWritePath`.
+- Projection paths are virtual, under deterministic
+  `.dohc/chats/v1-<digest>.md` paths, and marked `readOnly: true`.
+- Projection filenames hash `v1\0workspaceId\0threadId\0projectionKind` with
+  lowercase RFC 4648 base32 and do not expose raw thread IDs.
+- Denied linked-file projections emit only `Linked file: unavailable` and do
+  not include object IDs or stored path hints.
+- Corrupt persisted state fails closed.
+
+### Performance Notes
+
+- Budget areas touched: package-level local JSON chat metadata store.
+- Metrics:
+  - workspace-engine tests: 30 tests in 1.56s locally.
+  - Latest 2026-06-29 P0D stack refresh with Node v24.18.0 and `TMPDIR=/tmp`:
+    docs link/anchor checks in repo and from `/tmp` passed for 7 files;
+    workspace-engine `linkedChatStore.test.ts`, `versionedTextMerge.test.ts`,
+    `versionedTextStore.test.ts`, and `versionedFileWorkspace.test.ts` passed
+    169 tests in 30.65s; workspace-history passed 47 tests in 11.45s;
+    workspace-engine and workspace-history typechecks passed.
+- Machine/CI context: local Codex machine; latest rerun happened after the P0D
+  restack and used Linux Node v24.18.0/Corepack for the first rerun, then the
+  local Node v24.18.0/pnpm toolchain for the 2026-06-29 P0D stack refresh.
+- Budget pass/fail: no renderer/startup/watch budget applies yet.
+- Jank/blocking notes: no renderer integration or watcher loop changes ship in
+  this PR.
+
+### Migration Notes
+
+- Adds new store path `.dohc/engine/linked-chat-store.json`.
+- Adds a package subpath export `@dohc/workspace-engine/linkedChatStore`.
+- No production app path reads or writes the new chat store yet.
+
+### Remaining Risk
+
+- This lane does not yet show chat beside the file in desktop UI.
+- It does not implement channels, DMs, presence, reactions, notifications, or
+  full policy-aware chat search.
+- Raw store APIs return stored thread metadata to authorized callers; policy
+  filtering for UI/search/share projections belongs to P0F and later
+  permission integration.
+- PR00 docs-only local-agent-CLI exception and upstream lane PR approvals remain
+  gates before P0E can be marked complete.
+- Required CodeRabbit major-gate review and stacked PR review are still pending.
+
+### Follow-Up / Deletion Conditions
+
+- P0F should index linked chat projections through the same policy-aware search
+  gate as files.
+- P0G must add integrated E2E/local-agent QA showing a chat linked to a file in
+  the usable surface.
+
 ### Phase 0 Proof Arc
 
 PR00 remains a docs-only orchestration PR. The checked proof items below refer

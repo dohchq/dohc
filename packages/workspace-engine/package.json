@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./linkedChatStore": "./src/linkedChatStore.ts",
     "./versioned-file-workspace": "./src/versionedFileWorkspace.ts",
     "./testing": "./src/testing.ts"
   },

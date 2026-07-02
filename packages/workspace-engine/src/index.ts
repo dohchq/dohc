@@ -1,4 +1,11 @@
 export {
+  LINKED_CHAT_PROJECTION_KIND,
+  LINKED_CHAT_STORE_RELATIVE_PATH,
+  LinkedChatStoreError,
+  createLinkedChatStore,
+  linkedChatProjectionPath,
+} from "./linkedChatStore";
+export {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
   createVersionedTextStore,
@@ -46,3 +53,16 @@ export type {
   VersionedFileWorkspaceOptions,
   VersionedFileWriteResult,
 } from "./versionedFileWorkspace";
+export type {
+  ChatActor,
+  ChatMessage,
+  ChatMessageId,
+  ChatThread,
+  ChatThreadId,
+  LinkedChatFileRef,
+  LinkedChatProjection,
+  LinkedChatProjectionFileAccess,
+  LinkedChatStore,
+  LinkedChatStoreErrorCode,
+  LinkedChatStoreOptions,
+} from "./linkedChatStore";
