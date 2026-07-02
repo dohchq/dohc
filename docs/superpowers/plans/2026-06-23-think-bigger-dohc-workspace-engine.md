@@ -1406,6 +1406,11 @@ mandatory on every meaningful implementation step. CodeRabbit is reserved for:
 - final milestone gates such as Phase 0 proof-arc acceptance.
 - user-requested focused audits.
 
+Repository configuration must reflect this policy: `.coderabbit.yaml` keeps
+automatic and incremental reviews disabled so CodeRabbit is invoked manually for
+major gates instead of consuming review quota on every push, ready-for-review
+transition, or restack commit.
+
 At a CodeRabbit gate:
 
 ```text
