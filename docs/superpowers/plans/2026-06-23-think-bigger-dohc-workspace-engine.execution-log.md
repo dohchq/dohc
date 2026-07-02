@@ -9226,8 +9226,10 @@ Date completed:
       external edits as a human or agent.
 - [x] Tighten scan inclusion parity for `.git`, `node_modules`, nested `.dohc`,
       and SQLite sidecars.
-- [ ] Open PR after PR00 docs-only exception approval and upstream lane PR
-      decisions are settled, or use a stacked PR target.
+- [x] Open P0G as stacked draft
+      [#54](https://github.com/dohc-ai/dohc/pull/54) after user approval to
+      skip GitHub PR Actions for now. Do not merge P0G until local validation,
+      required major review gates, and explicit acceptance clear.
 
 ### Files Changed
 
@@ -13006,6 +13008,27 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspa
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres test src/db/schema.test.ts
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/shares.test.ts # blocked locally: ECONNREFUSED 127.0.0.1:54329
+# 2026-07-02 Actions-disabled final restack verification
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-core test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-core typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-sync typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-postgres test src/db/schema.test.ts
+cargo fmt --manifest-path crates/workspace-kernel-spike/Cargo.toml -- --check
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+node scripts/check-think-bigger-doc-links.mjs
+git diff --check
 pg_isready -h 127.0.0.1 -p 54329 # no response
 docker ps # blocked locally: Docker is not installed in this WSL distro
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=240000 pnpm test:phase0-agent-cli
@@ -13087,11 +13110,12 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp DOHC_KEEP_AGENT_SMOKE_WORKS
 
 ### CodeRabbit
 
-- Status: deferred until the P0G proof-arc major readiness/material-risk gate
-  under the 2026-06-29 user-directed review policy; no per-fix rerun is
-  required for the P0F stack-refresh merge.
-- Findings: none solicited for this stack-refresh merge.
-- Fixes: not applicable for this stack-refresh merge.
+- Status: PR00 and P0A-P0G automatic CodeRabbit PR checks pass after the
+  2026-07-02 Actions-disabled restack. Manual CodeRabbit reruns remain deferred
+  to major readiness/material-risk gates under the 2026-06-29 user-directed
+  review policy.
+- Findings: none open from the automatic PR checks.
+- Fixes: not applicable for this restack verification.
 - Overrides:
 
 ### Subagent Reviews
@@ -13151,13 +13175,21 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp DOHC_KEEP_AGENT_SMOKE_WORKS
   - current restack workspace-engine tests: 177 tests in 29.68s locally.
   - latest P0F stack-refresh workspace-engine tests: 177 tests in 30.43s
     locally with Node v24.18.0 and `TMPDIR=/tmp`.
+  - 2026-07-02 Actions-disabled final restack workspace-engine tests: 177 tests
+    passed in 32.50s locally with Node v24.18.0 and `TMPDIR=/tmp`.
   - latest restack workspace-engine typecheck: passed.
   - final full-restack workspace-engine typecheck: passed.
   - current restack workspace-engine typecheck: passed.
+  - 2026-07-02 Actions-disabled final restack workspace-engine typecheck:
+    passed.
   - latest restack workspace-fs tests: 40 tests in 3.25s locally.
   - final full-restack workspace-fs tests: 40 tests in 3.41s locally.
+  - 2026-07-02 Actions-disabled final restack workspace-fs tests: 40 tests in
+    2.65s locally; typecheck passed.
   - latest restack workspace-history tests: 28 tests in 2.83s locally.
   - final full-restack workspace-history tests: 28 tests in 3.45s locally.
+  - 2026-07-02 Actions-disabled final restack workspace-history tests: 47 tests
+    in 12.78s locally; typecheck passed.
   - current restack workspace-history conflict-resolution test: 8 tests in
     348ms locally.
   - latest P0F stack-refresh workspace-history tests: 47 tests in 11.34s
@@ -13166,12 +13198,20 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp DOHC_KEEP_AGENT_SMOKE_WORKS
   - latest restack workspace-core tests: 104 tests in 809ms locally.
   - final full-restack workspace-core tests: 104 tests in 953ms locally.
   - latest P0F stack-refresh workspace-core tests: 108 tests in 615ms locally.
+  - 2026-07-02 Actions-disabled final restack workspace-core tests: 108 tests in
+    949ms locally; workspace-core and workspace-sync typechecks passed.
   - latest P0F stack-refresh workspace-fs tests: 40 tests in 2.85s locally.
   - latest P0F stack-refresh MCP tests: 58 tests in 4.37s locally.
+  - 2026-07-02 Actions-disabled final restack MCP tests: 58 tests in 6.51s
+    locally; MCP and desktop typechecks passed.
   - latest P0F stack-refresh workspace-api share-revocation tests: 18 tests in
     591ms locally.
+  - 2026-07-02 Actions-disabled final restack workspace-api share-revocation
+    tests: 18 tests in 1.24s locally; workspace-api typecheck passed.
   - latest P0F stack-refresh workspace-postgres schema tests: 2 tests in 617ms
     locally.
+  - 2026-07-02 Actions-disabled final restack workspace-postgres schema tests:
+    2 tests in 585ms locally; workspace-postgres typecheck passed.
   - latest restack workspace-fs typecheck: passed.
   - final full-restack workspace-fs typecheck: passed.
   - latest restack workspace-core typecheck: passed.
@@ -13190,6 +13230,10 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp DOHC_KEEP_AGENT_SMOKE_WORKS
     tests passed; Rust/TypeScript bench smoke with 2 files at 1024 bytes each
     reported exact 2048 bytes on both implementations, Rust avg 0.10ms and
     TypeScript avg 10.46ms.
+  - 2026-07-02 Actions-disabled final restack Rust checks passed:
+    `cargo fmt --check`, `cargo test --manifest-path
+    crates/workspace-kernel-spike/Cargo.toml` 3 tests, docs link/anchor check
+    for 7 files, and `git diff --check`.
   - Codex fallback agent smoke: completed successfully in 26.26s.
   - latest restack Codex fallback agent smoke: completed successfully.
   - latest transcript-schema Codex fallback agent smoke: completed successfully
