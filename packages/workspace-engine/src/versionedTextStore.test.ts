@@ -8,7 +8,10 @@ import {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
-import { createTestableVersionedTextStore as createVersionedTextStoreForTest } from "./testing";
+import {
+  createTestableVersionedTextStore as createVersionedTextStoreForTest,
+  versionedTextStoreLockDirForTest,
+} from "./testing";
 
 let root: string;
 let now = 1000;
@@ -87,7 +90,7 @@ async function ensureStoreStateDir(): Promise<void> {
 }
 
 function storeLockDir(): string {
-  return join(root, `${VERSIONED_TEXT_STORE_RELATIVE_PATH}.lock`);
+  return versionedTextStoreLockDirForTest(root);
 }
 
 const localFileWrite = { origin: "local-file" as const, summary: "local save" };
@@ -1071,6 +1074,55 @@ describe("versioned text store", () => {
     expect(raw).not.toContain("toJSON summary should not win");
   });
 
+  it("persists restorable before and after text on write and rename moments", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const first = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "First\n",
+      metadata: apiWrite,
+    });
+    const second = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Second\n",
+      metadata: localFileWrite,
+    });
+    const rename = await store.renameTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      fromPath: "notes/today.md",
+      toPath: "archive/today.md",
+      metadata: apiWrite,
+    });
+
+    expect(first.moment.payload).toEqual({
+      before: null,
+      after: { path: "notes/today.md", text: "First\n" },
+    });
+    expect(second.moment.payload).toEqual({
+      before: { path: "notes/today.md", text: "First\n" },
+      after: { path: "notes/today.md", text: "Second\n" },
+    });
+    expect(rename.moment.payload).toEqual({
+      before: { path: "notes/today.md", text: "Second\n" },
+      after: { path: "archive/today.md", text: "Second\n" },
+    });
+
+    const raw = JSON.parse(await readFile(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH), "utf8"));
+    const persistedPayloads = raw.workspaces["workspace-a"].moments.map(
+      (moment: { payload: unknown }) => moment.payload,
+    );
+    expect(persistedPayloads).toEqual([
+      first.moment.payload,
+      second.moment.payload,
+      rename.moment.payload,
+    ]);
+  });
+
   it("rejects non-string text before persisting", async () => {
     const store = storeWithDeterministicIds();
     const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
@@ -1886,6 +1938,7 @@ describe("versioned text store", () => {
     workspace.pathAliases.main[legacyPath] = write.object.id;
     workspace.snapshots.main[write.object.id].path = legacyPath;
     workspace.moments[0].path = legacyPath;
+    workspace.moments[0].payload.after.path = legacyPath;
     await writeFile(statePath, `${JSON.stringify(raw)}\n`);
     const reloaded = createVersionedTextStore(root);
 
@@ -2166,6 +2219,9 @@ describe("versioned text store", () => {
       (raw: typeof validRaw) => {
         raw.workspaces["workspace-a"].snapshots.main[write.object.id].metadata.correlationId =
           "other-request";
+      },
+      (raw: typeof validRaw) => {
+        raw.workspaces["workspace-a"].moments[0].payload.after.text = "Different text\n";
       },
     ];
 

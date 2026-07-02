@@ -40,7 +40,7 @@ export type ShareRevocationDisconnectBacklogStats = {
 
 const SHARE_REVOCATION_RETRY_DELAY_SECONDS = 30;
 const SHARE_REVOCATION_CLAIM_STALE_SECONDS = 5 * 60;
-const SHARE_REVOCATION_DISCONNECT_TIMEOUT_MS = 2_000;
+const SHARE_REVOCATION_DISCONNECT_TIMEOUT_MAX_MS = 5_000;
 const SHARE_REVOCATION_WORKER_MAX_BATCH = 100;
 const SHARE_REVOCATION_COMPLETED_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 const POSTGRES_UTC_ISO_FORMAT = `YYYY-MM-DD"T"HH24:MI:SS.MS"Z"`;
@@ -419,11 +419,13 @@ export async function retryPendingShareRevocationDisconnects(
     await client.query("begin");
     const { rows } = await client.query<{
       id: string;
+      kind: string;
       workspace_id: string;
       target_id: string;
       payload: unknown;
     }>(
       `select workspace_events.id,
+              workspace_events.kind,
               workspace_events.workspace_id,
               workspace_events.target_id,
               workspace_events.payload
@@ -475,6 +477,15 @@ export async function retryPendingShareRevocationDisconnects(
                  '${POSTGRES_UTC_ISO_FORMAT}'
                )
            )
+         union all
+         select id,
+                case
+                  when payload->>'completedAt' ~ $3 then payload->>'completedAt'
+                  else ${POSTGRES_UTC_ISO_NOW_SQL}
+                end as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_completed'
        ) as due_revocation_disconnects
          on due_revocation_disconnects.id = workspace_events.id
        order by due_revocation_disconnects.sort_at asc,
@@ -483,18 +494,23 @@ export async function retryPendingShareRevocationDisconnects(
        for update of workspace_events skip locked`,
       [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS, POSTGRES_UTC_ISO_TEXT_RE],
     );
-    attempted = rows.length;
     for (const row of rows) {
+      if (row.kind === "share.revocation.disconnect_completed") {
+        await client.query(
+          `delete from workspace_events
+           where id = $1
+             and kind = 'share.revocation.disconnect_completed'`,
+          [row.id],
+        );
+        continue;
+      }
+      attempted += 1;
       const recipientUserIdFromShare = await readRevokedShareRecipientUserId(
         client,
         row.workspace_id,
         row.target_id,
       );
-      const recipientUserIdFromPayload = readRecipientUserId(row.payload);
-      if (
-        !recipientUserIdFromShare ||
-        (recipientUserIdFromPayload && recipientUserIdFromPayload !== recipientUserIdFromShare)
-      ) {
+      if (!recipientUserIdFromShare) {
         failed += 1;
         await client.query("delete from workspace_events where id = $1", [row.id]);
         continue;
@@ -656,6 +672,7 @@ async function disconnectWorkspaceUserWithinLease(
   if (!hocuspocusAdmin) {
     throw new Error("Hocuspocus admin disconnect is not configured");
   }
+  const leaseTimeoutMs = readHocuspocusAdminDisconnectTimeoutMs(hocuspocusAdmin);
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const disconnect = hocuspocusAdmin.disconnectWorkspaceUser({
@@ -672,13 +689,25 @@ async function disconnectWorkspaceUserWithinLease(
             controller.abort(new Error("Hocuspocus admin disconnect timed out"));
             reject(new Error("Hocuspocus admin disconnect timed out"));
           },
-          SHARE_REVOCATION_DISCONNECT_TIMEOUT_MS,
+          leaseTimeoutMs,
         );
       }),
     ]);
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+function readHocuspocusAdminDisconnectTimeoutMs(
+  hocuspocusAdmin: NonNullable<SharedAtomDeps["hocuspocusAdmin"]>,
+): number {
+  const configuredTimeoutMs = Number(
+    (hocuspocusAdmin as { disconnectTimeoutMs?: unknown }).disconnectTimeoutMs,
+  );
+  if (Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0) {
+    return Math.ceil(configuredTimeoutMs);
+  }
+  return SHARE_REVOCATION_DISCONNECT_TIMEOUT_MAX_MS;
 }
 
 async function readRevokedShareRecipientUserId(
@@ -769,24 +798,6 @@ function toShare(row: DbShareRow): ShareRow {
     recipientEmail: row.recipient_email ?? "",
     capability: row.capability,
   };
-}
-
-function readRecipientUserId(payload: unknown): string | undefined {
-  let value = payload;
-  if (typeof value === "string") {
-    try {
-      value = JSON.parse(value) as unknown;
-    } catch {
-      return undefined;
-    }
-    if (typeof value !== "string" && (!value || typeof value !== "object")) {
-      return undefined;
-    }
-  }
-  if (typeof value === "string") return undefined;
-  if (!value || typeof value !== "object") return undefined;
-  const recipientUserId = (value as { recipientUserId?: unknown }).recipientUserId;
-  return typeof recipientUserId === "string" && recipientUserId ? recipientUserId : undefined;
 }
 
 function requirePool(deps: SharedAtomDeps | undefined): pg.Pool {

@@ -183,8 +183,19 @@ export interface VersionedTextMoment {
   path: string;
   recordedAtMs: number;
   operation: "write" | "rename" | "delete";
+  payload: VersionedTextMomentPayload;
   metadata: ActorNeutralWriteMetadata;
   before?: TextFileSnapshot | null;
+}
+
+export interface VersionedTextMomentPayloadSnapshot {
+  path: string;
+  text: string;
+}
+
+export interface VersionedTextMomentPayload {
+  before: VersionedTextMomentPayloadSnapshot | null;
+  after: VersionedTextMomentPayloadSnapshot;
 }
 
 export interface VersionedTextWriteResult {
@@ -405,6 +416,22 @@ function assertWriteMetadata(value: unknown): asserts value is ActorNeutralWrite
   }
 }
 
+function assertMomentPayload(value: unknown): asserts value is VersionedTextMomentPayload {
+  assertRecord(value);
+  if (value.before !== null) {
+    assertMomentPayloadSnapshot(value.before);
+  }
+  assertMomentPayloadSnapshot(value.after);
+}
+
+function assertMomentPayloadSnapshot(
+  value: unknown,
+): asserts value is VersionedTextMomentPayloadSnapshot {
+  assertRecord(value);
+  assertPersistedWritePath(value.path);
+  assertString(value.text);
+}
+
 function assertPersistedWritePath(value: unknown): asserts value is string {
   assertString(value);
   const result = validateUserWritePath(value, { allowIgnoredSegments: true });
@@ -480,10 +507,20 @@ function cloneMoment(moment: VersionedTextMoment): VersionedTextMoment {
     path: moment.path,
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
+    payload: cloneMomentPayload(moment.payload),
     metadata: pickWriteMetadata(moment.metadata),
     ...(moment.before !== undefined
       ? { before: moment.before === null ? null : cloneSnapshot(moment.before) }
       : {}),
+  };
+}
+
+function cloneMomentPayload(payload: VersionedTextMomentPayload): VersionedTextMomentPayload {
+  return {
+    before: payload.before
+      ? { path: payload.before.path, text: payload.before.text }
+      : null,
+    after: { path: payload.after.path, text: payload.after.text },
   };
 }
 
@@ -515,6 +552,10 @@ function cloneFileObject(object: FileObjectRecord): FileObjectRecord {
 
 function storePath(rootDir: string): string {
   return join(rootDir, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+}
+
+export function versionedTextStoreLockDirForTest(rootDir: string): string {
+  return `${storePath(resolve(normalizeRootDir(rootDir)))}.lock`;
 }
 
 function stateFileToken(stats: Stats): string {
@@ -886,6 +927,20 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
     ) {
       throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
     }
+    assertMomentPayload(moment.payload);
+    if (moment.payload.after.path !== moment.path) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    if (moment.operation === "write" && moment.payload.before?.path !== undefined) {
+      if (moment.payload.before.path !== moment.path) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+    }
+    if (moment.operation === "rename") {
+      if (!moment.payload.before || moment.payload.before.text !== moment.payload.after.text) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+    }
     assertWriteMetadata(moment.metadata);
     assertMomentBefore(moment.before);
     if (moment.operation === "delete" && (moment.before === undefined || moment.before === null)) {
@@ -1038,6 +1093,8 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
       }
       if (
         persistedSnapshot.updatedAtMs !== latestMoment.recordedAtMs ||
+        persistedSnapshot.text !== latestMoment.payload.after.text ||
+        persistedSnapshot.path !== latestMoment.payload.after.path ||
         !sameWriteMetadata(persistedSnapshot.metadata, latestMoment.metadata)
       ) {
         throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
@@ -2336,6 +2393,7 @@ function createMoment(input: {
   path: string;
   recordedAtMs: number;
   operation: "write" | "rename" | "delete";
+  payload: VersionedTextMomentPayload;
   metadata: ActorNeutralWriteMetadata;
   before: TextFileSnapshot | null;
 }): VersionedTextMoment {
@@ -2347,6 +2405,7 @@ function createMoment(input: {
     path: input.path,
     recordedAtMs: input.recordedAtMs,
     operation: input.operation,
+    payload: cloneMomentPayload(input.payload),
     metadata: pickWriteMetadata(input.metadata),
     before: input.before === null ? null : cloneSnapshot(input.before),
   };
@@ -2579,6 +2638,10 @@ function createVersionedTextStoreWithHooks(
       path: input.path,
       recordedAtMs,
       operation: "write",
+      payload: {
+        before: before ? { path: before.path, text: before.text } : null,
+        after: { path: input.path, text: input.text },
+      },
       metadata: input.metadata,
       before,
     });
@@ -2638,6 +2701,10 @@ function createVersionedTextStoreWithHooks(
       path: input.path,
       recordedAtMs,
       operation: "delete",
+      payload: {
+        before: { path: before.path, text: before.text },
+        after: { path: before.path, text: before.text },
+      },
       metadata: input.metadata,
       before,
     });
@@ -3122,6 +3189,10 @@ function createVersionedTextStoreWithHooks(
           path: toPath,
           recordedAtMs,
           operation: "rename",
+          payload: {
+            before: { path: before.path, text: before.text },
+            after: { path: toPath, text: before.text },
+          },
           metadata,
           before,
         });

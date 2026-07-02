@@ -924,7 +924,7 @@ type WorkspaceStatusPayload = {
   pinned: boolean
   encrypted: boolean
   searchable: boolean
-  visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
+  visibility: FileVisibilityScope
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny'
   exportState: 'included' | 'redacted' | 'excluded' | 'not_exportable'
@@ -1307,13 +1307,19 @@ ambiguous input.
 Example internal shape:
 
 ```ts
+type FileVisibilityScope =
+  | 'private'
+  | 'shared_with_selected_people'
+  | 'workspace'
+  | 'public'
+
 type FilePolicyBase = {
   tracked: boolean
   versioned: boolean
   synced: boolean
   pinned: boolean
   searchable: boolean
-  visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
+  visibility: FileVisibilityScope
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
 }
@@ -1343,6 +1349,13 @@ type SecretBackedFilePolicy =
 
 type FilePolicy = NonSecretFilePolicy | SecretBackedFilePolicy
 ```
+
+Canonical visibility values are `private`, `shared_with_selected_people`,
+`workspace`, and `public`, matching the versioned-workspace visibility
+contract. Human-authored policy files may accept `shared with selected people`
+as a display label, and legacy imports may map `team` or `shared` to
+`shared_with_selected_people`, but status payloads, storage, policy export,
+policy import, and search indexes must emit only canonical enum values.
 
 `materialized` describes runtime hydration state only and lives in
 `WorkspaceStatusPayload`, not in `FilePolicyBase` or persisted policy
