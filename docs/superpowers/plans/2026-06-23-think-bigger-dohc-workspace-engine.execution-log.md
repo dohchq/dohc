@@ -8326,11 +8326,11 @@ Mutable status symbol: `LivePR00Status`.
 
 Three-hundred-third pass:
 
-### Live PR00 Status
+### Historical PR00 Status - Pass 303
 
-Mutable status symbol: `LivePR00Status`.
+- Historical mutable status symbol: `LivePR00Status`.
 
-- Live PR00 status:
+- Historical PR00 status:
   - CodeRabbit status: PR00 and P0A-P0G draft PR checks currently pass; future
     manual CodeRabbit reruns remain deferred to major readiness/material-risk
     gates under the 2026-06-29 user-directed review policy.
@@ -8400,10 +8400,59 @@ Mutable status symbol: `LivePR00Status`.
 - Overrides:
   - None approved.
 
+Three-hundred-fourth pass:
+
+### Live PR00 Status
+
+Mutable status symbol: `LivePR00Status`.
+
+- Live PR00 status:
+  - CodeRabbit status: PR00 and P0A-P0G draft PR checks currently pass. Future
+    manual CodeRabbit reruns remain deferred to major readiness/material-risk
+    gates under the 2026-06-29 user-directed review policy.
+  - Test evidence: PR00 docs-only local validation remains green; the pushed
+    P0A-P0G proof stack is locally validated through
+    `codex/think-bigger-p0g-proof-qa` at commit `090702d7`. GitHub Actions are
+    disabled/skipped as of the 2026-07-02 user direction, so old red PR Action
+    statuses are not blockers for this initiative while Actions remain disabled.
+  - Open overrides: the user explicitly approved skipping GitHub PR Actions
+    from now on and disabling GitHub Actions for now. The PR00 docs-only
+    local-agent-CLI exception remains pending human approval.
+  - Unresolved findings: the PR00 docs-only local-agent-CLI exception remains
+    pending human approval.
+  - Completion state: not complete or merge-ready until the required
+    major-gate review policy is satisfied, the P0A-P0G draft lane PRs are
+    approved or explicitly accepted, and the docs-only local-agent-CLI
+    exception is approved. Remote GitHub Actions are not a completion blocker
+    while disabled by user direction.
+
+- GitHub Actions policy update:
+  - `gh workflow disable 299787992` disabled `Desktop Release`.
+  - `gh workflow disable 304500458` disabled `Think Bigger Docs`.
+  - `gh workflow list --all` confirmed both workflows as `disabled_manually`.
+  - `gh pr checks 46 --required` reported no required checks.
+  - `gh pr checks 46` still shows the historical red `Link And Anchor Check`
+    and `Preflight` runs, but those are old pre-run billing-limit failures and
+    no longer gate progress under the 2026-07-02 user direction.
+- Validation for this policy/log patch:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 discovered
+    Think Bigger docs and the in-script fixtures.
+  - `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+    passed for 5 discovered Think Bigger docs and the in-script fixtures.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Unresolved findings:
+  - The PR00 docs-only local-agent-CLI exception remains pending human approval
+    before completion or merge-readiness.
+- Overrides:
+  - User approved skipping GitHub PR Actions from now on and disabling GitHub
+    Actions for now on 2026-07-02.
+
 ### Unresolved Findings
 
-- GitHub Actions billing/spending-limit blocker prevents remote CI from running
-  on PR00.
+- GitHub Actions are intentionally disabled/skipped by 2026-07-02 user
+  direction and are not an active blocker while disabled.
 - CodeRabbit checks currently pass on PR00 and P0A-P0G draft lane PRs; manual
   reruns remain deferred to the next major readiness/material-risk gate under
   the updated review policy.
