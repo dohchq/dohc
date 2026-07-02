@@ -9004,6 +9004,214 @@ Latest stack-refresh validation on 2026-07-01:
 - Delete once a production Rust kernel lane supersedes the spike, or keep as a
   benchmark fixture until cross-language contract tests replace it.
 
+## PR P0B - Minimal Versioned Text Store
+
+Status: restacked on P0R; not approved
+Branch: codex/think-bigger-p0b-versioned-store
+Worktree: `/home/ice/dev/dohc-p0b-versioned-store`
+Implementation workstream, if used: main orchestration thread
+PR Link: [#49](https://github.com/dohc-ai/dohc/pull/49)
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0B worktree stacked after P0R.
+- [x] Add a focused `@dohc/workspace-engine` package.
+- [x] Add a minimal durable versioned text store for ordinary text/file
+      content.
+- [x] Add stable `WorkspaceObjectId` records for file objects.
+- [x] Add Main plus named versions with fork-point metadata.
+- [x] Preserve object identity across supported renames.
+- [x] Store actor-neutral write metadata without claiming human/agent identity.
+- [x] Deny invalid, reserved, traversal, and wrong-workspace/version writes.
+- [x] Add tests for version isolation, stable object ID, rename, wrong
+      workspace denial, path denial, persistence, and corrupt-state fail-closed
+      behavior.
+- [ ] Open PR only after PR00 external CI/docs-only exception handling, final
+      approval, and P0A/P0R lane PR decisions are settled; keep this lane
+      stacked on P0R until then. Do not merge P0B until its tests and required
+      CodeRabbit major gate clear.
+
+### Files Changed
+
+- packages/workspace-engine/package.json
+- packages/workspace-engine/tsconfig.json
+- packages/workspace-engine/src/index.ts
+- packages/workspace-engine/src/versionedTextStore.ts
+- packages/workspace-engine/src/versionedTextStore.test.ts
+- pnpm-lock.yaml
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- `packages/workspace-engine/src/versionedTextStore.test.ts`
+  - Main plus named version isolation for one file.
+  - rename preserves stable object ID where supported.
+  - wrong workspace/version writes are denied.
+  - reserved/traversal/absolute paths are denied through `validateUserWritePath`.
+  - durable JSON store reloads.
+  - corrupt persisted state fails closed.
+  - malformed persisted JSON maps to `state-corrupt`.
+  - malformed nested workspace state maps to `state-corrupt`.
+  - failed persistence does not leak unpersisted writes through the in-memory
+    cache.
+  - path aliases stay isolated per version after renames.
+  - concurrent writes through separate store instances preserve both changes.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0b-versioned-store /home/ice/dev/dohc-p0b-versioned-store codex/think-bigger-p0r-rust-kernel
+pnpm install --filter @dohc/workspace-engine
+pnpm --filter @dohc/workspace-engine test
+pnpm --filter @dohc/workspace-engine typecheck
+pnpm install --filter @dohc/workspace-engine --filter @dohc/workspace-core --filter @dohc/workspace-contracts
+pnpm --filter @dohc/workspace-engine test
+pnpm --filter @dohc/workspace-engine typecheck
+pnpm --filter @dohc/workspace-core typecheck
+git rebase --onto codex/think-bigger-p0r-rust-kernel b9e804b codex/think-bigger-p0b-versioned-store
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-core typecheck
+git merge origin/codex/think-bigger-p0r-rust-kernel
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --frozen-lockfile --ignore-scripts
+git diff --check
+node scripts/check-think-bigger-doc-links.mjs
+REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+```
+
+Latest stack-refresh validation on 2026-07-01:
+
+- `git diff --check` passed.
+- `node scripts/check-think-bigger-doc-links.mjs` passed for 7 discovered
+  Think Bigger docs and the in-script fixtures.
+- `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+  passed for 7 discovered Think Bigger docs and the in-script fixtures.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test`
+  passed with 1 file and 45 tests.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck`
+  passed.
+
+### E2E / Visual / Manual QA
+
+- Not applicable yet. P0B is a package-level engine proof, not a UI or desktop
+  integration PR.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable until P0G wires the local agent loop
+  against the proof arc.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: no secrets touched; `.dohc` paths are denied.
+
+### AI Review
+
+- Status: deferred until the P0B major readiness/material-risk gate under the
+  2026-06-29 user-directed review policy; no per-fix rerun is required for the
+  P0R stack-refresh merge.
+- Findings fixed in this P0B loop:
+  - Major: cached state could be mutated before durable persistence completed.
+  - Major: path aliases were workspace-global instead of version-scoped.
+  - Major: malformed JSON escaped as a raw `SyntaxError`.
+  - Critical: same-root store instances could overwrite each other because
+    writes were only serialized per instance.
+  - Major: `getObject()` exposed a shared `lastKnownPath` that became
+    misleading when branches diverged.
+  - Major: nested corrupt state could escape the store error contract.
+  - Major: P0B open-PR gate wording implied a stacked-target bypass.
+  - Minor: failed-persistence regression used a loose rejection assertion.
+  - Critical: stale-lock recovery could delete a live replacement lock.
+  - Major: heartbeat writes could finish after lock release.
+  - Major: public clone helpers could leak unknown persisted properties.
+  - Major: version `kind` and `forkPoint` consistency was not enforced.
+  - Major: lock owner initialization failure could leave an empty lock dir.
+  - Major: warm cache reads hashed the full state file.
+  - Major: lock health checks could leak raw fs errors when owner metadata
+    disappeared.
+  - Major: atomic replacements lacked temp-file and parent-directory fsyncs.
+  - Major: rename invalid-path coverage was missing.
+  - Minor: lock serialization waits used exact counter equality.
+- Fixes applied:
+  - Added copy-on-write mutation flow and only assign `cachedState` after
+    `writeFileAtomic` succeeds.
+  - Moved path aliases under `VersionId` and copied aliases when forking named
+    versions.
+  - Wrapped JSON parse syntax failures as `VersionedTextStoreError` with
+    `state-corrupt`.
+  - Added a global per-store-path write chain and reload writable state from
+    disk before each serialized mutation.
+  - Removed shared `lastKnownPath`; version paths live on snapshots.
+  - Added nested state validation and precise failed-persist regression
+    coverage.
+  - Tightened the P0B PR gate wording to remain blocked on PR00 and upstream
+    lane decisions.
+- Remaining verification:
+  - Run the required CodeRabbit major gate when P0B reaches readiness or a
+    material risk decision point.
+- Overrides:
+
+### Subagent Reviews
+
+- Package-pattern explorer: complete.
+  - Confirmed `packages/workspace-engine` fits `packages/*`.
+  - Confirmed raw TS package exports, local Vitest tests, and simple tsconfig
+    shape.
+  - Warned to keep Node/fs APIs split from browser-safe surfaces and avoid
+    canonical `atoms.body` assumptions.
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+
+### Security / Privacy Notes
+
+- The store refuses reserved `.dohc`, traversal, absolute, and invalid paths
+  through the existing core path guard.
+- The store scopes every version, object, snapshot, and moment by workspace ID.
+- Writes carry actor-neutral metadata only; this intentionally avoids guessing
+  whether a local file write came from a human or an agent.
+- Corrupt persisted state fails closed.
+- No rich-doc/Y.Doc or `atoms.body` behavior is introduced.
+
+### Performance Notes
+
+- Budget areas touched: package-level local metadata store only.
+- Metrics: focused Vitest suite completed in 3.08s locally after the P0R stack
+  refresh.
+- Workspace/file/chat sizes: unit fixtures cover one-file version isolation.
+- Machine/CI context: local Codex machine; latest rerun used Node v24.18.0 and
+  pnpm 10.24.0.
+- Budget pass/fail: no UI/startup/watch budget applies yet.
+- Jank/blocking notes: no renderer integration or long-running scan is added.
+
+### Migration Notes
+
+- Adds a new package and lockfile entry.
+- Store path is `.dohc/engine/versioned-text-store.json`, but no production
+  app path reads or writes it yet.
+- Existing history, sync, atoms, Y.Doc, and desktop behavior are untouched.
+
+### Remaining Risk
+
+- This is an intentionally narrow durable JSON proof, not the final
+  concurrent/multi-process storage engine.
+- No production write path is integrated yet; P0C owns file/API write capture
+  and history.
+- No merge/conflict behavior is included; P0D owns compare, clean merge, and
+  conflict preservation.
+- PR00 docs-only local-agent-CLI exception and upstream lane PR approvals remain
+  gates before P0B can be marked complete.
+- Required CodeRabbit major-gate review and stacked PR review are still pending.
+
+### Follow-Up / Deletion Conditions
+
+- Promote this package into the Phase 0 file/API loop in P0C, or delete it if
+  P0C chooses a different minimal engine substrate.
+
 ### Phase 0 Proof Arc
 
 PR00 remains a docs-only orchestration PR. The checked proof items below refer
