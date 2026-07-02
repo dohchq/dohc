@@ -25,6 +25,11 @@ struct ScannedFile {
     media_type: String,
 }
 
+struct HashedFile {
+    sha256: String,
+    bytes: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct SkippedPath {
     path: String,
@@ -151,7 +156,7 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
                     .unwrap_or_else(|| "<unknown>".to_string());
                 skipped.push(SkippedPath {
                     path,
-                    reason: error.to_string(),
+                    reason: walkdir_error_reason(&error),
                 });
                 continue;
             }
@@ -183,25 +188,28 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
             Err(error) => {
                 skipped.push(SkippedPath {
                     path: relative.clone(),
-                    reason: error.to_string(),
+                    reason: walkdir_error_reason(&error),
                 });
                 continue;
             }
         };
-        let sha = match sha256_file(entry.path()) {
-            Ok(sha) => sha,
+        if !metadata.is_file() {
+            continue;
+        }
+        let hashed = match sha256_file(entry.path()) {
+            Ok(hashed) => hashed,
             Err(error) => {
                 skipped.push(SkippedPath {
                     path: relative.clone(),
-                    reason: error.to_string(),
+                    reason: io_error_reason(&error),
                 });
                 continue;
             }
         };
         files.push(ScannedFile {
             path: relative.clone(),
-            size: metadata.len(),
-            sha256: sha,
+            size: hashed.bytes,
+            sha256: hashed.sha256,
             media_type: media_type_for_path(&relative).to_string(),
         });
     }
@@ -212,7 +220,7 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
     let scan_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(ScanOutput {
-        root: canonical_root.display().to_string(),
+        root: ".".to_string(),
         metrics: ScanMetrics {
             files: files.len(),
             bytes,
@@ -224,7 +232,7 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
 }
 
 fn should_descend(entry: &DirEntry) -> bool {
-    let name = entry.file_name().to_string_lossy().to_lowercase();
+    let name = normalize_ignored_segment(&entry.file_name().to_string_lossy());
     !IGNORED_SEGMENTS.contains(&name.as_str())
 }
 
@@ -238,22 +246,42 @@ fn relative_display(root: &Path, path: &Path) -> String {
 fn has_ignored_segment(path: &str) -> bool {
     path.replace('\\', "/")
         .split('/')
-        .map(|segment| segment.trim_end_matches(['.', ' ']).to_lowercase())
+        .map(normalize_ignored_segment)
         .any(|segment| IGNORED_SEGMENTS.contains(&segment.as_str()))
 }
 
-fn sha256_file(path: &Path) -> io::Result<String> {
+fn normalize_ignored_segment(segment: &str) -> String {
+    segment.trim_end_matches(['.', ' ']).to_lowercase()
+}
+
+fn io_error_reason(error: &io::Error) -> String {
+    format!("io:{:?}", error.kind())
+}
+
+fn walkdir_error_reason(error: &walkdir::Error) -> String {
+    error
+        .io_error()
+        .map(io_error_reason)
+        .unwrap_or_else(|| "walkdir:error".to_string())
+}
+
+fn sha256_file(path: &Path) -> io::Result<HashedFile> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
+    let mut bytes = 0u64;
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        bytes += read as u64;
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(HashedFile {
+        sha256: format!("{:x}", hasher.finalize()),
+        bytes,
+    })
 }
 
 fn media_type_for_path(path: &str) -> &'static str {
@@ -292,12 +320,17 @@ mod tests {
         write_file(temp.path().join(".dohc/history.json"), b"hidden");
         write_file(temp.path().join(".git/config"), b"hidden");
         write_file(temp.path().join("node_modules/pkg/index.js"), b"hidden");
+        write_file(temp.path().join("node_modules /pkg/index.js"), b"hidden");
+        write_file(temp.path().join(".git./config"), b"hidden");
 
         let output = scan_workspace(temp.path()).unwrap();
         assert_eq!(output.files.len(), 1);
+        assert_eq!(output.root, ".");
         assert_eq!(output.files[0].path, "notes/a.md");
+        assert_eq!(output.files[0].size, 4);
         assert_eq!(output.files[0].media_type, "text/markdown");
         assert_eq!(output.metrics.files, 1);
+        assert_eq!(output.metrics.bytes, 4);
     }
 
     #[test]

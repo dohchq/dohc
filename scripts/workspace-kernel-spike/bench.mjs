@@ -33,8 +33,12 @@ function run(command, args, options = {}) {
       const text = String(value ?? "");
       return text.length > 2000 ? `${text.slice(0, 2000)}\n<truncated>` : text;
     };
+    const details = [
+      result.error ? `spawn error: ${result.error.message}` : null,
+      result.signal ? `signal: ${result.signal}` : null,
+    ].filter(Boolean);
     throw new Error(
-      `${command} ${args.join(" ")} failed\n${trim(result.stdout)}\n${trim(result.stderr)}`,
+      `${command} ${args.join(" ")} failed${details.length ? `\n${details.join("\n")}` : ""}\n${trim(result.stdout)}\n${trim(result.stderr)}`,
     );
   }
   return result.stdout;
@@ -42,19 +46,24 @@ function run(command, args, options = {}) {
 
 async function createFixture({ files, bytesPerFile }) {
   const root = await mkdtemp(join(nativeTmpdir, "dohc-kernel-spike-"));
-  const payload = "x".repeat(bytesPerFile);
-  for (let index = 0; index < files; index += 1) {
-    const path = join(root, `dir-${index % 50}`, `file-${index}.txt`);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `${index}:${payload}\n`);
+  try {
+    const payload = "x".repeat(bytesPerFile);
+    for (let index = 0; index < files; index += 1) {
+      const path = join(root, `dir-${index % 50}`, `file-${index}.txt`);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, `${index}:${payload}\n`);
+    }
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "hidden.txt"), "hidden");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "config"), "hidden");
+    await mkdir(join(root, "node_modules/pkg"), { recursive: true });
+    await writeFile(join(root, "node_modules/pkg/index.js"), "hidden");
+    return root;
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
   }
-  await mkdir(join(root, ".dohc"), { recursive: true });
-  await writeFile(join(root, ".dohc", "hidden.txt"), "hidden");
-  await mkdir(join(root, ".git"), { recursive: true });
-  await writeFile(join(root, ".git", "config"), "hidden");
-  await mkdir(join(root, "node_modules/pkg"), { recursive: true });
-  await writeFile(join(root, "node_modules/pkg/index.js"), "hidden");
-  return root;
 }
 
 function parseJson(stdout) {
@@ -90,9 +99,10 @@ if (!Number.isInteger(iterations) || iterations < 1) {
   throw new Error("--iterations must be an integer >= 1");
 }
 
-const fixture = await createFixture({ files, bytesPerFile });
+let fixture;
 
 try {
+  fixture = await createFixture({ files, bytesPerFile });
   run("cargo", ["build", "--release", "--manifest-path", rustManifest], {
     stdio: "inherit",
   });
@@ -133,7 +143,7 @@ try {
   };
   console.log(JSON.stringify(result, null, 2));
 } finally {
-  if (!keepFixture) {
+  if (!keepFixture && fixture) {
     await rm(fixture, { recursive: true, force: true });
   }
 }
