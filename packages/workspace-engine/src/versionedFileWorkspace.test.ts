@@ -29,7 +29,7 @@ let now = 1000;
 // implementation; desktop/MCP callers use higher-level fallbacks off platform.
 const itAnchoredFilesystem = process.platform === "linux" ? it : it.skip;
 
-type WorkspaceTestCounters = Record<"moment" | "object" | "version", number>;
+type WorkspaceTestCounters = Record<"conflict" | "moment" | "object" | "version", number>;
 type VersionedFileWorkspaceTestHooks = Parameters<
   typeof createTestableVersionedFileWorkspace
 >[1];
@@ -46,7 +46,7 @@ afterEach(async () => {
 });
 
 function createWorkspaceTestCounters(): WorkspaceTestCounters {
-  return { moment: 0, object: 0, version: 0 };
+  return { conflict: 0, moment: 0, object: 0, version: 0 };
 }
 
 function historyBlobDirForTest(workspaceId = "workspace-a"): string {
