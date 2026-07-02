@@ -2,8 +2,6 @@ name: Think Bigger Docs
 
 on:
   pull_request:
-    branches:
-      - main
     paths: &think-bigger-doc-paths
       - 'docs/superpowers/**'
       - 'scripts/check-think-bigger-doc-links.mjs'
