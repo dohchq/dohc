@@ -8540,10 +8540,10 @@ Date completed:
       CodeRabbit review.
 - [x] Wire share revocation to configured Hocuspocus admin
       disconnect-by-workspace-user hook after CodeRabbit review.
-- [ ] Open the P0A lane PR only after PR00 external CI/docs-only exception
-      handling and final approval clear; after that approval, use either the
-      normal base or a stacked PR target according to the stack state, and do
-      not merge P0A until its tests and required CodeRabbit major gate clear.
+- [x] Open the P0A lane PR as stacked draft
+      [#47](https://github.com/dohc-ai/dohc/pull/47) after user approval to
+      skip GitHub PR Actions for now. Do not merge P0A until its local
+      validation, required major review gate, and explicit acceptance clear.
 
 ### Files Changed
 
