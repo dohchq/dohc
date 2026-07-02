@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const nativeTmpdir = process.platform === "win32" ? tmpdir() : "/tmp";
+const rustManifest = join(repoRoot, "crates/workspace-kernel-spike/Cargo.toml");
+const rustBin = join(
+  repoRoot,
+  `crates/workspace-kernel-spike/target/release/dohc-workspace-kernel-spike${
+    process.platform === "win32" ? ".exe" : ""
+  }`,
+);
+
+function arg(name, fallback) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return fallback;
+  return process.argv[index + 1] ?? fallback;
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, TMPDIR: nativeTmpdir },
+    stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    const trim = (value) => {
+      const text = String(value ?? "");
+      return text.length > 2000 ? `${text.slice(0, 2000)}\n<truncated>` : text;
+    };
+    const details = [
+      result.error ? `spawn error: ${result.error.message}` : null,
+      result.signal ? `signal: ${result.signal}` : null,
+    ].filter(Boolean);
+    throw new Error(
+      `${command} ${args.join(" ")} failed${details.length ? `\n${details.join("\n")}` : ""}\n${trim(result.stdout)}\n${trim(result.stderr)}`,
+    );
+  }
+  return result.stdout;
+}
+
+async function createFixture({ files, bytesPerFile }) {
+  const root = await mkdtemp(join(nativeTmpdir, "dohc-kernel-spike-"));
+  try {
+    const payload = "x".repeat(bytesPerFile);
+    for (let index = 0; index < files; index += 1) {
+      const path = join(root, `dir-${index % 50}`, `file-${index}.txt`);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, `${index}:${payload}\n`);
+    }
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "hidden.txt"), "hidden");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "config"), "hidden");
+    await mkdir(join(root, "node_modules/pkg"), { recursive: true });
+    await writeFile(join(root, "node_modules/pkg/index.js"), "hidden");
+    return root;
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function parseJson(stdout) {
+  return JSON.parse(stdout);
+}
+
+function summarize(runs) {
+  const values = runs.map((run) => run.metrics.scan_ms);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return {
+    min_ms: Number(min.toFixed(2)),
+    max_ms: Number(max.toFixed(2)),
+    avg_ms: Number(avg.toFixed(2)),
+    files: runs[0]?.metrics.files ?? 0,
+    bytes: runs[0]?.metrics.bytes ?? 0,
+  };
+}
+
+const files = Number(arg("--files", "1000"));
+const bytesPerFile = Number(arg("--bytes-per-file", "1024"));
+const iterations = Number(arg("--iterations", "3"));
+const keepFixture = process.argv.includes("--keep-fixture");
+
+if (!Number.isInteger(files) || files < 1) {
+  throw new Error("--files must be an integer >= 1");
+}
+if (!Number.isInteger(bytesPerFile) || bytesPerFile < 1) {
+  throw new Error("--bytes-per-file must be an integer >= 1");
+}
+if (!Number.isInteger(iterations) || iterations < 1) {
+  throw new Error("--iterations must be an integer >= 1");
+}
+
+let fixture;
+
+try {
+  fixture = await createFixture({ files, bytesPerFile });
+  run("cargo", ["build", "--release", "--manifest-path", rustManifest], {
+    stdio: "inherit",
+  });
+
+  const rustRuns = [];
+  const tsRuns = [];
+  for (let index = 0; index < iterations; index += 1) {
+    rustRuns.push(parseJson(run(rustBin, ["scan", "--root", fixture, "--json"])));
+    tsRuns.push(
+      parseJson(
+        run("pnpm", [
+          "--dir",
+          "packages/workspace-fs",
+          "exec",
+          "tsx",
+          "../../scripts/workspace-kernel-spike/ts-scan.ts",
+          "--root",
+          fixture,
+          "--json",
+        ]),
+      ),
+    );
+  }
+
+  const result = {
+    fixture: {
+      root: keepFixture ? fixture : "<temp>",
+      files,
+      bytes_per_file: bytesPerFile,
+      iterations,
+    },
+    rust: summarize(rustRuns),
+    typescript: summarize(tsRuns),
+    notes: [
+      "Rust spike and TypeScript baseline both skip .dohc, .git, and node_modules.",
+      "Numbers are local-machine smoke data, not release budgets.",
+    ],
+  };
+  console.log(JSON.stringify(result, null, 2));
+} finally {
+  if (!keepFixture && fixture) {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}

@@ -2,6 +2,7 @@ node_modules/
 .output/
 dist/
 coverage/
+target/
 *.tsbuildinfo
 .env
 .env.*

@@ -8846,6 +8846,164 @@ Latest stack-refresh validation on 2026-07-01:
 - Keep this note until Phase 0 decisions are either implemented or superseded
   by a later architecture decision record.
 
+## PR P0R - Rust Workspace Kernel Spike
+
+Status: restacked on P0A; not approved
+Branch: codex/think-bigger-p0r-rust-kernel
+Worktree: `/home/ice/dev/dohc-p0r-rust-kernel`
+Implementation workstream, if used: main orchestration thread
+PR Link: [#48](https://github.com/dohc-ai/dohc/pull/48)
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0R worktree.
+- [x] Add contained Rust workspace-kernel scanner spike.
+- [x] Add TypeScript comparison scanner that calls current
+      `scanWorkspaceFiles`.
+- [x] Add local benchmark harness.
+- [x] Add bridge-option recommendation note.
+- [x] Run Rust tests.
+- [x] Run TypeScript/Rust benchmark.
+- [x] Record measurements and final recommendation.
+- [ ] Open PR after PR00 external CI/docs-only exception handling and P0A lane
+      PR decision are settled, or use a stacked PR target. Do not merge P0R
+      until its tests and required CodeRabbit major gate clear.
+
+### Files Changed
+
+- crates/workspace-kernel-spike/Cargo.toml
+- crates/workspace-kernel-spike/Cargo.lock
+- crates/workspace-kernel-spike/src/main.rs
+- scripts/workspace-kernel-spike/ts-scan.ts
+- scripts/workspace-kernel-spike/bench.mjs
+- .gitignore
+- docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json
+- docs/superpowers/plans/2026-06-24-think-bigger-p0r-rust-kernel-spike.md
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- Rust unit tests inside `crates/workspace-kernel-spike/src/main.rs`.
+- Benchmark harness for generated fixture comparison.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0r-rust-kernel /home/ice/dev/dohc-p0r-rust-kernel HEAD
+rustc --version
+cargo --version
+pnpm install --filter @dohc/workspace-fs --frozen-lockfile
+pnpm install --filter @dohc/workspace-core --filter @dohc/workspace-contracts --frozen-lockfile
+cargo fmt --manifest-path crates/workspace-kernel-spike/Cargo.toml
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+git rebase codex/think-bigger-p0a-inventory
+git merge origin/codex/think-bigger-p0a-inventory
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" pnpm install --frozen-lockfile --ignore-scripts
+git diff --check
+node scripts/check-think-bigger-doc-links.mjs
+REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")
+cargo fmt --manifest-path crates/workspace-kernel-spike/Cargo.toml -- --check
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test src/scan.test.ts
+```
+
+Latest stack-refresh validation on 2026-07-01:
+
+- `git diff --check` passed.
+- `node scripts/check-think-bigger-doc-links.mjs` passed for 7 discovered
+  Think Bigger docs and the in-script fixtures.
+- `REPO_ROOT="$(git rev-parse --show-toplevel)" && (cd "${TMPDIR:-/tmp}" && node "$REPO_ROOT/scripts/check-think-bigger-doc-links.mjs")`
+  passed for 7 discovered Think Bigger docs and the in-script fixtures.
+- `cargo fmt --manifest-path crates/workspace-kernel-spike/Cargo.toml -- --check`
+  passed.
+- `cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml` passed
+  with 3 tests.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test src/scan.test.ts`
+  passed with 1 file and 1 test.
+- `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3`
+  passed.
+
+### E2E / Visual / Manual QA
+
+- Not applicable yet. P0R is a kernel spike, not UI.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable for this spike unless later wired into
+  P0G.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: not applicable.
+
+### CodeRabbit
+
+- Status: deferred until the P0R major readiness/material-risk gate under the
+  2026-06-29 user-directed review policy; no per-fix rerun is required for the
+  P0A stack-refresh merge.
+- Findings:
+- Fixes:
+- Overrides:
+
+### Subagent Reviews
+
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+- Other:
+
+### Security / Privacy Notes
+
+- Spike does not change production behavior.
+- Rust scanner skips `.dohc`, `.git`, and `node_modules`.
+- Rust scanner does not follow symlinks.
+- Effective policy and authz stay outside native code for this spike.
+
+### Performance Notes
+
+- Budget areas touched: planning/spike only.
+- Metrics:
+  - Rust spike: min 6.78ms, max 8.49ms, average 7.50ms.
+  - Current TypeScript baseline: min 336.92ms, max 341.06ms, average
+    338.58ms.
+- Workspace/file/chat sizes: generated 1,000-file fixture, 1,024 bytes per
+  file, three iterations.
+- Machine/CI context: local Codex machine; latest rerun happened after the P0A
+  stack refresh and used Node v24.18.0 and Cargo 1.82.0.
+- Budget pass/fail: no production budget applies yet. Result strongly supports
+  continuing the Rust kernel lane behind shared contracts. The fixture now uses
+  the same ignored-segment behavior for Rust and the TypeScript
+  `scanWorkspaceFiles` baseline (`.dohc`, `.git`, and `node_modules`), but the
+  numbers are still directional local smoke data rather than release budgets for
+  the full future scan/hash/reconcile/indexing engine.
+
+### Migration Notes
+
+- No migrations.
+- No production package depends on the spike.
+
+### Remaining Risk
+
+- Rust packaging and CI are not yet proven.
+- Current Rust spike uses a one-shot CLI, not the recommended long-term
+  sidecar/JSON-RPC bridge.
+- The Rust scanner and current TypeScript `scanWorkspaceFiles` now share the
+  same `.dohc`, `.git`, and `node_modules` ignored-segment policy after P0A.
+- PR00 docs-only local-agent-CLI exception and P0A lane PR approval remain
+  upstream gates before P0R can be marked complete.
+
+### Follow-Up / Deletion Conditions
+
+- Delete once a production Rust kernel lane supersedes the spike, or keep as a
+  benchmark fixture until cross-language contract tests replace it.
+
 ### Phase 0 Proof Arc
 
 PR00 remains a docs-only orchestration PR. The checked proof items below refer
