@@ -2,6 +2,39 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
+import type {
+  ActorNeutralWriteMetadata,
+  ActorNeutralWriteOrigin,
+  FileObjectRecord,
+  TextFileSnapshot,
+  VersionId,
+  VersionKind,
+  VersionRecord,
+  VersionedTextComparison,
+  VersionedTextComparisonStatus,
+  VersionedTextConflictChoice,
+  VersionedTextConflictId,
+  VersionedTextConflictRecord,
+  VersionedTextConflictResolveResult,
+  VersionedTextConflictResolution,
+  VersionedTextConflictStatus,
+  VersionedTextDeleteResult,
+  VersionedTextFileState,
+  VersionedTextMergeResult,
+  VersionedTextMoment,
+  VersionedTextMomentId,
+  VersionedTextMomentPage,
+  VersionedTextMomentPayload,
+  VersionedTextMomentPayloadSnapshot,
+  VersionedTextMomentSummary,
+  VersionedTextRenameResult,
+  VersionedTextStore,
+  VersionedTextStoreErrorCode,
+  VersionedTextStoreOptions,
+  VersionedTextWriteResult,
+  WorkspaceId,
+  WorkspaceObjectId,
+} from "@dohc/workspace-contracts/engine";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { mergeMarkdown } from "@dohc/workspace-history/mergeMarkdown";
 
@@ -9,35 +42,39 @@ export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_WRITE_METADATA_FIELD_BYTES = 16 * 1024;
 
-export type WorkspaceObjectId = string;
-export type VersionId = string;
-export type WorkspaceId = string;
-export type VersionedTextMomentId = string;
-export type VersionedTextConflictId = string;
-
-export type VersionedTextStoreErrorCode =
-  | "conflict-not-found"
-  | "conflict-stale-target"
-  | "duplicate-id"
-  | "file-not-found"
-  | "fork-base-not-found"
-  | "invalid-generated-id"
-  | "invalid-input"
-  | "invalid-metadata"
-  | "invalid-object"
-  | "invalid-path"
-  | "invalid-root"
-  | "invalid-version"
-  | "invalid-text"
-  | "invalid-timestamp"
-  | "invalid-version-name"
-  | "invalid-workspace"
-  | "persist-failed"
-  | "state-corrupt"
-  | "target-path-exists"
-  | "version-name-conflict"
-  | "version-not-found"
-  | "workspace-mismatch";
+export type {
+  ActorNeutralWriteMetadata,
+  ActorNeutralWriteOrigin,
+  FileObjectRecord,
+  TextFileSnapshot,
+  VersionId,
+  VersionKind,
+  VersionRecord,
+  VersionedTextComparison,
+  VersionedTextComparisonStatus,
+  VersionedTextConflictChoice,
+  VersionedTextConflictId,
+  VersionedTextConflictRecord,
+  VersionedTextConflictResolveResult,
+  VersionedTextConflictResolution,
+  VersionedTextConflictStatus,
+  VersionedTextDeleteResult,
+  VersionedTextFileState,
+  VersionedTextMergeResult,
+  VersionedTextMoment,
+  VersionedTextMomentId,
+  VersionedTextMomentPage,
+  VersionedTextMomentPayload,
+  VersionedTextMomentPayloadSnapshot,
+  VersionedTextMomentSummary,
+  VersionedTextRenameResult,
+  VersionedTextStore,
+  VersionedTextStoreErrorCode,
+  VersionedTextStoreOptions,
+  VersionedTextWriteResult,
+  WorkspaceId,
+  WorkspaceObjectId,
+} from "@dohc/workspace-contracts/engine";
 
 export class VersionedTextStoreError extends Error {
   readonly code: VersionedTextStoreErrorCode;
@@ -47,317 +84,6 @@ export class VersionedTextStoreError extends Error {
     this.name = "VersionedTextStoreError";
     this.code = code;
   }
-}
-
-export type VersionKind = "main" | "named";
-
-export interface VersionRecord {
-  id: VersionId;
-  workspaceId: WorkspaceId;
-  kind: VersionKind;
-  name: string;
-  createdAtMs: number;
-  forkPoint?: {
-    versionId: VersionId;
-    momentId?: VersionedTextMomentId;
-  };
-}
-
-export interface FileObjectRecord {
-  id: WorkspaceObjectId;
-  workspaceId: WorkspaceId;
-  createdAtMs: number;
-}
-
-export type ActorNeutralWriteOrigin =
-  | "api"
-  | "local-file"
-  | "restore"
-  | "sync"
-  | "unknown";
-
-export interface ActorNeutralWriteMetadata {
-  origin: ActorNeutralWriteOrigin;
-  summary?: string;
-  correlationId?: string;
-}
-
-export interface TextFileSnapshot {
-  objectId: WorkspaceObjectId;
-  versionId: VersionId;
-  path: string;
-  text: string;
-  updatedAtMs: number;
-  latestMomentId: VersionedTextMomentId;
-  metadata: ActorNeutralWriteMetadata;
-}
-
-export interface VersionedTextFileState {
-  exists: boolean;
-  path: string;
-  objectId?: WorkspaceObjectId;
-  text?: string;
-  updatedAtMs?: number;
-  latestMomentId?: VersionedTextMomentId;
-  metadata?: ActorNeutralWriteMetadata;
-}
-
-export type VersionedTextComparisonStatus =
-  | "same"
-  | "incoming-changed"
-  | "current-changed"
-  | "diverged";
-
-export interface VersionedTextComparison {
-  workspaceId: WorkspaceId;
-  path: string;
-  targetVersionId: VersionId;
-  sourceVersionId: VersionId;
-  base: VersionedTextFileState;
-  current: VersionedTextFileState;
-  incoming: VersionedTextFileState;
-  status: VersionedTextComparisonStatus;
-}
-
-export type VersionedTextConflictStatus = "open" | "resolved";
-export type VersionedTextConflictResolution =
-  | "applied-incoming"
-  | "applied-merged"
-  | "kept-current";
-export type VersionedTextConflictChoice = "current" | "incoming" | "merged";
-
-export interface VersionedTextConflictRecord {
-  id: VersionedTextConflictId;
-  workspaceId: WorkspaceId;
-  path: string;
-  targetVersionId: VersionId;
-  sourceVersionId: VersionId;
-  createdAtMs: number;
-  updatedAtMs: number;
-  base: VersionedTextFileState;
-  current: VersionedTextFileState;
-  incoming: VersionedTextFileState;
-  status: VersionedTextConflictStatus;
-  chosenFrom: VersionedTextConflictChoice;
-  metadata: ActorNeutralWriteMetadata;
-  resolution?: VersionedTextConflictResolution;
-}
-
-export type VersionedTextMergeResult =
-  | {
-      kind: "unchanged";
-      reason: "already-same" | "source-unchanged";
-      comparison: VersionedTextComparison;
-    }
-  | {
-      kind: "merged";
-      operation: "write";
-      comparison: VersionedTextComparison;
-      write: VersionedTextWriteResult;
-    }
-  | {
-      kind: "merged";
-      operation: "delete";
-      comparison: VersionedTextComparison;
-      delete: VersionedTextDeleteResult;
-    }
-  | {
-      kind: "conflict";
-      comparison: VersionedTextComparison;
-      conflict: VersionedTextConflictRecord;
-    };
-
-export type VersionedTextConflictResolveResult =
-  | {
-      kind: "resolved";
-      conflict: VersionedTextConflictRecord;
-      write?: VersionedTextWriteResult;
-      delete?: VersionedTextDeleteResult;
-    };
-
-export interface VersionedTextMoment {
-  id: VersionedTextMomentId;
-  workspaceId: WorkspaceId;
-  versionId: VersionId;
-  objectId: WorkspaceObjectId;
-  path: string;
-  recordedAtMs: number;
-  operation: "write" | "rename" | "delete";
-  payload: VersionedTextMomentPayload;
-  metadata: ActorNeutralWriteMetadata;
-  before?: TextFileSnapshot | null;
-}
-
-// Timeline row (PR 0M-5 history flip): everything the history list needs
-// without hauling snapshot text bodies. momentOrder is the workspace-global
-// recording order — the keyset-pagination cursor and a monotonic refresh key.
-export interface VersionedTextMomentSummary {
-  id: VersionedTextMomentId;
-  workspaceId: WorkspaceId;
-  versionId: VersionId;
-  objectId: WorkspaceObjectId;
-  path: string;
-  recordedAtMs: number;
-  operation: "write" | "rename" | "delete";
-  metadata: ActorNeutralWriteMetadata;
-  momentOrder: number;
-}
-
-export interface VersionedTextMomentPage {
-  // Newest first (descending momentOrder).
-  moments: VersionedTextMomentSummary[];
-  // Pass back as beforeMomentOrder to fetch the next (older) page; null when
-  // this page reached the beginning of the timeline.
-  nextBeforeMomentOrder: number | null;
-  // The workspace's newest moment order for the given filter (-1 when empty),
-  // regardless of pagination position.
-  latestMomentOrder: number;
-}
-
-export interface VersionedTextMomentPayloadSnapshot {
-  path: string;
-  text: string;
-}
-
-export interface VersionedTextMomentPayload {
-  before: VersionedTextMomentPayloadSnapshot | null;
-  after: VersionedTextMomentPayloadSnapshot;
-}
-
-export interface VersionedTextWriteResult {
-  object: FileObjectRecord;
-  snapshot: TextFileSnapshot;
-  moment: VersionedTextMoment;
-}
-
-export interface VersionedTextRenameResult {
-  object: FileObjectRecord;
-  before: TextFileSnapshot;
-  after: TextFileSnapshot;
-  moment: VersionedTextMoment;
-}
-
-export interface VersionedTextDeleteResult {
-  object: FileObjectRecord;
-  before: TextFileSnapshot;
-  moment: VersionedTextMoment;
-}
-
-/**
- * Internal server-side storage primitive.
- *
- * Callers must derive workspace identity and authorization before invoking this
- * API. Browser/client-provided workspace, version, or object ids are not an
- * authorization boundary.
- */
-export interface VersionedTextStore {
-  ensureMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord>;
-  getMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord | null>;
-  // Engine-owned "which version does the workspace folder show right now".
-  // Defaults to main until setActiveVersion persists a different choice; null
-  // only when the workspace has never been initialized in this store.
-  getActiveVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord | null>;
-  // Fails closed: an unknown or other-workspace version id throws
-  // (version-not-found / workspace-mismatch) and the active version is
-  // unchanged.
-  setActiveVersion(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-  }): Promise<VersionRecord>;
-  createNamedVersion(input: {
-    workspaceId: WorkspaceId;
-    name: string;
-    fromVersionId: VersionId;
-  }): Promise<VersionRecord>;
-  listVersions(input: { workspaceId: WorkspaceId }): Promise<VersionRecord[]>;
-  writeTextFile(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    path: string;
-    text: string;
-    metadata: ActorNeutralWriteMetadata;
-    momentId?: VersionedTextMomentId;
-  }): Promise<VersionedTextWriteResult>;
-  readTextFile(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    path: string;
-  }): Promise<TextFileSnapshot | null>;
-  compareTextFileVersions(input: {
-    workspaceId: WorkspaceId;
-    targetVersionId: VersionId;
-    sourceVersionId: VersionId;
-    path: string;
-  }): Promise<VersionedTextComparison>;
-  mergeTextFileFromVersion(input: {
-    workspaceId: WorkspaceId;
-    targetVersionId: VersionId;
-    sourceVersionId: VersionId;
-    path: string;
-    metadata: ActorNeutralWriteMetadata;
-  }): Promise<VersionedTextMergeResult>;
-  listTextConflicts(input: {
-    workspaceId: WorkspaceId;
-    status?: VersionedTextConflictStatus;
-  }): Promise<VersionedTextConflictRecord[]>;
-  resolveTextConflict(input: {
-    workspaceId: WorkspaceId;
-    conflictId: VersionedTextConflictId;
-    resolution:
-      | { kind: "keep-current" }
-      | { kind: "apply-incoming" }
-      | { kind: "apply-merged"; text: string };
-    metadata: ActorNeutralWriteMetadata;
-  }): Promise<VersionedTextConflictResolveResult>;
-  listTextFiles(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-  }): Promise<TextFileSnapshot[]>;
-  renameTextFile(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    fromPath: string;
-    toPath: string;
-    metadata: ActorNeutralWriteMetadata;
-  }): Promise<VersionedTextRenameResult>;
-  deleteTextFile(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    path: string;
-    metadata: ActorNeutralWriteMetadata;
-    momentId?: VersionedTextMomentId;
-  }): Promise<VersionedTextDeleteResult>;
-  rollbackTextFileMutation(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    path: string;
-    mutationMomentId: VersionedTextMomentId;
-    legacyBeforeText?: string;
-  }): Promise<void>;
-  getObject(input: {
-    workspaceId: WorkspaceId;
-    objectId: WorkspaceObjectId;
-  }): Promise<FileObjectRecord | null>;
-  // Timeline reads (PR 0M-5 history flip). listMoments serves the history
-  // list without payload bodies; getMoment serves the diff page with the full
-  // before/after payload. Both are workspace-scoped: a moment id from another
-  // workspace reads as null / absent.
-  listMoments(input: {
-    workspaceId: WorkspaceId;
-    versionId?: VersionId;
-    objectId?: WorkspaceObjectId;
-    limit?: number;
-    beforeMomentOrder?: number;
-  }): Promise<VersionedTextMomentPage>;
-  getMoment(input: {
-    workspaceId: WorkspaceId;
-    momentId: VersionedTextMomentId;
-  }): Promise<VersionedTextMoment | null>;
-}
-
-export interface VersionedTextStoreOptions {
-  nowMs?: () => number;
-  createId?: (kind: "conflict" | "moment" | "object" | "version") => string;
 }
 
 export interface VersionedTextStoreTestHooks {

@@ -1,16 +1,12 @@
-export type FileWorkspacePlatformMode = "linux-anchored" | "portable";
+import type {
+  FileWorkspaceCapabilityReport,
+  FileWorkspacePlatformMode,
+} from "@dohc/workspace-contracts/engine";
 
-export interface FileWorkspaceCapabilityReport {
-  platform: NodeJS.Platform;
-  mode: FileWorkspacePlatformMode;
-  atomicReplace: boolean;
-  symlinkDefense: "descriptor-relative" | "o-nofollow-lstat" | "lstat-only";
-  descriptorPinning: boolean;
-  containmentCheck: "realpath-root-containment";
-  fileFsync: boolean;
-  parentDirectoryFsync: "supported" | "best-effort-noop";
-  notes: readonly string[];
-}
+export type {
+  FileWorkspaceCapabilityReport,
+  FileWorkspacePlatformMode,
+} from "@dohc/workspace-contracts/engine";
 
 export function resolveFileWorkspacePlatformMode(
   forced?: FileWorkspacePlatformMode,

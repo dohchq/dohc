@@ -25,6 +25,19 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { TextDecoder } from "node:util";
+import type {
+  VersionedFileDeleteResult,
+  VersionedFileHistoryReader,
+  VersionedFileListResult,
+  VersionedFileReadResult,
+  VersionedFileRestoreResult,
+  VersionedFileStat,
+  VersionedFileVersionReader,
+  VersionedFileWorkspace,
+  VersionedFileWorkspaceErrorCode,
+  VersionedFileWorkspaceOptions,
+  VersionedFileWriteResult,
+} from "@dohc/workspace-contracts/engine";
 import {
   addFileChanges,
   createChangeSet,
@@ -90,20 +103,19 @@ const pathMutationChains = new Map<string, Promise<unknown>>();
 
 export const LOCAL_FILE_AUTHOR: ChangeAuthor = createLocalChangeAuthor("Local file edit");
 
-export type VersionedFileWorkspaceErrorCode =
-  | "file-too-large"
-  | "file-not-found"
-  | "history-record-failed"
-  | "invalid-input"
-  | "invalid-path"
-  | "invalid-restore-direction"
-  | "not-text"
-  | "recovery-failed"
-  | "restore-file-not-found"
-  | "restore-snapshot-unavailable"
-  | "restore-stale-live-file"
-  | "stale-live-file"
-  | "unsupported-filesystem";
+export type {
+  VersionedFileDeleteResult,
+  VersionedFileHistoryReader,
+  VersionedFileListResult,
+  VersionedFileReadResult,
+  VersionedFileRestoreResult,
+  VersionedFileStat,
+  VersionedFileVersionReader,
+  VersionedFileWorkspace,
+  VersionedFileWorkspaceErrorCode,
+  VersionedFileWorkspaceOptions,
+  VersionedFileWriteResult,
+} from "@dohc/workspace-contracts/engine";
 
 export class VersionedFileWorkspaceError extends Error {
   readonly code: VersionedFileWorkspaceErrorCode;
@@ -161,98 +173,12 @@ function canonicalWorkspaceRoot(rootDir: string): { rootDir: string; identity: D
   };
 }
 
-export interface VersionedFileStat {
-  path: string;
-  mediaType: string;
-  sizeBytes: number;
-  sha256: string;
-}
-
-export type VersionedFileReadResult = string | null;
-export type VersionedFileListResult = VersionedFileStat[];
-
-export interface VersionedFileWriteResult {
-  path: string;
-  versionId: VersionId;
-  snapshot: TextFileSnapshot;
-  history: HistoryRecord;
-}
-
-export interface VersionedFileDeleteResult {
-  path: string;
-  versionId: VersionId;
-  deleted: TextFileSnapshot | null;
-  history: HistoryRecord;
-}
-
-export type VersionedFileRestoreResult = (VersionedFileWriteResult | VersionedFileDeleteResult) & {
-  restoredFrom: {
-    changeSetId: string;
-    path: string;
-    direction: "before" | "after";
-  };
-};
-
-export interface VersionedFileWorkspace {
-  capabilities(): FileWorkspaceCapabilityReport;
-  ensureMainVersion(): Promise<VersionRecord>;
-  createNamedVersion(input: { name: string; fromVersionId: VersionId }): Promise<VersionRecord>;
-  writeTextFile(input: {
-    path: string;
-    text: string;
-    versionId?: VersionId;
-    metadata?: ActorNeutralWriteMetadata;
-    summary?: string;
-    provenance?: ChangeProvenance;
-  }): Promise<VersionedFileWriteResult>;
-  deleteTextFile(input: {
-    path: string;
-    versionId?: VersionId;
-    metadata?: ActorNeutralWriteMetadata;
-    summary?: string;
-    provenance?: ChangeProvenance;
-  }): Promise<VersionedFileDeleteResult>;
-  readTextFile(input: { path: string }): Promise<VersionedFileReadResult>;
-  listTextFiles(): Promise<VersionedFileListResult>;
-  statTextFile(input: { path: string }): Promise<VersionedFileStat | null>;
-  restoreTextFile(input: {
-    changeSetId: string;
-    path: string;
-    direction?: "before" | "after";
-    versionId?: VersionId;
-  }): Promise<VersionedFileRestoreResult>;
-  history: VersionedFileHistoryReader;
-  versions: VersionedFileVersionReader;
-}
-
-export type VersionedFileHistoryReader = Pick<
-  ChangeSetStore,
-  "get" | "list" | "listIndexed" | "listSince"
->;
-
-export interface VersionedFileVersionReader {
-  getMainVersion(): Promise<VersionRecord | null>;
-  getObject(input: { objectId: WorkspaceObjectId }): Promise<FileObjectRecord | null>;
-  listTextFiles(input: { versionId: VersionId }): Promise<TextFileSnapshot[]>;
-  listVersions(): Promise<VersionRecord[]>;
-  readTextFile(input: {
-    versionId: VersionId;
-    path: string;
-  }): Promise<TextFileSnapshot | null>;
-}
-
 export interface TestableVersionedFileWorkspace extends VersionedFileWorkspace {
   unsafeInternals: {
     history: ChangeSetStore;
     rootDir: string;
     versions: VersionedTextStore;
   };
-}
-
-export interface VersionedFileWorkspaceOptions extends VersionedTextStoreOptions {
-  rootDir: string;
-  workspaceId: WorkspaceId;
-  author?: ChangeAuthor;
 }
 
 export interface VersionedFileWorkspaceTestHooks {

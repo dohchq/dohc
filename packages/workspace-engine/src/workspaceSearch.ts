@@ -1,5 +1,13 @@
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
 import type {
+  EngineFilePathClassification,
+  SearchSurface,
+  SearchVisibility,
+  WorkspaceEngineSearchOptions,
+  WorkspaceEngineSearchResult,
+  WorkspaceSearchPolicy,
+} from "@dohc/workspace-contracts/engine";
+import type {
   ChatThread,
   LinkedChatProjection,
   LinkedChatProjectionFileAccess,
@@ -14,47 +22,18 @@ import type {
 
 export const WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS = 180;
 
-export type SearchSurface = "chat" | "file";
-
-export type SearchVisibility =
-  | { searchable: true; projectionFileAccess?: LinkedChatProjectionFileAccess }
-  | { searchable: false; reason: "ignored" | "permission-denied" | "secret" };
-
-export type WorkspaceSearchPolicy = {
-  fileVisibility?: (file: TextFileSnapshot) => SearchVisibility;
-  chatVisibility?: (thread: ChatThread) => SearchVisibility;
-};
-
-export interface WorkspaceEngineSearchResult {
-  surface: SearchSurface;
-  path: string;
-  title: string;
-  line: number;
-  preview: string;
-  matchStart: number;
-  matchEnd: number;
-  threadId?: string;
-  objectId?: string;
-}
-
-export interface WorkspaceEngineSearchOptions {
-  workspaceId: WorkspaceId;
-  versionId: VersionId;
-  query: string;
-  versions: VersionedTextStore;
-  chats: LinkedChatStore;
-  policy?: WorkspaceSearchPolicy;
-  limit?: number;
-}
+export type {
+  EngineFilePathClassification,
+  SearchSurface,
+  SearchVisibility,
+  WorkspaceEngineSearchOptions,
+  WorkspaceEngineSearchResult,
+  WorkspaceSearchPolicy,
+} from "@dohc/workspace-contracts/engine";
 
 function normalizeQuery(query: string): string {
   return query.trim().toLowerCase();
 }
-
-export type EngineFilePathClassification =
-  | { kind: "tracked" }
-  | { kind: "ignored" }
-  | { kind: "secret" };
 
 // THE shared engine path policy: one classifier decides which workspace paths
 // the engine owns at all, shared by engine search visibility and the desktop

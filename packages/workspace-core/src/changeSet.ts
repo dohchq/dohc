@@ -15,16 +15,19 @@ export type BoundaryCrossing =
   | "private-to-shared"
   | "unmergeable-overwrite";
 
-declare const nonEmptyLocalAuthorLabelBrand: unique symbol;
+// The change-author vocabulary (including the branded local-author label) is
+// canonically owned by @dohc/workspace-contracts since the PR 0M-6 contracts
+// extraction. Re-exported here so existing imports keep working and the brand
+// stays one nominal type across packages.
+import type {
+  ChangeAuthor,
+  NonEmptyLocalAuthorLabel,
+} from "@dohc/workspace-contracts/engine";
 
-export type NonEmptyLocalAuthorLabel = string & {
-  readonly [nonEmptyLocalAuthorLabelBrand]: true;
-};
-
-export type ChangeAuthor =
-  | { kind: "user"; userId: string }
-  | { kind: "agent"; agentId: string; onBehalfOf: string }
-  | { kind: "local"; label: NonEmptyLocalAuthorLabel };
+export type {
+  ChangeAuthor,
+  NonEmptyLocalAuthorLabel,
+} from "@dohc/workspace-contracts/engine";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

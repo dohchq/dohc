@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { WorkspacePath } from "./domain";
+import { engineContractCompileCheck } from "./engine.compile";
 import { WorkspaceError } from "./errors";
 import { composeRenamedPath } from "./path";
+
+void engineContractCompileCheck;
 
 function expectInvalidPath(fn: () => unknown) {
   try {
