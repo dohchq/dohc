@@ -10,7 +10,11 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
-export { VersionedFileWorkspaceError } from "./versionedFileWorkspace";
+export {
+  VersionedFileWorkspaceError,
+  getFileWorkspaceCapabilityReport,
+  resolveFileWorkspacePlatformMode,
+} from "./versionedFileWorkspace";
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
@@ -52,6 +56,8 @@ export type {
   VersionedFileWorkspaceErrorCode,
   VersionedFileWorkspaceOptions,
   VersionedFileWriteResult,
+  FileWorkspaceCapabilityReport,
+  FileWorkspacePlatformMode,
 } from "./versionedFileWorkspace";
 export type {
   ChatActor,

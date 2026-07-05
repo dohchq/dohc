@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import {
   lstat,
+  chmod,
   mkdir,
   open,
   readFile,
@@ -59,6 +60,12 @@ import {
   type WorkspaceObjectId,
   type WorkspaceId,
 } from "./versionedTextStore";
+import {
+  getFileWorkspaceCapabilityReport,
+  resolveFileWorkspacePlatformMode,
+  type FileWorkspaceCapabilityReport,
+  type FileWorkspacePlatformMode,
+} from "./versionedFileWorkspacePlatform";
 
 const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
 const MAX_READ_TEXT_FILE_BYTES = 10 * 1024 * 1024;
@@ -108,7 +115,19 @@ export class VersionedFileWorkspaceError extends Error {
   }
 }
 
-function assertSupportedVersionedFileWorkspacePlatform(): void {
+export {
+  getFileWorkspaceCapabilityReport,
+  resolveFileWorkspacePlatformMode,
+};
+export type {
+  FileWorkspaceCapabilityReport,
+  FileWorkspacePlatformMode,
+};
+
+function assertSupportedVersionedFileWorkspacePlatform(
+  mode: FileWorkspacePlatformMode,
+): void {
+  if (mode !== "linux-anchored") return;
   if (process.platform !== "linux") {
     throw new VersionedFileWorkspaceError(
       "unsupported-filesystem",
@@ -175,6 +194,7 @@ export type VersionedFileRestoreResult = (VersionedFileWriteResult | VersionedFi
 };
 
 export interface VersionedFileWorkspace {
+  capabilities(): FileWorkspaceCapabilityReport;
   ensureMainVersion(): Promise<VersionRecord>;
   createNamedVersion(input: { name: string; fromVersionId: VersionId }): Promise<VersionRecord>;
   writeTextFile(input: {
@@ -238,6 +258,7 @@ export interface VersionedFileWorkspaceOptions extends VersionedTextStoreOptions
 export interface VersionedFileWorkspaceTestHooks {
   afterFileMutationLockAcquired?: () => void | Promise<void>;
   afterFileWriteBeforeHistory?: (path: string) => void | Promise<void>;
+  forcePlatformMode?: FileWorkspacePlatformMode;
   onFileMutationLockWait?: () => void;
   onWorkspaceMutationQueued?: () => void;
 }
@@ -409,7 +430,24 @@ async function ensureSafeInternalDirectory(
   rootRealPath: string,
   path: string,
   workspacePath: string,
+  platformMode: FileWorkspacePlatformMode,
 ): Promise<void> {
+  if (platformMode === "portable") {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      rejectEscapedPath(workspacePath);
+    }
+    const pathRealPath = await realpath(path);
+    if (!isWithinRealRoot(rootRealPath, pathRealPath) || pathRealPath !== path) {
+      rejectEscapedPath(workspacePath);
+    }
+    const mode = info.mode & 0o777;
+    if (mode !== 0o700) {
+      await chmod(path, 0o700);
+    }
+    return;
+  }
+
   const handle = await open(path, OPEN_DIRECTORY_FLAGS);
   try {
     const openedInfo = await handle.stat();
@@ -441,6 +479,7 @@ async function ensureSafeInternalDirectory(
 }
 
 async function mkdirChildInVerifiedDirectory(input: {
+  platformMode: FileWorkspacePlatformMode;
   parentPath: string;
   childPath: string;
   workspacePath: string;
@@ -451,15 +490,17 @@ async function mkdirChildInVerifiedDirectory(input: {
     input.parentPath,
     parentIdentity,
     input.workspacePath,
+    input.platformMode,
   );
   try {
+    await assertDirectoryIdentity(input.parentPath, parentIdentity, input.workspacePath);
     await mkdir(pathInOpenDirectory(parentHandle, input.childPath), {
       ...(input.mode === undefined ? {} : { mode: input.mode }),
     }).catch((mkdirError: NodeJS.ErrnoException) => {
       if (mkdirError.code !== "EEXIST") throw mkdirError;
     });
   } finally {
-    await parentHandle.close().catch(() => undefined);
+    await closeDirectoryHandleBestEffort(parentHandle);
   }
   await syncParentDirectoryBestEffort(input.childPath);
 }
@@ -468,6 +509,7 @@ async function ensureWorkspaceParentDir(
   rootDir: string,
   workspacePath: string,
   absolute: string,
+  platformMode: FileWorkspacePlatformMode,
 ): Promise<string> {
   const rootRealPath = await realpath(rootDir);
   const parentDir = dirname(absolute);
@@ -489,6 +531,7 @@ async function ensureWorkspaceParentDir(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         await mkdirChildInVerifiedDirectory({
+          platformMode,
           parentPath: cursor,
           childPath: child,
           workspacePath,
@@ -502,55 +545,64 @@ async function ensureWorkspaceParentDir(
   return parentDir;
 }
 
-async function ensureInternalTempDir(rootDir: string): Promise<string> {
-  return ensureInternalChildDir(rootDir, ".dohc/tmp", [".dohc", "tmp"]);
+async function ensureInternalTempDir(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+): Promise<string> {
+  return ensureInternalChildDir(rootDir, ".dohc/tmp", [".dohc", "tmp"], platformMode);
 }
 
 async function ensureInternalChildDir(
   rootDir: string,
   workspacePath: string,
   segments: string[],
+  platformMode: FileWorkspacePlatformMode,
 ): Promise<string> {
   const rootRealPath = await realpath(rootDir);
   let cursor = rootRealPath;
   for (const segment of segments) {
     const child = join(cursor, segment);
     try {
-      await ensureSafeInternalDirectory(rootRealPath, child, workspacePath);
+      await ensureSafeInternalDirectory(rootRealPath, child, workspacePath, platformMode);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await mkdirChildInVerifiedDirectory({
+        platformMode,
         parentPath: cursor,
         childPath: child,
         workspacePath,
         mode: 0o700,
       });
-      await ensureSafeInternalDirectory(rootRealPath, child, workspacePath);
+      await ensureSafeInternalDirectory(rootRealPath, child, workspacePath, platformMode);
     }
     cursor = child;
   }
   return cursor;
 }
 
-async function ensurePendingMutationDir(rootDir: string): Promise<string> {
+async function ensurePendingMutationDir(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+): Promise<string> {
   return ensureInternalChildDir(rootDir, PENDING_FILE_MUTATIONS_RELATIVE_DIR, [
     ".dohc",
     "engine",
     "pending-file-mutations",
-  ]);
+  ], platformMode);
 }
 
 async function existingInternalChildDir(
   rootDir: string,
   workspacePath: string,
   segments: string[],
+  platformMode: FileWorkspacePlatformMode,
 ): Promise<string | null> {
   const rootRealPath = await realpath(rootDir);
   let cursor = rootRealPath;
   for (const segment of segments) {
     const child = join(cursor, segment);
     try {
-      await ensureSafeInternalDirectory(rootRealPath, child, workspacePath);
+      await ensureSafeInternalDirectory(rootRealPath, child, workspacePath, platformMode);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -560,22 +612,29 @@ async function existingInternalChildDir(
   return cursor;
 }
 
-async function ensureHistoryBlobDir(rootDir: string, workspaceId: WorkspaceId): Promise<string> {
+async function ensureHistoryBlobDir(
+  rootDir: string,
+  workspaceId: WorkspaceId,
+  platformMode: FileWorkspacePlatformMode,
+): Promise<string> {
   const namespace = workspaceHistoryNamespace(workspaceId);
   return ensureInternalChildDir(rootDir, `${HISTORY_BLOBS_RELATIVE_DIR}/${namespace}`, [
     ".dohc",
     "engine",
     "history-blobs",
     namespace,
-  ]);
+  ], platformMode);
 }
 
-async function pendingMutationStateExists(rootDir: string): Promise<boolean> {
+async function pendingMutationStateExists(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+): Promise<boolean> {
   const pendingDir = await existingInternalChildDir(rootDir, PENDING_FILE_MUTATIONS_RELATIVE_DIR, [
     ".dohc",
     "engine",
     "pending-file-mutations",
-  ]);
+  ], platformMode);
   if (!pendingDir) return false;
   const entries = await readdir(pendingDir).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [] as string[];
@@ -584,12 +643,15 @@ async function pendingMutationStateExists(rootDir: string): Promise<boolean> {
   return entries.some((entry) => entry.endsWith(".json"));
 }
 
-async function ensureMutationLockDir(rootDir: string): Promise<string> {
+async function ensureMutationLockDir(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+): Promise<string> {
   return ensureInternalChildDir(rootDir, ".dohc/engine/mutation-locks", [
     ".dohc",
     "engine",
     "mutation-locks",
-  ]);
+  ], platformMode);
 }
 
 function delayMs(ms: number): Promise<void> {
@@ -645,10 +707,16 @@ function fileMutationLockHeartbeatAgeMs(owner: FileMutationLockOwner): number | 
 
 async function writeFileMutationLockOwner(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   ownerPath: string,
   token: string,
 ): Promise<void> {
-  await writeInternalJsonAtomic(rootDir, ownerPath, createFileMutationLockOwner(token));
+  await writeInternalJsonAtomic(
+    rootDir,
+    platformMode,
+    ownerPath,
+    createFileMutationLockOwner(token),
+  );
 }
 
 interface FileMutationLockGeneration {
@@ -909,6 +977,7 @@ async function reclaimStaleFileMutationLock(
 
 async function acquireDirectoryLock(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   lockDir: string;
   staleMs: number;
   timeoutMs: number;
@@ -924,7 +993,7 @@ async function acquireDirectoryLock(input: {
       try {
         await mkdir(ownerDir);
         const ownerDirIdentity = directoryIdentityFromStats(await stat(ownerDir));
-        await writeFileMutationLockOwner(input.rootDir, ownerPath, token);
+        await writeFileMutationLockOwner(input.rootDir, input.platformMode, ownerPath, token);
         const heartbeat = setInterval(() => {
           assertFileMutationLockStillOwned({
             lockDir: input.lockDir,
@@ -933,7 +1002,9 @@ async function acquireDirectoryLock(input: {
             ownerPath,
             ownerDirIdentity,
           })
-            .then(() => writeFileMutationLockOwner(input.rootDir, ownerPath, token))
+            .then(() =>
+              writeFileMutationLockOwner(input.rootDir, input.platformMode, ownerPath, token),
+            )
             .catch(() => undefined);
         }, 5_000);
         heartbeat.unref?.();
@@ -999,12 +1070,14 @@ async function acquireDirectoryLock(input: {
 
 async function acquireWorkspaceFileMutationLock(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   onWait?: () => void,
 ): Promise<FileMutationLockLease> {
-  const mutationLockDir = await ensureMutationLockDir(rootDir);
+  const mutationLockDir = await ensureMutationLockDir(rootDir, platformMode);
   const lockDir = join(mutationLockDir, "workspace.lock");
   const lease = await acquireDirectoryLock({
     rootDir,
+    platformMode,
     lockDir,
     staleMs: FILE_MUTATION_LOCK_STALE_MS,
     timeoutMs: FILE_MUTATION_LOCK_TIMEOUT_MS,
@@ -1065,10 +1138,11 @@ function appendSuppressedError(error: unknown, suppressed: unknown): void {
 
 async function runWithFileMutationLock<T>(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   task: (lease: FileMutationLockLease) => Promise<T>,
   onWait?: () => void,
 ): Promise<T> {
-  const lease = await acquireWorkspaceFileMutationLock(rootDir, onWait);
+  const lease = await acquireWorkspaceFileMutationLock(rootDir, platformMode, onWait);
   let taskResult: T | undefined;
   let taskError: unknown;
   let taskSucceeded = false;
@@ -1122,13 +1196,14 @@ function serializeMutationChain<T>(
 
 async function serializeWorkspaceMutation<T>(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   task: (lease: FileMutationLockLease) => Promise<T>,
   afterLockAcquired?: () => void | Promise<void>,
   onQueued?: () => void,
   onFileMutationLockWait?: () => void,
 ): Promise<T> {
   return serializeMutationChain(workspaceMutationChains, await realpath(rootDir), async () => {
-    return runWithFileMutationLock(rootDir, async (lease) => {
+    return runWithFileMutationLock(rootDir, platformMode, async (lease) => {
       await afterLockAcquired?.();
       await lease.assertStillOwnsLock();
       return await task(lease);
@@ -1138,6 +1213,7 @@ async function serializeWorkspaceMutation<T>(
 
 async function serializePathMutation<T>(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   task: (lease: FileMutationLockLease) => Promise<T>,
   afterLockAcquired?: () => void | Promise<void>,
@@ -1147,7 +1223,7 @@ async function serializePathMutation<T>(
   const rootRealPath = await realpath(rootDir);
   return serializeMutationChain(workspaceMutationChains, rootRealPath, () =>
     serializeMutationChain(pathMutationChains, `${rootRealPath}\0${path}`, async () => {
-      return runWithFileMutationLock(rootDir, async (lease) => {
+      return runWithFileMutationLock(rootDir, platformMode, async (lease) => {
         await afterLockAcquired?.();
         await lease.assertStillOwnsLock();
         return await task(lease);
@@ -1370,6 +1446,23 @@ interface DirectoryIdentity {
   ino: number;
 }
 
+type FileHandle = Awaited<ReturnType<typeof open>>;
+
+type VerifiedDirectoryHandle =
+  | {
+      kind: "linux-anchored";
+      handle: FileHandle;
+      path: string;
+      expected: DirectoryIdentity;
+      workspacePath: string;
+    }
+  | {
+      kind: "portable";
+      path: string;
+      expected: DirectoryIdentity;
+      workspacePath: string;
+    };
+
 function directoryIdentityFromStats(info: Awaited<ReturnType<typeof stat>>): DirectoryIdentity {
   return { dev: Number(info.dev), ino: Number(info.ino) };
 }
@@ -1411,7 +1504,7 @@ async function openVerifiedDirectoryHandle(
   path: string,
   expected: DirectoryIdentity,
   workspacePath: string,
-): Promise<Awaited<ReturnType<typeof open>>> {
+): Promise<FileHandle> {
   const handle = await open(path, OPEN_DIRECTORY_FLAGS);
   try {
     const info = await handle.stat();
@@ -1429,44 +1522,65 @@ async function openDirectoryHandleForRead(
   path: string,
   expected: DirectoryIdentity,
   workspacePath: string,
-): Promise<Awaited<ReturnType<typeof open>>> {
-  if (process.platform !== "linux") {
-    throw new VersionedFileWorkspaceError(
-      "unsupported-filesystem",
-      "Versioned file workspace requires anchored directory handles for safe local file access.",
-    );
+  platformMode: FileWorkspacePlatformMode,
+): Promise<VerifiedDirectoryHandle> {
+  if (platformMode === "portable") {
+    await assertDirectoryIdentity(path, expected, workspacePath);
+    return { kind: "portable", path, expected, workspacePath };
   }
-  return openVerifiedDirectoryHandle(path, expected, workspacePath);
+  const handle = await openVerifiedDirectoryHandle(path, expected, workspacePath);
+  return { kind: "linux-anchored", handle, path, expected, workspacePath };
 }
 
 async function openDirectoryHandleForMutation(
   path: string,
   expected: DirectoryIdentity,
   workspacePath: string,
-): Promise<Awaited<ReturnType<typeof open>>> {
-  if (process.platform !== "linux") {
-    throw new VersionedFileWorkspaceError(
-      "unsupported-filesystem",
-      "Versioned file workspace requires anchored directory handles for safe local file mutation.",
-    );
+  platformMode: FileWorkspacePlatformMode,
+): Promise<VerifiedDirectoryHandle> {
+  if (platformMode === "portable") {
+    await assertDirectoryIdentity(path, expected, workspacePath);
+    return { kind: "portable", path, expected, workspacePath };
   }
-  return openVerifiedDirectoryHandle(path, expected, workspacePath);
+  const handle = await openVerifiedDirectoryHandle(path, expected, workspacePath);
+  return { kind: "linux-anchored", handle, path, expected, workspacePath };
 }
 
-function pathInOpenDirectory(
-  directory: Awaited<ReturnType<typeof open>>,
-  targetPath: string,
-): string {
+function pathInOpenDirectory(directory: VerifiedDirectoryHandle, targetPath: string): string {
   return join(openDirectoryDescriptorPath(directory), basename(targetPath));
 }
 
-function openDirectoryDescriptorPath(directory: Awaited<ReturnType<typeof open>>): string {
-  return join(PROC_SELF_FD_DIR, String(directory.fd));
+function openDirectoryDescriptorPath(directory: VerifiedDirectoryHandle): string {
+  if (directory.kind === "portable") return directory.path;
+  return join(PROC_SELF_FD_DIR, String(directory.handle.fd));
+}
+
+async function closeDirectoryHandleBestEffort(directory: VerifiedDirectoryHandle): Promise<void> {
+  if (directory.kind === "linux-anchored") {
+    await directory.handle.close().catch(() => undefined);
+  }
+}
+
+async function closeDirectoryHandle(directory: VerifiedDirectoryHandle): Promise<void> {
+  if (directory.kind === "linux-anchored") {
+    await directory.handle.close();
+  }
+}
+
+async function assertTargetIsNotSymlinkIfPresent(
+  path: string,
+  workspacePath: string,
+): Promise<void> {
+  const info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (info?.isSymbolicLink()) rejectEscapedPath(workspacePath);
 }
 
 async function pathInVerifiedOpenDirectory(input: {
   rootDir: string;
-  directory: Awaited<ReturnType<typeof open>>;
+  directory: VerifiedDirectoryHandle;
   targetPath: string;
   workspacePath: string;
 }): Promise<string> {
@@ -1481,14 +1595,38 @@ async function pathInVerifiedOpenDirectory(input: {
   if (requestedParentRealPath !== directoryRealPath) {
     rejectEscapedPath(input.workspacePath);
   }
+  if (input.directory.kind === "portable") {
+    await assertDirectoryIdentity(
+      input.directory.path,
+      input.directory.expected,
+      input.workspacePath,
+    );
+    await assertTargetIsNotSymlinkIfPresent(
+      join(input.directory.path, basename(input.targetPath)),
+      input.workspacePath,
+    );
+  }
   return pathInOpenDirectory(input.directory, input.targetPath);
 }
 
 async function syncDirectoryHandleBestEffort(
-  directory: Awaited<ReturnType<typeof open>>,
+  directory: VerifiedDirectoryHandle,
 ): Promise<void> {
+  if (directory.kind === "portable") {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(directory.path, "r");
+      await handle.sync();
+    } catch {
+      // Portable directory sync is explicitly best-effort. Windows cannot open
+      // directories as file handles, and some filesystems reject directory fsync.
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+    return;
+  }
   try {
-    await directory.sync();
+    await directory.handle.sync();
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (
@@ -1506,6 +1644,7 @@ async function syncDirectoryHandleBestEffort(
 
 async function renameIntoVerifiedParent(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   tmpPath: string;
   targetPath: string;
@@ -1518,6 +1657,7 @@ async function renameIntoVerifiedParent(input: {
     input.parentDir,
     input.parentIdentity,
     input.workspacePath,
+    input.platformMode,
   );
   try {
     await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
@@ -1533,12 +1673,13 @@ async function renameIntoVerifiedParent(input: {
     );
     await syncDirectoryHandleBestEffort(parentHandle);
   } finally {
-    await parentHandle?.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function removeFromVerifiedParent(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   targetPath: string;
   parentDir: string;
@@ -1550,6 +1691,7 @@ async function removeFromVerifiedParent(input: {
     input.parentDir,
     input.parentIdentity,
     input.workspacePath,
+    input.platformMode,
   );
   try {
     await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
@@ -1565,12 +1707,13 @@ async function removeFromVerifiedParent(input: {
     );
     await syncDirectoryHandleBestEffort(parentHandle);
   } finally {
-    await parentHandle?.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function renameFromVerifiedParent(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   targetPath: string;
   destinationPath: string;
@@ -1583,6 +1726,7 @@ async function renameFromVerifiedParent(input: {
     input.parentDir,
     input.parentIdentity,
     input.workspacePath,
+    input.platformMode,
   );
   try {
     await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
@@ -1599,12 +1743,13 @@ async function renameFromVerifiedParent(input: {
     await syncDirectoryHandleBestEffort(parentHandle);
     await syncParentDirectoryBestEffort(input.destinationPath);
   } finally {
-    await parentHandle?.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function writeFileExclusiveIntoVerifiedParent(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   targetPath: string;
   parentDir: string;
@@ -1618,9 +1763,10 @@ async function writeFileExclusiveIntoVerifiedParent(input: {
     input.parentDir,
     input.parentIdentity,
     input.workspacePath,
+    input.platformMode,
   );
   let targetDescriptorPath: string | undefined;
-  let targetHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let targetHandle: FileHandle | undefined;
   let createdTarget = false;
   let committedTarget = false;
   try {
@@ -1657,12 +1803,13 @@ async function writeFileExclusiveIntoVerifiedParent(input: {
     throw error;
   } finally {
     await targetHandle?.close();
-    await parentHandle?.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function copyFileExclusiveIntoVerifiedParent(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   sourcePath: string;
   targetPath: string;
@@ -1676,10 +1823,11 @@ async function copyFileExclusiveIntoVerifiedParent(input: {
     input.parentDir,
     input.parentIdentity,
     input.workspacePath,
+    input.platformMode,
   );
-  let sourceHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let sourceHandle: FileHandle | undefined;
   let targetDescriptorPath: string | undefined;
-  let targetHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let targetHandle: FileHandle | undefined;
   let createdTarget = false;
   let committedTarget = false;
   try {
@@ -1717,15 +1865,16 @@ async function copyFileExclusiveIntoVerifiedParent(input: {
   } finally {
     await sourceHandle?.close();
     await targetHandle?.close();
-    await parentHandle?.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function openWorkspaceFileForRead(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspacePath: string,
   absolute: string,
-): Promise<{ handle: Awaited<ReturnType<typeof open>>; info: Awaited<ReturnType<typeof stat>> } | null> {
+): Promise<{ handle: FileHandle; info: Awaited<ReturnType<typeof stat>> } | null> {
   const parentDir = dirname(absolute);
   const parentIdentity = await readDirectoryIdentity(parentDir);
   await assertResolvedWorkspacePath(rootDir, workspacePath, absolute);
@@ -1734,11 +1883,20 @@ async function openWorkspaceFileForRead(
     parentDir,
     parentIdentity,
     workspacePath,
+    platformMode,
   );
   try {
-    let handle: Awaited<ReturnType<typeof open>>;
+    let handle: FileHandle;
     try {
-      handle = await open(pathInOpenDirectory(parentHandle, absolute), OPEN_READ_NOFOLLOW_FLAGS);
+      handle = await open(
+        await pathInVerifiedOpenDirectory({
+          rootDir,
+          directory: parentHandle,
+          targetPath: absolute,
+          workspacePath,
+        }),
+        OPEN_READ_NOFOLLOW_FLAGS,
+      );
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return null;
@@ -1764,24 +1922,28 @@ async function openWorkspaceFileForRead(
       throw error;
     }
   } finally {
-    await parentHandle?.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function openWorkspaceFileForReadIfPresent(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspacePath: string,
   absolute: string,
-): Promise<{ handle: Awaited<ReturnType<typeof open>>; info: Awaited<ReturnType<typeof stat>> } | null> {
+): Promise<{ handle: FileHandle; info: Awaited<ReturnType<typeof stat>> } | null> {
   try {
-    return await openWorkspaceFileForRead(rootDir, workspacePath, absolute);
+    return await openWorkspaceFileForRead(rootDir, platformMode, workspacePath, absolute);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
 }
 
-async function listWorkspaceTextFileStats(rootDir: string): Promise<VersionedFileStat[]> {
+async function listWorkspaceTextFileStats(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+): Promise<VersionedFileStat[]> {
   const files: VersionedFileStat[] = [];
 
   async function scanDir(relativeDir: string): Promise<void> {
@@ -1794,6 +1956,7 @@ async function listWorkspaceTextFileStats(rootDir: string): Promise<VersionedFil
       absoluteDir,
       directoryIdentity,
       workspacePath,
+      platformMode,
     );
     let entries: Dirent[];
     try {
@@ -1801,7 +1964,7 @@ async function listWorkspaceTextFileStats(rootDir: string): Promise<VersionedFil
         withFileTypes: true,
       });
     } finally {
-      await directoryHandle.close();
+      await closeDirectoryHandle(directoryHandle);
     }
     for (const entry of entries) {
       const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
@@ -1817,7 +1980,12 @@ async function listWorkspaceTextFileStats(rootDir: string): Promise<VersionedFil
       const mediaType = mediaTypeForPath(path);
       if (!isTextMediaType(mediaType, path)) continue;
       const absolute = await resolveContainedWorkspacePath(rootDir, path);
-      const opened = await openWorkspaceFileForReadIfPresent(rootDir, path, absolute);
+      const opened = await openWorkspaceFileForReadIfPresent(
+        rootDir,
+        platformMode,
+        path,
+        absolute,
+      );
       if (!opened) continue;
       try {
         const sizeBytes = Number(opened.info.size);
@@ -1846,6 +2014,7 @@ async function listWorkspaceTextFileStats(rootDir: string): Promise<VersionedFil
 
 async function writeFileAtomic(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspacePath: string,
   path: string,
   data: string | Uint8Array,
@@ -1853,7 +2022,7 @@ async function writeFileAtomic(
   mode?: number,
 ): Promise<void> {
   const parentDir = dirname(path);
-  await ensureWorkspaceParentDir(rootDir, workspacePath, path);
+  await ensureWorkspaceParentDir(rootDir, workspacePath, path, platformMode);
   await assertResolvedWorkspacePath(rootDir, workspacePath, path);
   const parentIdentity = await readDirectoryIdentity(parentDir);
   const tmp = join(tmpDir, `write-${process.pid}-${randomUUID()}.tmp`);
@@ -1873,6 +2042,7 @@ async function writeFileAtomic(
     await syncParentDirectoryBestEffort(tmp);
     await renameIntoVerifiedParent({
       rootDir,
+      platformMode,
       workspacePath,
       tmpPath: tmp,
       targetPath: path,
@@ -1902,6 +2072,7 @@ function staleLiveFileChanged(path: string, operation: string): VersionedFileWor
 
 async function restorePreservedLivePreimage(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   targetPath: string;
   preserved: PreservedLivePreimage;
@@ -1909,6 +2080,7 @@ async function restorePreservedLivePreimage(input: {
   if (!input.preserved.preservedPath) return;
   await copyFileExclusiveIntoVerifiedParent({
     rootDir: input.rootDir,
+    platformMode: input.platformMode,
     workspacePath: input.workspacePath,
     sourcePath: input.preserved.preservedPath,
     targetPath: input.targetPath,
@@ -1930,6 +2102,7 @@ async function discardPreservedLivePreimage(input: {
 
 async function preserveLivePreimageForMutation(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   targetPath: string;
   tmpDir: string;
@@ -1937,7 +2110,12 @@ async function preserveLivePreimageForMutation(input: {
   operation: string;
 }): Promise<PreservedLivePreimage> {
   const parentDir = dirname(input.targetPath);
-  await ensureWorkspaceParentDir(input.rootDir, input.workspacePath, input.targetPath);
+  await ensureWorkspaceParentDir(
+    input.rootDir,
+    input.workspacePath,
+    input.targetPath,
+    input.platformMode,
+  );
   await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
   const parentIdentity = await readDirectoryIdentity(parentDir);
   const currentInfo = await lstat(input.targetPath).catch((error: NodeJS.ErrnoException) => {
@@ -1968,6 +2146,7 @@ async function preserveLivePreimageForMutation(input: {
   try {
     await renameFromVerifiedParent({
       rootDir: input.rootDir,
+      platformMode: input.platformMode,
       workspacePath: input.workspacePath,
       targetPath: input.targetPath,
       destinationPath: preservedPath,
@@ -1981,6 +2160,7 @@ async function preserveLivePreimageForMutation(input: {
       if (!snapshotsMatch(snapshot, input.expected)) {
         await restorePreservedLivePreimage({
           rootDir: input.rootDir,
+          platformMode: input.platformMode,
           workspacePath: input.workspacePath,
           targetPath: input.targetPath,
           preserved,
@@ -1996,6 +2176,7 @@ async function preserveLivePreimageForMutation(input: {
     if (moved) {
       await restorePreservedLivePreimage({
         rootDir: input.rootDir,
+        platformMode: input.platformMode,
         workspacePath: input.workspacePath,
         targetPath: input.targetPath,
         preserved,
@@ -2009,6 +2190,7 @@ async function preserveLivePreimageForMutation(input: {
 
 async function writeFileAtomicAfterPreservingPreimage(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   path: string;
   data: string | Uint8Array;
@@ -2018,6 +2200,7 @@ async function writeFileAtomicAfterPreservingPreimage(input: {
 }): Promise<void> {
   const preserved = await preserveLivePreimageForMutation({
     rootDir: input.rootDir,
+    platformMode: input.platformMode,
     workspacePath: input.workspacePath,
     targetPath: input.path,
     tmpDir: input.tmpDir,
@@ -2027,6 +2210,7 @@ async function writeFileAtomicAfterPreservingPreimage(input: {
   try {
     await writeFileExclusiveIntoVerifiedParent({
       rootDir: input.rootDir,
+      platformMode: input.platformMode,
       workspacePath: input.workspacePath,
       targetPath: input.path,
       parentDir: preserved.parentDir,
@@ -2038,6 +2222,7 @@ async function writeFileAtomicAfterPreservingPreimage(input: {
   } catch (error) {
     await restorePreservedLivePreimage({
       rootDir: input.rootDir,
+      platformMode: input.platformMode,
       workspacePath: input.workspacePath,
       targetPath: input.path,
       preserved,
@@ -2053,6 +2238,7 @@ async function writeFileAtomicAfterPreservingPreimage(input: {
 
 async function removeFileAfterPreservingPreimage(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspacePath: string;
   path: string;
   tmpDir: string;
@@ -2061,6 +2247,7 @@ async function removeFileAfterPreservingPreimage(input: {
 }): Promise<void> {
   const preserved = await preserveLivePreimageForMutation({
     rootDir: input.rootDir,
+    platformMode: input.platformMode,
     workspacePath: input.workspacePath,
     targetPath: input.path,
     tmpDir: input.tmpDir,
@@ -2077,6 +2264,7 @@ async function removeFileAfterPreservingPreimage(input: {
   } catch (error) {
     await restorePreservedLivePreimage({
       rootDir: input.rootDir,
+      platformMode: input.platformMode,
       workspacePath: input.workspacePath,
       targetPath: input.path,
       preserved,
@@ -2089,6 +2277,7 @@ async function removeFileAfterPreservingPreimage(input: {
 
 async function writeFileAtomicFromFile(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspacePath: string,
   path: string,
   source: Awaited<ReturnType<typeof open>>,
@@ -2096,7 +2285,7 @@ async function writeFileAtomicFromFile(
   mode?: number,
 ): Promise<void> {
   const parentDir = dirname(path);
-  await ensureWorkspaceParentDir(rootDir, workspacePath, path);
+  await ensureWorkspaceParentDir(rootDir, workspacePath, path, platformMode);
   await assertResolvedWorkspacePath(rootDir, workspacePath, path);
   const parentIdentity = await readDirectoryIdentity(parentDir);
   const tmp = join(tmpDir, `write-${process.pid}-${randomUUID()}.tmp`);
@@ -2116,6 +2305,7 @@ async function writeFileAtomicFromFile(
     await syncParentDirectoryBestEffort(tmp);
     await renameIntoVerifiedParent({
       rootDir,
+      platformMode,
       workspacePath,
       tmpPath: tmp,
       targetPath: path,
@@ -2282,32 +2472,39 @@ async function snapshotWithBackupDigest(
 
 async function openInternalParentHandleForMutation(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
 ): Promise<{
-  parentHandle: Awaited<ReturnType<typeof open>>;
+  parentHandle: VerifiedDirectoryHandle;
   parentDir: string;
   parentIdentity: DirectoryIdentity;
 }> {
   const rootRealPath = await realpath(rootDir);
   const parentDir = dirname(path);
   const parentIdentity = await assertContainedRealDirectory(rootRealPath, parentDir, path);
-  const parentHandle = await openDirectoryHandleForMutation(parentDir, parentIdentity, path);
+  const parentHandle = await openDirectoryHandleForMutation(
+    parentDir,
+    parentIdentity,
+    path,
+    platformMode,
+  );
   try {
     await assertDirectoryIdentity(parentDir, parentIdentity, path);
     return { parentHandle, parentDir, parentIdentity };
   } catch (error) {
-    await parentHandle.close().catch(() => undefined);
+    await closeDirectoryHandleBestEffort(parentHandle);
     throw error;
   }
 }
 
 async function writeInternalFileAtomic(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   writeTemp: (tmpPath: string) => Promise<void>,
 ): Promise<void> {
   const { parentHandle, parentDir, parentIdentity } =
-    await openInternalParentHandleForMutation(rootDir, path);
+    await openInternalParentHandleForMutation(rootDir, platformMode, path);
   const tmp = join(
     openDirectoryDescriptorPath(parentHandle),
     `${basename(path)}.tmp-${process.pid}-${randomUUID()}`,
@@ -2331,38 +2528,54 @@ async function writeInternalFileAtomic(
     await syncDirectoryHandleBestEffort(parentHandle).catch(() => undefined);
     throw error;
   } finally {
-    await parentHandle.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
 async function writeInternalJsonAtomic(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   value: unknown,
 ): Promise<void> {
-  await writeInternalBytesAtomic(rootDir, path, `${JSON.stringify(value, null, 2)}\n`);
+  await writeInternalBytesAtomic(
+    rootDir,
+    platformMode,
+    path,
+    `${JSON.stringify(value, null, 2)}\n`,
+  );
 }
 
 async function writeInternalBytesAtomic(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   value: string | Uint8Array,
 ): Promise<void> {
-  await writeInternalFileAtomic(rootDir, path, (tmp) => writeFileDurably(tmp, value));
+  await writeInternalFileAtomic(rootDir, platformMode, path, (tmp) =>
+    writeFileDurably(tmp, value),
+  );
 }
 
 async function writeInternalOpenFileAtomic(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
-  source: Awaited<ReturnType<typeof open>>,
+  source: FileHandle,
 ): Promise<void> {
-  await writeInternalFileAtomic(rootDir, path, (tmp) => copyOpenFileContentsDurably(source, tmp));
+  await writeInternalFileAtomic(rootDir, platformMode, path, (tmp) =>
+    copyOpenFileContentsDurably(source, tmp),
+  );
 }
 
-async function removeInternalFile(rootDir: string, path: string): Promise<void> {
+async function removeInternalFile(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+  path: string,
+): Promise<void> {
   let parent: Awaited<ReturnType<typeof openInternalParentHandleForMutation>> | null;
   try {
-    parent = await openInternalParentHandleForMutation(rootDir, path);
+    parent = await openInternalParentHandleForMutation(rootDir, platformMode, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
@@ -2380,7 +2593,7 @@ async function removeInternalFile(rootDir: string, path: string): Promise<void> 
     );
     await syncDirectoryHandleBestEffort(parentHandle);
   } finally {
-    await parentHandle.close();
+    await closeDirectoryHandle(parentHandle);
   }
 }
 
@@ -2400,22 +2613,24 @@ function historyBlobFileName(snapshot: FileChangeSnapshot): string | null {
 
 async function historyBlobPath(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId: WorkspaceId,
   snapshot: FileChangeSnapshot | null | undefined,
 ): Promise<string | null> {
   if (!snapshot) return null;
   const fileName = historyBlobFileName(snapshot);
   if (!fileName) return null;
-  return join(await ensureHistoryBlobDir(rootDir, workspaceId), fileName);
+  return join(await ensureHistoryBlobDir(rootDir, workspaceId, platformMode), fileName);
 }
 
 async function persistHistoryBlobText(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId: WorkspaceId,
   snapshot: FileChangeSnapshot | null | undefined,
   text: string,
 ): Promise<string | null> {
-  const blobPath = await historyBlobPath(rootDir, workspaceId, snapshot);
+  const blobPath = await historyBlobPath(rootDir, platformMode, workspaceId, snapshot);
   if (!blobPath) return null;
   const existed = await lstat(blobPath).then(
     () => true,
@@ -2424,17 +2639,18 @@ async function persistHistoryBlobText(
       throw error;
     },
   );
-  await writeInternalBytesAtomic(rootDir, blobPath, text);
+  await writeInternalBytesAtomic(rootDir, platformMode, blobPath, text);
   return existed ? null : blobPath;
 }
 
 async function persistHistoryBlobFromBackup(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId: WorkspaceId,
   snapshot: FileChangeSnapshot | null | undefined,
   backupPath: string | undefined,
 ): Promise<string | null> {
-  const blobPath = await historyBlobPath(rootDir, workspaceId, snapshot);
+  const blobPath = await historyBlobPath(rootDir, platformMode, workspaceId, snapshot);
   if (!blobPath || !backupPath) return null;
   const existed = await lstat(blobPath).then(
     () => true,
@@ -2445,7 +2661,7 @@ async function persistHistoryBlobFromBackup(
   );
   const backup = await open(backupPath, OPEN_READ_NOFOLLOW_FLAGS);
   try {
-    await writeInternalOpenFileAtomic(rootDir, blobPath, backup);
+    await writeInternalOpenFileAtomic(rootDir, platformMode, blobPath, backup);
   } finally {
     await backup.close();
   }
@@ -2454,12 +2670,13 @@ async function persistHistoryBlobFromBackup(
 
 async function discardUnreferencedHistoryBlobs(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId: WorkspaceId,
   paths: readonly string[],
 ): Promise<void> {
   const uniquePaths = [...new Set(paths)];
   if (!uniquePaths.length) return;
-  const blobDir = await ensureHistoryBlobDir(rootDir, workspaceId);
+  const blobDir = await ensureHistoryBlobDir(rootDir, workspaceId, platformMode);
   for (const path of uniquePaths) {
     const offset = relative(blobDir, path);
     if (
@@ -2471,7 +2688,7 @@ async function discardUnreferencedHistoryBlobs(
     ) {
       throw recoveryFailed("Pending file mutation history blob path is outside the blob store.");
     }
-    await removeInternalFile(rootDir, path);
+    await removeInternalFile(rootDir, platformMode, path);
   }
   await rmdir(blobDir).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error;
@@ -2480,6 +2697,7 @@ async function discardUnreferencedHistoryBlobs(
 
 async function readHistoryBlobText(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId: WorkspaceId,
   snapshot: FileChangeSnapshot,
   changeSetId: string,
@@ -2491,7 +2709,7 @@ async function readHistoryBlobText(
       `History record ${changeSetId} large text content is too large to restore for ${path}.`,
     );
   }
-  const blobPath = await historyBlobPath(rootDir, workspaceId, snapshot);
+  const blobPath = await historyBlobPath(rootDir, platformMode, workspaceId, snapshot);
   if (!blobPath) {
     throw new VersionedFileWorkspaceError(
       "restore-snapshot-unavailable",
@@ -2815,15 +3033,17 @@ function normalizePendingJournal(raw: unknown): PendingFileMutationJournal {
 
 async function writePendingMutationJournal(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
 ): Promise<void> {
-  const dir = await ensurePendingMutationDir(rootDir);
+  const dir = await ensurePendingMutationDir(rootDir, platformMode);
   const serialized = `${JSON.stringify(journal, null, 2)}\n`;
   if (Buffer.byteLength(serialized, "utf8") > MAX_PENDING_FILE_MUTATION_JOURNAL_BYTES) {
     throw recoveryFailed(`Pending mutation file ${journal.id} exceeds the maximum supported size.`);
   }
   await writeInternalBytesAtomic(
     rootDir,
+    platformMode,
     join(dir, pendingMutationFileName(journal.id)),
     serialized,
   );
@@ -2831,12 +3051,13 @@ async function writePendingMutationJournal(
 
 async function removePendingMutationJournal(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
   fence?: MutationFence,
 ): Promise<void> {
-  const dir = await ensurePendingMutationDir(rootDir);
+  const dir = await ensurePendingMutationDir(rootDir, platformMode);
   await assertMutationFence(fence);
-  await removeInternalFile(rootDir, join(dir, pendingMutationFileName(journal.id)));
+  await removeInternalFile(rootDir, platformMode, join(dir, pendingMutationFileName(journal.id)));
 }
 
 async function readPendingMutationJournalFile(
@@ -2890,9 +3111,10 @@ async function readPendingMutationJournalFile(
 
 async function readPendingMutationJournals(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId?: WorkspaceId,
 ): Promise<PendingFileMutationJournal[]> {
-  const dir = await ensurePendingMutationDir(rootDir);
+  const dir = await ensurePendingMutationDir(rootDir, platformMode);
   const entries = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [] as string[];
     throw error;
@@ -2921,6 +3143,7 @@ async function readPendingMutationJournals(
 
 async function createPendingMutationJournal(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspaceId: WorkspaceId;
   versionId: VersionId;
   path: string;
@@ -2952,12 +3175,13 @@ async function createPendingMutationJournal(input: {
     createdAtMs: input.createdAtMs,
   };
   await assertMutationFence(input.fence);
-  await writePendingMutationJournal(input.rootDir, journal);
+  await writePendingMutationJournal(input.rootDir, input.platformMode, journal);
   return journal;
 }
 
 async function updatePendingMutationJournal(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
   patch: Partial<
     Pick<PendingFileMutationJournal, "phase" | "versionMutationMomentId" | "createdHistoryBlobPaths">
@@ -2966,12 +3190,13 @@ async function updatePendingMutationJournal(
 ): Promise<PendingFileMutationJournal> {
   const next = { ...journal, ...patch };
   await assertMutationFence(fence);
-  await writePendingMutationJournal(rootDir, next);
+  await writePendingMutationJournal(rootDir, platformMode, next);
   return next;
 }
 
 async function rememberCreatedHistoryBlobPath(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
   createdHistoryBlobPaths: string[],
   blobPath: string | null,
@@ -2981,6 +3206,7 @@ async function rememberCreatedHistoryBlobPath(
   createdHistoryBlobPaths.push(blobPath);
   return updatePendingMutationJournal(
     rootDir,
+    platformMode,
     journal,
     { createdHistoryBlobPaths: [...createdHistoryBlobPaths] },
     fence,
@@ -2989,12 +3215,13 @@ async function rememberCreatedHistoryBlobPath(
 
 async function createDiskPreimageBackup(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspacePath: string,
   path: string,
   tmpDir: string,
 ): Promise<DiskPreimageCapture> {
   try {
-    const opened = await openWorkspaceFileForRead(rootDir, workspacePath, path);
+    const opened = await openWorkspaceFileForRead(rootDir, platformMode, workspacePath, path);
     if (!opened) return { snapshot: null, backup: { targetPath: path } };
     const backupPath = join(tmpDir, `backup-${process.pid}-${randomUUID()}.bak`);
     try {
@@ -3027,7 +3254,12 @@ async function createDiskPreimageBackup(
             `Cannot capture ${workspacePath}: live file changed while backing up its preimage.`,
           );
         }
-        const currentOpened = await openWorkspaceFileForRead(rootDir, workspacePath, path);
+        const currentOpened = await openWorkspaceFileForRead(
+          rootDir,
+          platformMode,
+          workspacePath,
+          path,
+        );
         try {
           if (!currentOpened || !statsIdentityMatches(opened.info, currentOpened.info)) {
             throw recoveryFailed(
@@ -3058,9 +3290,10 @@ async function createDiskPreimageBackup(
 
 async function resolveDiskPreimageBackupPath(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   backupPath: string,
 ): Promise<string> {
-  const tempDir = await ensureInternalTempDir(rootDir);
+  const tempDir = await ensureInternalTempDir(rootDir, platformMode);
   const tempRealPath = await realpath(tempDir);
   const backupRealPath = await realpath(backupPath);
   if (!isWithinRealRoot(tempRealPath, backupRealPath) || backupRealPath !== backupPath) {
@@ -3069,9 +3302,13 @@ async function resolveDiskPreimageBackupPath(
   return backupPath;
 }
 
-async function backupPathForRemoval(rootDir: string, backupPath: string): Promise<string | null> {
+async function backupPathForRemoval(
+  rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
+  backupPath: string,
+): Promise<string | null> {
   try {
-    return await resolveDiskPreimageBackupPath(rootDir, backupPath);
+    return await resolveDiskPreimageBackupPath(rootDir, platformMode, backupPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
@@ -3080,11 +3317,12 @@ async function backupPathForRemoval(rootDir: string, backupPath: string): Promis
 
 async function discardDiskPreimageBackup(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   backup: DiskPreimageBackup,
   fence?: MutationFence,
 ): Promise<void> {
   if (backup.backupPath) {
-    const backupPath = await backupPathForRemoval(rootDir, backup.backupPath);
+    const backupPath = await backupPathForRemoval(rootDir, platformMode, backup.backupPath);
     if (backupPath) {
       await assertMutationFence(fence);
       await rm(backupPath, { force: true });
@@ -3095,11 +3333,12 @@ async function discardDiskPreimageBackup(
 
 async function discardDiskPreimageBackupBestEffort(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   backup: DiskPreimageBackup,
   fence?: MutationFence,
 ): Promise<void> {
   try {
-    await discardDiskPreimageBackup(rootDir, backup, fence);
+    await discardDiskPreimageBackup(rootDir, platformMode, backup, fence);
   } catch {
     // Backup cleanup happens after the history entry commits; failure must not roll back.
   }
@@ -3123,25 +3362,34 @@ function attachRollbackError(error: unknown, rollbackError: unknown): void {
 
 async function restoreDiskPreimage(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   before: FileChangeSnapshot | null,
   backup: DiskPreimageBackup,
   fence?: MutationFence,
 ): Promise<void> {
   if (backup.backupPath) {
-    const tmpDir = await ensureInternalTempDir(rootDir);
+    const tmpDir = await ensureInternalTempDir(rootDir, platformMode);
     const source = await open(backup.backupPath, OPEN_READ_NOFOLLOW_FLAGS);
     try {
       await verifyBackupMatchesSnapshot(source, before, path);
       await assertMutationFence(fence);
-      await writeFileAtomicFromFile(rootDir, path, backup.targetPath, source, tmpDir, backup.mode);
+      await writeFileAtomicFromFile(
+        rootDir,
+        platformMode,
+        path,
+        backup.targetPath,
+        source,
+        tmpDir,
+        backup.mode,
+      );
     } finally {
       await source.close();
     }
     return;
   }
   await assertMutationFence(fence);
-  await restoreSnapshotToDisk(rootDir, path, before);
+  await restoreSnapshotToDisk(rootDir, platformMode, path, before);
 }
 
 async function pendingHistoryRecordMatchesJournal(
@@ -3159,6 +3407,7 @@ async function pendingHistoryRecordMatchesJournal(
 
 async function restoreBackupForJournal(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
   fence?: MutationFence,
 ): Promise<void> {
@@ -3166,7 +3415,11 @@ async function restoreBackupForJournal(
   let backupPath: string | undefined;
   if (journal.diskBackup.backupPath) {
     try {
-      backupPath = await resolveDiskPreimageBackupPath(rootDir, journal.diskBackup.backupPath);
+      backupPath = await resolveDiskPreimageBackupPath(
+        rootDir,
+        platformMode,
+        journal.diskBackup.backupPath,
+      );
     } catch (error) {
       if (
         (error as NodeJS.ErrnoException).code !== "ENOENT" ||
@@ -3176,7 +3429,7 @@ async function restoreBackupForJournal(
       }
     }
   }
-  await restoreDiskPreimage(rootDir, journal.path, journal.before, {
+  await restoreDiskPreimage(rootDir, platformMode, journal.path, journal.before, {
     targetPath,
     ...(backupPath ? { backupPath } : {}),
     ...(journal.diskBackup.mode !== undefined ? { mode: journal.diskBackup.mode } : {}),
@@ -3202,14 +3455,24 @@ function phaseHasCompletedVersionMutation(phase: PendingFileMutationPhase): bool
 
 async function diskPreimageStillMatches(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
 ): Promise<boolean> {
   const targetPath = await resolveContainedWorkspacePath(rootDir, journal.path);
-  const opened = await openWorkspaceFileForReadIfPresent(rootDir, journal.path, targetPath);
+  const opened = await openWorkspaceFileForReadIfPresent(
+    rootDir,
+    platformMode,
+    journal.path,
+    targetPath,
+  );
   if (journal.diskBackup.backupPath) {
     if (!opened) return false;
     try {
-      const backupPath = await resolveDiskPreimageBackupPath(rootDir, journal.diskBackup.backupPath);
+      const backupPath = await resolveDiskPreimageBackupPath(
+        rootDir,
+        platformMode,
+        journal.diskBackup.backupPath,
+      );
       const backup = await open(backupPath, OPEN_READ_NOFOLLOW_FLAGS);
       try {
         await verifyBackupMatchesSnapshot(backup, journal.before, journal.path);
@@ -3245,10 +3508,16 @@ async function diskPreimageStillMatches(
 
 async function diskPostimageStillMatches(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
 ): Promise<boolean> {
   const targetPath = await resolveContainedWorkspacePath(rootDir, journal.path);
-  const opened = await openWorkspaceFileForReadIfPresent(rootDir, journal.path, targetPath);
+  const opened = await openWorkspaceFileForReadIfPresent(
+    rootDir,
+    platformMode,
+    journal.path,
+    targetPath,
+  );
   if (!opened) return snapshotsMatch(null, journal.after);
   try {
     return snapshotsMatch(await snapshotForOpenFile(opened.handle, opened.info), journal.after);
@@ -3259,10 +3528,17 @@ async function diskPostimageStillMatches(
 
 async function failPendingMutationRecoveryConflict(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
   fence?: MutationFence,
 ): Promise<never> {
-  await updatePendingMutationJournal(rootDir, journal, { phase: "recovery-conflict" }, fence);
+  await updatePendingMutationJournal(
+    rootDir,
+    platformMode,
+    journal,
+    { phase: "recovery-conflict" },
+    fence,
+  );
   throw recoveryFailed(
     `Pending mutation for ${journal.path} no longer matches its recorded postimage.`,
   );
@@ -3294,25 +3570,28 @@ async function rollbackVersionMutationForJournal(
 
 async function rollbackPendingFileMutation(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   versions: VersionedTextStore;
   history: ChangeSetStore;
   journal: PendingFileMutationJournal;
   skipHistoryCheck?: boolean;
   fence?: MutationFence;
 }): Promise<void> {
-  const { rootDir, versions, history, journal, skipHistoryCheck = false, fence } = input;
+  const { rootDir, platformMode, versions, history, journal, skipHistoryCheck = false, fence } =
+    input;
   await assertPendingBackupTargetMatchesJournal(rootDir, journal);
   if (!skipHistoryCheck && (await pendingHistoryRecordMatchesJournal(history, journal))) {
-    await removePendingMutationJournal(rootDir, journal, fence);
-    await discardDiskPreimageBackupBestEffort(rootDir, journal.diskBackup, fence);
+    await removePendingMutationJournal(rootDir, platformMode, journal, fence);
+    await discardDiskPreimageBackupBestEffort(rootDir, platformMode, journal.diskBackup, fence);
     return;
   }
 
   if (journal.phase === "prepared") {
-    await discardDiskPreimageBackup(rootDir, journal.diskBackup, fence);
-    await removePendingMutationJournal(rootDir, journal, fence);
+    await discardDiskPreimageBackup(rootDir, platformMode, journal.diskBackup, fence);
+    await removePendingMutationJournal(rootDir, platformMode, journal, fence);
     await discardUnreferencedHistoryBlobs(
       rootDir,
+      platformMode,
       journal.workspaceId,
       journal.createdHistoryBlobPaths,
     );
@@ -3323,14 +3602,15 @@ async function rollbackPendingFileMutation(input: {
     throw recoveryFailed(`Pending mutation for ${journal.path} is in recovery conflict.`);
   }
 
-  if (await diskPreimageStillMatches(rootDir, journal)) {
+  if (await diskPreimageStillMatches(rootDir, platformMode, journal)) {
     if (phaseHasCompletedVersionMutation(journal.phase)) {
       await rollbackVersionMutationForJournal(versions, journal, fence);
     }
-    await removePendingMutationJournal(rootDir, journal, fence);
-    await discardDiskPreimageBackup(rootDir, journal.diskBackup, fence);
+    await removePendingMutationJournal(rootDir, platformMode, journal, fence);
+    await discardDiskPreimageBackup(rootDir, platformMode, journal.diskBackup, fence);
     await discardUnreferencedHistoryBlobs(
       rootDir,
+      platformMode,
       journal.workspaceId,
       journal.createdHistoryBlobPaths,
     );
@@ -3338,20 +3618,21 @@ async function rollbackPendingFileMutation(input: {
   }
 
   if (journal.phase === "disk-mutating") {
-    if (!(await diskPostimageStillMatches(rootDir, journal))) {
-      await failPendingMutationRecoveryConflict(rootDir, journal, fence);
+    if (!(await diskPostimageStillMatches(rootDir, platformMode, journal))) {
+      await failPendingMutationRecoveryConflict(rootDir, platformMode, journal, fence);
     }
-    await restoreBackupForJournal(rootDir, journal, fence);
+    await restoreBackupForJournal(rootDir, platformMode, journal, fence);
   } else if (phaseHasCompletedDiskMutation(journal.phase)) {
-    if (!(await diskPostimageStillMatches(rootDir, journal))) {
-      await failPendingMutationRecoveryConflict(rootDir, journal, fence);
+    if (!(await diskPostimageStillMatches(rootDir, platformMode, journal))) {
+      await failPendingMutationRecoveryConflict(rootDir, platformMode, journal, fence);
     }
-    await restoreBackupForJournal(rootDir, journal, fence);
+    await restoreBackupForJournal(rootDir, platformMode, journal, fence);
   } else {
-    await removePendingMutationJournal(rootDir, journal, fence);
-    await discardDiskPreimageBackup(rootDir, journal.diskBackup, fence);
+    await removePendingMutationJournal(rootDir, platformMode, journal, fence);
+    await discardDiskPreimageBackup(rootDir, platformMode, journal.diskBackup, fence);
     await discardUnreferencedHistoryBlobs(
       rootDir,
+      platformMode,
       journal.workspaceId,
       journal.createdHistoryBlobPaths,
     );
@@ -3360,27 +3641,44 @@ async function rollbackPendingFileMutation(input: {
   if (phaseHasCompletedVersionMutation(journal.phase)) {
     await rollbackVersionMutationForJournal(versions, journal, fence);
   }
-  await removePendingMutationJournal(rootDir, journal, fence);
-  await discardDiskPreimageBackup(rootDir, journal.diskBackup, fence);
-  await discardUnreferencedHistoryBlobs(rootDir, journal.workspaceId, journal.createdHistoryBlobPaths);
+  await removePendingMutationJournal(rootDir, platformMode, journal, fence);
+  await discardDiskPreimageBackup(rootDir, platformMode, journal.diskBackup, fence);
+  await discardUnreferencedHistoryBlobs(
+    rootDir,
+    platformMode,
+    journal.workspaceId,
+    journal.createdHistoryBlobPaths,
+  );
 }
 
 async function cleanupCommittedPendingMutation(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   journal: PendingFileMutationJournal,
   fence?: MutationFence,
 ): Promise<void> {
   let cleanupJournal = journal;
   try {
-    cleanupJournal = await updatePendingMutationJournal(rootDir, cleanupJournal, {
-      phase: "history-recorded",
-    }, fence);
+    cleanupJournal = await updatePendingMutationJournal(
+      rootDir,
+      platformMode,
+      cleanupJournal,
+      {
+        phase: "history-recorded",
+      },
+      fence,
+    );
   } catch {
     // The history record is committed; leftover journals are recovered later.
   }
-  await discardDiskPreimageBackupBestEffort(rootDir, cleanupJournal.diskBackup, fence);
+  await discardDiskPreimageBackupBestEffort(
+    rootDir,
+    platformMode,
+    cleanupJournal.diskBackup,
+    fence,
+  );
   try {
-    await removePendingMutationJournal(rootDir, cleanupJournal, fence);
+    await removePendingMutationJournal(rootDir, platformMode, cleanupJournal, fence);
   } catch {
     // Best-effort post-commit cleanup. Recovery will clear this if it remains.
   }
@@ -3388,13 +3686,14 @@ async function cleanupCommittedPendingMutation(
 
 async function recoverPendingFileMutations(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   workspaceId: WorkspaceId;
   versions: VersionedTextStore;
   history: ChangeSetStore;
   fence?: MutationFence;
 }): Promise<void> {
   const histories = new Map<WorkspaceId, ChangeSetStore>([[input.workspaceId, input.history]]);
-  const journals = await readPendingMutationJournals(input.rootDir);
+  const journals = await readPendingMutationJournals(input.rootDir, input.platformMode);
   for (const journal of journals) {
     let history = histories.get(journal.workspaceId);
     if (!history) {
@@ -3406,6 +3705,7 @@ async function recoverPendingFileMutations(input: {
     try {
       await rollbackPendingFileMutation({
         rootDir: input.rootDir,
+        platformMode: input.platformMode,
         versions: input.versions,
         history,
         journal,
@@ -3419,13 +3719,14 @@ async function recoverPendingFileMutations(input: {
 
 async function restoreSnapshotToDisk(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   before: FileChangeSnapshot | null,
 ): Promise<void> {
   const absolute = await resolveContainedWorkspacePath(rootDir, path);
   if (typeof before?.text === "string") {
-    const tmpDir = await ensureInternalTempDir(rootDir);
-    await writeFileAtomic(rootDir, path, absolute, before.text, tmpDir);
+    const tmpDir = await ensureInternalTempDir(rootDir, platformMode);
+    await writeFileAtomic(rootDir, platformMode, path, absolute, before.text, tmpDir);
     return;
   }
   if (before === null || before.unavailableReason === "missing") {
@@ -3440,6 +3741,7 @@ async function restoreSnapshotToDisk(
     await assertResolvedWorkspacePath(rootDir, path, absolute);
     await removeFromVerifiedParent({
       rootDir,
+      platformMode,
       workspacePath: path,
       targetPath: absolute,
       parentDir,
@@ -3484,6 +3786,7 @@ function defaultDeleteSummary(path: string, provenance?: ChangeProvenance): stri
 
 async function restorableTextSnapshot(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   workspaceId: WorkspaceId,
   snapshot: FileChangeSnapshot | null | undefined,
   changeSetId: string,
@@ -3491,7 +3794,7 @@ async function restorableTextSnapshot(
 ): Promise<string> {
   if (typeof snapshot?.text === "string") return snapshot.text;
   if (snapshot?.unavailableReason === "too-large") {
-    return readHistoryBlobText(rootDir, workspaceId, snapshot, changeSetId, path);
+    return readHistoryBlobText(rootDir, platformMode, workspaceId, snapshot, changeSetId, path);
   }
   throw new VersionedFileWorkspaceError(
     "restore-snapshot-unavailable",
@@ -3534,10 +3837,11 @@ function normalizeRestoreDirection(direction: unknown): "before" | "after" {
 
 async function readCurrentWorkspaceSnapshot(
   rootDir: string,
+  platformMode: FileWorkspacePlatformMode,
   path: string,
   absolute: string,
 ): Promise<FileChangeSnapshot | null> {
-  const opened = await openWorkspaceFileForReadIfPresent(rootDir, path, absolute);
+  const opened = await openWorkspaceFileForReadIfPresent(rootDir, platformMode, path, absolute);
   if (!opened) return null;
   try {
     return await snapshotForOpenFile(opened.handle, opened.info);
@@ -3548,12 +3852,18 @@ async function readCurrentWorkspaceSnapshot(
 
 async function assertLivePreimageStillMatches(input: {
   rootDir: string;
+  platformMode: FileWorkspacePlatformMode;
   path: string;
   absolute: string;
   expected: FileChangeSnapshot | null;
   operation: string;
 }): Promise<void> {
-  const current = await readCurrentWorkspaceSnapshot(input.rootDir, input.path, input.absolute);
+  const current = await readCurrentWorkspaceSnapshot(
+    input.rootDir,
+    input.platformMode,
+    input.path,
+    input.absolute,
+  );
   if (!snapshotsMatch(current, input.expected)) {
     throw new VersionedFileWorkspaceError(
       "stale-live-file",
@@ -3586,7 +3896,8 @@ function createVersionedFileWorkspaceWithHooks(
   }: VersionedFileWorkspaceOptions,
   testHooks: VersionedFileWorkspaceTestHooks = {},
 ): TestableVersionedFileWorkspace {
-  assertSupportedVersionedFileWorkspacePlatform();
+  const platformMode = resolveFileWorkspacePlatformMode(testHooks.forcePlatformMode);
+  assertSupportedVersionedFileWorkspacePlatform(platformMode);
   const workspaceId = normalizeWorkspaceId(inputWorkspaceId);
   const canonicalRoot = canonicalWorkspaceRoot(inputRootDir);
   const rootDir = canonicalRoot.rootDir;
@@ -3629,7 +3940,14 @@ function createVersionedFileWorkspaceWithHooks(
   async function recoverPendingMutationsForWorkspace(fence?: MutationFence): Promise<void> {
     await assertRootStillPinned();
     await assertMutationFence(fence);
-    await recoverPendingFileMutations({ rootDir, workspaceId, versions, history, fence });
+    await recoverPendingFileMutations({
+      rootDir,
+      platformMode,
+      workspaceId,
+      versions,
+      history,
+      fence,
+    });
     await assertMutationFence(fence);
   }
 
@@ -3639,10 +3957,10 @@ function createVersionedFileWorkspaceWithHooks(
 
   async function readWithWorkspaceLock<T>(task: () => Promise<T>): Promise<T> {
     await assertRootStillPinned();
-    return serializeWorkspaceMutation(rootDir, async (lease) => {
+    return serializeWorkspaceMutation(rootDir, platformMode, async (lease) => {
       await assertRootStillPinned();
       await lease.assertStillOwnsLock();
-      if (await pendingMutationStateExists(rootDir)) {
+      if (await pendingMutationStateExists(rootDir, platformMode)) {
         await recoverPendingMutationsForWorkspace(lease);
       }
       await lease.assertStillOwnsLock();
@@ -3660,6 +3978,7 @@ function createVersionedFileWorkspaceWithHooks(
   ): Promise<void> {
     await rollbackPendingFileMutation({
       rootDir,
+      platformMode,
       versions,
       history,
       journal,
@@ -3691,10 +4010,11 @@ function createVersionedFileWorkspaceWithHooks(
     await recoverPendingMutationsForWorkspace(fence);
     assertWritableTextSize(path, input.text);
     const absolute = await resolveContainedWorkspacePath(rootDir, path);
-    const tmpDir = await ensureInternalTempDir(rootDir);
+    const tmpDir = await ensureInternalTempDir(rootDir, platformMode);
     await assertResolvedWorkspacePath(rootDir, path, absolute);
     await fence.assertStillOwnsLock();
-    const capture = preimage ?? (await createDiskPreimageBackup(rootDir, path, absolute, tmpDir));
+    const capture =
+      preimage ?? (await createDiskPreimageBackup(rootDir, platformMode, path, absolute, tmpDir));
     const before = capture.snapshot;
     const backup = capture.backup;
     const metadata = input.metadata ?? { origin: "local-file" as const };
@@ -3719,6 +4039,7 @@ function createVersionedFileWorkspaceWithHooks(
       const versionId = await activeVersion(input.versionId, fence);
       journal = await createPendingMutationJournal({
         rootDir,
+        platformMode,
         workspaceId,
         versionId,
         path,
@@ -3735,32 +4056,42 @@ function createVersionedFileWorkspaceWithHooks(
       await fence.assertStillOwnsLock();
       const beforeBlobPath = await persistHistoryBlobFromBackup(
         rootDir,
+        platformMode,
         workspaceId,
         before,
         backup.backupPath,
       );
       journal = await rememberCreatedHistoryBlobPath(
         rootDir,
+        platformMode,
         journal,
         createdHistoryBlobPaths,
         beforeBlobPath,
         fence,
       );
       await fence.assertStillOwnsLock();
-      const afterBlobPath = await persistHistoryBlobText(rootDir, workspaceId, after, input.text);
+      const afterBlobPath = await persistHistoryBlobText(
+        rootDir,
+        platformMode,
+        workspaceId,
+        after,
+        input.text,
+      );
       journal = await rememberCreatedHistoryBlobPath(
         rootDir,
+        platformMode,
         journal,
         createdHistoryBlobPaths,
         afterBlobPath,
         fence,
       );
-      journal = await updatePendingMutationJournal(rootDir, journal, {
+      journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
         phase: "disk-mutating",
       }, fence);
       await fence.assertStillOwnsLock();
       await writeFileAtomicAfterPreservingPreimage({
         rootDir,
+        platformMode,
         workspacePath: path,
         path: absolute,
         data: input.text,
@@ -3768,11 +4099,11 @@ function createVersionedFileWorkspaceWithHooks(
         expected: before,
         operation: "writing",
       });
-      journal = await updatePendingMutationJournal(rootDir, journal, {
+      journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
         phase: "disk-mutated",
       }, fence);
       const versionMutationMomentId = nextVersionMomentId();
-      journal = await updatePendingMutationJournal(rootDir, journal, {
+      journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
         phase: "version-recording",
         versionMutationMomentId,
       }, fence);
@@ -3785,7 +4116,7 @@ function createVersionedFileWorkspaceWithHooks(
         metadata,
         momentId: versionMutationMomentId,
       });
-      journal = await updatePendingMutationJournal(rootDir, journal, {
+      journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
         phase: "version-recorded",
       }, fence);
       versionSnapshot = versionWrite.snapshot;
@@ -3799,7 +4130,7 @@ function createVersionedFileWorkspaceWithHooks(
         path,
         fence,
       });
-      await cleanupCommittedPendingMutation(rootDir, journal, fence);
+      await cleanupCommittedPendingMutation(rootDir, platformMode, journal, fence);
       return {
         path,
         versionId,
@@ -3815,11 +4146,21 @@ function createVersionedFileWorkspaceWithHooks(
             skipHistoryCheck,
           }, fence);
           if (skipHistoryCheck) {
-            await discardUnreferencedHistoryBlobs(rootDir, workspaceId, createdHistoryBlobPaths);
+            await discardUnreferencedHistoryBlobs(
+              rootDir,
+              platformMode,
+              workspaceId,
+              createdHistoryBlobPaths,
+            );
           }
         } else {
-          await discardDiskPreimageBackup(rootDir, backup, fence);
-          await discardUnreferencedHistoryBlobs(rootDir, workspaceId, createdHistoryBlobPaths);
+          await discardDiskPreimageBackup(rootDir, platformMode, backup, fence);
+          await discardUnreferencedHistoryBlobs(
+            rootDir,
+            platformMode,
+            workspaceId,
+            createdHistoryBlobPaths,
+          );
         }
       } catch (pendingRollbackError) {
         rollbackError = pendingRollbackError;
@@ -3841,7 +4182,7 @@ function createVersionedFileWorkspaceWithHooks(
     assertTextWorkspacePath(path);
     assertWritableTextSize(path, input.text);
     await assertRootStillPinned();
-    return serializePathMutation(rootDir, path, (fence) =>
+    return serializePathMutation(rootDir, platformMode, path, (fence) =>
       writeTextFileUnlocked(input, path, fence),
       testHooks.afterFileMutationLockAcquired,
       testHooks.onWorkspaceMutationQueued,
@@ -3864,10 +4205,11 @@ function createVersionedFileWorkspaceWithHooks(
     const authorForChange = configuredChangeAuthor();
     await recoverPendingMutationsForWorkspace(fence);
     const absolute = await resolveContainedWorkspacePath(rootDir, path);
-    const tmpDir = await ensureInternalTempDir(rootDir);
+    const tmpDir = await ensureInternalTempDir(rootDir, platformMode);
     await assertResolvedWorkspacePath(rootDir, path, absolute);
     await fence.assertStillOwnsLock();
-    const capture = preimage ?? (await createDiskPreimageBackup(rootDir, path, absolute, tmpDir));
+    const capture =
+      preimage ?? (await createDiskPreimageBackup(rootDir, platformMode, path, absolute, tmpDir));
     const before = capture.snapshot;
     if (before === null || before.unavailableReason === "missing") {
       throw new VersionedFileWorkspaceError("file-not-found", `File ${path} was not found.`);
@@ -3896,6 +4238,7 @@ function createVersionedFileWorkspaceWithHooks(
       await fence.assertStillOwnsLock();
       journal = await createPendingMutationJournal({
         rootDir,
+        platformMode,
         workspaceId,
         versionId,
         path,
@@ -3912,12 +4255,14 @@ function createVersionedFileWorkspaceWithHooks(
       await fence.assertStillOwnsLock();
       const beforeBlobPath = await persistHistoryBlobFromBackup(
         rootDir,
+        platformMode,
         workspaceId,
         before,
         backup.backupPath,
       );
       journal = await rememberCreatedHistoryBlobPath(
         rootDir,
+        platformMode,
         journal,
         createdHistoryBlobPaths,
         beforeBlobPath,
@@ -3925,24 +4270,25 @@ function createVersionedFileWorkspaceWithHooks(
       );
       await fence.assertStillOwnsLock();
       const versionBefore = await versions.readTextFile({ workspaceId, versionId, path });
-      journal = await updatePendingMutationJournal(rootDir, journal, {
+      journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
         phase: "disk-mutating",
       }, fence);
       await fence.assertStillOwnsLock();
       await removeFileAfterPreservingPreimage({
         rootDir,
+        platformMode,
         workspacePath: path,
         path: absolute,
         tmpDir,
         expected: before,
         operation: "deleting",
       });
-      journal = await updatePendingMutationJournal(rootDir, journal, {
+      journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
         phase: "disk-mutated",
       }, fence);
       if (versionBefore) {
         const versionMutationMomentId = nextVersionMomentId();
-        journal = await updatePendingMutationJournal(rootDir, journal, {
+        journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
           phase: "version-recording",
           versionMutationMomentId,
         }, fence);
@@ -3954,13 +4300,13 @@ function createVersionedFileWorkspaceWithHooks(
           metadata,
           momentId: versionMutationMomentId,
         });
-        journal = await updatePendingMutationJournal(rootDir, journal, {
+        journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
           phase: "version-recorded",
         }, fence);
         deletedSnapshot = versionDelete.before;
       } else {
         deletedSnapshot = null;
-        journal = await updatePendingMutationJournal(rootDir, journal, {
+        journal = await updatePendingMutationJournal(rootDir, platformMode, journal, {
           phase: "version-recorded",
         }, fence);
       }
@@ -3973,7 +4319,7 @@ function createVersionedFileWorkspaceWithHooks(
         path,
         fence,
       });
-      await cleanupCommittedPendingMutation(rootDir, journal, fence);
+      await cleanupCommittedPendingMutation(rootDir, platformMode, journal, fence);
       return {
         path,
         versionId,
@@ -3989,11 +4335,21 @@ function createVersionedFileWorkspaceWithHooks(
             skipHistoryCheck,
           }, fence);
           if (skipHistoryCheck) {
-            await discardUnreferencedHistoryBlobs(rootDir, workspaceId, createdHistoryBlobPaths);
+            await discardUnreferencedHistoryBlobs(
+              rootDir,
+              platformMode,
+              workspaceId,
+              createdHistoryBlobPaths,
+            );
           }
         } else {
-          await discardDiskPreimageBackup(rootDir, backup, fence);
-          await discardUnreferencedHistoryBlobs(rootDir, workspaceId, createdHistoryBlobPaths);
+          await discardDiskPreimageBackup(rootDir, platformMode, backup, fence);
+          await discardUnreferencedHistoryBlobs(
+            rootDir,
+            platformMode,
+            workspaceId,
+            createdHistoryBlobPaths,
+          );
         }
       } catch (pendingRollbackError) {
         rollbackError = pendingRollbackError;
@@ -4013,7 +4369,7 @@ function createVersionedFileWorkspaceWithHooks(
     const path = normalizeWorkspacePath(input.path);
     assertTextWorkspacePath(path);
     await assertRootStillPinned();
-    return serializePathMutation(rootDir, path, (fence) =>
+    return serializePathMutation(rootDir, platformMode, path, (fence) =>
       deleteTextFileUnlocked(input, path, fence),
       testHooks.afterFileMutationLockAcquired,
       testHooks.onWorkspaceMutationQueued,
@@ -4026,10 +4382,15 @@ function createVersionedFileWorkspaceWithHooks(
     versions: createVersionReader(versions, workspaceId, readWithWorkspaceLock),
     unsafeInternals: { history, rootDir, versions },
 
+    capabilities() {
+      return getFileWorkspaceCapabilityReport(platformMode);
+    },
+
     async ensureMainVersion() {
       await assertRootStillPinned();
       return serializeWorkspaceMutation(
         rootDir,
+        platformMode,
         async (fence) => {
           await recoverPendingMutationsForWorkspace(fence);
           await fence.assertStillOwnsLock();
@@ -4047,6 +4408,7 @@ function createVersionedFileWorkspaceWithHooks(
       await assertRootStillPinned();
       return serializeWorkspaceMutation(
         rootDir,
+        platformMode,
         async (fence) => {
           await recoverPendingMutationsForWorkspace(fence);
           await fence.assertStillOwnsLock();
@@ -4073,7 +4435,7 @@ function createVersionedFileWorkspaceWithHooks(
         assertTextWorkspacePath(path);
         const absolute = await resolveContainedWorkspacePath(rootDir, path);
         try {
-          const opened = await openWorkspaceFileForRead(rootDir, path, absolute);
+          const opened = await openWorkspaceFileForRead(rootDir, platformMode, path, absolute);
           if (!opened) return null;
           try {
             if (Number(opened.info.size) > MAX_READ_TEXT_FILE_BYTES) {
@@ -4112,7 +4474,7 @@ function createVersionedFileWorkspaceWithHooks(
 
     listTextFiles() {
       return readWithWorkspaceLock(async () => {
-        return listWorkspaceTextFileStats(rootDir);
+        return listWorkspaceTextFileStats(rootDir, platformMode);
       });
     },
 
@@ -4122,7 +4484,7 @@ function createVersionedFileWorkspaceWithHooks(
         assertTextWorkspacePath(path);
         const absolute = await resolveContainedWorkspacePath(rootDir, path);
         try {
-          const opened = await openWorkspaceFileForRead(rootDir, path, absolute);
+          const opened = await openWorkspaceFileForRead(rootDir, platformMode, path, absolute);
           if (!opened) return null;
           const mediaType = mediaTypeForPath(path);
           try {
@@ -4157,6 +4519,7 @@ function createVersionedFileWorkspaceWithHooks(
       await assertRootStillPinned();
       return serializePathMutation(
         rootDir,
+        platformMode,
         path,
         async (fence) => {
           await recoverPendingMutationsForWorkspace(fence);
@@ -4176,9 +4539,15 @@ function createVersionedFileWorkspaceWithHooks(
             );
           }
           const expectedLive = direction === "before" ? file.after : file.before;
-          const tmpDir = await ensureInternalTempDir(rootDir);
+          const tmpDir = await ensureInternalTempDir(rootDir, platformMode);
           await fence.assertStillOwnsLock();
-          const preimage = await createDiskPreimageBackup(rootDir, path, absolute, tmpDir);
+          const preimage = await createDiskPreimageBackup(
+            rootDir,
+            platformMode,
+            path,
+            absolute,
+            tmpDir,
+          );
           let preimageConsumed = false;
           try {
             if (!snapshotsMatch(preimage.snapshot, expectedLive)) {
@@ -4219,6 +4588,7 @@ function createVersionedFileWorkspaceWithHooks(
               }
               const text = await restorableTextSnapshot(
                 rootDir,
+                platformMode,
                 workspaceId,
                 target,
                 input.changeSetId,
@@ -4250,7 +4620,12 @@ function createVersionedFileWorkspaceWithHooks(
             };
           } finally {
             if (!preimageConsumed) {
-              await discardDiskPreimageBackupBestEffort(rootDir, preimage.backup, fence);
+              await discardDiskPreimageBackupBestEffort(
+                rootDir,
+                platformMode,
+                preimage.backup,
+                fence,
+              );
             }
           }
         },

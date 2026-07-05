@@ -25,8 +25,8 @@ import {
 let root: string;
 let rootParent: string;
 let now = 1000;
-// VersionedFileWorkspace currently exercises the anchored descriptor filesystem
-// implementation; desktop/MCP callers use higher-level fallbacks off platform.
+// Linux CI keeps the descriptor-anchored suite intact while separate tests force
+// the portable backend through the same public workspace API.
 const itAnchoredFilesystem = process.platform === "linux" ? it : it.skip;
 
 type WorkspaceTestCounters = Record<"conflict" | "moment" | "object" | "version", number>;
@@ -83,21 +83,34 @@ function workspace(
   return createTestableVersionedFileWorkspace(options, testHooks ?? {});
 }
 
-it("rejects unsupported versioned file workspace platforms", () => {
+it("constructs portable versioned file workspaces on desktop platforms", () => {
   const originalPlatform = process.platform;
-  Object.defineProperty(process, "platform", {
-    configurable: true,
-    value: "darwin",
-  });
   try {
-    try {
-      workspace();
-    } catch (error) {
-      expect(error).toBeInstanceOf(VersionedFileWorkspaceError);
-      expect(error).toMatchObject({ code: "unsupported-filesystem" });
-      return;
-    }
-    throw new Error("Expected workspace creation to fail on unsupported platforms.");
+    Object.defineProperty(process, "platform", {
+      configurable: true,
+      value: "darwin",
+    });
+    const darwin = workspace();
+    expect(darwin.capabilities()).toMatchObject({
+      platform: "darwin",
+      mode: "portable",
+      descriptorPinning: false,
+      symlinkDefense: "o-nofollow-lstat",
+      parentDirectoryFsync: "supported",
+    });
+
+    Object.defineProperty(process, "platform", {
+      configurable: true,
+      value: "win32",
+    });
+    const win32 = workspace();
+    expect(win32.capabilities()).toMatchObject({
+      platform: "win32",
+      mode: "portable",
+      descriptorPinning: false,
+      symlinkDefense: "lstat-only",
+      parentDirectoryFsync: "best-effort-noop",
+    });
   } finally {
     Object.defineProperty(process, "platform", {
       configurable: true,
@@ -810,6 +823,189 @@ describe("versioned file workspace", () => {
         after: null,
       },
     ]);
+  });
+
+  describe("forced portable file workspace backend", () => {
+    function portableWorkspace(counters = createWorkspaceTestCounters()) {
+      return workspace(counters, { forcePlatformMode: "portable" });
+    }
+
+    it("writes a normal file, stores a version snapshot, and records history", async () => {
+      const ws = portableWorkspace();
+      const result = await ws.writeTextFile({
+        path: "notes/today.md",
+        text: "Hello portable files\n",
+      });
+
+      await expect(readFile(join(root, "notes/today.md"), "utf8")).resolves.toBe(
+        "Hello portable files\n",
+      );
+      await expect(
+        ws.versions.readTextFile({
+          versionId: result.versionId,
+          path: "notes/today.md",
+        }),
+      ).resolves.toMatchObject({
+        path: "notes/today.md",
+        text: "Hello portable files\n",
+        metadata: { origin: "local-file" },
+      });
+      expect(result.history).toMatchObject({
+        author: LOCAL_FILE_AUTHOR,
+        files: [
+          {
+            path: "notes/today.md",
+            operation: "write",
+            before: null,
+            after: { text: "Hello portable files\n" },
+          },
+        ],
+      });
+    });
+
+    it("overwrites an existing file atomically without leftover temp artifacts", async () => {
+      const ws = portableWorkspace();
+      await ws.writeTextFile({ path: "notes/today.md", text: "Original\n" });
+
+      const overwritten = await ws.writeTextFile({
+        path: "notes/today.md",
+        text: "Replacement\n",
+      });
+
+      await expect(readFile(join(root, "notes/today.md"), "utf8")).resolves.toBe(
+        "Replacement\n",
+      );
+      expect(overwritten.history.files).toMatchObject([
+        {
+          path: "notes/today.md",
+          operation: "write",
+          before: { text: "Original\n" },
+          after: { text: "Replacement\n" },
+        },
+      ]);
+      await expect(readdir(join(root, "notes"))).resolves.toEqual(["today.md"]);
+      expect(await readInternalTempEntries()).toEqual([]);
+    });
+
+    it("deletes a text file while recording version and history state", async () => {
+      const ws = portableWorkspace();
+      const written = await ws.writeTextFile({ path: "notes/today.md", text: "Delete me\n" });
+      const named = await ws.createNamedVersion({
+        name: "Delete branch",
+        fromVersionId: written.versionId,
+      });
+
+      const deleted = await ws.deleteTextFile({ path: "notes/today.md", versionId: named.id });
+
+      await expect(readFile(join(root, "notes/today.md"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        ws.versions.readTextFile({
+          versionId: deleted.versionId,
+          path: "notes/today.md",
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        ws.versions.readTextFile({
+          versionId: written.versionId,
+          path: "notes/today.md",
+        }),
+      ).resolves.toMatchObject({ text: "Delete me\n" });
+      expect(deleted.deleted).toMatchObject({ text: "Delete me\n" });
+      expect(deleted.history.files).toMatchObject([
+        {
+          path: "notes/today.md",
+          operation: "delete",
+          before: { text: "Delete me\n" },
+          after: null,
+        },
+      ]);
+    });
+
+    it("restores one file from a previous history snapshot", async () => {
+      const ws = portableWorkspace();
+      await ws.writeTextFile({ path: "notes/today.md", text: "Version one\n" });
+      const second = await ws.writeTextFile({
+        path: "notes/today.md",
+        text: "Version two\n",
+      });
+
+      const restored = await ws.restoreTextFile({
+        changeSetId: second.history.id,
+        path: "notes/today.md",
+      });
+
+      await expect(ws.readTextFile({ path: "notes/today.md" })).resolves.toBe(
+        "Version one\n",
+      );
+      expect(restored.restoredFrom).toEqual({
+        changeSetId: second.history.id,
+        path: "notes/today.md",
+        direction: "before",
+      });
+      expect(restored.history.provenance).toMatchObject({
+        source: "history-restore",
+        restoreOfChangeSetId: second.history.id,
+        restoreOfPath: "notes/today.md",
+      });
+    });
+
+    it("rejects symlinked paths that escape the workspace root", async () => {
+      const ws = portableWorkspace();
+      const outside = await mkdtemp(join(tmpdir(), "dohc-versioned-files-portable-outside-"));
+      try {
+        const linkedTarget = join(outside, "target.md");
+        await writeFile(linkedTarget, "outside target\n", "utf8");
+        await symlink(linkedTarget, join(root, "linked.md"));
+        await symlink(outside, join(root, "escape"), "dir");
+
+        await expect(ws.readTextFile({ path: "linked.md" })).rejects.toMatchObject({
+          code: "invalid-path",
+        });
+        await expect(
+          ws.writeTextFile({ path: "linked.md", text: "outside overwrite\n" }),
+        ).rejects.toMatchObject({ code: "invalid-path" });
+        await expect(
+          ws.writeTextFile({ path: "escape/out.md", text: "outside\n" }),
+        ).rejects.toMatchObject({ code: "invalid-path" });
+        await expect(ws.deleteTextFile({ path: "escape/out.md" })).rejects.toMatchObject({
+          code: "invalid-path",
+        });
+        await expect(readFile(join(outside, "out.md"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await expect(readFile(linkedTarget, "utf8")).resolves.toBe("outside target\n");
+        await expect(ws.history.list()).resolves.toEqual([]);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("reports portable capabilities for the current platform", () => {
+      const ws = portableWorkspace();
+      const capabilities = ws.capabilities();
+
+      expect(capabilities).toMatchObject({
+        platform: process.platform,
+        mode: "portable",
+        atomicReplace: true,
+        descriptorPinning: false,
+        containmentCheck: "realpath-root-containment",
+        fileFsync: true,
+      });
+      if (process.platform === "win32") {
+        expect(capabilities).toMatchObject({
+          symlinkDefense: "lstat-only",
+          parentDirectoryFsync: "best-effort-noop",
+        });
+      } else {
+        expect(capabilities).toMatchObject({
+          symlinkDefense: "o-nofollow-lstat",
+          parentDirectoryFsync: "supported",
+        });
+      }
+    });
   });
 
   itAnchoredFilesystem("cleans delete preimage backups when version lookup fails", async () => {
