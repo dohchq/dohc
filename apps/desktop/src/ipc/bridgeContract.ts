@@ -390,6 +390,11 @@ export const SyncStatusResult = z.object({
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
+  // Additive (PR 0M-7): true while the workspace-engine capture — a flagged
+  // workspace's SOLE history recorder — is failing, so the notice center can
+  // say history is not being recorded. Optional so older producers/fixtures
+  // keep parsing.
+  historyCaptureFailed: z.boolean().optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 

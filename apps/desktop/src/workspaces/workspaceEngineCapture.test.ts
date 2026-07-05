@@ -87,6 +87,7 @@ function capture(root: string, options: {
   store?: VersionedTextStore;
   now?: () => number;
   onError?: (context: string, error: unknown) => void;
+  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
@@ -522,6 +523,146 @@ describe("workspaceEngineCapture failure isolation", () => {
     expect(readEngineMoments(root).map((m) => m.path)).toEqual(["good.md"]);
     expect(errors).toEqual(["batch capture of bad.md"]);
   });
+});
+
+describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
+  // A real store wrapped so every method throws while `failing` is true —
+  // flip it to simulate an engine store that recovers.
+  function flakyStore(root: string) {
+    const real = createVersionedTextStore(root);
+    const state = { failing: true };
+    const store = new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (state.failing) throw new Error("engine store unavailable");
+          return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as VersionedTextStore;
+    return { store, state };
+  }
+
+  it("reports a failed outcome per failing capture pass and success on recovery", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", "v1\n");
+    const { store, state } = flakyStore(root);
+    const outcomes: boolean[] = [];
+    const engine = capture(root, {
+      store,
+      onError: () => {},
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    });
+
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    expect(outcomes).toEqual([false]);
+
+    state.failing = false;
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.stop();
+    expect(outcomes).toEqual([false, true]);
+    // The recovered pass really captured: a transient open failure must not
+    // be cached forever.
+    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["note.md"]);
+  });
+
+  it("reports a failed outcome when only one path in a batch fails", async () => {
+    const root = await tempRoot();
+    await write(root, "good.md", "fine\n");
+    await write(root, "bad.md", "poison\n");
+    const real = createVersionedTextStore(root);
+    const poisonedStore: VersionedTextStore = {
+      ...real,
+      async writeTextFile(input) {
+        if (input.path === "bad.md") throw new Error("poisoned path");
+        return real.writeTextFile(input);
+      },
+    };
+    const outcomes: boolean[] = [];
+    const engine = capture(root, {
+      store: poisonedStore,
+      onError: () => {},
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    });
+    engine.captureBatch([
+      { path: "bad.md", operation: "update" },
+      { path: "good.md", operation: "update" },
+    ]);
+    await engine.stop();
+    expect(outcomes).toEqual([false]);
+  });
+
+  it("raises the workspace notice once without spam and clears it when capture recovers", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", "v1\n");
+    const workspace: CreatedWorkspace = {
+      workspaceId: "engine-capture-notice",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const { store, state } = flakyStore(root);
+    let notifyCount = 0;
+    const activity = createWorkspaceActivity(
+      () => {
+        notifyCount += 1;
+      },
+      {
+        captureFor: (w, hooks) =>
+          createWorkspaceEngineCapture({
+            workspaceId: w.workspaceId,
+            rootPath: w.rootPath,
+            store,
+            onError: () => {},
+            onCaptureOutcome: hooks.onCaptureOutcome,
+          }),
+      },
+    );
+    await activity.open(workspace);
+    const engineCapture = activity.engineCaptureFor(workspace.workspaceId);
+    expect(engineCapture).not.toBeNull();
+    // Startup reconciliation fails against the broken store: the notice is
+    // raised (one notify for the transition).
+    await engineCapture!.flush();
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(true);
+    const notifiesAtRaise = notifyCount;
+    expect(notifiesAtRaise).toBeGreaterThan(0);
+
+    // Repeated failures keep the flag raised but never re-notify (no spam).
+    engineCapture!.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engineCapture!.flush();
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(true);
+    expect(notifyCount).toBe(notifiesAtRaise);
+
+    // A later successful capture clears the notice (one more notify).
+    state.failing = false;
+    engineCapture!.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engineCapture!.flush();
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    expect(notifyCount).toBe(notifiesAtRaise + 1);
+
+    await activity.stopAll();
+  }, 15_000);
+
+  it("keeps unflagged workspaces unaffected", async () => {
+    const root = await tempRoot();
+    const workspace: CreatedWorkspace = {
+      workspaceId: "engine-capture-unflagged-notice",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => null,
+    });
+    await activity.open(workspace);
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    await activity.stopAll();
+    // Not-open workspaces report a clean status too.
+    expect(activity.getStatus("never-opened").historyCaptureFailed).toBe(false);
+  }, 15_000);
 });
 
 describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {

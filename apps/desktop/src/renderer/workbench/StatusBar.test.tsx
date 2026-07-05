@@ -230,6 +230,64 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
+  it("shows the persistent history-capture-failure notice while capture is failing (PR 0M-7)", async () => {
+    const onOpenHistory = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyCaptureFailed: true,
+      },
+      onOpenHistory,
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const center = screen.getByTestId("notice-center");
+    expect(within(center).getByTestId("notice-center-count").textContent).toBe("1");
+    const notice = within(center).getByTestId("notice-history-capture-failed");
+    expect(notice.textContent).toContain("History paused");
+    expect(notice.textContent).toContain(
+      "dohc couldn't record history for this workspace. Your files are safe on disk, but recent changes may be missing from History.",
+    );
+    await userEvent.click(
+      within(center).getByRole("button", { name: "Open History" }),
+    );
+    expect(onOpenHistory).toHaveBeenCalledOnce();
+  });
+
+  it("clears the history-capture-failure notice when the status reports recovery", async () => {
+    const failedStatus = {
+      state: "synced" as const,
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyCaptureFailed: true,
+    };
+    const { rerender } = renderBar({ syncStatus: failedStatus });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(
+      within(screen.getByTestId("notice-center")).getByTestId(
+        "notice-history-capture-failed",
+      ),
+    ).toBeTruthy();
+
+    rerender(
+      <StatusBar
+        workspaceName="my-notes"
+        syncStatus={{ ...failedStatus, historyCaptureFailed: false }}
+        agentActive={false}
+        conflictSummaries={[]}
+        onConnectCloud={() => {}}
+        onOpenAgent={() => {}}
+        onOpenHistory={() => {}}
+        onOpenSettings={() => {}}
+        onToggleTheme={() => {}}
+        onContextMenu={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+  });
+
   it("keeps the notice center open when dismissing the update toast", async () => {
     renderBar();
     pushUpdate?.({

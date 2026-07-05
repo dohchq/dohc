@@ -221,6 +221,15 @@ export interface WorkspaceEngineCaptureOptions {
   store?: VersionedTextStore;
   now?: () => number;
   onError?: (context: string, error: unknown) => void;
+  // Outcome of each background HISTORY-CAPTURE task (batch capture and
+  // reconciliation passes). With the engine as a flagged workspace's SOLE
+  // recorder, a persistently failing store means history capture fails
+  // silently — this hook lets the product raise a capture-failure notice on
+  // ok:false and clear it when a later pass succeeds. Deliberately narrower
+  // than onError: version/restore operations reject to their caller (the UI
+  // surfaces those directly) and best-effort rename coordination falls back
+  // to plain capture, so neither means history is silently missing.
+  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -373,11 +382,20 @@ export function createWorkspaceEngineCapture(
 
   let initialized: Promise<VersionedTextStore> | null = null;
   function engineStore(): Promise<VersionedTextStore> {
-    initialized ??= (async () => {
-      store ??= createVersionedTextStore(rootPath);
-      await store.ensureMainVersion({ workspaceId });
-      return store;
-    })();
+    if (!initialized) {
+      const attempt = (async () => {
+        store ??= createVersionedTextStore(rootPath);
+        await store.ensureMainVersion({ workspaceId });
+        return store;
+      })();
+      initialized = attempt;
+      // A failed open must not be cached forever: the next capture task
+      // retries, so a transient failure can recover (and clear the
+      // capture-failure notice) instead of poisoning the whole session.
+      attempt.catch(() => {
+        if (initialized === attempt) initialized = null;
+      });
+    }
     return initialized;
   }
 
@@ -616,27 +634,50 @@ export function createWorkspaceEngineCapture(
     return { versions, activeVersionId };
   }
 
+  // Wraps one background capture task so its overall outcome (ok / failed)
+  // reaches onCaptureOutcome, whether the failure was a thrown task (store
+  // unavailable) or per-path errors the task swallowed to keep the batch
+  // going. Rethrows so enqueue's catch still logs via onError.
+  async function reportCaptureOutcome(task: () => Promise<boolean>): Promise<void> {
+    let ok = false;
+    try {
+      ok = await task();
+    } finally {
+      options.onCaptureOutcome?.({ ok });
+    }
+  }
+
   return {
     start() {
-      enqueue("startup reconciliation", reconcile);
+      enqueue("startup reconciliation", () =>
+        reportCaptureOutcome(async () => {
+          await reconcile();
+          return true;
+        }),
+      );
     },
 
     captureBatch(events) {
       if (events.length === 0) return;
       const batch = events.map((event) => ({ ...event }));
-      enqueue("batch capture", async () => {
-        const engine = await engineStore();
-        const versionId = await activeVersionIdOf(engine);
-        const metadata: ActorNeutralWriteMetadata = { origin: "local-file" };
-        for (const event of batch) {
-          try {
-            await captureOnePath(engine, versionId, event, metadata);
-          } catch (error) {
-            // One bad path must not drop the rest of the batch.
-            onError(`batch capture of ${event.path}`, error);
+      enqueue("batch capture", () =>
+        reportCaptureOutcome(async () => {
+          const engine = await engineStore();
+          const versionId = await activeVersionIdOf(engine);
+          const metadata: ActorNeutralWriteMetadata = { origin: "local-file" };
+          let pathFailures = 0;
+          for (const event of batch) {
+            try {
+              await captureOnePath(engine, versionId, event, metadata);
+            } catch (error) {
+              // One bad path must not drop the rest of the batch.
+              pathFailures += 1;
+              onError(`batch capture of ${event.path}`, error);
+            }
           }
-        }
-      });
+          return pathFailures === 0;
+        }),
+      );
     },
 
     registerExpectedEngineEvents,

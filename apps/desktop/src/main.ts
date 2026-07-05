@@ -888,12 +888,16 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   // recorder — watcher batches become engine moments and no legacy
   // .dohc/history change set is written. Flag is read at open; toggling it
   // takes effect on the next open of the workspace.
-  captureFor: async (workspace) => {
+  captureFor: async (workspace, hooks) => {
     const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
     if (!settings.experimental.workspaceEngineAlpha) return null;
     return createWorkspaceEngineCapture({
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
+      // Feeds the persistent history-capture notice (PR 0M-7): with legacy
+      // recording off for flagged workspaces, a failing engine store must be
+      // user-visible, not console-only.
+      onCaptureOutcome: hooks.onCaptureOutcome,
     });
   },
 });
