@@ -2,6 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
+import type {
+  ChatActor,
+  ChatMessage,
+  ChatMessageId,
+  ChatThread,
+  ChatThreadId,
+  LinkedChatFileRef,
+  LinkedChatProjection,
+  LinkedChatProjectionFileAccess,
+  LinkedChatStore,
+  LinkedChatStoreErrorCode,
+  LinkedChatStoreOptions,
+} from "@dohc/workspace-contracts/engine";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
@@ -14,18 +27,19 @@ export const LINKED_CHAT_PROJECTION_KIND = "thread";
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 const ENGINE_SCHEMA_VERSION = 1;
 
-export type ChatThreadId = string;
-export type ChatMessageId = string;
-
-export type LinkedChatStoreErrorCode =
-  | "invalid-message-body"
-  | "invalid-path"
-  | "invalid-sender"
-  | "invalid-thread-title"
-  | "invalid-workspace"
-  | "state-corrupt"
-  | "thread-not-found"
-  | "workspace-mismatch";
+export type {
+  ChatActor,
+  ChatMessage,
+  ChatMessageId,
+  ChatThread,
+  ChatThreadId,
+  LinkedChatFileRef,
+  LinkedChatProjection,
+  LinkedChatProjectionFileAccess,
+  LinkedChatStore,
+  LinkedChatStoreErrorCode,
+  LinkedChatStoreOptions,
+} from "@dohc/workspace-contracts/engine";
 
 export class LinkedChatStoreError extends Error {
   readonly code: LinkedChatStoreErrorCode;
@@ -35,79 +49,6 @@ export class LinkedChatStoreError extends Error {
     this.name = "LinkedChatStoreError";
     this.code = code;
   }
-}
-
-export type ChatActor =
-  | { kind: "human"; displayName: string }
-  | { kind: "agent"; displayName: string };
-
-export interface LinkedChatFileRef {
-  objectId: WorkspaceObjectId;
-  pathHint?: string;
-  linkedAtMs: number;
-}
-
-export interface ChatThread {
-  id: ChatThreadId;
-  workspaceId: WorkspaceId;
-  title: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  linkedFile?: LinkedChatFileRef;
-}
-
-export interface ChatMessage {
-  id: ChatMessageId;
-  workspaceId: WorkspaceId;
-  threadId: ChatThreadId;
-  author: ChatActor;
-  body: string;
-  createdAtMs: number;
-}
-
-export type LinkedChatProjectionFileAccess =
-  | { kind: "allowed"; path: string }
-  | { kind: "denied" }
-  | { kind: "unknown" };
-
-export interface LinkedChatProjection {
-  path: string;
-  readOnly: true;
-  threadId: ChatThreadId;
-  text: string;
-}
-
-export interface LinkedChatStore {
-  createThread(input: {
-    workspaceId: WorkspaceId;
-    title: string;
-    linkedFile?: { objectId: WorkspaceObjectId; pathHint?: string };
-  }): Promise<ChatThread>;
-  listThreads(input: { workspaceId: WorkspaceId }): Promise<ChatThread[]>;
-  listThreadsForFile(input: {
-    workspaceId: WorkspaceId;
-    objectId: WorkspaceObjectId;
-  }): Promise<ChatThread[]>;
-  sendMessage(input: {
-    workspaceId: WorkspaceId;
-    threadId: ChatThreadId;
-    author: ChatActor;
-    body: string;
-  }): Promise<ChatMessage>;
-  listMessages(input: {
-    workspaceId: WorkspaceId;
-    threadId: ChatThreadId;
-  }): Promise<ChatMessage[]>;
-  getThreadProjection(input: {
-    workspaceId: WorkspaceId;
-    threadId: ChatThreadId;
-    linkedFileAccess?: LinkedChatProjectionFileAccess;
-  }): Promise<LinkedChatProjection>;
-}
-
-export interface LinkedChatStoreOptions {
-  nowMs?: () => number;
-  createId?: (kind: "message" | "thread") => string;
 }
 
 function cloneJson<T>(value: T): T {

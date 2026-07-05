@@ -1,4 +1,8 @@
 import type {
+  VersionFileChange,
+  VersionFileChangeStatus,
+} from "@dohc/workspace-contracts/engine";
+import type {
   VersionId,
   VersionedTextStore,
   WorkspaceId,
@@ -17,16 +21,10 @@ import type {
 //   - modified: both versions have the path with different text.
 // Identical paths are omitted — an empty result means "no differences".
 
-export type VersionFileChangeStatus = "added" | "modified" | "deleted";
-
-export interface VersionFileChange {
-  path: string;
-  status: VersionFileChangeStatus;
-  // Target-side text (for example Main); absent when the file was added.
-  currentText?: string;
-  // Source-side text (the compared version); absent when the file was deleted.
-  incomingText?: string;
-}
+export type {
+  VersionFileChange,
+  VersionFileChangeStatus,
+} from "@dohc/workspace-contracts/engine";
 
 export async function compareVersionFiles(
   store: VersionedTextStore,
