@@ -14089,3 +14089,145 @@ git diff --check
   legacy-recording disablement (including the switch/merge materialization
   suppression decision), and engine-routed restore via
   registerExpectedEngineEvents.
+
+## PR 0M-5 - History Flip, Engine Restore, Linked-Chat Rail
+
+Status: merged to main via PR #59 (merge commit 6767555d)
+Branch: codex/think-bigger-0m5-history-chat
+Worktree: /home/ice/dev/dohc-0m5-history-chat (removed after merge)
+Implementation workstream, if used: direct implementation by a Claude lane
+(fable-5), tests-first; orchestrator merge review with independent E2E re-run
+PR Link: https://github.com/dohc-ai/dohc/pull/59
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] History flip: flagged workspaces read engine moments (real summaries,
+      correlationId-grouped passes, keyset pagination 200/page) through new
+      zod-validated IPC; unflagged workspaces keep legacy byte-for-byte; new
+      store APIs listMoments/getMoment; capture-level reads scope to the
+      active version and drain the capture chain first (read-your-writes)
+- [x] Dual-write ENDED (arc acceptance "no second source of truth"):
+      recordBatch records each batch into exactly one history — engine for
+      flagged, legacy otherwise; capture resolved before watcher start so the
+      mode is deterministic from the first batch; 0M-3/0M-4 deletion
+      checklists fully resolved; switch/merge legacy suppression verified moot
+- [x] Engine restore on the capture chain: unsaved disk edits captured first,
+      forward "Restored <file>" moment, materialization through
+      registerExpectedEngineEvents (first production caller), undo as forward
+      restore; legacy restore untouched for unflagged
+- [x] Linked Chats rail (the unchecked P0E item): History/Chats tab pair on
+      the right rail; per-file chats in engine.db linked to stable engine
+      object ids; main-derived authorship; agent messages render as
+      "<User Name>'s agent" (seeded-message tested); moveWorkspacePath
+      coordinates single-file renames through the engine so chats survive
+      product renames (rename moment, rollback on failed disk move)
+- [x] Workspace-switch race E2E (arc requirement): heavy workspace's
+      history/chats never repaint a switched-to workspace; liveness-token
+      gating on every new async renderer path
+
+### Files Changed
+
+- packages/workspace-engine/src/versionedTextStore.ts,
+  momentTimeline.test.ts (new), index.ts
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts (+ .test.ts),
+  workspaceEngineRestore.test.ts (new), workspaceWatcher.ts,
+  workspaceActivity.ts
+- apps/desktop/src/main.ts, preload.ts, ipc/channels.ts,
+  ipc/bridgeContract.ts (+ contract tests)
+- apps/desktop/src/renderer/DesktopWorkspaceShell.tsx,
+  workbench/EngineHistory.tsx (new, + test), workbench/LinkedChats.tsx (new),
+  workbench/workbenchState.ts (+ test)
+- apps/desktop/e2e/workspace-engine-history.spec.ts (new),
+  workspace-linked-chats.spec.ts (new), workspace-switch-race.spec.ts (new),
+  workspace-engine-capture.spec.ts, helpers/workspace.ts
+
+### Tests Added Or Updated
+
+- Engine 201/201 (+6 timeline tests); desktop vitest 811 passed (+26) with
+  the 1 pre-existing theme.test.ts env failure.
+- Two justified, documented test flips (the deliberate 0M-5 behavior change):
+  capture E2E now asserts engine-ONLY recording for flagged workspaces; the
+  unit fail-open-for-legacy test now pins fail-visible with zero legacy
+  records (watcher survives, onError surfaces).
+- Orchestrator independently re-verified suites, typechecks, and E2E (11/11
+  across the 5 new/changed specs plus regressions) after a fresh build.
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-engine test   # 201/201
+pnpm --filter @dohc/desktop test            # 811 passed + 1 pre-existing env failure
+pnpm --filter @dohc/workspace-engine typecheck && pnpm --filter @dohc/desktop typecheck
+pnpm --filter @dohc/desktop build
+npx playwright test <new + regression specs> # 11/11 (orchestrator re-run)
+git diff --check
+```
+
+### E2E / Visual / Manual QA
+
+- Engine history spec 2/2 (flagged timeline with product summaries + restore
+  end-to-end with undo; unflagged legacy intact); linked chats spec 2/2
+  (create/send/persist across relaunch, rename survival, seeded agent
+  message renders as "Ice de Vera's agent"); workspace-switch race 1/1
+  (1,000 seeded moments + 200-message chat never repaint the other
+  workspace); versions/capture/direct-disk/settings regressions green.
+
+### Local Agent CLI QA
+
+- Not run for this lane; the arc gate (0M-7) runs agent CLI QA against the
+  flagged capture path.
+
+### CodeRabbit
+
+- Status: deferred to the PR 0M arc gate (User Decision 5).
+
+### Unresolved Findings
+
+- None at merge.
+
+### Subagent Reviews
+
+- Architecture: orchestrator reviewed the sole-recorder branch, restore
+  ordering, and the read-your-writes drain.
+- Security: new handlers resolve workspaces server-side and reject unflagged
+  callers; chat authorship derived in main; chats stay inside engine.db.
+- QA: orchestrator re-ran everything independently; the two test flips were
+  reviewed as the deliberate acceptance-criterion change, not weakening.
+- Accessibility: rail tabs and chat composer keyboard accessible.
+
+### Security / Privacy Notes
+
+- Renderer never supplies identity; restore reuses the contained engine disk
+  writer; no .dohc watcher exposure for chat projections.
+
+### Performance Notes
+
+- History with 1,000 engine moments: first useful content 57 ms; list IPC
+  116.3 ms — <500 ms budget PASS (hard-asserted in the race spec).
+- Chat rail with 200 messages: 952 ms click-to-rendered.
+- Machine: Ryzen 9 7950X, WSL2, node v25.2.1, /tmp tmpfs.
+
+### Migration Notes
+
+- The 0M-3 dual-write interim is over. MCP posture at alpha: MCP's direct
+  legacy record still lands but is invisible to the flagged UI; its physical
+  write is engine-captured via the watcher. MCP-on-engine with attribution is
+  0M-6/0M-7 territory.
+
+### Remaining Risk
+
+- Engine capture failure is currently console-only; with legacy recording
+  disabled for flagged workspaces, a persistently failing engine store means
+  no history capture at all. A user-visible capture-failure notice is a
+  REQUIRED 0M-7 item (orchestrator review finding).
+- Engine moments are actor-neutral until agent/MCP writes route through the
+  engine; external (non-product) renames still break object-id continuity.
+- Chat/history lists paginated but unvirtualized; fine at alpha scale.
+
+### Follow-Up / Deletion Conditions
+
+- 0M-7 owns: user-visible engine-capture-failure notice, engine search flip
+  decision, arc-gate CodeRabbit batch review, live Postgres re-run, agent
+  CLI QA, and the arc acceptance checklist sweep.
