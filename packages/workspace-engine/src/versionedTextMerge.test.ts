@@ -1,12 +1,27 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+
+interface RawSqliteStatement {
+  run(...params: unknown[]): { changes: number };
+}
+
+interface RawSqliteDb {
+  exec(sql: string): void;
+  prepare(sql: string): RawSqliteStatement;
+  close(): void;
+}
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => RawSqliteDb;
+};
 
 let root: string;
 let now = 1000;
@@ -33,6 +48,16 @@ function storeWithDeterministicIds() {
       return `${kind}-${deterministicCounters[kind]}`;
     },
   });
+}
+
+function withRawDb(fn: (db: RawSqliteDb) => void): void {
+  const db = new DatabaseSync(join(root, ".dohc/engine/engine.db"));
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    fn(db);
+  } finally {
+    db.close();
+  }
 }
 
 const localFileWrite = { origin: "local-file" as const, summary: "local save" };
@@ -312,47 +337,19 @@ describe("versioned text compare and merge", () => {
   });
 
   it("fails closed for versions that do not have a durable fork base", async () => {
-    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-    await writeFile(
-      join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH),
-      JSON.stringify({
-        schemaVersion: 1,
-        workspaces: {
-          "workspace-a": {
-            mainVersionId: "main",
-            versions: {
-              main: {
-                id: "main",
-                workspaceId: "workspace-a",
-                kind: "main",
-                name: "Main",
-                createdAtMs: 1000,
-              },
-              "version-1": {
-                id: "version-1",
-                workspaceId: "workspace-a",
-                kind: "named",
-                name: "Old branch",
-                createdAtMs: 1010,
-                forkPoint: { versionId: "main" },
-              },
-            },
-            objects: {},
-            pathAliases: { main: {}, "version-1": {} },
-            snapshots: { main: {}, "version-1": {} },
-            moments: [],
-          },
-        },
-      }),
-      "utf8",
-    );
-    const store = createVersionedTextStore(root);
+    const { main, named, store } = await createForkedPlan();
+    withRawDb((db) => {
+      db.prepare("DELETE FROM fork_base_snapshots WHERE workspace_id = ? AND version_id = ?").run(
+        "workspace-a",
+        named.id,
+      );
+    });
 
     await expect(
       store.compareTextFileVersions({
         workspaceId: "workspace-a",
-        targetVersionId: "main",
-        sourceVersionId: "version-1",
+        targetVersionId: main.id,
+        sourceVersionId: named.id,
         path: "docs/plan.md",
       }),
     ).rejects.toMatchObject({ code: "fork-base-not-found" });

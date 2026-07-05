@@ -1,11 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import type { WorkspaceId, WorkspaceObjectId } from "./versionedTextStore";
+import {
+  VERSIONED_TEXT_STORE_RELATIVE_PATH,
+  type WorkspaceId,
+  type WorkspaceObjectId,
+} from "./versionedTextStore";
 
-export const LINKED_CHAT_STORE_RELATIVE_PATH = ".dohc/engine/linked-chat-store.json";
+export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
+const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+const ENGINE_SCHEMA_VERSION = 1;
 
 export type ChatThreadId = string;
 export type ChatMessageId = string;
@@ -103,22 +110,6 @@ export interface LinkedChatStoreOptions {
   createId?: (kind: "message" | "thread") => string;
 }
 
-interface PersistedWorkspaceChatState {
-  threads: Record<ChatThreadId, ChatThread>;
-  threadOrder: ChatThreadId[];
-  messages: Record<ChatMessageId, ChatMessage>;
-  threadMessages: Record<ChatThreadId, ChatMessageId[]>;
-}
-
-interface PersistedLinkedChatState {
-  schemaVersion: 1;
-  workspaces: Record<WorkspaceId, PersistedWorkspaceChatState>;
-}
-
-function initialState(): PersistedLinkedChatState {
-  return { schemaVersion: 1, workspaces: {} };
-}
-
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -127,50 +118,222 @@ function storePath(rootDir: string): string {
   return join(rootDir, LINKED_CHAT_STORE_RELATIVE_PATH);
 }
 
-async function readJson<T>(path: string): Promise<T | null> {
+interface SqliteStatement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes: number };
+}
+
+interface SqliteDb {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  close(): void;
+}
+
+interface SqliteModule {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDb;
+}
+
+const requireModule = createRequire(import.meta.url);
+
+function nodeSqlite(): SqliteModule {
+  return requireModule("node:sqlite") as SqliteModule;
+}
+
+function corruptStore(cause?: unknown): LinkedChatStoreError {
+  const error = new LinkedChatStoreError("state-corrupt", "Linked chat store is corrupt.");
+  if (cause !== undefined) {
+    (error as Error & { cause?: unknown }).cause = cause;
+  }
+  return error;
+}
+
+function openDatabase(rootDir: string): SqliteDb {
+  const path = storePath(resolve(rootDir));
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const { DatabaseSync } = nodeSqlite();
+  let db: SqliteDb;
   try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
+    db = new DatabaseSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw corruptStore(error);
+  }
+  try {
+    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec("PRAGMA journal_mode = WAL");
+    initializeOrValidateSchema(db);
+    assertSqliteIntegrity(db);
+    return db;
+  } catch (error) {
+    try {
+      db.close();
+    } catch {}
+    if (error instanceof LinkedChatStoreError) throw error;
+    throw corruptStore(error);
+  }
+}
+
+function initializeOrValidateSchema(db: SqliteDb): void {
+  const schemaRow = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'")
+    .get();
+  if (!schemaRow) {
+    const userTables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .all();
+    if (userTables.length > 0) throw corruptStore();
+    createSchema(db);
+    return;
+  }
+  const version = db.prepare("SELECT version FROM schema_version WHERE id = 1").get();
+  if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corruptStore();
+  assertRequiredTables(db);
+}
+
+function assertSqliteIntegrity(db: SqliteDb): void {
+  const integrity = db.prepare("PRAGMA integrity_check").all();
+  if (integrity.length !== 1 || String(integrity[0]?.integrity_check) !== "ok") {
+    throw corruptStore();
+  }
+}
+
+function assertRequiredTables(db: SqliteDb): void {
+  const required = new Set([
+    "schema_version",
+    "blobs",
+    "versioned_workspaces",
+    "versions",
+    "file_objects",
+    "path_aliases",
+    "snapshots",
+    "fork_base_snapshots",
+    "moments",
+    "conflicts",
+    "chat_threads",
+    "chat_messages",
+  ]);
+  const names = new Set(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .all()
+      .map((row) => String(row.name)),
+  );
+  for (const table of required) {
+    if (!names.has(table)) throw corruptStore();
+  }
+}
+
+function createSchema(db: SqliteDb): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
+      CREATE TABLE blobs (sha256 TEXT PRIMARY KEY, byte_length INTEGER NOT NULL, text TEXT NOT NULL);
+      CREATE TABLE versioned_workspaces (workspace_id TEXT PRIMARY KEY, main_version_id TEXT NOT NULL);
+      CREATE TABLE versions (
+        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+        created_at_ms REAL NOT NULL, fork_version_id TEXT, fork_moment_id TEXT,
+        PRIMARY KEY (workspace_id, version_id),
+        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+      );
+      CREATE TABLE file_objects (
+        workspace_id TEXT NOT NULL, object_id TEXT NOT NULL, created_at_ms REAL NOT NULL,
+        PRIMARY KEY (workspace_id, object_id), UNIQUE (object_id),
+        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+      );
+      CREATE TABLE path_aliases (
+        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, path TEXT NOT NULL, object_id TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, version_id, path),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+      );
+      CREATE TABLE snapshots (
+        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL,
+        blob_sha256 TEXT NOT NULL, updated_at_ms REAL NOT NULL, latest_moment_id TEXT NOT NULL,
+        metadata_origin TEXT NOT NULL, metadata_summary TEXT, metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, version_id, object_id),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+        FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE fork_base_snapshots (
+        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL,
+        blob_sha256 TEXT NOT NULL, updated_at_ms REAL NOT NULL, latest_moment_id TEXT NOT NULL,
+        metadata_origin TEXT NOT NULL, metadata_summary TEXT, metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, version_id, object_id),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+        FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE moments (
+        workspace_id TEXT NOT NULL, moment_order INTEGER NOT NULL, moment_id TEXT NOT NULL,
+        version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, recorded_at_ms REAL NOT NULL,
+        operation TEXT NOT NULL, payload_before_path TEXT, payload_before_blob_sha256 TEXT,
+        payload_after_path TEXT NOT NULL, payload_after_blob_sha256 TEXT NOT NULL,
+        metadata_origin TEXT NOT NULL, metadata_summary TEXT, metadata_correlation_id TEXT,
+        before_present INTEGER NOT NULL, before_object_id TEXT, before_version_id TEXT, before_path TEXT,
+        before_blob_sha256 TEXT, before_updated_at_ms REAL, before_latest_moment_id TEXT,
+        before_metadata_origin TEXT, before_metadata_summary TEXT, before_metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, moment_id), UNIQUE (workspace_id, moment_order),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+        FOREIGN KEY (payload_before_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (payload_after_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (before_blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE conflicts (
+        workspace_id TEXT NOT NULL, conflict_id TEXT NOT NULL, path TEXT NOT NULL, target_version_id TEXT NOT NULL,
+        source_version_id TEXT NOT NULL, created_at_ms REAL NOT NULL, updated_at_ms REAL NOT NULL,
+        status TEXT NOT NULL, chosen_from TEXT NOT NULL, resolution TEXT, metadata_origin TEXT NOT NULL,
+        metadata_summary TEXT, metadata_correlation_id TEXT, base_exists INTEGER NOT NULL, base_path TEXT NOT NULL,
+        base_object_id TEXT, base_blob_sha256 TEXT, base_updated_at_ms REAL, base_latest_moment_id TEXT,
+        base_metadata_origin TEXT, base_metadata_summary TEXT, base_metadata_correlation_id TEXT,
+        current_exists INTEGER NOT NULL, current_path TEXT NOT NULL, current_object_id TEXT,
+        current_blob_sha256 TEXT, current_updated_at_ms REAL, current_latest_moment_id TEXT,
+        current_metadata_origin TEXT, current_metadata_summary TEXT, current_metadata_correlation_id TEXT,
+        incoming_exists INTEGER NOT NULL, incoming_path TEXT NOT NULL, incoming_object_id TEXT,
+        incoming_blob_sha256 TEXT, incoming_updated_at_ms REAL, incoming_latest_moment_id TEXT,
+        incoming_metadata_origin TEXT, incoming_metadata_summary TEXT, incoming_metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, conflict_id),
+        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+        FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE chat_threads (
+        workspace_id TEXT NOT NULL, thread_id TEXT NOT NULL, title TEXT NOT NULL,
+        created_at_ms REAL NOT NULL, updated_at_ms REAL NOT NULL, linked_object_id TEXT,
+        linked_path_hint TEXT, linked_at_ms REAL, PRIMARY KEY (workspace_id, thread_id)
+      );
+      CREATE TABLE chat_messages (
+        workspace_id TEXT NOT NULL, thread_id TEXT NOT NULL, message_order INTEGER NOT NULL,
+        message_id TEXT NOT NULL, author_kind TEXT NOT NULL, author_display_name TEXT NOT NULL,
+        body TEXT NOT NULL, created_at_ms REAL NOT NULL, PRIMARY KEY (workspace_id, message_id),
+        UNIQUE (workspace_id, thread_id, message_order),
+        FOREIGN KEY (workspace_id, thread_id) REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_versions_workspace_name ON versions(workspace_id, name);
+      CREATE INDEX idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
+      CREATE INDEX idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);
+      CREATE INDEX idx_snapshots_path ON snapshots(workspace_id, version_id, path);
+      CREATE INDEX idx_fork_base_snapshots_path ON fork_base_snapshots(workspace_id, version_id, path);
+      CREATE INDEX idx_moments_version_object_order ON moments(workspace_id, version_id, object_id, moment_order);
+      CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order);
+      CREATE INDEX idx_moments_object_before ON moments(workspace_id, object_id, before_latest_moment_id);
+      CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
+      CREATE INDEX idx_chat_threads_workspace_created ON chat_threads(workspace_id, created_at_ms, thread_id);
+      CREATE INDEX idx_chat_threads_linked_file ON chat_threads(workspace_id, linked_object_id, created_at_ms, thread_id);
+      CREATE INDEX idx_chat_messages_thread_order ON chat_messages(workspace_id, thread_id, message_order);
+      INSERT INTO schema_version (id, version) VALUES (1, ${ENGINE_SCHEMA_VERSION});
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
     throw error;
   }
-}
-
-function normalizeState(raw: unknown): PersistedLinkedChatState {
-  if (raw === null) return initialState();
-  if (
-    typeof raw !== "object" ||
-    raw === null ||
-    (raw as { schemaVersion?: unknown }).schemaVersion !== 1 ||
-    typeof (raw as { workspaces?: unknown }).workspaces !== "object" ||
-    (raw as { workspaces?: unknown }).workspaces === null
-  ) {
-    throw new LinkedChatStoreError("state-corrupt", "Linked chat store is corrupt.");
-  }
-  const state = raw as PersistedLinkedChatState;
-  for (const workspace of Object.values(state.workspaces)) {
-    if (
-      typeof workspace !== "object" ||
-      workspace === null ||
-      !Array.isArray(workspace.threadOrder) ||
-      typeof workspace.threads !== "object" ||
-      workspace.threads === null ||
-      typeof workspace.messages !== "object" ||
-      workspace.messages === null ||
-      typeof workspace.threadMessages !== "object" ||
-      workspace.threadMessages === null
-    ) {
-      throw new LinkedChatStoreError("state-corrupt", "Linked chat store is corrupt.");
-    }
-  }
-  return state;
-}
-
-async function writeFileAtomic(path: string, data: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${process.hrtime.bigint()}`;
-  await writeFile(tmp, data, "utf8");
-  await rename(tmp, path);
 }
 
 function normalizeWorkspaceId(workspaceId: string): WorkspaceId {
@@ -291,53 +454,80 @@ export function linkedChatProjectionPath(input: {
   return `.dohc/chats/v1-${base32LowercaseNoPadding(digest)}.md`;
 }
 
-function ensureWorkspace(
-  state: PersistedLinkedChatState,
-  workspaceId: WorkspaceId,
-): PersistedWorkspaceChatState {
-  const existing = state.workspaces[workspaceId];
-  if (existing) return existing;
-  const workspace: PersistedWorkspaceChatState = {
-    threads: {},
-    threadOrder: [],
-    messages: {},
-    threadMessages: {},
+function threadFromRow(row: Record<string, unknown>): ChatThread {
+  const linkedObjectId = optionalString(row.linked_object_id);
+  return {
+    id: stringValue(row.thread_id),
+    workspaceId: stringValue(row.workspace_id),
+    title: stringValue(row.title),
+    createdAtMs: numberValue(row.created_at_ms),
+    updatedAtMs: numberValue(row.updated_at_ms),
+    ...(linkedObjectId
+      ? {
+          linkedFile: {
+            objectId: linkedObjectId,
+            ...(optionalString(row.linked_path_hint)
+              ? { pathHint: optionalString(row.linked_path_hint) }
+              : {}),
+            linkedAtMs: numberValue(row.linked_at_ms),
+          },
+        }
+      : {}),
   };
-  state.workspaces[workspaceId] = workspace;
-  return workspace;
 }
 
-function threadExistsInAnotherWorkspace(
-  state: PersistedLinkedChatState,
-  workspaceId: WorkspaceId,
-  threadId: ChatThreadId,
-): boolean {
-  return Object.entries(state.workspaces).some(
-    ([candidateWorkspaceId, workspace]) =>
-      candidateWorkspaceId !== workspaceId && workspace.threads[threadId] !== undefined,
-  );
+function messageFromRow(row: Record<string, unknown>): ChatMessage {
+  return {
+    id: stringValue(row.message_id),
+    workspaceId: stringValue(row.workspace_id),
+    threadId: stringValue(row.thread_id),
+    author: {
+      kind: stringValue(row.author_kind) as ChatActor["kind"],
+      displayName: stringValue(row.author_display_name),
+    },
+    body: stringValue(row.body),
+    createdAtMs: numberValue(row.created_at_ms),
+  };
+}
+
+function stringValue(value: unknown): string {
+  if (typeof value !== "string") throw corruptStore();
+  return value;
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") throw corruptStore();
+  return value;
+}
+
+function numberValue(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw corruptStore();
+  return value;
 }
 
 function requireWorkspaceThread(
-  state: PersistedLinkedChatState,
+  db: SqliteDb,
   workspaceId: WorkspaceId,
   threadId: ChatThreadId,
-): { workspace: PersistedWorkspaceChatState; thread: ChatThread } {
-  const workspace = state.workspaces[workspaceId];
-  const thread = workspace?.threads[threadId];
-  if (!workspace || !thread) {
-    if (threadExistsInAnotherWorkspace(state, workspaceId, threadId)) {
-      throw new LinkedChatStoreError(
-        "workspace-mismatch",
-        `Thread ${threadId} does not belong to workspace ${workspaceId}.`,
-      );
-    }
+): ChatThread {
+  const row = db
+    .prepare("SELECT * FROM chat_threads WHERE workspace_id = ? AND thread_id = ?")
+    .get(workspaceId, threadId);
+  if (row) return threadFromRow(row);
+  const other = db
+    .prepare("SELECT workspace_id FROM chat_threads WHERE thread_id = ? AND workspace_id <> ?")
+    .get(threadId, workspaceId);
+  if (other) {
     throw new LinkedChatStoreError(
-      "thread-not-found",
-      `Thread ${threadId} was not found in workspace ${workspaceId}.`,
+      "workspace-mismatch",
+      `Thread ${threadId} does not belong to workspace ${workspaceId}.`,
     );
   }
-  return { workspace, thread };
+  throw new LinkedChatStoreError(
+    "thread-not-found",
+    `Thread ${threadId} was not found in workspace ${workspaceId}.`,
+  );
 }
 
 function formatProjection(input: {
@@ -374,21 +564,17 @@ export function createLinkedChatStore(
   const nowMs = options.nowMs ?? (() => Date.now());
   const createId = options.createId ?? defaultCreateId;
   let writeChain: Promise<unknown> = Promise.resolve();
-  let cachedState: PersistedLinkedChatState | null = null;
+  let dbHandle: SqliteDb | null = null;
 
-  async function loadState(): Promise<PersistedLinkedChatState> {
-    if (cachedState) return cachedState;
-    cachedState = normalizeState(await readJson<unknown>(storePath(rootDir)));
-    return cachedState;
+  function db(): SqliteDb {
+    if (!dbHandle) {
+      dbHandle = openDatabase(rootDir);
+    }
+    return dbHandle;
   }
 
-  async function saveState(state: PersistedLinkedChatState): Promise<void> {
-    cachedState = state;
-    await writeFileAtomic(storePath(rootDir), `${JSON.stringify(state, null, 2)}\n`);
-  }
-
-  function serialize<T>(task: () => Promise<T>): Promise<T> {
-    const run = writeChain.then(task, task);
+  function serialize<T>(task: (db: SqliteDb) => Promise<T>): Promise<T> {
+    const run = writeChain.then(() => withTransaction(task), () => withTransaction(task));
     writeChain = run.then(
       () => undefined,
       () => undefined,
@@ -401,37 +587,80 @@ export function createLinkedChatStore(
     return task();
   }
 
+  async function withDb<T>(task: (db: SqliteDb) => T): Promise<T> {
+    return task(db());
+  }
+
+  async function withTransaction<T>(task: (db: SqliteDb) => Promise<T>): Promise<T> {
+    const txDb = db();
+    try {
+      txDb.exec("BEGIN IMMEDIATE");
+      const result = await task(txDb);
+      txDb.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        txDb.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  function listMessagesForThread(db: SqliteDb, workspaceId: WorkspaceId, threadId: ChatThreadId) {
+    return db
+      .prepare(
+        `SELECT * FROM chat_messages
+         WHERE workspace_id = ? AND thread_id = ?
+         ORDER BY message_order`,
+      )
+      .all(workspaceId, threadId)
+      .map(messageFromRow);
+  }
+
   return {
     createThread(input) {
-      return serialize(async () => {
+      return serialize(async (db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const title = normalizeThreadTitle(input.title);
-        const state = await loadState();
-        const workspace = ensureWorkspace(state, workspaceId);
         const id = createId("thread");
         const recordedAtMs = nowMs();
+        const linkedObjectId = input.linkedFile
+          ? normalizeObjectId(input.linkedFile.objectId)
+          : undefined;
+        const linkedPathHint = input.linkedFile?.pathHint
+          ? normalizePathHint(input.linkedFile.pathHint)
+          : undefined;
         const thread: ChatThread = {
           id,
           workspaceId,
           title,
           createdAtMs: recordedAtMs,
           updatedAtMs: recordedAtMs,
-          ...(input.linkedFile
+          ...(linkedObjectId
             ? {
                 linkedFile: {
-                  objectId: normalizeObjectId(input.linkedFile.objectId),
-                  ...(input.linkedFile.pathHint
-                    ? { pathHint: normalizePathHint(input.linkedFile.pathHint) }
-                    : {}),
+                  objectId: linkedObjectId,
+                  ...(linkedPathHint ? { pathHint: linkedPathHint } : {}),
                   linkedAtMs: recordedAtMs,
                 },
               }
             : {}),
         };
-        workspace.threads[id] = thread;
-        workspace.threadOrder.push(id);
-        workspace.threadMessages[id] = [];
-        await saveState(state);
+        db.prepare(
+          `INSERT INTO chat_threads (
+            workspace_id, thread_id, title, created_at_ms, updated_at_ms,
+            linked_object_id, linked_path_hint, linked_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          workspaceId,
+          id,
+          title,
+          recordedAtMs,
+          recordedAtMs,
+          linkedObjectId ?? null,
+          linkedPathHint ?? null,
+          linkedObjectId ? recordedAtMs : null,
+        );
         return cloneJson(thread);
       });
     },
@@ -439,13 +668,17 @@ export function createLinkedChatStore(
     listThreads(input) {
       return afterWrites(async () => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadState();
-        const workspace = state.workspaces[workspaceId];
-        if (!workspace) return [];
-        return workspace.threadOrder
-          .map((threadId) => workspace.threads[threadId])
-          .filter((thread): thread is ChatThread => thread !== undefined)
-          .map(cloneJson);
+        return withDb((db) =>
+          db
+            .prepare(
+              `SELECT * FROM chat_threads
+               WHERE workspace_id = ?
+               ORDER BY created_at_ms, thread_id`,
+            )
+            .all(workspaceId)
+            .map(threadFromRow)
+            .map(cloneJson),
+        );
       });
     },
 
@@ -453,28 +686,24 @@ export function createLinkedChatStore(
       return afterWrites(async () => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const objectId = normalizeObjectId(input.objectId);
-        const state = await loadState();
-        const workspace = state.workspaces[workspaceId];
-        if (!workspace) return [];
-        return workspace.threadOrder
-          .map((threadId) => workspace.threads[threadId])
-          .filter(
-            (thread): thread is ChatThread =>
-              thread !== undefined && thread.linkedFile?.objectId === objectId,
-          )
-          .map(cloneJson);
+        return withDb((db) =>
+          db
+            .prepare(
+              `SELECT * FROM chat_threads
+               WHERE workspace_id = ? AND linked_object_id = ?
+               ORDER BY created_at_ms, thread_id`,
+            )
+            .all(workspaceId, objectId)
+            .map(threadFromRow)
+            .map(cloneJson),
+        );
       });
     },
 
     sendMessage(input) {
-      return serialize(async () => {
+      return serialize(async (db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadState();
-        const { workspace, thread } = requireWorkspaceThread(
-          state,
-          workspaceId,
-          input.threadId,
-        );
+        const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const message: ChatMessage = {
           id: createId("message"),
           workspaceId,
@@ -483,11 +712,29 @@ export function createLinkedChatStore(
           body: normalizeBody(input.body),
           createdAtMs: nowMs(),
         };
-        workspace.messages[message.id] = message;
-        workspace.threadMessages[thread.id] ??= [];
-        workspace.threadMessages[thread.id].push(message.id);
-        thread.updatedAtMs = message.createdAtMs;
-        await saveState(state);
+        const count = db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM chat_messages WHERE workspace_id = ? AND thread_id = ?",
+          )
+          .get(workspaceId, thread.id);
+        db.prepare(
+          `INSERT INTO chat_messages (
+            workspace_id, thread_id, message_order, message_id, author_kind,
+            author_display_name, body, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          workspaceId,
+          thread.id,
+          Number(count?.count ?? 0),
+          message.id,
+          message.author.kind,
+          message.author.displayName,
+          message.body,
+          message.createdAtMs,
+        );
+        db.prepare(
+          "UPDATE chat_threads SET updated_at_ms = ? WHERE workspace_id = ? AND thread_id = ?",
+        ).run(message.createdAtMs, workspaceId, thread.id);
         return cloneJson(message);
       });
     },
@@ -495,42 +742,31 @@ export function createLinkedChatStore(
     listMessages(input) {
       return afterWrites(async () => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadState();
-        const { workspace, thread } = requireWorkspaceThread(
-          state,
-          workspaceId,
-          input.threadId,
-        );
-        return (workspace.threadMessages[thread.id] ?? [])
-          .map((messageId) => workspace.messages[messageId])
-          .filter((message): message is ChatMessage => message !== undefined)
-          .map(cloneJson);
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+          return listMessagesForThread(db, workspaceId, thread.id).map(cloneJson);
+        });
       });
     },
 
     getThreadProjection(input) {
       return afterWrites(async () => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadState();
-        const { workspace, thread } = requireWorkspaceThread(
-          state,
-          workspaceId,
-          input.threadId,
-        );
-        const access = input.linkedFileAccess ?? { kind: "unknown" as const };
-        const linkedFileAccess =
-          access.kind === "allowed"
-            ? { kind: "allowed" as const, path: normalizePathHint(access.path) }
-            : access;
-        const messages = (workspace.threadMessages[thread.id] ?? [])
-          .map((messageId) => workspace.messages[messageId])
-          .filter((message): message is ChatMessage => message !== undefined);
-        return {
-          path: linkedChatProjectionPath({ workspaceId, threadId: thread.id }),
-          readOnly: true,
-          threadId: thread.id,
-          text: formatProjection({ thread, messages, linkedFileAccess }),
-        };
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+          const access = input.linkedFileAccess ?? { kind: "unknown" as const };
+          const linkedFileAccess =
+            access.kind === "allowed"
+              ? { kind: "allowed" as const, path: normalizePathHint(access.path) }
+              : access;
+          const messages = listMessagesForThread(db, workspaceId, thread.id);
+          return {
+            path: linkedChatProjectionPath({ workspaceId, threadId: thread.id }),
+            readOnly: true,
+            threadId: thread.id,
+            text: formatProjection({ thread, messages, linkedFileAccess }),
+          };
+        });
       });
     },
   };

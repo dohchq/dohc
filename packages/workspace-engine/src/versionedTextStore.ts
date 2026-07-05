@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { mergeMarkdown } from "@dohc/workspace-history/mergeMarkdown";
 
-export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/versioned-text-store.json";
+export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_WRITE_METADATA_FIELD_BYTES = 16 * 1024;
 
@@ -320,8 +320,8 @@ export interface VersionedTextStoreTestHooks {
 
 const storeWriteChains = new Map<string, Promise<unknown>>();
 const ID_KEY_SEPARATOR = "\u0000";
-const STORE_LOCK_STALE_MS = 30_000;
-const STORE_LOCK_TIMEOUT_MS = 35_000;
+const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+const ENGINE_SCHEMA_VERSION = 1;
 
 interface PersistedWorkspaceState {
   mainVersionId: VersionId;
@@ -554,66 +554,326 @@ function storePath(rootDir: string): string {
   return join(rootDir, VERSIONED_TEXT_STORE_RELATIVE_PATH);
 }
 
-export function versionedTextStoreLockDirForTest(rootDir: string): string {
-  return `${storePath(resolve(normalizeRootDir(rootDir)))}.lock`;
+interface SqliteStatement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes: number };
 }
 
-function stateFileToken(stats: Stats): string {
-  return [
-    stats.dev,
-    stats.ino,
-    stats.size,
-    stats.mtimeMs,
-    stats.ctimeMs,
-  ].join(":");
+interface SqliteDb {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  close(): void;
 }
 
-async function readJsonWithStateToken(path: string): Promise<{ raw: unknown; token: string }> {
+interface SqliteModule {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDb;
+}
+
+const requireModule = createRequire(import.meta.url);
+
+function nodeSqlite(): SqliteModule {
+  return requireModule("node:sqlite") as SqliteModule;
+}
+
+function openDatabase(rootDir: string): SqliteDb {
+  const path = storePath(resolve(normalizeRootDir(rootDir)));
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const { DatabaseSync } = nodeSqlite();
+  let db: SqliteDb;
   try {
-    const deadlineMs = Date.now() + 5_000;
-    let before = await stat(path);
-    let text = await readFile(path, "utf8");
-    let token = stateFileToken(before);
-    let after = await stat(path);
-    let afterToken = stateFileToken(after);
-    while (token !== afterToken) {
-      if (Date.now() > deadlineMs) {
-        throw new VersionedTextStoreError(
-          "persist-failed",
-          "Versioned text store did not reach a stable readable state.",
-        );
-      }
-      before = after;
-      text = await readFile(path, "utf8");
-      token = stateFileToken(before);
-      after = await stat(path);
-      afterToken = stateFileToken(after);
-    }
-    return {
-      raw: JSON.parse(text) as unknown,
-      token,
-    };
+    db = new DatabaseSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { raw: undefined, token: "missing" };
-    }
-    if (error instanceof SyntaxError) {
-      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-    }
+    throw corruptStore(error);
+  }
+  try {
+    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec("PRAGMA journal_mode = WAL");
+    initializeOrValidateSchema(db);
+    assertSqliteIntegrity(db);
+    return db;
+  } catch (error) {
+    try {
+      db.close();
+    } catch {}
+    if (error instanceof VersionedTextStoreError) throw error;
+    throw corruptStore(error);
+  }
+}
+
+function corruptStore(cause?: unknown): VersionedTextStoreError {
+  const error = new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  if (cause !== undefined) {
+    (error as Error & { cause?: unknown }).cause = cause;
+  }
+  return error;
+}
+
+function persistFailed(cause: unknown): VersionedTextStoreError {
+  const error = new VersionedTextStoreError(
+    "persist-failed",
+    "Versioned text store could not be persisted.",
+  );
+  (error as Error & { cause?: unknown }).cause = cause;
+  return error;
+}
+
+function initializeOrValidateSchema(db: SqliteDb): void {
+  const schemaRow = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'")
+    .get();
+  if (!schemaRow) {
+    const userTables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .all();
+    if (userTables.length > 0) throw corruptStore();
+    createSchema(db);
+    return;
+  }
+
+  const version = db.prepare("SELECT version FROM schema_version WHERE id = 1").get();
+  if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corruptStore();
+  assertRequiredTables(db);
+}
+
+function assertSqliteIntegrity(db: SqliteDb): void {
+  const integrity = db.prepare("PRAGMA integrity_check").all();
+  if (integrity.length !== 1 || String(integrity[0]?.integrity_check) !== "ok") {
+    throw corruptStore();
+  }
+}
+
+function assertRequiredTables(db: SqliteDb): void {
+  const required = new Set([
+    "schema_version",
+    "blobs",
+    "versioned_workspaces",
+    "versions",
+    "file_objects",
+    "path_aliases",
+    "snapshots",
+    "fork_base_snapshots",
+    "moments",
+    "conflicts",
+    "chat_threads",
+    "chat_messages",
+  ]);
+  const rows = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+    .all();
+  const names = new Set(rows.map((row) => String(row.name)));
+  for (const table of required) {
+    if (!names.has(table)) throw corruptStore();
+  }
+}
+
+function createSchema(db: SqliteDb): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      CREATE TABLE blobs (
+        sha256 TEXT PRIMARY KEY,
+        byte_length INTEGER NOT NULL,
+        text TEXT NOT NULL
+      );
+      CREATE TABLE versioned_workspaces (
+        workspace_id TEXT PRIMARY KEY,
+        main_version_id TEXT NOT NULL
+      );
+      CREATE TABLE versions (
+        workspace_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at_ms REAL NOT NULL,
+        fork_version_id TEXT,
+        fork_moment_id TEXT,
+        PRIMARY KEY (workspace_id, version_id),
+        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+      );
+      CREATE TABLE file_objects (
+        workspace_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        created_at_ms REAL NOT NULL,
+        PRIMARY KEY (workspace_id, object_id),
+        UNIQUE (object_id),
+        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+      );
+      CREATE TABLE path_aliases (
+        workspace_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, version_id, path),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+      );
+      CREATE TABLE snapshots (
+        workspace_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        blob_sha256 TEXT NOT NULL,
+        updated_at_ms REAL NOT NULL,
+        latest_moment_id TEXT NOT NULL,
+        metadata_origin TEXT NOT NULL,
+        metadata_summary TEXT,
+        metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, version_id, object_id),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+        FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE fork_base_snapshots (
+        workspace_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        blob_sha256 TEXT NOT NULL,
+        updated_at_ms REAL NOT NULL,
+        latest_moment_id TEXT NOT NULL,
+        metadata_origin TEXT NOT NULL,
+        metadata_summary TEXT,
+        metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, version_id, object_id),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+        FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE moments (
+        workspace_id TEXT NOT NULL,
+        moment_order INTEGER NOT NULL,
+        moment_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        recorded_at_ms REAL NOT NULL,
+        operation TEXT NOT NULL,
+        payload_before_path TEXT,
+        payload_before_blob_sha256 TEXT,
+        payload_after_path TEXT NOT NULL,
+        payload_after_blob_sha256 TEXT NOT NULL,
+        metadata_origin TEXT NOT NULL,
+        metadata_summary TEXT,
+        metadata_correlation_id TEXT,
+        before_present INTEGER NOT NULL,
+        before_object_id TEXT,
+        before_version_id TEXT,
+        before_path TEXT,
+        before_blob_sha256 TEXT,
+        before_updated_at_ms REAL,
+        before_latest_moment_id TEXT,
+        before_metadata_origin TEXT,
+        before_metadata_summary TEXT,
+        before_metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, moment_id),
+        UNIQUE (workspace_id, moment_order),
+        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+        FOREIGN KEY (payload_before_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (payload_after_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (before_blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE conflicts (
+        workspace_id TEXT NOT NULL,
+        conflict_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        target_version_id TEXT NOT NULL,
+        source_version_id TEXT NOT NULL,
+        created_at_ms REAL NOT NULL,
+        updated_at_ms REAL NOT NULL,
+        status TEXT NOT NULL,
+        chosen_from TEXT NOT NULL,
+        resolution TEXT,
+        metadata_origin TEXT NOT NULL,
+        metadata_summary TEXT,
+        metadata_correlation_id TEXT,
+        base_exists INTEGER NOT NULL,
+        base_path TEXT NOT NULL,
+        base_object_id TEXT,
+        base_blob_sha256 TEXT,
+        base_updated_at_ms REAL,
+        base_latest_moment_id TEXT,
+        base_metadata_origin TEXT,
+        base_metadata_summary TEXT,
+        base_metadata_correlation_id TEXT,
+        current_exists INTEGER NOT NULL,
+        current_path TEXT NOT NULL,
+        current_object_id TEXT,
+        current_blob_sha256 TEXT,
+        current_updated_at_ms REAL,
+        current_latest_moment_id TEXT,
+        current_metadata_origin TEXT,
+        current_metadata_summary TEXT,
+        current_metadata_correlation_id TEXT,
+        incoming_exists INTEGER NOT NULL,
+        incoming_path TEXT NOT NULL,
+        incoming_object_id TEXT,
+        incoming_blob_sha256 TEXT,
+        incoming_updated_at_ms REAL,
+        incoming_latest_moment_id TEXT,
+        incoming_metadata_origin TEXT,
+        incoming_metadata_summary TEXT,
+        incoming_metadata_correlation_id TEXT,
+        PRIMARY KEY (workspace_id, conflict_id),
+        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+        FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
+        FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256)
+      );
+      CREATE TABLE chat_threads (
+        workspace_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        created_at_ms REAL NOT NULL,
+        updated_at_ms REAL NOT NULL,
+        linked_object_id TEXT,
+        linked_path_hint TEXT,
+        linked_at_ms REAL,
+        PRIMARY KEY (workspace_id, thread_id)
+      );
+      CREATE TABLE chat_messages (
+        workspace_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        message_order INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        author_kind TEXT NOT NULL,
+        author_display_name TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at_ms REAL NOT NULL,
+        PRIMARY KEY (workspace_id, message_id),
+        UNIQUE (workspace_id, thread_id, message_order),
+        FOREIGN KEY (workspace_id, thread_id) REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_versions_workspace_name ON versions(workspace_id, name);
+      CREATE INDEX idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
+      CREATE INDEX idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);
+      CREATE INDEX idx_snapshots_path ON snapshots(workspace_id, version_id, path);
+      CREATE INDEX idx_fork_base_snapshots_path ON fork_base_snapshots(workspace_id, version_id, path);
+      CREATE INDEX idx_moments_version_object_order ON moments(workspace_id, version_id, object_id, moment_order);
+      CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order);
+      CREATE INDEX idx_moments_object_before ON moments(workspace_id, object_id, before_latest_moment_id);
+      CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
+      CREATE INDEX idx_chat_threads_workspace_created ON chat_threads(workspace_id, created_at_ms, thread_id);
+      CREATE INDEX idx_chat_threads_linked_file ON chat_threads(workspace_id, linked_object_id, created_at_ms, thread_id);
+      CREATE INDEX idx_chat_messages_thread_order ON chat_messages(workspace_id, thread_id, message_order);
+      INSERT INTO schema_version (id, version) VALUES (1, ${ENGINE_SCHEMA_VERSION});
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
     throw error;
   }
 }
 
-async function readStateToken(path: string): Promise<string> {
-  try {
-    return stateFileToken(await stat(path));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-    throw error;
-  }
-}
-
-function normalizeState(raw: unknown): PersistedVersionedTextState {
+function normalizeHydratedState(raw: unknown): PersistedVersionedTextState {
   if (raw === undefined) return initialState();
   if (!isRecord(raw) || raw.schemaVersion !== 1 || !isRecord(raw.workspaces)) {
     throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
@@ -626,7 +886,7 @@ function normalizeState(raw: unknown): PersistedVersionedTextState {
       workspace.forkBaseSnapshots ??= createDictionary();
       workspace.conflicts ??= createDictionary();
     }
-    assertWorkspaceState(workspaceId, workspace);
+    assertHydratedWorkspaceState(workspaceId, workspace);
     const normalizedWorkspace = normalizeWorkspaceState(
       workspace as unknown as PersistedWorkspaceState,
     );
@@ -664,7 +924,7 @@ function normalizeStateAfterWorkspaceMutation(
   if (!workspace) {
     throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
   }
-  assertWorkspaceState(changedWorkspaceId, workspace);
+  assertHydratedWorkspaceState(changedWorkspaceId, workspace);
   const normalizedWorkspace = normalizeWorkspaceState(workspace);
 
   for (const [workspaceId, otherWorkspace] of Object.entries(state.workspaces)) {
@@ -745,7 +1005,7 @@ function normalizeWorkspaceState(workspace: PersistedWorkspaceState): PersistedW
   };
 }
 
-function assertWorkspaceState(workspaceId: string, value: unknown): void {
+function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void {
   assertPersistedNormalizedString(workspaceId);
   assertRecord(value);
   assertPersistedGeneratedId(value.mainVersionId);
@@ -884,6 +1144,33 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
       if (snapshot.versionId !== versionId) {
         throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
       }
+      assertPersistedWritePath(snapshot.path);
+      const existingObjectId = seenSnapshotPaths.get(snapshot.path);
+      if (existingObjectId !== undefined && existingObjectId !== objectId) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+      seenSnapshotPaths.set(snapshot.path, objectId);
+      referencedObjectIds.add(objectId);
+      assertPersistedText(snapshot.text);
+      assertNumber(snapshot.updatedAtMs);
+      assertPersistedGeneratedId(snapshot.latestMomentId);
+      assertWriteMetadata(snapshot.metadata);
+    }
+  }
+
+  for (const [versionId, snapshots] of Object.entries(value.forkBaseSnapshots)) {
+    if (getOwn(value.versions, versionId) === undefined) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    assertRecord(snapshots);
+    const seenSnapshotPaths = new Map<string, WorkspaceObjectId>();
+    for (const [objectId, snapshot] of Object.entries(snapshots)) {
+      assertRecord(snapshot);
+      assertPersistedGeneratedId(snapshot.objectId);
+      if (snapshot.objectId !== objectId || getOwn(value.objects, objectId) === undefined) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+      assertString(snapshot.versionId);
       assertPersistedWritePath(snapshot.path);
       const existingObjectId = seenSnapshotPaths.get(snapshot.path);
       if (existingObjectId !== undefined && existingObjectId !== objectId) {
@@ -1147,711 +1434,361 @@ function versionObjectKey(versionId: VersionId, objectId: WorkspaceObjectId): st
   return `${versionId}${ID_KEY_SEPARATOR}${objectId}`;
 }
 
-type AtomicPublishGuard = () => void | Promise<void>;
-
-async function writeFileAtomic(
-  path: string,
-  data: string,
-  beforePublish?: AtomicPublishGuard,
-): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await replaceFileAtomic(path, data, beforePublish);
+function sha256Text(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-async function replaceFileAtomic(
-  path: string,
-  data: string,
-  beforePublish?: AtomicPublishGuard,
-): Promise<void> {
-  const tmp = `${path}.tmp-${process.pid}-${process.hrtime.bigint()}`;
-  try {
-    await writeFileDurably(tmp, data);
-    await beforePublish?.();
-    await rename(tmp, path);
-    await syncParentDirectory(path);
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined);
-    throw error;
-  }
+function rowString(row: Record<string, unknown>, key: string): string {
+  const value = row[key];
+  if (typeof value !== "string") throw corruptStore();
+  return value;
 }
 
-async function writeFileDurably(path: string, data: string): Promise<void> {
-  const handle = await open(path, "w", 0o600);
-  try {
-    await handle.writeFile(data, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
+function rowOptionalString(row: Record<string, unknown>, key: string): string | undefined {
+  const value = row[key];
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") throw corruptStore();
+  return value;
 }
 
-async function syncParentDirectory(path: string): Promise<void> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(dirname(path), "r");
-    await handle.sync();
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (
-      code !== "EINVAL" &&
-      code !== "EPERM" &&
-      code !== "EISDIR" &&
-      code !== "ENOTSUP" &&
-      code !== "EOPNOTSUPP"
-    ) {
-      throw error;
-    }
-  } finally {
-    await handle?.close();
-  }
+function rowNumber(row: Record<string, unknown>, key: string): number {
+  const value = row[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) throw corruptStore();
+  return value;
 }
 
-function delayMs(ms: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-}
-
-function lockHeartbeatIntervalMs(staleMs: number): number {
-  if (!Number.isFinite(staleMs) || staleMs <= 0) {
-    throw new VersionedTextStoreError(
-      "persist-failed",
-      "Versioned text store lock stale threshold is too low for safe heartbeats.",
-    );
-  }
-  return Math.max(1, Math.min(5_000, Math.floor(staleMs / 3)));
-}
-
-interface StoreLockOwner {
-  token: string;
-  pid: number;
-  createdAtMs: number;
-  heartbeatAtMs: number;
-}
-
-function createLockOwner(token: string): StoreLockOwner {
-  const nowMs = Date.now();
-  return { token, pid: process.pid, createdAtMs: nowMs, heartbeatAtMs: nowMs };
-}
-
-function serializeLockOwner(owner: StoreLockOwner): string {
-  return `${JSON.stringify(owner)}\n`;
-}
-
-function parseLockOwner(text: string): StoreLockOwner | null {
-  try {
-    const value = JSON.parse(text) as Partial<StoreLockOwner>;
-    if (
-      typeof value.token !== "string" ||
-      typeof value.pid !== "number" ||
-      !Number.isFinite(value.pid) ||
-      typeof value.createdAtMs !== "number" ||
-      !Number.isFinite(value.createdAtMs) ||
-      typeof value.heartbeatAtMs !== "number" ||
-      !Number.isFinite(value.heartbeatAtMs)
-    ) {
-      return null;
-    }
-    return value as StoreLockOwner;
-  } catch {
-    return null;
-  }
-}
-
-async function statIfExists(path: string): Promise<Stats | null> {
-  try {
-    return await stat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-}
-
-async function readLockOwnerIfExists(ownerPath: string): Promise<StoreLockOwner | null> {
-  try {
-    return parseLockOwner(await readFile(ownerPath, "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-}
-
-async function readLockOwnerBestEffort(ownerPath: string): Promise<StoreLockOwner | null> {
-  try {
-    return await readLockOwnerIfExists(ownerPath);
-  } catch {
-    return null;
-  }
-}
-
-function lockOwnershipLost(cause?: unknown): VersionedTextStoreError {
-  const wrapped = new VersionedTextStoreError(
-    "persist-failed",
-    "Versioned text store lock ownership was lost.",
-  );
-  if (cause !== undefined) {
-    (wrapped as Error & { cause?: unknown }).cause = cause;
-  }
-  return wrapped;
-}
-
-function lockInspectionFailed(message: string, cause: unknown): VersionedTextStoreError {
-  const wrapped = new VersionedTextStoreError("persist-failed", message);
-  (wrapped as Error & { cause?: unknown }).cause = cause;
-  return wrapped;
-}
-
-interface LockOwnerDirectoryFence {
-  directoryPath: string;
-  directoryStats: Stats;
-}
-
-async function assertLockOwnerDirectoryFence(fence: LockOwnerDirectoryFence): Promise<void> {
-  const current = await statIfExists(fence.directoryPath);
-  if (!current || !current.isDirectory() || !sameFileIdentity(fence.directoryStats, current)) {
-    throw lockOwnershipLost();
-  }
-}
-
-async function removeDirectoryIfSameIdentity(path: string, expected: Stats): Promise<void> {
-  const current = await statIfExists(path);
-  if (!current || !sameFileIdentity(expected, current)) return;
-  const quarantinePath = `${path}.removing-${process.pid}-${process.hrtime.bigint()}`;
-  try {
-    await rename(path, quarantinePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  await syncParentDirectory(path);
-
-  const quarantined = await statIfExists(quarantinePath);
-  if (!quarantined || !sameFileIdentity(expected, quarantined)) {
-    if (quarantined) {
-      await restoreQuarantinedDirectoryBestEffort({
-        quarantinePath,
-        targetPath: path,
-        expected: quarantined,
-      });
-    }
-    return;
-  }
-
-  await rm(quarantinePath, { recursive: true, force: true });
-  await syncParentDirectory(quarantinePath);
-}
-
-async function restoreQuarantinedDirectoryBestEffort(input: {
-  quarantinePath: string;
-  targetPath: string;
-  expected: Stats;
-}): Promise<void> {
-  const currentQuarantine = await statIfExists(input.quarantinePath);
-  if (!currentQuarantine || !sameFileIdentity(input.expected, currentQuarantine)) return;
-  if (await statIfExists(input.targetPath)) return;
-  try {
-    await rename(input.quarantinePath, input.targetPath);
-    await syncParentDirectory(input.targetPath);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "ENOTDIR") {
-      throw error;
-    }
-  }
-}
-
-async function writeFencedLockOwnerFile(
-  ownerPath: string,
-  token: string,
-  fence: LockOwnerDirectoryFence,
-): Promise<void> {
-  const tmp = `${ownerPath}.tmp-${process.pid}-${process.hrtime.bigint()}`;
-  try {
-    await assertLockOwnerDirectoryFence(fence);
-    await writeFileDurably(tmp, serializeLockOwner(createLockOwner(token)));
-    await assertLockOwnerDirectoryFence(fence);
-    await rename(tmp, ownerPath);
-    await syncParentDirectory(ownerPath);
-    await assertLockOwnerDirectoryFence(fence);
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-async function refreshStoreLockOwner(
-  ownerPath: string,
-  token: string,
-  fence?: LockOwnerDirectoryFence,
-): Promise<void> {
-  // Store locks assume local-disk mtime and fsync semantics. Networked roots
-  // need an explicit platform guard before this heartbeat scheme is reused.
-  if (fence) await assertLockOwnerDirectoryFence(fence);
-  const handle = await open(ownerPath, "r+");
-  try {
-    const owner = parseLockOwner(await handle.readFile("utf8"));
-    if (owner?.token !== token) {
-      throw lockOwnershipLost();
-    }
-    const now = new Date();
-    await handle.utimes(now, now);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  if (fence) await assertLockOwnerDirectoryFence(fence);
-}
-
-function sameFileIdentity(left: Stats, right: Stats): boolean {
-  return Number(left.dev) === Number(right.dev) && Number(left.ino) === Number(right.ino);
-}
-
-async function isBlockedByStaleLock(
-  lockDirPath: string,
-  ownerPath: string,
-  staleMs: number,
-): Promise<boolean> {
-  const lockStats = await statIfExists(lockDirPath);
-  if (!lockStats) return false;
-  const ownerStats = await statIfExists(ownerPath);
-  const owner = await readLockOwnerBestEffort(ownerPath);
-  if (!owner) {
-    return Date.now() - Math.max(lockStats.mtimeMs, ownerStats?.mtimeMs ?? 0) > staleMs;
-  }
-  return Date.now() - (ownerStats?.mtimeMs ?? owner.heartbeatAtMs) > staleMs;
-}
-
-async function readObservedStaleStoreLock(
-  lockDirPath: string,
-  ownerPath: string,
-  staleMs: number,
-): Promise<Stats | null> {
-  const lockStats = await statIfExists(lockDirPath);
-  if (!lockStats) return null;
-  const ownerStats = await statIfExists(ownerPath);
-  const owner = await readLockOwnerBestEffort(ownerPath);
-  const stale = owner
-    ? Date.now() - (ownerStats?.mtimeMs ?? owner.heartbeatAtMs) > staleMs
-    : Date.now() - Math.max(lockStats.mtimeMs, ownerStats?.mtimeMs ?? 0) > staleMs;
-  return stale ? lockStats : null;
-}
-
-function storeLockReclaimerPath(lockDirPath: string): string {
-  return `${lockDirPath}.reclaimer`;
-}
-
-function storeLockReclaimerOwnerPath(reclaimerPath: string): string {
-  return join(reclaimerPath, "owner.json");
-}
-
-async function writeStoreLockReclaimerOwner(
-  reclaimerPath: string,
-  token: string,
-  reclaimerStats: Stats,
-): Promise<void> {
-  const ownerPath = storeLockReclaimerOwnerPath(reclaimerPath);
-  await writeFencedLockOwnerFile(ownerPath, token, {
-    directoryPath: reclaimerPath,
-    directoryStats: reclaimerStats,
+function metadataFromRow(
+  row: Record<string, unknown>,
+  prefix = "metadata_",
+): ActorNeutralWriteMetadata {
+  return pickWriteMetadata({
+    origin: rowString(row, `${prefix}origin`) as ActorNeutralWriteOrigin,
+    ...(rowOptionalString(row, `${prefix}summary`) !== undefined
+      ? { summary: rowOptionalString(row, `${prefix}summary`) }
+      : {}),
+    ...(rowOptionalString(row, `${prefix}correlation_id`) !== undefined
+      ? { correlationId: rowOptionalString(row, `${prefix}correlation_id`) }
+      : {}),
   });
 }
 
-async function readStoreLockReclaimerLease(
-  reclaimerPath: string,
-  reclaimerStats: Stats,
-): Promise<{ owner: StoreLockOwner | null; freshnessMs: number }> {
-  const ownerPath = storeLockReclaimerOwnerPath(reclaimerPath);
-  const ownerStats = await statIfExists(ownerPath);
-  const owner = await readLockOwnerBestEffort(ownerPath);
+function metadataValues(metadata: ActorNeutralWriteMetadata): [string, string | null, string | null] {
+  return [metadata.origin, metadata.summary ?? null, metadata.correlationId ?? null];
+}
+
+function putBlob(db: SqliteDb, text: string): string {
+  const sha256 = sha256Text(text);
+  db.prepare("INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, ?)").run(
+    sha256,
+    Buffer.byteLength(text, "utf8"),
+    text,
+  );
+  return sha256;
+}
+
+function snapshotFromRow(row: Record<string, unknown>): TextFileSnapshot {
   return {
-    owner,
-    freshnessMs: Math.max(
-      reclaimerStats.mtimeMs,
-      owner?.heartbeatAtMs ?? 0,
-      ownerStats?.mtimeMs ?? 0,
-    ),
+    objectId: rowString(row, "object_id"),
+    versionId: rowString(row, "version_id"),
+    path: rowString(row, "path"),
+    text: rowString(row, "text"),
+    updatedAtMs: rowNumber(row, "updated_at_ms"),
+    latestMomentId: rowString(row, "latest_moment_id"),
+    metadata: metadataFromRow(row),
   };
 }
 
-async function removeStaleStoreLockReclaimer(
-  reclaimerPath: string,
-  reclaimerStaleMs: number,
-): Promise<boolean> {
-  const observed = await statIfExists(reclaimerPath);
-  if (!observed) return false;
-  const observedLease = await readStoreLockReclaimerLease(reclaimerPath, observed);
-  if (Date.now() - observedLease.freshnessMs <= reclaimerStaleMs) return false;
-  const quarantinePath = `${reclaimerPath}.stale-${process.pid}-${process.hrtime.bigint()}`;
+function momentFromRow(row: Record<string, unknown>): VersionedTextMoment {
+  const beforePresent = Number(row.before_present);
+  const before =
+    beforePresent === 0
+      ? undefined
+      : beforePresent === 1
+        ? null
+        : {
+            objectId: rowString(row, "before_object_id"),
+            versionId: rowString(row, "before_version_id"),
+            path: rowString(row, "before_path"),
+            text: rowString(row, "before_text"),
+            updatedAtMs: rowNumber(row, "before_updated_at_ms"),
+            latestMomentId: rowString(row, "before_latest_moment_id"),
+            metadata: metadataFromRow(row, "before_metadata_"),
+          };
+  const payloadBeforePath = rowOptionalString(row, "payload_before_path");
+  return {
+    id: rowString(row, "moment_id"),
+    workspaceId: rowString(row, "workspace_id"),
+    versionId: rowString(row, "version_id"),
+    objectId: rowString(row, "object_id"),
+    path: rowString(row, "path"),
+    recordedAtMs: rowNumber(row, "recorded_at_ms"),
+    operation: rowString(row, "operation") as VersionedTextMoment["operation"],
+    payload: {
+      before: payloadBeforePath
+        ? { path: payloadBeforePath, text: rowString(row, "payload_before_text") }
+        : null,
+      after: {
+        path: rowString(row, "payload_after_path"),
+        text: rowString(row, "payload_after_text"),
+      },
+    },
+    metadata: metadataFromRow(row),
+    ...(beforePresent === 0 ? {} : { before }),
+  };
+}
+
+function momentSelectSql(where: string): string {
+  return `SELECT m.*,
+                 before_payload.text AS payload_before_text,
+                 after_payload.text AS payload_after_text,
+                 before_blob.text AS before_text
+          FROM moments m
+          LEFT JOIN blobs before_payload ON before_payload.sha256 = m.payload_before_blob_sha256
+          JOIN blobs after_payload ON after_payload.sha256 = m.payload_after_blob_sha256
+          LEFT JOIN blobs before_blob ON before_blob.sha256 = m.before_blob_sha256
+          ${where}`;
+}
+
+function fileStateFromConflictRow(
+  row: Record<string, unknown>,
+  prefix: "base" | "current" | "incoming",
+): VersionedTextFileState {
+  const path = rowString(row, `${prefix}_path`);
+  if (Number(row[`${prefix}_exists`]) !== 1) return { exists: false, path };
+  return {
+    exists: true,
+    path,
+    objectId: rowString(row, `${prefix}_object_id`),
+    text: rowString(row, `${prefix}_text`),
+    updatedAtMs: rowNumber(row, `${prefix}_updated_at_ms`),
+    latestMomentId: rowString(row, `${prefix}_latest_moment_id`),
+    metadata: metadataFromRow(row, `${prefix}_metadata_`),
+  };
+}
+
+function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
+  const state = initialState();
   try {
-    await rename(reclaimerPath, quarantinePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-  await syncParentDirectory(reclaimerPath);
-  const quarantined = await statIfExists(quarantinePath);
-  if (!quarantined) {
-    return false;
-  }
-  const restoreQuarantinedReclaimerBestEffort = () =>
-    restoreQuarantinedDirectoryBestEffort({
-      quarantinePath,
-      targetPath: reclaimerPath,
-      expected: quarantined,
-    });
-  if (!sameFileIdentity(observed, quarantined)) {
-    await restoreQuarantinedReclaimerBestEffort();
-    return false;
-  }
-  const quarantinedLease = await readStoreLockReclaimerLease(quarantinePath, quarantined);
-  if (observedLease.owner && quarantinedLease.owner?.token !== observedLease.owner.token) {
-    await restoreQuarantinedReclaimerBestEffort();
-    return false;
-  }
-  if (Date.now() - quarantinedLease.freshnessMs <= reclaimerStaleMs) {
-    await restoreQuarantinedReclaimerBestEffort();
-    return false;
-  }
-  await rm(quarantinePath, { recursive: true, force: true });
-  await syncParentDirectory(quarantinePath);
-  return true;
-}
-
-async function isStoreLockReclaimerActive(
-  lockDirPath: string,
-  reclaimerStaleMs: number,
-): Promise<boolean> {
-  const reclaimerPath = storeLockReclaimerPath(lockDirPath);
-  const info = await stat(reclaimerPath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (!info) return false;
-  const lease = await readStoreLockReclaimerLease(reclaimerPath, info);
-  if (Date.now() - lease.freshnessMs > reclaimerStaleMs) {
-    if (await removeStaleStoreLockReclaimer(reclaimerPath, reclaimerStaleMs)) return false;
-    return (await statIfExists(reclaimerPath)) !== null;
-  }
-  return true;
-}
-
-interface StoreLockReclaimerLease {
-  assertHealthy: () => Promise<boolean>;
-  release: () => Promise<void>;
-}
-
-async function acquireStoreLockReclaimer(
-  lockDirPath: string,
-  deadlineAtMs: number,
-  reclaimerStaleMs: number,
-): Promise<StoreLockReclaimerLease> {
-  const reclaimerPath = storeLockReclaimerPath(lockDirPath);
-  while (true) {
-    if (Date.now() > deadlineAtMs) {
-      throw new VersionedTextStoreError(
-        "persist-failed",
-        `Timed out waiting for versioned text store lock reclaimer: ${reclaimerPath}`,
-      );
-    }
-    let createdReclaimer = false;
-    let acquiredReclaimer: Stats | null = null;
-    try {
-      const token = randomUUID();
-      await mkdir(reclaimerPath, { mode: 0o700 });
-      createdReclaimer = true;
-      const acquiredReclaimerStats = await stat(reclaimerPath);
-      acquiredReclaimer = acquiredReclaimerStats;
-      const reclaimerFence = {
-        directoryPath: reclaimerPath,
-        directoryStats: acquiredReclaimerStats,
+    for (const row of db
+      .prepare("SELECT workspace_id, main_version_id FROM versioned_workspaces ORDER BY workspace_id")
+      .all()) {
+      state.workspaces[rowString(row, "workspace_id")] = {
+        mainVersionId: rowString(row, "main_version_id"),
+        versions: createDictionary(),
+        objects: createDictionary(),
+        pathAliases: createDictionary(),
+        snapshots: createDictionary(),
+        forkBaseSnapshots: createDictionary(),
+        moments: [],
+        conflicts: createDictionary(),
       };
-      await writeStoreLockReclaimerOwner(reclaimerPath, token, acquiredReclaimerStats);
-      await syncParentDirectory(reclaimerPath);
-      const ownerPath = storeLockReclaimerOwnerPath(reclaimerPath);
-      let released = false;
-      let heartbeatFailure: unknown = null;
-      let heartbeatWritePending = false;
-      const heartbeatWrites = new Set<Promise<void>>();
-      const heartbeatIntervalMs = lockHeartbeatIntervalMs(reclaimerStaleMs);
-      const trackHeartbeatWrite = (write: Promise<void>) => {
-        let tracked: Promise<void>;
-        tracked = write
-          .catch((error: unknown) => {
-            heartbeatFailure = error;
-          })
-          .finally(() => {
-            heartbeatWrites.delete(tracked);
-          });
-        heartbeatWrites.add(tracked);
-      };
-      const heartbeat = setInterval(() => {
-        if (released || heartbeatWritePending) return;
-        heartbeatWritePending = true;
-        trackHeartbeatWrite(
-          refreshStoreLockOwner(ownerPath, token, reclaimerFence)
-            .finally(() => {
-              heartbeatWritePending = false;
-            }),
-        );
-      }, heartbeatIntervalMs);
-      const assertHealthy = async () => {
-        if (heartbeatFailure) return false;
-        const current = await statIfExists(reclaimerPath);
-        if (!current || !sameFileIdentity(acquiredReclaimerStats, current)) return false;
-        const owner = await readLockOwnerIfExists(ownerPath);
-        return owner?.token === token;
-      };
-      return {
-        assertHealthy,
-        release: async () => {
-          released = true;
-          clearInterval(heartbeat);
-          while (heartbeatWrites.size > 0) {
-            await Promise.all([...heartbeatWrites]);
-          }
-          if (!(await assertHealthy())) return;
-          await removeDirectoryIfSameIdentity(reclaimerPath, acquiredReclaimerStats);
-        },
-      };
-    } catch (error) {
-      if (createdReclaimer && acquiredReclaimer) {
-        await removeDirectoryIfSameIdentity(reclaimerPath, acquiredReclaimer).catch(() => undefined);
-      }
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (await removeStaleStoreLockReclaimer(reclaimerPath, reclaimerStaleMs)) continue;
-      if (Date.now() > deadlineAtMs) {
-        throw new VersionedTextStoreError(
-          "persist-failed",
-          `Timed out waiting for versioned text store lock reclaimer: ${reclaimerPath}`,
-        );
-      }
-      await delayMs(25);
     }
-  }
-}
 
-async function reclaimStaleStoreLock(
-  lockDirPath: string,
-  ownerPath: string,
-  staleMs: number,
-  deadlineAtMs: number,
-): Promise<boolean> {
-  const reclaimer = await acquireStoreLockReclaimer(lockDirPath, deadlineAtMs, staleMs);
-  try {
-    if (!(await reclaimer.assertHealthy())) return false;
-    const observed = await readObservedStaleStoreLock(lockDirPath, ownerPath, staleMs);
-    if (!observed) return false;
-    const current = await stat(lockDirPath).catch(() => null);
-    if (!current || !sameFileIdentity(observed, current)) return false;
-    const quarantinePath = `${lockDirPath}.stale-${process.pid}-${process.hrtime.bigint()}`;
-    if (!(await reclaimer.assertHealthy())) return false;
-    try {
-      await rename(lockDirPath, quarantinePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
-    await syncParentDirectory(lockDirPath);
-
-    const quarantined = await stat(quarantinePath).catch(() => null);
-    if (!quarantined) {
-      return false;
-    }
-    const restoreQuarantinedLockBestEffort = () =>
-      restoreQuarantinedDirectoryBestEffort({
-        quarantinePath,
-        targetPath: lockDirPath,
-        expected: quarantined,
-      });
-    if (!sameFileIdentity(observed, quarantined)) {
-      await restoreQuarantinedLockBestEffort();
-      return false;
-    }
-    let quarantinedLockIsStale: boolean;
-    try {
-      quarantinedLockIsStale = await isBlockedByStaleLock(
-        quarantinePath,
-        join(quarantinePath, "owner.json"),
-        staleMs,
-      );
-    } catch (error) {
-      await restoreQuarantinedLockBestEffort();
-      throw error;
-    }
-    if (!quarantinedLockIsStale) {
-      await restoreQuarantinedLockBestEffort();
-      return false;
-    }
-    if (!(await reclaimer.assertHealthy())) {
-      await restoreQuarantinedLockBestEffort();
-      return false;
-    }
-    await rm(quarantinePath, { recursive: true, force: true });
-    await syncParentDirectory(quarantinePath);
-    return true;
-  } finally {
-    await reclaimer.release();
-  }
-}
-
-interface StoreLockLease {
-  assertHealthy: () => Promise<void>;
-  release: () => Promise<void>;
-}
-
-async function acquireStoreLock(
-  lockDirPath: string,
-  lockTimeoutMs: number,
-  lockStaleMs: number,
-  onLockBlocked?: () => void | Promise<void>,
-): Promise<StoreLockLease> {
-  await mkdir(dirname(lockDirPath), { recursive: true, mode: 0o700 });
-  const ownerPath = join(lockDirPath, "owner.json");
-  const startedAt = Date.now();
-  while (true) {
-    try {
-      if (await isStoreLockReclaimerActive(lockDirPath, lockStaleMs)) {
-        await onLockBlocked?.();
-        if (Date.now() - startedAt > lockTimeoutMs) {
-          throw new VersionedTextStoreError(
-            "persist-failed",
-            "Versioned text store lock timed out.",
-          );
-        }
-        await delayMs(25);
-        continue;
-      }
-      await mkdir(lockDirPath, { mode: 0o700 });
-      const acquiredBeforeReclaimerCheck = await stat(lockDirPath);
-      const storeLockFence = {
-        directoryPath: lockDirPath,
-        directoryStats: acquiredBeforeReclaimerCheck,
-      };
-      if (await isStoreLockReclaimerActive(lockDirPath, lockStaleMs)) {
-        const current = await statIfExists(lockDirPath);
-        if (current && sameFileIdentity(acquiredBeforeReclaimerCheck, current)) {
-          await removeDirectoryIfSameIdentity(lockDirPath, acquiredBeforeReclaimerCheck).catch(
-            () => undefined,
-          );
-        }
-        await onLockBlocked?.();
-        if (Date.now() - startedAt > lockTimeoutMs) {
-          throw new VersionedTextStoreError(
-            "persist-failed",
-            "Versioned text store lock timed out.",
-          );
-        }
-        await delayMs(25);
-        continue;
-      }
-      const token = randomUUID();
-      let heartbeatFailure: unknown = null;
-      let released = false;
-      const heartbeatWrites = new Set<Promise<void>>();
-      const heartbeatIntervalMs = lockHeartbeatIntervalMs(lockStaleMs);
-      const trackHeartbeatWrite = (write: Promise<void>) => {
-        let tracked: Promise<void>;
-        tracked = write
-          .catch((error: unknown) => {
-            heartbeatFailure = error;
-          })
-          .finally(() => {
-            heartbeatWrites.delete(tracked);
-          });
-        heartbeatWrites.add(tracked);
-      };
-      try {
-        await writeFencedLockOwnerFile(ownerPath, token, storeLockFence);
-      } catch (error) {
-        await removeDirectoryIfSameIdentity(lockDirPath, acquiredBeforeReclaimerCheck).catch(
-          () => undefined,
-        );
-        throw error;
-      }
-      let heartbeatWritePending = false;
-      const heartbeat = setInterval(() => {
-        if (released) return;
-        if (heartbeatWritePending) return;
-        heartbeatWritePending = true;
-        trackHeartbeatWrite(
-          refreshStoreLockOwner(ownerPath, token, storeLockFence).finally(() => {
-            heartbeatWritePending = false;
-          }),
-        );
-      }, heartbeatIntervalMs);
-      return {
-        assertHealthy: async () => {
-          if (heartbeatFailure) {
-            const wrapped = new VersionedTextStoreError(
-              "persist-failed",
-              "Versioned text store lock heartbeat failed.",
-            );
-            (wrapped as Error & { cause?: unknown }).cause = heartbeatFailure;
-            throw wrapped;
-          }
-          const current = await statIfExists(lockDirPath);
-          if (!current || !sameFileIdentity(acquiredBeforeReclaimerCheck, current)) {
-            throw lockOwnershipLost();
-          }
-          let owner: StoreLockOwner | null;
-          try {
-            owner = parseLockOwner(await readFile(ownerPath, "utf8"));
-          } catch (error) {
-            throw lockOwnershipLost(error);
-          }
-          if (owner?.token !== token) {
-            throw lockOwnershipLost();
-          }
-        },
-        release: async () => {
-          released = true;
-          clearInterval(heartbeat);
-          while (heartbeatWrites.size > 0) {
-            await Promise.all([...heartbeatWrites]);
-          }
-          try {
-            const current = await statIfExists(lockDirPath);
-            if (!current || !sameFileIdentity(acquiredBeforeReclaimerCheck, current)) return;
-            const owner = parseLockOwner(await readFile(ownerPath, "utf8"));
-            if (owner?.token === token) {
-              await removeDirectoryIfSameIdentity(lockDirPath, acquiredBeforeReclaimerCheck);
+    for (const row of db
+      .prepare(
+        "SELECT * FROM versions ORDER BY workspace_id, created_at_ms, name, version_id",
+      )
+      .all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      const forkVersionId = rowOptionalString(row, "fork_version_id");
+      const version: VersionRecord = {
+        id: rowString(row, "version_id"),
+        workspaceId: rowString(row, "workspace_id"),
+        kind: rowString(row, "kind") as VersionKind,
+        name: rowString(row, "name"),
+        createdAtMs: rowNumber(row, "created_at_ms"),
+        ...(forkVersionId
+          ? {
+              forkPoint: {
+                versionId: forkVersionId,
+                ...(rowOptionalString(row, "fork_moment_id")
+                  ? { momentId: rowOptionalString(row, "fork_moment_id") }
+                  : {}),
+              },
             }
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-        },
+          : {}),
       };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      await onLockBlocked?.();
-      let blockedByStaleLock: boolean;
-      try {
-        blockedByStaleLock = await isBlockedByStaleLock(lockDirPath, ownerPath, lockStaleMs);
-      } catch (inspectionError) {
-        throw lockInspectionFailed(
-          "Failed to inspect versioned text store lock owner.",
-          inspectionError,
-        );
-      }
-      if (blockedByStaleLock) {
-        if (
-          await reclaimStaleStoreLock(
-            lockDirPath,
-            ownerPath,
-            lockStaleMs,
-            startedAt + lockTimeoutMs,
-          )
-        ) {
-          continue;
-        }
-      }
-      if (Date.now() - startedAt > lockTimeoutMs) {
-        throw new VersionedTextStoreError(
-          "persist-failed",
-          "Versioned text store lock timed out.",
-        );
-      }
-      await delayMs(25);
+      workspace.versions[version.id] = version;
+      workspace.pathAliases[version.id] ??= createDictionary();
+      workspace.snapshots[version.id] ??= createDictionary();
     }
+
+    for (const row of db.prepare("SELECT * FROM file_objects ORDER BY workspace_id, object_id").all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      workspace.objects[rowString(row, "object_id")] = {
+        id: rowString(row, "object_id"),
+        workspaceId: rowString(row, "workspace_id"),
+        createdAtMs: rowNumber(row, "created_at_ms"),
+      };
+    }
+
+    for (const row of db
+      .prepare("SELECT * FROM path_aliases ORDER BY workspace_id, version_id, path")
+      .all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      const versionId = rowString(row, "version_id");
+      workspace.pathAliases[versionId] ??= createDictionary();
+      workspace.pathAliases[versionId][rowString(row, "path")] = rowString(row, "object_id");
+    }
+
+    for (const row of db
+      .prepare(
+        `SELECT s.*, b.text
+         FROM snapshots s
+         JOIN blobs b ON b.sha256 = s.blob_sha256
+         ORDER BY s.workspace_id, s.version_id, s.path`,
+      )
+      .all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      const versionId = rowString(row, "version_id");
+      workspace.snapshots[versionId] ??= createDictionary();
+      const snapshot = snapshotFromRow(row);
+      workspace.snapshots[versionId][snapshot.objectId] = snapshot;
+    }
+
+    for (const row of db
+      .prepare(
+        `SELECT s.*, b.text
+         FROM fork_base_snapshots s
+         JOIN blobs b ON b.sha256 = s.blob_sha256
+         ORDER BY s.workspace_id, s.version_id, s.path`,
+      )
+      .all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      const versionId = rowString(row, "version_id");
+      workspace.forkBaseSnapshots[versionId] ??= createDictionary();
+      const snapshot = snapshotFromRow(row);
+      workspace.forkBaseSnapshots[versionId][snapshot.objectId] = snapshot;
+    }
+
+    for (const row of db
+      .prepare(
+        `SELECT m.*,
+                before_payload.text AS payload_before_text,
+                after_payload.text AS payload_after_text,
+                before_blob.text AS before_text
+         FROM moments m
+         LEFT JOIN blobs before_payload ON before_payload.sha256 = m.payload_before_blob_sha256
+         JOIN blobs after_payload ON after_payload.sha256 = m.payload_after_blob_sha256
+         LEFT JOIN blobs before_blob ON before_blob.sha256 = m.before_blob_sha256
+         ORDER BY m.workspace_id, m.moment_order`,
+      )
+      .all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      const beforePresent = Number(row.before_present);
+      const before =
+        beforePresent === 0
+          ? undefined
+          : beforePresent === 1
+            ? null
+            : {
+                objectId: rowString(row, "before_object_id"),
+                versionId: rowString(row, "before_version_id"),
+                path: rowString(row, "before_path"),
+                text: rowString(row, "before_text"),
+                updatedAtMs: rowNumber(row, "before_updated_at_ms"),
+                latestMomentId: rowString(row, "before_latest_moment_id"),
+                metadata: metadataFromRow(row, "before_metadata_"),
+              };
+      const payloadBeforePath = rowOptionalString(row, "payload_before_path");
+      workspace.moments.push({
+        id: rowString(row, "moment_id"),
+        workspaceId: rowString(row, "workspace_id"),
+        versionId: rowString(row, "version_id"),
+        objectId: rowString(row, "object_id"),
+        path: rowString(row, "path"),
+        recordedAtMs: rowNumber(row, "recorded_at_ms"),
+        operation: rowString(row, "operation") as VersionedTextMoment["operation"],
+        payload: {
+          before: payloadBeforePath
+            ? { path: payloadBeforePath, text: rowString(row, "payload_before_text") }
+            : null,
+          after: {
+            path: rowString(row, "payload_after_path"),
+            text: rowString(row, "payload_after_text"),
+          },
+        },
+        metadata: metadataFromRow(row),
+        ...(beforePresent === 0 ? {} : { before }),
+      });
+    }
+
+    for (const row of db
+      .prepare(
+        `SELECT c.*,
+                base_blob.text AS base_text,
+                current_blob.text AS current_text,
+                incoming_blob.text AS incoming_text
+         FROM conflicts c
+         LEFT JOIN blobs base_blob ON base_blob.sha256 = c.base_blob_sha256
+         LEFT JOIN blobs current_blob ON current_blob.sha256 = c.current_blob_sha256
+         LEFT JOIN blobs incoming_blob ON incoming_blob.sha256 = c.incoming_blob_sha256
+         ORDER BY c.workspace_id, c.created_at_ms, c.conflict_id`,
+      )
+      .all()) {
+      const workspace = state.workspaces[rowString(row, "workspace_id")];
+      if (!workspace) throw corruptStore();
+      const conflict: VersionedTextConflictRecord = {
+        id: rowString(row, "conflict_id"),
+        workspaceId: rowString(row, "workspace_id"),
+        path: rowString(row, "path"),
+        targetVersionId: rowString(row, "target_version_id"),
+        sourceVersionId: rowString(row, "source_version_id"),
+        createdAtMs: rowNumber(row, "created_at_ms"),
+        updatedAtMs: rowNumber(row, "updated_at_ms"),
+        base: fileStateFromConflictRow(row, "base"),
+        current: fileStateFromConflictRow(row, "current"),
+        incoming: fileStateFromConflictRow(row, "incoming"),
+        status: rowString(row, "status") as VersionedTextConflictStatus,
+        chosenFrom: rowString(row, "chosen_from") as VersionedTextConflictChoice,
+        metadata: metadataFromRow(row),
+        ...(rowOptionalString(row, "resolution")
+          ? { resolution: rowOptionalString(row, "resolution") as VersionedTextConflictResolution }
+          : {}),
+      };
+      workspace.conflicts[conflict.id] = conflict;
+    }
+  } catch (error) {
+    if (error instanceof VersionedTextStoreError) throw error;
+    throw corruptStore(error);
   }
+
+  return normalizeHydratedState(state);
+}
+
+function insertConflictFileState(
+  db: SqliteDb,
+  state: VersionedTextFileState,
+): [
+  number,
+  string,
+  string | null,
+  string | null,
+  number | null,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+] {
+  if (!state.exists) {
+    return [0, state.path, null, null, null, null, null, null, null];
+  }
+  const metadata = state.metadata ?? { origin: "unknown" as const };
+  return [
+    1,
+    state.path,
+    state.objectId ?? null,
+    putBlob(db, state.text ?? ""),
+    state.updatedAtMs ?? null,
+    state.latestMomentId ?? null,
+    ...metadataValues(metadata),
+  ];
 }
 
 function normalizeWorkspaceId(workspaceId: string): WorkspaceId {
@@ -2411,6 +2348,499 @@ function createMoment(input: {
   };
 }
 
+function versionFromRow(row: Record<string, unknown>): VersionRecord {
+  const forkVersionId = rowOptionalString(row, "fork_version_id");
+  return {
+    id: rowString(row, "version_id"),
+    workspaceId: rowString(row, "workspace_id"),
+    kind: rowString(row, "kind") as VersionKind,
+    name: rowString(row, "name"),
+    createdAtMs: rowNumber(row, "created_at_ms"),
+    ...(forkVersionId
+      ? {
+          forkPoint: {
+            versionId: forkVersionId,
+            ...(rowOptionalString(row, "fork_moment_id")
+              ? { momentId: rowOptionalString(row, "fork_moment_id") }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+function objectFromRow(row: Record<string, unknown>): FileObjectRecord {
+  return {
+    id: rowString(row, "object_id"),
+    workspaceId: rowString(row, "workspace_id"),
+    createdAtMs: rowNumber(row, "created_at_ms"),
+  };
+}
+
+function selectSnapshotByObject(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+): TextFileSnapshot | null {
+  const row = db
+    .prepare(
+      `SELECT s.*, b.text
+       FROM snapshots s
+       JOIN blobs b ON b.sha256 = s.blob_sha256
+       WHERE s.workspace_id = ? AND s.version_id = ? AND s.object_id = ?`,
+    )
+    .get(workspaceId, versionId, objectId);
+  return row ? snapshotFromRow(row) : null;
+}
+
+function selectSnapshotByPath(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  path: string,
+): TextFileSnapshot | null {
+  const aliased = db
+    .prepare(
+      `SELECT s.*, b.text
+       FROM path_aliases a
+       JOIN snapshots s
+         ON s.workspace_id = a.workspace_id
+        AND s.version_id = a.version_id
+        AND s.object_id = a.object_id
+       JOIN blobs b ON b.sha256 = s.blob_sha256
+       WHERE a.workspace_id = ? AND a.version_id = ? AND a.path = ?`,
+    )
+    .get(workspaceId, versionId, path);
+  if (aliased) {
+    const snapshot = snapshotFromRow(aliased);
+    if (snapshot.path !== path) throw corruptStore();
+    return snapshot;
+  }
+  const fallback = db
+    .prepare(
+      `SELECT s.*, b.text
+       FROM snapshots s
+       JOIN blobs b ON b.sha256 = s.blob_sha256
+       WHERE s.workspace_id = ? AND s.version_id = ? AND s.path = ?
+       LIMIT 2`,
+    )
+    .all(workspaceId, versionId, path);
+  if (fallback.length > 1) throw corruptStore();
+  return fallback[0] ? snapshotFromRow(fallback[0]) : null;
+}
+
+function selectForkBaseSnapshotByPath(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  path: string,
+): TextFileSnapshot | null {
+  const rows = db
+    .prepare(
+      `SELECT s.*, b.text
+       FROM fork_base_snapshots s
+       JOIN blobs b ON b.sha256 = s.blob_sha256
+       WHERE s.workspace_id = ? AND s.version_id = ? AND s.path = ?
+       LIMIT 2`,
+    )
+    .all(workspaceId, versionId, path);
+  if (rows.length > 1) throw corruptStore();
+  return rows[0] ? snapshotFromRow(rows[0]) : null;
+}
+
+function requireWorkspaceVersionRow(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+): VersionRecord {
+  const row = db
+    .prepare("SELECT * FROM versions WHERE workspace_id = ? AND version_id = ?")
+    .get(workspaceId, versionId);
+  if (row) return versionFromRow(row);
+  const other = db
+    .prepare("SELECT workspace_id FROM versions WHERE version_id = ? AND workspace_id <> ?")
+    .get(versionId, workspaceId);
+  if (other && versionId !== "main") {
+    throw new VersionedTextStoreError(
+      "workspace-mismatch",
+      `Version ${versionId} does not belong to workspace ${workspaceId}.`,
+    );
+  }
+  throw new VersionedTextStoreError(
+    "version-not-found",
+    `Version ${versionId} was not found in workspace ${workspaceId}.`,
+  );
+}
+
+function ensureWorkspaceRow(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  nowMs: number,
+): VersionRecord {
+  const existing = db
+    .prepare(
+      `SELECT v.*
+       FROM versioned_workspaces w
+       JOIN versions v
+         ON v.workspace_id = w.workspace_id
+        AND v.version_id = w.main_version_id
+       WHERE w.workspace_id = ?`,
+    )
+    .get(workspaceId);
+  if (existing) return versionFromRow(existing);
+
+  const main: VersionRecord = {
+    id: "main",
+    workspaceId,
+    kind: "main",
+    name: "Main",
+    createdAtMs: nowMs,
+  };
+  db.prepare("INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES (?, ?)").run(
+    workspaceId,
+    main.id,
+  );
+  db.prepare(
+    `INSERT INTO versions (
+      workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id
+    ) VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+  ).run(workspaceId, main.id, main.kind, main.name, main.createdAtMs);
+  return main;
+}
+
+function insertOrReplaceSnapshot(
+  db: SqliteDb,
+  table: "snapshots" | "fork_base_snapshots",
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  snapshot: TextFileSnapshot,
+): void {
+  const blobSha256 = putBlob(db, snapshot.text);
+  db.prepare(
+    `INSERT INTO ${table} (
+      workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+      latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
+      path = excluded.path,
+      blob_sha256 = excluded.blob_sha256,
+      updated_at_ms = excluded.updated_at_ms,
+      latest_moment_id = excluded.latest_moment_id,
+      metadata_origin = excluded.metadata_origin,
+      metadata_summary = excluded.metadata_summary,
+      metadata_correlation_id = excluded.metadata_correlation_id`,
+  ).run(
+    workspaceId,
+    versionId,
+    snapshot.objectId,
+    snapshot.path,
+    blobSha256,
+    snapshot.updatedAtMs,
+    snapshot.latestMomentId,
+    ...metadataValues(snapshot.metadata),
+  );
+}
+
+function nextMomentOrder(db: SqliteDb, workspaceId: WorkspaceId): number {
+  const row = db
+    .prepare("SELECT COALESCE(MAX(moment_order), -1) + 1 AS next_order FROM moments WHERE workspace_id = ?")
+    .get(workspaceId);
+  return Number(row?.next_order ?? 0);
+}
+
+function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
+  const payloadBeforeSha = moment.payload.before ? putBlob(db, moment.payload.before.text) : null;
+  const payloadAfterSha = putBlob(db, moment.payload.after.text);
+  const beforePresent = moment.before === undefined ? 0 : moment.before === null ? 1 : 2;
+  const beforeSha = moment.before && moment.before !== null ? putBlob(db, moment.before.text) : null;
+  db.prepare(
+    `INSERT INTO moments (
+      workspace_id, moment_order, moment_id, version_id, object_id, path,
+      recorded_at_ms, operation, payload_before_path, payload_before_blob_sha256,
+      payload_after_path, payload_after_blob_sha256, metadata_origin,
+      metadata_summary, metadata_correlation_id, before_present, before_object_id,
+      before_version_id, before_path, before_blob_sha256, before_updated_at_ms,
+      before_latest_moment_id, before_metadata_origin, before_metadata_summary,
+      before_metadata_correlation_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    moment.workspaceId,
+    nextMomentOrder(db, moment.workspaceId),
+    moment.id,
+    moment.versionId,
+    moment.objectId,
+    moment.path,
+    moment.recordedAtMs,
+    moment.operation,
+    moment.payload.before?.path ?? null,
+    payloadBeforeSha,
+    moment.payload.after.path,
+    payloadAfterSha,
+    ...metadataValues(moment.metadata),
+    beforePresent,
+    moment.before && moment.before !== null ? moment.before.objectId : null,
+    moment.before && moment.before !== null ? moment.before.versionId : null,
+    moment.before && moment.before !== null ? moment.before.path : null,
+    beforeSha,
+    moment.before && moment.before !== null ? moment.before.updatedAtMs : null,
+    moment.before && moment.before !== null ? moment.before.latestMomentId : null,
+    ...(moment.before && moment.before !== null ? metadataValues(moment.before.metadata) : [null, null, null]),
+  );
+}
+
+function requireFileObjectRow(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  objectId: WorkspaceObjectId,
+): FileObjectRecord {
+  const row = db
+    .prepare("SELECT * FROM file_objects WHERE workspace_id = ? AND object_id = ?")
+    .get(workspaceId, objectId);
+  if (!row) throw corruptStore();
+  return objectFromRow(row);
+}
+
+function insertConflictRow(db: SqliteDb, conflict: VersionedTextConflictRecord): void {
+  db.prepare(
+    `INSERT INTO conflicts (
+      workspace_id, conflict_id, path, target_version_id, source_version_id,
+      created_at_ms, updated_at_ms, status, chosen_from, resolution,
+      metadata_origin, metadata_summary, metadata_correlation_id,
+      base_exists, base_path, base_object_id, base_blob_sha256, base_updated_at_ms,
+      base_latest_moment_id, base_metadata_origin, base_metadata_summary,
+      base_metadata_correlation_id, current_exists, current_path, current_object_id,
+      current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
+      current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
+      incoming_exists, incoming_path, incoming_object_id, incoming_blob_sha256,
+      incoming_updated_at_ms, incoming_latest_moment_id, incoming_metadata_origin,
+      incoming_metadata_summary, incoming_metadata_correlation_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    conflict.workspaceId,
+    conflict.id,
+    conflict.path,
+    conflict.targetVersionId,
+    conflict.sourceVersionId,
+    conflict.createdAtMs,
+    conflict.updatedAtMs,
+    conflict.status,
+    conflict.chosenFrom,
+    conflict.resolution ?? null,
+    ...metadataValues(conflict.metadata),
+    ...insertConflictFileState(db, conflict.base),
+    ...insertConflictFileState(db, conflict.current),
+    ...insertConflictFileState(db, conflict.incoming),
+  );
+}
+
+function conflictFromRow(row: Record<string, unknown>): VersionedTextConflictRecord {
+  return {
+    id: rowString(row, "conflict_id"),
+    workspaceId: rowString(row, "workspace_id"),
+    path: rowString(row, "path"),
+    targetVersionId: rowString(row, "target_version_id"),
+    sourceVersionId: rowString(row, "source_version_id"),
+    createdAtMs: rowNumber(row, "created_at_ms"),
+    updatedAtMs: rowNumber(row, "updated_at_ms"),
+    base: fileStateFromConflictRow(row, "base"),
+    current: fileStateFromConflictRow(row, "current"),
+    incoming: fileStateFromConflictRow(row, "incoming"),
+    status: rowString(row, "status") as VersionedTextConflictStatus,
+    chosenFrom: rowString(row, "chosen_from") as VersionedTextConflictChoice,
+    metadata: metadataFromRow(row),
+    ...(rowOptionalString(row, "resolution")
+      ? { resolution: rowOptionalString(row, "resolution") as VersionedTextConflictResolution }
+      : {}),
+  };
+}
+
+function conflictSelectSql(where: string): string {
+  return `SELECT c.*,
+                 base_blob.text AS base_text,
+                 current_blob.text AS current_text,
+                 incoming_blob.text AS incoming_text
+          FROM conflicts c
+          LEFT JOIN blobs base_blob ON base_blob.sha256 = c.base_blob_sha256
+          LEFT JOIN blobs current_blob ON current_blob.sha256 = c.current_blob_sha256
+          LEFT JOIN blobs incoming_blob ON incoming_blob.sha256 = c.incoming_blob_sha256
+          ${where}`;
+}
+
+function selectMomentByOrder(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  maxOrder: number,
+): { moment: VersionedTextMoment; order: number } | null {
+  const row = db
+    .prepare(
+      momentSelectSql(
+        `WHERE m.workspace_id = ? AND m.version_id = ? AND m.object_id = ? AND m.moment_order <= ?
+         ORDER BY m.moment_order DESC LIMIT 1`,
+      ),
+    )
+    .get(workspaceId, versionId, objectId, maxOrder);
+  return row ? { moment: momentFromRow(row), order: rowNumber(row, "moment_order") } : null;
+}
+
+function inheritedObjectMomentFromDb(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  seen = new Set<VersionId>(),
+): { moment: VersionedTextMoment; order: number } | null {
+  if (seen.has(versionId)) throw corruptStore();
+  seen.add(versionId);
+  const version = requireWorkspaceVersionRow(db, workspaceId, versionId);
+  if (!version.forkPoint) return null;
+  let forkOrder = -1;
+  if (version.forkPoint.momentId !== undefined) {
+    const forkMoment = db
+      .prepare("SELECT moment_order FROM moments WHERE workspace_id = ? AND moment_id = ?")
+      .get(workspaceId, version.forkPoint.momentId);
+    if (!forkMoment) throw corruptStore();
+    forkOrder = rowNumber(forkMoment, "moment_order");
+  }
+  return (
+    selectMomentByOrder(db, workspaceId, version.forkPoint.versionId, objectId, forkOrder) ??
+    inheritedObjectMomentFromDb(
+      db,
+      workspaceId,
+      version.forkPoint.versionId,
+      objectId,
+      seen,
+    )
+  );
+}
+
+function rollbackMomentHasDependentsInDb(input: {
+  db: SqliteDb;
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  momentId: VersionedTextMomentId;
+  momentOrder: number;
+  objectId: WorkspaceObjectId;
+}): boolean {
+  if (
+    input.db
+      .prepare(
+        `SELECT 1 FROM snapshots
+         WHERE workspace_id = ? AND version_id <> ? AND latest_moment_id = ?
+         LIMIT 1`,
+      )
+      .get(input.workspaceId, input.versionId, input.momentId)
+  ) {
+    return true;
+  }
+  if (
+    input.db
+      .prepare(
+        `SELECT 1 FROM moments
+         WHERE workspace_id = ? AND moment_id <> ? AND object_id = ? AND before_latest_moment_id = ?
+         LIMIT 1`,
+      )
+      .get(input.workspaceId, input.momentId, input.objectId, input.momentId)
+  ) {
+    return true;
+  }
+
+  const versions = new Map(
+    input.db
+      .prepare("SELECT * FROM versions WHERE workspace_id = ?")
+      .all(input.workspaceId)
+      .map((row) => [rowString(row, "version_id"), versionFromRow(row)] as const),
+  );
+  const momentOrders = new Map(
+    input.db
+      .prepare("SELECT moment_id, moment_order FROM moments WHERE workspace_id = ?")
+      .all(input.workspaceId)
+      .map((row) => [rowString(row, "moment_id"), rowNumber(row, "moment_order")] as const),
+  );
+  const objectMoments = input.db
+    .prepare(
+      `SELECT version_id, moment_order, before_present
+       FROM moments
+       WHERE workspace_id = ? AND object_id = ?
+       ORDER BY moment_order`,
+    )
+    .all(input.workspaceId, input.objectId);
+
+  const versionHasIndependentObjectMutationInRange = (
+    candidateVersionId: VersionId,
+    afterOrder: number,
+    atOrBeforeOrder: number,
+  ) =>
+    objectMoments.some(
+      (row) =>
+        rowString(row, "version_id") === candidateVersionId &&
+        rowNumber(row, "moment_order") > afterOrder &&
+        rowNumber(row, "moment_order") <= atOrBeforeOrder &&
+        Number(row.before_present) === 2,
+    );
+
+  const lineageHasIndependentObjectMutation = (
+    candidateVersionId: VersionId,
+    afterOrder: number,
+  ): boolean => {
+    let cursor = versions.get(candidateVersionId);
+    let atOrBeforeOrder = Number.POSITIVE_INFINITY;
+    const seen = new Set<VersionId>();
+    while (cursor) {
+      if (seen.has(cursor.id)) return false;
+      seen.add(cursor.id);
+      if (
+        versionHasIndependentObjectMutationInRange(
+          cursor.id,
+          afterOrder,
+          atOrBeforeOrder,
+        )
+      ) {
+        return true;
+      }
+      if (!cursor.forkPoint || cursor.forkPoint.versionId === input.versionId) return false;
+      atOrBeforeOrder =
+        cursor.forkPoint.momentId === undefined
+          ? -1
+          : (momentOrders.get(cursor.forkPoint.momentId) ?? -1);
+      cursor = versions.get(cursor.forkPoint.versionId);
+    }
+    return false;
+  };
+
+  const forkOrderFromVersion = (version: VersionRecord): number | null => {
+    let cursor: VersionRecord | undefined = version;
+    const seen = new Set<VersionId>();
+    while (cursor?.forkPoint) {
+      if (seen.has(cursor.id)) return null;
+      seen.add(cursor.id);
+      if (cursor.forkPoint.versionId === input.versionId) {
+        return cursor.forkPoint.momentId
+          ? (momentOrders.get(cursor.forkPoint.momentId) ?? null)
+          : null;
+      }
+      cursor = versions.get(cursor.forkPoint.versionId);
+    }
+    return null;
+  };
+
+  for (const version of versions.values()) {
+    if (version.id === input.versionId) continue;
+    const forkOrder = forkOrderFromVersion(version);
+    if (
+      forkOrder !== null &&
+      forkOrder >= input.momentOrder &&
+      (forkOrder === input.momentOrder ||
+        !lineageHasIndependentObjectMutation(version.id, forkOrder))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function createVersionedTextStoreWithHooks(
   rootDir: string,
   options: VersionedTextStoreOptions = {},
@@ -2422,84 +2852,51 @@ function createVersionedTextStoreWithHooks(
   const createGeneratedId = (kind: "conflict" | "moment" | "object" | "version") =>
     normalizeGeneratedId(kind, createId(kind));
   const stateFilePath = storePath(resolve(normalizeRootDir(rootDir)));
-  const lockDirPath = `${stateFilePath}.lock`;
-  let cachedState: PersistedVersionedTextState | null = null;
-  let cachedStateToken: string | null = null;
-  let activeLease: StoreLockLease | null = null;
+  let activeWriteDb: SqliteDb | null = null;
+  let dbHandle: SqliteDb | null = null;
+  let validated = false;
 
-  async function readStateFromDisk(): Promise<{
-    state: PersistedVersionedTextState;
-    token: string;
-  }> {
-    const { raw, token } = await readJsonWithStateToken(stateFilePath);
-    return { state: normalizeState(raw), token };
+  function db(): SqliteDb {
+    if (!dbHandle) {
+      dbHandle = openDatabase(rootDir);
+    }
+    if (!validated) {
+      loadStateFromDatabase(dbHandle);
+      validated = true;
+    }
+    return dbHandle;
   }
 
-  async function loadState(): Promise<PersistedVersionedTextState> {
-    const currentToken = await readStateToken(stateFilePath);
-    if (cachedState && cachedStateToken === currentToken) return cachedState;
-    const { state, token } = await readStateFromDisk();
-    if (cachedState && cachedStateToken === token) return cachedState;
-    cachedState = state;
-    cachedStateToken = token;
-    return cachedState;
-  }
-
-  async function loadWritableState(): Promise<PersistedVersionedTextState> {
-    const { state } = await readStateFromDisk();
+  async function beforeWriteMutation(): Promise<void> {
     await testHooks.afterLoadWritableState?.();
-    return state;
   }
 
-  async function saveState(
-    state: PersistedVersionedTextState,
-    changedWorkspaceId: WorkspaceId,
-  ): Promise<void> {
-    const normalized = normalizeStateAfterWorkspaceMutation(state, changedWorkspaceId);
-    const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
+  async function persistBarrier(): Promise<void> {
     try {
       await testHooks.beforePersist?.();
-      if (!activeLease) {
-        throw new VersionedTextStoreError(
-          "persist-failed",
-          "Versioned text store write lock is required.",
-        );
-      }
-      const lease = activeLease;
-      await lease.assertHealthy();
-      await writeFileAtomic(stateFilePath, serialized, async () => {
-        await testHooks.beforeAtomicPublish?.();
-        await lease.assertHealthy();
-      });
-      cachedStateToken = await readStateToken(stateFilePath);
+      await testHooks.beforeAtomicPublish?.();
     } catch (error) {
-      const wrapped = new VersionedTextStoreError(
-        "persist-failed",
-        "Versioned text store could not be persisted.",
-      );
-      (wrapped as Error & { cause?: unknown }).cause = error;
-      throw wrapped;
+      if (error instanceof VersionedTextStoreError && error.code === "state-corrupt") throw error;
+      throw persistFailed(error);
     }
-    cachedState = normalized;
   }
 
-  async function runWithStoreLock<T>(task: () => Promise<T>): Promise<T> {
-    const lease = await acquireStoreLock(
-      lockDirPath,
-      testHooks.lockTimeoutMs ?? STORE_LOCK_TIMEOUT_MS,
-      testHooks.lockStaleMs ?? STORE_LOCK_STALE_MS,
-      testHooks.onLockBlocked,
-    );
-    const previousLease = activeLease;
-    activeLease = lease;
+  async function runTransaction<T>(task: () => Promise<T>): Promise<T> {
+    const txDb = db();
+    const previousDb = activeWriteDb;
+    activeWriteDb = txDb;
     try {
-      await lease.assertHealthy();
+      txDb.exec("BEGIN IMMEDIATE");
       const result = await task();
-      await lease.assertHealthy();
+      txDb.exec("COMMIT");
       return result;
+    } catch (error) {
+      try {
+        txDb.exec("ROLLBACK");
+      } catch {}
+      throw error;
     } finally {
-      activeLease = previousLease;
-      await lease.release();
+      activeWriteDb = previousDb;
     }
   }
 
@@ -2509,7 +2906,7 @@ function createVersionedTextStoreWithHooks(
       testHooks.onWriteQueued?.();
     }
     const previous = storeWriteChains.get(stateFilePath) ?? Promise.resolve();
-    const run = previous.then(() => runWithStoreLock(task), () => runWithStoreLock(task));
+    const run = previous.then(() => runTransaction(task), () => runTransaction(task));
     const next = run.then(
       () => undefined,
       () => undefined,
@@ -2754,23 +3151,239 @@ function createVersionedTextStoreWithHooks(
     return conflict;
   }
 
+  function compareTextFileVersionsInDb(input: {
+    db: SqliteDb;
+    workspaceId: WorkspaceId;
+    targetVersionId: VersionId;
+    sourceVersion: VersionRecord;
+    path: string;
+  }): VersionedTextComparison {
+    if (
+      input.sourceVersion.kind !== "named" ||
+      input.sourceVersion.forkPoint?.versionId !== input.targetVersionId
+    ) {
+      throw new VersionedTextStoreError(
+        "fork-base-not-found",
+        `Version ${input.sourceVersion.id} does not have a fork base for ${input.targetVersionId}.`,
+      );
+    }
+
+    const forkBaseCount = input.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM fork_base_snapshots WHERE workspace_id = ? AND version_id = ?",
+      )
+      .get(input.workspaceId, input.sourceVersion.id);
+    if (Number(forkBaseCount?.count ?? 0) === 0) {
+      throw new VersionedTextStoreError(
+        "fork-base-not-found",
+        `Version ${input.sourceVersion.id} does not have durable fork-base snapshots.`,
+      );
+    }
+
+    const base = fileStateFromSnapshot(
+      input.path,
+      selectForkBaseSnapshotByPath(input.db, input.workspaceId, input.sourceVersion.id, input.path),
+    );
+    const current = fileStateFromSnapshot(
+      input.path,
+      selectSnapshotByPath(input.db, input.workspaceId, input.targetVersionId, input.path),
+    );
+    const incoming = fileStateFromSnapshot(
+      input.path,
+      selectSnapshotByPath(input.db, input.workspaceId, input.sourceVersion.id, input.path),
+    );
+
+    return {
+      workspaceId: input.workspaceId,
+      path: input.path,
+      targetVersionId: input.targetVersionId,
+      sourceVersionId: input.sourceVersion.id,
+      base,
+      current,
+      incoming,
+      status: comparisonStatus({ base, current, incoming }),
+    };
+  }
+
+  function writeTextFileInDb(input: {
+    db: SqliteDb;
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    text: string;
+    metadata: ActorNeutralWriteMetadata;
+    momentId?: VersionedTextMomentId;
+  }): VersionedTextWriteResult {
+    requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
+    const before = selectSnapshotByPath(input.db, input.workspaceId, input.versionId, input.path);
+    const recordedAtMs = readNowMs();
+    let object: FileObjectRecord;
+
+    if (before) {
+      object = requireFileObjectRow(input.db, input.workspaceId, before.objectId);
+    } else {
+      const objectId = createGeneratedId("object");
+      const existing = input.db
+        .prepare("SELECT workspace_id FROM file_objects WHERE object_id = ?")
+        .get(objectId);
+      if (existing) rejectDuplicateId("object", objectId);
+      object = { id: objectId, workspaceId: input.workspaceId, createdAtMs: recordedAtMs };
+      input.db
+        .prepare("INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)")
+        .run(input.workspaceId, object.id, object.createdAtMs);
+    }
+
+    const momentId =
+      input.momentId === undefined
+        ? createGeneratedId("moment")
+        : normalizeGeneratedId("moment", input.momentId);
+    if (
+      input.db
+        .prepare("SELECT 1 FROM moments WHERE workspace_id = ? AND moment_id = ?")
+        .get(input.workspaceId, momentId)
+    ) {
+      rejectDuplicateId("moment", momentId);
+    }
+
+    const moment = createMoment({
+      id: momentId,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId: object.id,
+      path: input.path,
+      recordedAtMs,
+      operation: "write",
+      payload: {
+        before: before ? { path: before.path, text: before.text } : null,
+        after: { path: input.path, text: input.text },
+      },
+      metadata: input.metadata,
+      before,
+    });
+    const snapshot: TextFileSnapshot = {
+      objectId: object.id,
+      versionId: input.versionId,
+      path: input.path,
+      text: input.text,
+      updatedAtMs: recordedAtMs,
+      latestMomentId: moment.id,
+      metadata: pickWriteMetadata(input.metadata),
+    };
+
+    insertMomentRow(input.db, moment);
+    insertOrReplaceSnapshot(input.db, "snapshots", input.workspaceId, input.versionId, snapshot);
+    input.db
+      .prepare(
+        `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET object_id = excluded.object_id`,
+      )
+      .run(input.workspaceId, input.versionId, input.path, object.id);
+
+    return {
+      object: cloneFileObject(object),
+      snapshot: cloneSnapshot(snapshot),
+      moment: cloneMoment(moment),
+    };
+  }
+
+  function deleteTextFileInDb(input: {
+    db: SqliteDb;
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+    momentId?: VersionedTextMomentId;
+  }): VersionedTextDeleteResult {
+    requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
+    const before = selectSnapshotByPath(input.db, input.workspaceId, input.versionId, input.path);
+    if (!before) {
+      throw new VersionedTextStoreError("file-not-found", `File ${input.path} was not found.`);
+    }
+    const object = requireFileObjectRow(input.db, input.workspaceId, before.objectId);
+    const recordedAtMs = readNowMs();
+    const momentId =
+      input.momentId === undefined
+        ? createGeneratedId("moment")
+        : normalizeGeneratedId("moment", input.momentId);
+    if (
+      input.db
+        .prepare("SELECT 1 FROM moments WHERE workspace_id = ? AND moment_id = ?")
+        .get(input.workspaceId, momentId)
+    ) {
+      rejectDuplicateId("moment", momentId);
+    }
+    const moment = createMoment({
+      id: momentId,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId: before.objectId,
+      path: input.path,
+      recordedAtMs,
+      operation: "delete",
+      payload: {
+        before: { path: before.path, text: before.text },
+        after: { path: before.path, text: before.text },
+      },
+      metadata: input.metadata,
+      before,
+    });
+
+    insertMomentRow(input.db, moment);
+    input.db
+      .prepare(
+        "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
+      )
+      .run(input.workspaceId, input.versionId, input.path, before.objectId);
+    input.db
+      .prepare("DELETE FROM snapshots WHERE workspace_id = ? AND version_id = ? AND object_id = ?")
+      .run(input.workspaceId, input.versionId, before.objectId);
+
+    return { object, before: cloneSnapshot(before), moment: cloneMoment(moment) };
+  }
+
+  function recordTextConflictInDb(input: {
+    db: SqliteDb;
+    comparison: VersionedTextComparison;
+    metadata: ActorNeutralWriteMetadata;
+  }): VersionedTextConflictRecord {
+    const recordedAtMs = readNowMs();
+    const conflictId = createGeneratedId("conflict");
+    if (
+      input.db
+        .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
+        .get(input.comparison.workspaceId, conflictId)
+    ) {
+      rejectDuplicateId("conflict", conflictId);
+    }
+    const conflict: VersionedTextConflictRecord = {
+      id: conflictId,
+      workspaceId: input.comparison.workspaceId,
+      path: input.comparison.path,
+      targetVersionId: input.comparison.targetVersionId,
+      sourceVersionId: input.comparison.sourceVersionId,
+      createdAtMs: recordedAtMs,
+      updatedAtMs: recordedAtMs,
+      base: cloneJson(input.comparison.base),
+      current: cloneJson(input.comparison.current),
+      incoming: cloneJson(input.comparison.incoming),
+      status: "open",
+      chosenFrom: "current",
+      metadata: pickWriteMetadata(input.metadata),
+    };
+    insertConflictRow(input.db, conflict);
+    return conflict;
+  }
+
   return {
     ensureMainVersion(input) {
       return serialize(async () => {
         assertInputEnvelope(input);
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadWritableState();
-        const existing = getOwn(state.workspaces, workspaceId);
-        if (existing) {
-          const main = getOwn(existing.versions, existing.mainVersionId);
-          if (!main) {
-            throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-          }
-          return cloneVersion(main);
-        }
-        const workspace = ensureWorkspace(state, workspaceId, readNowMs());
-        await saveState(state, workspaceId);
-        return cloneVersion(workspace.versions[workspace.mainVersionId]);
+        await beforeWriteMutation();
+        const main = ensureWorkspaceRow(db(), workspaceId, readNowMs());
+        await persistBarrier();
+        return cloneVersion(main);
       });
     },
 
@@ -2778,12 +3391,17 @@ function createVersionedTextStoreWithHooks(
       return afterWrites(async () => {
         assertInputEnvelope(input);
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadState();
-        const workspace = getOwn(state.workspaces, workspaceId);
-        const version = workspace
-          ? (getOwn(workspace.versions, workspace.mainVersionId) ?? null)
-          : null;
-        return version ? cloneVersion(version) : null;
+        const version = db()
+          .prepare(
+            `SELECT v.*
+             FROM versioned_workspaces w
+             JOIN versions v
+               ON v.workspace_id = w.workspace_id
+              AND v.version_id = w.main_version_id
+             WHERE w.workspace_id = ?`,
+          )
+          .get(workspaceId);
+        return version ? cloneVersion(versionFromRow(version)) : null;
       });
     },
 
@@ -2793,13 +3411,14 @@ function createVersionedTextStoreWithHooks(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const name = normalizeVersionName(input.name);
         const fromVersionId = normalizeVersionId(input.fromVersionId);
-        const state = await loadWritableState();
-        const { workspace, version: source } = requireWorkspaceVersion(
-          state,
-          workspaceId,
-          fromVersionId,
-        );
-        if (Object.values(workspace.versions).some((version) => version.name === name)) {
+        await beforeWriteMutation();
+        const txDb = db();
+        const source = requireWorkspaceVersionRow(txDb, workspaceId, fromVersionId);
+        if (
+          txDb
+            .prepare("SELECT 1 FROM versions WHERE workspace_id = ? AND name = ?")
+            .get(workspaceId, name)
+        ) {
           throw new VersionedTextStoreError(
             "version-name-conflict",
             `Version ${JSON.stringify(name)} already exists.`,
@@ -2807,14 +3426,18 @@ function createVersionedTextStoreWithHooks(
         }
 
         const id = createGeneratedId("version");
-        if (
-          getOwn(workspace.versions, id) !== undefined ||
-          versionExistsInAnotherWorkspace(state, workspaceId, id)
-        ) {
+        if (id !== "main" && txDb.prepare("SELECT 1 FROM versions WHERE version_id = ?").get(id)) {
           rejectDuplicateId("version", id);
         }
         const createdAtMs = readNowMs();
-        const latestMomentId = latestMomentIdForVersion(workspace, source.id);
+        const latestMoment = txDb
+          .prepare(
+            `SELECT moment_id FROM moments
+             WHERE workspace_id = ? AND version_id = ?
+             ORDER BY moment_order DESC LIMIT 1`,
+          )
+          .get(workspaceId, source.id);
+        const latestMomentId = rowOptionalString(latestMoment ?? {}, "moment_id");
         const version: VersionRecord = {
           id,
           workspaceId,
@@ -2827,27 +3450,54 @@ function createVersionedTextStoreWithHooks(
           },
         };
 
-        workspace.versions[id] = version;
-        const sourceSnapshots =
-          getOwn(workspace.snapshots, source.id) ?? createDictionary<TextFileSnapshot>();
-        workspace.snapshots[id] = createDictionary<TextFileSnapshot>(
-          Object.entries(sourceSnapshots).map(([objectId, snapshot]) => [
-            objectId,
-            { ...cloneSnapshot(snapshot), versionId: id },
-          ]),
-        );
-        workspace.pathAliases[id] = createDictionary<WorkspaceObjectId>(
-          Object.entries(
-            getOwn(workspace.pathAliases, source.id) ?? createDictionary<WorkspaceObjectId>(),
-          ),
-        );
-        workspace.forkBaseSnapshots[id] = createDictionary<TextFileSnapshot>(
-          Object.entries(sourceSnapshots).map(([objectId, snapshot]) => [
-            objectId,
-            cloneSnapshot(snapshot),
-          ]),
-        );
-        await saveState(state, workspaceId);
+        txDb
+          .prepare(
+            `INSERT INTO versions (
+              workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            workspaceId,
+            version.id,
+            version.kind,
+            version.name,
+            version.createdAtMs,
+            version.forkPoint?.versionId ?? null,
+            version.forkPoint?.momentId ?? null,
+          );
+        txDb
+          .prepare(
+            `INSERT INTO snapshots (
+              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+              latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+            )
+            SELECT workspace_id, ?, object_id, path, blob_sha256, updated_at_ms,
+                   latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+            FROM snapshots
+            WHERE workspace_id = ? AND version_id = ?`,
+          )
+          .run(id, workspaceId, source.id);
+        txDb
+          .prepare(
+            `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+             SELECT workspace_id, ?, path, object_id
+             FROM path_aliases
+             WHERE workspace_id = ? AND version_id = ?`,
+          )
+          .run(id, workspaceId, source.id);
+        txDb
+          .prepare(
+            `INSERT INTO fork_base_snapshots (
+              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+              latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+            )
+            SELECT workspace_id, ?, object_id, path, blob_sha256, updated_at_ms,
+                   latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+            FROM snapshots
+            WHERE workspace_id = ? AND version_id = ?`,
+          )
+          .run(id, workspaceId, source.id);
+        await persistBarrier();
         return cloneVersion(version);
       });
     },
@@ -2856,11 +3506,14 @@ function createVersionedTextStoreWithHooks(
       return afterWrites(async () => {
         assertInputEnvelope(input);
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
-        const state = await loadState();
-        const workspace = getOwn(state.workspaces, workspaceId);
-        if (!workspace) return [];
-        return Object.values(workspace.versions)
-          .sort((a, b) => a.createdAtMs - b.createdAtMs || a.name.localeCompare(b.name))
+        return db()
+          .prepare(
+            `SELECT * FROM versions
+             WHERE workspace_id = ?
+             ORDER BY created_at_ms, name, version_id`,
+          )
+          .all(workspaceId)
+          .map(versionFromRow)
           .map(cloneVersion);
       });
     },
@@ -2873,11 +3526,9 @@ function createVersionedTextStoreWithHooks(
         const path = normalizeWritePath(input.path);
         const text = normalizeWriteText(input.text);
         const metadata = normalizeWriteMetadata(input.metadata);
-        const state = await loadWritableState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const result = writeTextFileInWorkspace({
-          state,
-          workspace,
+        await beforeWriteMutation();
+        const result = writeTextFileInDb({
+          db: db(),
           workspaceId,
           versionId,
           path,
@@ -2885,7 +3536,7 @@ function createVersionedTextStoreWithHooks(
           metadata,
           momentId: input.momentId,
         });
-        await saveState(state, workspaceId);
+        await persistBarrier();
         return result;
       });
     },
@@ -2896,13 +3547,9 @@ function createVersionedTextStoreWithHooks(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const versionId = normalizeVersionId(input.versionId);
         const path = normalizeWritePath(input.path);
-        const state = await loadState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const objectId = findObjectIdByVersionPath(workspace, versionId, path);
-        if (!objectId) return null;
-        const snapshots = getOwn(workspace.snapshots, versionId);
-        const snapshot = snapshots ? (getOwn(snapshots, objectId) ?? null) : null;
-        return snapshot?.path === path ? cloneSnapshot(snapshot) : null;
+        requireWorkspaceVersionRow(db(), workspaceId, versionId);
+        const snapshot = selectSnapshotByPath(db(), workspaceId, versionId, path);
+        return snapshot ? cloneSnapshot(snapshot) : null;
       });
     },
 
@@ -2913,16 +3560,12 @@ function createVersionedTextStoreWithHooks(
         const targetVersionId = normalizeVersionId(input.targetVersionId);
         const sourceVersionId = normalizeVersionId(input.sourceVersionId);
         const path = normalizeWritePath(input.path);
-        const state = await loadState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, targetVersionId);
-        const { version: sourceVersion } = requireWorkspaceVersion(
-          state,
-          workspaceId,
-          sourceVersionId,
-        );
+        const txDb = db();
+        requireWorkspaceVersionRow(txDb, workspaceId, targetVersionId);
+        const sourceVersion = requireWorkspaceVersionRow(txDb, workspaceId, sourceVersionId);
         return cloneJson(
-          compareTextFileVersionsInWorkspace({
-            workspace,
+          compareTextFileVersionsInDb({
+            db: txDb,
             workspaceId,
             targetVersionId,
             sourceVersion,
@@ -2940,15 +3583,12 @@ function createVersionedTextStoreWithHooks(
         const sourceVersionId = normalizeVersionId(input.sourceVersionId);
         const path = normalizeWritePath(input.path);
         const metadata = normalizeWriteMetadata(input.metadata);
-        const state = await loadWritableState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, targetVersionId);
-        const { version: sourceVersion } = requireWorkspaceVersion(
-          state,
-          workspaceId,
-          sourceVersionId,
-        );
-        const comparison = compareTextFileVersionsInWorkspace({
-          workspace,
+        await beforeWriteMutation();
+        const txDb = db();
+        requireWorkspaceVersionRow(txDb, workspaceId, targetVersionId);
+        const sourceVersion = requireWorkspaceVersionRow(txDb, workspaceId, sourceVersionId);
+        const comparison = compareTextFileVersionsInDb({
+          db: txDb,
           workspaceId,
           targetVersionId,
           sourceVersion,
@@ -2964,26 +3604,25 @@ function createVersionedTextStoreWithHooks(
 
         if (fileStatesEqual(comparison.current, comparison.base)) {
           if (comparison.incoming.exists) {
-            const write = writeTextFileInWorkspace({
-              state,
-              workspace,
+            const write = writeTextFileInDb({
+              db: txDb,
               workspaceId,
               versionId: targetVersionId,
               path,
               text: comparison.incoming.text ?? "",
               metadata,
             });
-            await saveState(state, workspaceId);
+            await persistBarrier();
             return cloneJson({ kind: "merged", operation: "write", comparison, write });
           }
-          const deletion = deleteTextFileInWorkspace({
-            workspace,
+          const deletion = deleteTextFileInDb({
+            db: txDb,
             workspaceId,
             versionId: targetVersionId,
             path,
             metadata,
           });
-          await saveState(state, workspaceId);
+          await persistBarrier();
           return cloneJson({
             kind: "merged",
             operation: "delete",
@@ -3003,26 +3642,25 @@ function createVersionedTextStoreWithHooks(
             remote: comparison.incoming.text ?? "",
           });
           if (merged.kind === "merged") {
-            const write = writeTextFileInWorkspace({
-              state,
-              workspace,
+            const write = writeTextFileInDb({
+              db: txDb,
               workspaceId,
               versionId: targetVersionId,
               path,
               text: merged.content,
               metadata,
             });
-            await saveState(state, workspaceId);
+            await persistBarrier();
             return cloneJson({ kind: "merged", operation: "write", comparison, write });
           }
         }
 
-        const conflict = recordTextConflict({
-          workspace,
+        const conflict = recordTextConflictInDb({
+          db: txDb,
           comparison,
           metadata,
         });
-        await saveState(state, workspaceId);
+        await persistBarrier();
         return cloneJson({ kind: "conflict", comparison, conflict });
       });
     },
@@ -3038,12 +3676,15 @@ function createVersionedTextStoreWithHooks(
         ) {
           throw new VersionedTextStoreError("invalid-input", "Conflict status is invalid.");
         }
-        const state = await loadState();
-        const workspace = getOwn(state.workspaces, workspaceId);
-        if (!workspace) return [];
-        return Object.values(workspace.conflicts)
-          .filter((conflict) => !input.status || conflict.status === input.status)
-          .sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id))
+        const where =
+          input.status === undefined
+            ? "WHERE c.workspace_id = ? ORDER BY c.created_at_ms, c.conflict_id"
+            : "WHERE c.workspace_id = ? AND c.status = ? ORDER BY c.created_at_ms, c.conflict_id";
+        const params = input.status === undefined ? [workspaceId] : [workspaceId, input.status];
+        return db()
+          .prepare(conflictSelectSql(where))
+          .all(...params)
+          .map(conflictFromRow)
           .map(cloneJson);
       });
     },
@@ -3058,10 +3699,13 @@ function createVersionedTextStoreWithHooks(
           input.resolution.kind === "apply-merged"
             ? normalizeWriteText(input.resolution.text)
             : undefined;
-        const state = await loadWritableState();
-        const workspace = getOwn(state.workspaces, workspaceId);
-        const conflict = workspace ? getOwn(workspace.conflicts, conflictId) : undefined;
-        if (!workspace || !conflict) {
+        await beforeWriteMutation();
+        const txDb = db();
+        const conflictRow = txDb
+          .prepare(conflictSelectSql("WHERE c.workspace_id = ? AND c.conflict_id = ?"))
+          .get(workspaceId, conflictId);
+        const conflict = conflictRow ? conflictFromRow(conflictRow) : undefined;
+        if (!conflict) {
           throw new VersionedTextStoreError(
             "conflict-not-found",
             `Conflict ${conflictId} was not found in workspace ${workspaceId}.`,
@@ -3069,7 +3713,7 @@ function createVersionedTextStoreWithHooks(
         }
         const current = fileStateFromSnapshot(
           conflict.path,
-          snapshotByPath(workspace.snapshots[conflict.targetVersionId], conflict.path),
+          selectSnapshotByPath(txDb, workspaceId, conflict.targetVersionId, conflict.path),
         );
         if (!fileStatesEqual(current, conflict.current)) {
           throw new VersionedTextStoreError(
@@ -3085,9 +3729,8 @@ function createVersionedTextStoreWithHooks(
           resolution = "applied-incoming";
           conflict.chosenFrom = "incoming";
           if (conflict.incoming.exists) {
-            write = writeTextFileInWorkspace({
-              state,
-              workspace,
+            write = writeTextFileInDb({
+              db: txDb,
               workspaceId,
               versionId: conflict.targetVersionId,
               path: conflict.path,
@@ -3095,8 +3738,8 @@ function createVersionedTextStoreWithHooks(
               metadata,
             });
           } else if (conflict.current.exists) {
-            deletion = deleteTextFileInWorkspace({
-              workspace,
+            deletion = deleteTextFileInDb({
+              db: txDb,
               workspaceId,
               versionId: conflict.targetVersionId,
               path: conflict.path,
@@ -3106,9 +3749,8 @@ function createVersionedTextStoreWithHooks(
         } else if (input.resolution.kind === "apply-merged") {
           resolution = "applied-merged";
           conflict.chosenFrom = "merged";
-          write = writeTextFileInWorkspace({
-            state,
-            workspace,
+          write = writeTextFileInDb({
+            db: txDb,
             workspaceId,
             versionId: conflict.targetVersionId,
             path: conflict.path,
@@ -3120,7 +3762,21 @@ function createVersionedTextStoreWithHooks(
         conflict.status = "resolved";
         conflict.resolution = resolution;
         conflict.updatedAtMs = readNowMs();
-        await saveState(state, workspaceId);
+        txDb
+          .prepare(
+            `UPDATE conflicts
+             SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
+             WHERE workspace_id = ? AND conflict_id = ?`,
+          )
+          .run(
+            conflict.status,
+            conflict.chosenFrom,
+            conflict.resolution,
+            conflict.updatedAtMs,
+            workspaceId,
+            conflict.id,
+          );
+        await persistBarrier();
         return cloneJson({ kind: "resolved", conflict, write, delete: deletion });
       });
     },
@@ -3130,12 +3786,17 @@ function createVersionedTextStoreWithHooks(
         assertInputEnvelope(input);
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const versionId = normalizeVersionId(input.versionId);
-        const state = await loadState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const snapshots =
-          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
-        return Object.values(snapshots)
-          .sort((a, b) => a.path.localeCompare(b.path))
+        requireWorkspaceVersionRow(db(), workspaceId, versionId);
+        return db()
+          .prepare(
+            `SELECT s.*, b.text
+             FROM snapshots s
+             JOIN blobs b ON b.sha256 = s.blob_sha256
+             WHERE s.workspace_id = ? AND s.version_id = ?
+             ORDER BY s.path`,
+          )
+          .all(workspaceId, versionId)
+          .map(snapshotFromRow)
           .map(cloneSnapshot);
       });
     },
@@ -3154,22 +3815,16 @@ function createVersionedTextStoreWithHooks(
           );
         }
         const metadata = normalizeWriteMetadata(input.metadata);
-        const state = await loadWritableState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const objectId = findObjectIdByVersionPath(workspace, versionId, fromPath);
-        if (!objectId) {
-          throw new VersionedTextStoreError("file-not-found", `File ${fromPath} was not found.`);
-        }
-        const snapshots =
-          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
-        workspace.snapshots[versionId] = snapshots;
-        const before = getOwn(snapshots, objectId);
-        if (!before || before.path !== fromPath) {
+        await beforeWriteMutation();
+        const txDb = db();
+        requireWorkspaceVersionRow(txDb, workspaceId, versionId);
+        const before = selectSnapshotByPath(txDb, workspaceId, versionId, fromPath);
+        if (!before) {
           throw new VersionedTextStoreError("file-not-found", `File ${fromPath} was not found.`);
         }
 
-        const targetObjectId = findObjectIdByVersionPath(workspace, versionId, toPath);
-        if (targetObjectId && targetObjectId !== objectId) {
+        const target = selectSnapshotByPath(txDb, workspaceId, versionId, toPath);
+        if (target && target.objectId !== before.objectId) {
           throw new VersionedTextStoreError(
             "target-path-exists",
             `File ${toPath} already exists.`,
@@ -3178,14 +3833,14 @@ function createVersionedTextStoreWithHooks(
 
         const recordedAtMs = readNowMs();
         const momentId = createGeneratedId("moment");
-        if (workspace.moments.some((moment) => moment.id === momentId)) {
+        if (txDb.prepare("SELECT 1 FROM moments WHERE workspace_id = ? AND moment_id = ?").get(workspaceId, momentId)) {
           rejectDuplicateId("moment", momentId);
         }
         const moment = createMoment({
           id: momentId,
           workspaceId,
           versionId,
-          objectId,
+          objectId: before.objectId,
           path: toPath,
           recordedAtMs,
           operation: "rename",
@@ -3203,18 +3858,22 @@ function createVersionedTextStoreWithHooks(
           latestMomentId: moment.id,
           metadata: pickWriteMetadata(metadata),
         };
-        const object = getOwn(workspace.objects, objectId);
-        if (!object) {
-          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-        }
-        const aliases = pathAliasesForVersion(workspace, versionId);
-        if (getOwn(aliases, fromPath) === objectId) {
-          delete aliases[fromPath];
-        }
-        aliases[toPath] = objectId;
-        snapshots[objectId] = after;
-        workspace.moments.push(moment);
-        await saveState(state, workspaceId);
+        const object = requireFileObjectRow(txDb, workspaceId, before.objectId);
+        insertMomentRow(txDb, moment);
+        txDb
+          .prepare(
+            "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
+          )
+          .run(workspaceId, versionId, fromPath, before.objectId);
+        txDb
+          .prepare(
+            `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET object_id = excluded.object_id`,
+          )
+          .run(workspaceId, versionId, toPath, before.objectId);
+        insertOrReplaceSnapshot(txDb, "snapshots", workspaceId, versionId, after);
+        await persistBarrier();
         return {
           object: cloneFileObject(object),
           before: cloneSnapshot(before),
@@ -3231,17 +3890,16 @@ function createVersionedTextStoreWithHooks(
         const versionId = normalizeVersionId(input.versionId);
         const path = normalizeWritePath(input.path);
         const metadata = normalizeWriteMetadata(input.metadata);
-        const state = await loadWritableState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const result = deleteTextFileInWorkspace({
-          workspace,
+        await beforeWriteMutation();
+        const result = deleteTextFileInDb({
+          db: db(),
           workspaceId,
           versionId,
           path,
           metadata,
           momentId: input.momentId,
         });
-        await saveState(state, workspaceId);
+        await persistBarrier();
         return result;
       });
     },
@@ -3253,47 +3911,79 @@ function createVersionedTextStoreWithHooks(
         const versionId = normalizeVersionId(input.versionId);
         const path = normalizeWritePath(input.path);
         const mutationMomentId = normalizeGeneratedId("moment", input.mutationMomentId);
-        const state = await loadWritableState();
-        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const momentIndex = workspace.moments.findIndex(
-          (moment) =>
-            moment.id === mutationMomentId &&
-            moment.workspaceId === workspaceId &&
-            moment.versionId === versionId &&
-            moment.path === path,
-        );
-        if (momentIndex < 0) {
+        await beforeWriteMutation();
+        const txDb = db();
+        requireWorkspaceVersionRow(txDb, workspaceId, versionId);
+        const momentRow = txDb
+          .prepare(
+            momentSelectSql(
+              `WHERE m.workspace_id = ? AND m.moment_id = ? AND m.version_id = ? AND m.path = ?`,
+            ),
+          )
+          .get(workspaceId, mutationMomentId, versionId, path);
+        if (!momentRow) {
           throw new VersionedTextStoreError(
             "file-not-found",
             `Mutation moment ${mutationMomentId} was not found for ${path}.`,
           );
         }
-        const moment = workspace.moments[momentIndex];
-        if (!moment) {
-          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-        }
+        const moment = momentFromRow(momentRow);
+        const momentOrder = rowNumber(momentRow, "moment_order");
         const before =
           moment.before === undefined
-            ? legacyRollbackBeforeSnapshot({
-                workspace,
-                versionId,
-                path,
-                moment,
-                momentIndex,
-                legacyBeforeText: input.legacyBeforeText,
-              })
+            ? (() => {
+                const previous =
+                  selectMomentByOrder(
+                    txDb,
+                    workspaceId,
+                    versionId,
+                    moment.objectId,
+                    momentOrder - 1,
+                  ) ??
+                  inheritedObjectMomentFromDb(
+                    txDb,
+                    workspaceId,
+                    versionId,
+                    moment.objectId,
+                  );
+                if (input.legacyBeforeText !== undefined) {
+                  const legacyBeforeText = normalizeWriteText(input.legacyBeforeText);
+                  if (!previous || previous.moment.operation === "delete") {
+                    throw new VersionedTextStoreError(
+                      "invalid-input",
+                      `Legacy mutation moment ${moment.id} has no earlier snapshot to restore.`,
+                    );
+                  }
+                  const rollbackPath =
+                    moment.operation === "rename" ? previous.moment.path : path;
+                  return {
+                    objectId: moment.objectId,
+                    versionId,
+                    path: rollbackPath,
+                    text: legacyBeforeText,
+                    updatedAtMs: previous.moment.recordedAtMs,
+                    latestMomentId: previous.moment.id,
+                    metadata: pickWriteMetadata(previous.moment.metadata),
+                  };
+                }
+                if (moment.operation === "write" && !previous) return null;
+                throw new VersionedTextStoreError(
+                  "invalid-input",
+                  `Legacy mutation moment ${moment.id} is missing a rollback preimage.`,
+                );
+              })()
             : moment.before;
         if (before && before.versionId !== versionId) {
           invalidRollbackSnapshot();
         }
         if (
-          workspace.moments.some(
-            (candidate, index) =>
-              index > momentIndex &&
-              candidate.workspaceId === workspaceId &&
-              candidate.versionId === versionId &&
-              candidate.objectId === moment.objectId,
-          )
+          txDb
+            .prepare(
+              `SELECT 1 FROM moments
+               WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND moment_order > ?
+               LIMIT 1`,
+            )
+            .get(workspaceId, versionId, moment.objectId, momentOrder)
         ) {
           throw new VersionedTextStoreError(
             "invalid-input",
@@ -3301,13 +3991,14 @@ function createVersionedTextStoreWithHooks(
           );
         }
         if (
-          rollbackMomentHasDependents(
-            workspace,
+          rollbackMomentHasDependentsInDb({
+            db: txDb,
+            workspaceId,
             versionId,
-            mutationMomentId,
-            momentIndex,
-            moment.objectId,
-          )
+            momentId: mutationMomentId,
+            momentOrder,
+            objectId: moment.objectId,
+          })
         ) {
           throw new VersionedTextStoreError(
             "invalid-input",
@@ -3317,16 +4008,19 @@ function createVersionedTextStoreWithHooks(
         if (before && before.path !== path && moment.operation !== "rename") {
           invalidRollbackSnapshot();
         }
-        const aliases = pathAliasesForVersion(workspace, versionId);
-        const snapshots =
-          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
-        workspace.snapshots[versionId] = snapshots;
 
         if (before) {
           if (before.objectId !== moment.objectId) {
             invalidRollbackSnapshot();
           }
-          const restorePathObjectId = getOwn(aliases, before.path);
+          const restorePathObject = txDb
+            .prepare(
+              "SELECT object_id FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ?",
+            )
+            .get(workspaceId, versionId, before.path);
+          const restorePathObjectId = restorePathObject
+            ? rowString(restorePathObject, "object_id")
+            : undefined;
           if (restorePathObjectId !== undefined && restorePathObjectId !== before.objectId) {
             throw new VersionedTextStoreError(
               "target-path-exists",
@@ -3334,29 +4028,54 @@ function createVersionedTextStoreWithHooks(
             );
           }
         }
-
-        workspace.moments.splice(momentIndex, 1);
-        if (getOwn(aliases, path) === moment.objectId) {
-          delete aliases[path];
-        }
-        delete snapshots[moment.objectId];
+        await persistBarrier();
+        txDb
+          .prepare("DELETE FROM moments WHERE workspace_id = ? AND moment_id = ?")
+          .run(workspaceId, mutationMomentId);
+        txDb
+          .prepare(
+            "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
+          )
+          .run(workspaceId, versionId, path, moment.objectId);
+        txDb
+          .prepare("DELETE FROM snapshots WHERE workspace_id = ? AND version_id = ? AND object_id = ?")
+          .run(workspaceId, versionId, moment.objectId);
 
         if (before) {
-          const object = getOwn(workspace.objects, before.objectId);
-          if (!object) {
-            throw new VersionedTextStoreError(
-              "state-corrupt",
-              "Versioned text store is corrupt.",
-            );
-          }
-          aliases[before.path] = before.objectId;
-          snapshots[before.objectId] = cloneSnapshot(before);
+          txDb
+            .prepare(
+              `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET object_id = excluded.object_id`,
+            )
+            .run(workspaceId, versionId, before.path, before.objectId);
+          insertOrReplaceSnapshot(txDb, "snapshots", workspaceId, versionId, before);
         }
 
-        if (!workspaceReferencesObject(workspace, moment.objectId)) {
-          delete workspace.objects[moment.objectId];
+        const remainingReferences = txDb
+          .prepare(
+            `SELECT 1
+             WHERE EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id = ? AND object_id = ?)
+                OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id = ? AND object_id = ?)
+                OR EXISTS (SELECT 1 FROM fork_base_snapshots WHERE workspace_id = ? AND object_id = ?)
+                OR EXISTS (SELECT 1 FROM moments WHERE workspace_id = ? AND object_id = ?)
+             LIMIT 1`,
+          )
+          .get(
+            workspaceId,
+            moment.objectId,
+            workspaceId,
+            moment.objectId,
+            workspaceId,
+            moment.objectId,
+            workspaceId,
+            moment.objectId,
+          );
+        if (!remainingReferences) {
+          txDb
+            .prepare("DELETE FROM file_objects WHERE workspace_id = ? AND object_id = ?")
+            .run(workspaceId, moment.objectId);
         }
-        await saveState(state, workspaceId);
       });
     },
 
@@ -3365,16 +4084,21 @@ function createVersionedTextStoreWithHooks(
         assertInputEnvelope(input);
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const objectId = normalizeObjectId(input.objectId);
-        const state = await loadState();
-        const workspace = getOwn(state.workspaces, workspaceId);
-        const object = workspace ? (getOwn(workspace.objects, objectId) ?? null) : null;
-        if (!object && objectExistsInAnotherWorkspace(state, workspaceId, objectId)) {
+        const objectRow = db()
+          .prepare("SELECT * FROM file_objects WHERE workspace_id = ? AND object_id = ?")
+          .get(workspaceId, objectId);
+        if (
+          !objectRow &&
+          db()
+            .prepare("SELECT workspace_id FROM file_objects WHERE object_id = ? AND workspace_id <> ?")
+            .get(objectId, workspaceId)
+        ) {
           throw new VersionedTextStoreError(
             "workspace-mismatch",
             `Object ${objectId} does not belong to workspace ${workspaceId}.`,
           );
         }
-        return object ? cloneFileObject(object) : null;
+        return objectRow ? cloneFileObject(objectFromRow(objectRow)) : null;
       });
     },
   };
