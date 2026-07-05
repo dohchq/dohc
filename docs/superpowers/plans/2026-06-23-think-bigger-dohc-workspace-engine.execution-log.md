@@ -14355,3 +14355,207 @@ git diff --check
 - When PR 01 proper lands its import-enforcement gate, migrate consumers to
   contracts imports and review engine re-exports for retirement; add zod
   mirrors only if a runtime validation site appears.
+
+## PR 0M-7 - Arc Gate: Capture-Failure Notice, Agent QA, Validation Sweep
+
+Status: merged to main via PR #61 (merge commit b877518e)
+Branch: codex/think-bigger-0m7-arc-gate
+Worktree: /home/ice/dev/dohc-0m7-arc-gate (removed after merge)
+Implementation workstream, if used: direct Claude lane (fable-5) for the gate
+work, resumed once after a session-limit interruption; a second lane for the
+CodeRabbit triage/fixes; orchestrator merge review
+PR Link: https://github.com/dohc-ai/dohc/pull/61
+Date started: 2026-07-05
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] User-visible capture-failure notice (required 0M-5 review finding):
+      onCaptureOutcome seam on background capture passes, per-workspace
+      transition-deduped flag on SyncStatusResult, persistent calm notice in
+      NoticeCenter, cleared on recovery; a failed engine-store open is no
+      longer cached forever (recovery is real)
+- [x] Agent CLI QA on the SAFE codex sandbox (workspace-write, codex 0.140.0
+      — the Phase 0 bubblewrap/danger-full-access exception no longer needed
+      and can be retired): Phase 0 smoke PASS; new
+      scripts/phase0m-agent-engine-qa.ts proves an agent edit in a FLAGGED
+      workspace lands as an engine moment with zero legacy change sets and
+      zero .env capture, through the production capture gate
+- [x] Both long-standing "pre-existing environment" failures root-caused as
+      real bugs and fixed: FORCE_COLOR/ANSI broke dev-preview URL detection
+      (siteRunner.ts, affected real users); node>=25 WebStorage shadowed
+      jsdom localStorage (desktop vitest execArgv). Desktop vitest and the
+      full desktop e2e suite are fully green for the first time
+- [x] Batched CodeRabbit review over the entire arc (CLI, base b93687a8):
+      45 findings — 39 fixed, 4 rejected with written false-positive
+      arguments, 2 perf items deferred with rationale (see Unresolved
+      Findings). Highlights fixed: symlink-leaf capture defense (lstat
+      refusal in readDiskTextState + writer ancestor containment, 6 new
+      tests), decoded-path .env classifier bypass (secrets%2eenv), first-open
+      SQLite schema race made idempotent, engine DDL single-sourced
+      (engineDbSchema.ts — the duplicate had already drifted), store close()
+      lifecycle, renderer liveness re-checks after every await, conflict
+      dialog cannot be dismissed mid-merge
+- [x] Full validation sweep green: 14 package suites including live Postgres
+      (workspace-postgres 23, workspace-api 76), 17 project typechecks,
+      brand guard, docs checker, cargo fmt/test, full desktop e2e 17/17,
+      perf snapshot within every lane envelope
+
+### Files Changed
+
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts (+ .test.ts),
+  workspaceActivity.ts, engineCaptureGate.ts (new), siteRunner.ts (+ test)
+- apps/desktop/src/main.ts, ipc/bridgeContract.ts (+ test), preload-adjacent
+  wiring, renderer NoticeCenter.tsx, StatusBar.test.tsx,
+  WorkspaceVersions.tsx, LinkedChats.tsx, DesktopWorkspaceShell.tsx,
+  EngineHistory.test.ts, unifiedDiff.tsx (+ new test), workbench tests
+- apps/desktop/vitest.config.ts, e2e helpers + workspace-switch-race spec
+- packages/workspace-engine/src/versionedTextStore.ts, linkedChatStore.ts,
+  engineDbSchema.ts (new), workspaceSearch.ts, versionCompare.ts, tests
+- packages/workspace-contracts/src/engine.ts (+ compile checks), README
+- scripts/phase0m-agent-engine-qa.ts (new)
+
+### Tests Added Or Updated
+
+- Engine 207/207 (+6: encoded-.env classifier, schema-race idempotence,
+  store close/reopen, author_kind corruption fail-closed, chat-store-first
+  schema creation). Desktop vitest 832/832 fully green (+14: symlink
+  containment x6, suppression read-spy, binary round-trip, Other-tip
+  durability, tab-path decoding, unified-diff note, notice tests).
+- Justified strengthening only; the vacuous suppression assertion was
+  replaced with a read-spy that proves zero engine reads for suppressed
+  paths.
+
+### Commands Run
+
+```bash
+# full sweep — see PR #61 body; highlights:
+DOHC_TEST_AGENT_CLI=codex node scripts/phase0-agent-cli-smoke.mjs        # PASS (safe sandbox)
+DOHC_TEST_AGENT_CLI=codex pnpm exec tsx scripts/phase0m-agent-engine-qa.ts  # PASS (engine moment asserted)
+coderabbit review --plain --type committed --base-commit b93687a8        # 45 findings, triaged
+pnpm --filter @dohc/workspace-engine test    # 207/207
+TMPDIR=/tmp pnpm --filter @dohc/desktop test # 832/832 (fully green)
+pnpm run test:e2e                            # 17/17
+pnpm -r --if-present typecheck               # clean, 17 projects
+git diff --check                             # clean
+```
+
+### E2E / Visual / Manual QA
+
+- Full desktop e2e 17/17 including the previously failing sites-preview
+  specs; capture/versions/switch-race/linked-chats re-verified after the
+  CodeRabbit fixes (8/8).
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: codex (safe workspace-write sandbox). Smoke PASS;
+  flagged-workspace engine assertion PASS. Transcripts under /tmp QA dirs.
+- The Phase 0 danger-full-access exception is retired: codex 0.140.0 no
+  longer requires bubblewrap.
+
+### CodeRabbit
+
+- Status: COMPLETE for the arc gate (batched CLI review over
+  b93687a8..0M-7 tip per User Decision 5).
+- Findings: 45 (19 major / 10 minor / 16 trivial).
+- Fixes: 39, committed as c6770158 with regression tests for every
+  security/data-integrity fix.
+- Overrides: 4 rejections (documented false positives/preference: type-only
+  import cycle, total inner JOIN on NOT NULL FK payloads, perf-budget
+  assertion placement, test colocation), 2 perf deferrals (cold-open
+  full-history validation benchmark for aged workspaces; hash-only compare
+  listing API) — none in non-overridable categories except #27, whose
+  false-positive argument is recorded in the triage table.
+- Override approval reference: orchestrator-approved per the merge-when-green
+  cadence granted 2026-07-05.
+
+### Unresolved Findings
+
+- Deferred perf follow-ups: aged-workspace cold-open benchmark (validation
+  sweep is the corruption gate); sha-only listTextFileDigests for compare.
+
+### Subagent Reviews
+
+- Architecture/Security/QA: triage lane reviewed all 45 findings against the
+  plan's non-overridable categories; orchestrator independently re-ran the
+  suites and reviewed the triage rationale.
+
+### Security / Privacy Notes
+
+- Symlink-leaf capture defense closes the last known path for outside
+  content to enter engine history; the .env classifier now normalizes
+  encoded paths; a personal email in test fixtures was replaced.
+
+### Performance Notes
+
+- Arc perf snapshot re-run, all within lane envelopes: storage 4,824 ms /
+  1,000 writes (legacy 42,017 ms) and 79 ms cold read; capture burst
+  587.7 ms / 100 files; reconcile 739.5 ms / 1,000 files; version switch
+  214.0 ms; history first-content 71 ms (budget 500 ms); chat rail 946 ms /
+  200 messages; Rust scan spike 7.32 ms vs TS 314.62 ms. Machine: Ryzen 9
+  7950X, WSL2, node v25.2.1, /tmp tmpfs.
+
+### Migration Notes
+
+- None.
+
+### Remaining Risk
+
+- apps/web backendSwitch.test.tsx fails pre-existing on clean main (jsdom
+  lacks Blob#arrayBuffer); outside arc scope, cheap fix recorded.
+- macOS/Windows real-runner validation of the portable writer remains
+  outstanding (0M-2 follow-up; needs runners or CI).
+
+### Follow-Up / Deletion Conditions
+
+- See the PR 0M Arc Summary below for the consolidated disposition of every
+  carried-forward Phase 0 gate.
+
+## PR 0M Arc Summary (2026-07-06)
+
+The PR 0M Product Mount Arc is complete: PRs #55 (0M-1 SQLite storage), #56
+(0M-2 portable writer), #57 (0M-3 watcher-to-engine capture), #58 (0M-4 named
+versions — the wedge), #59 (0M-5 history flip + linked-chat rail), #60 (0M-6
+contracts extraction), #61 (0M-7 arc gate) all merged to main. The engine is
+mounted in the product behind `experimental.workspaceEngineAlpha`: the wedge
+loop (create Version -> edit as normal files -> history -> compare -> merge ->
+conflict resolution -> linked chat -> restore) runs end to end in the desktop
+app with measured budgets, and engine state is the sole source of truth for
+flagged workspaces.
+
+Disposition of the carried-forward Phase 0 gates (from the Landing Status
+section above):
+
+- Shared substrate baseline package: superseded — 0M-6 made
+  @dohc/workspace-contracts the canonical type source with the recorded
+  rename mapping (the honest replacement for Phase0SharedSubstrateBaseline).
+- Server/engine-derived actor identity: DONE for every new engine IPC
+  surface (workspace resolved server-side, chat authorship main-derived,
+  unflagged callers rejected). Legacy surfaces retire with the old system
+  per User Decision 6.
+- Full workspace scoping: DONE at alpha scope (per-workspace engine.db under
+  the workspace root; all handlers resolve through requireWorkspace).
+- Agent writes respect locks/protected paths/skill-turn gates: locks and
+  skill-turn gates do not exist on the engine path yet — REMAINING for the
+  expansion roadmap (agent writes are actor-neutral file edits at alpha).
+- External-edit detection while running: DONE (e2e).
+- Startup reconciliation of closed-period edits: DONE (e2e).
+- Linked chat beside the file: DONE (rail + e2e, rename survival).
+- Agent chat display name: DONE (rendering path; production agent
+  participation arrives with MCP/agent-on-engine work).
+- Workspace-switch race E2E: DONE (hard-asserted with perf budget).
+- Performance measurements against budgets: DONE (snapshot table in 0M-7).
+- CodeRabbit major gate: DONE (batched arc review, 45 findings triaged).
+- HTML atom sandboxing / Y.Doc precedence: legacy-system invariants — they
+  retire with the legacy stack (User Decision 6) and re-enter as engine
+  contracts if/when rich docs get an engine content driver.
+- macOS/Windows real-runner validation: REMAINING (0M-2 portable writer is
+  logic-verified on Linux; needs real runners).
+
+Open items carried to the next phase: MCP/agent writes through the engine
+with attribution; engine search flip (ripgrep remains the interim desktop
+search; engine search serves the chat rail — recorded rationale: un-indexed
+linear scan is not yet a product search surface); macOS/Windows runners;
+aged-workspace cold-open benchmark; sha-only compare listing;
+apps/web Blob#arrayBuffer test fix; legacy-stack retirement plan (superseded
+PR 21 scope).
