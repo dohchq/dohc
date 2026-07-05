@@ -4,6 +4,7 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isVersionCompareTabPath,
   parseHistoryDiffTabPath,
 } from "./workbenchState";
 
@@ -15,6 +16,7 @@ function fileName(path: string): string {
     const name = parsed?.filePath.split("/").pop() ?? "Diff";
     return `Diff: ${name}`;
   }
+  if (isVersionCompareTabPath(path)) return "Compare with Main";
   return path.split("/").pop() ?? path;
 }
 
@@ -25,6 +27,7 @@ function tabTitle(path: string): string {
     const parsed = parseHistoryDiffTabPath(path);
     return parsed ? `History diff: ${parsed.filePath}` : "History diff";
   }
+  if (isVersionCompareTabPath(path)) return "Compare this Version with Main";
   return path;
 }
 

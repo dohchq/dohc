@@ -1,24 +1,37 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
+import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   classifyEngineFilePath,
+  compareVersionFiles,
   createVersionedTextStore,
   type ActorNeutralWriteMetadata,
+  type VersionFileChange,
+  type VersionRecord,
+  type VersionedTextConflictRecord,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import { isTextMediaType, mediaTypeForPath, scanWorkspaceFiles } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 
-// PR 0M-3 watcher->engine capture (interim dual-write).
+// PR 0M-3 watcher->engine capture (interim dual-write) + PR 0M-4 named-version
+// operations.
 //
 // While a workspace's `experimental.workspaceEngineAlpha` flag is on, every
-// settled watcher batch is ALSO captured into the workspace engine's
-// versioned text store (main version) beside the untouched legacy
-// .dohc/history recording. The history UI still reads legacy records; lane
-// 0M-5 flips the UI to engine moments and disables legacy recording for
-// flagged workspaces. Engine state lives under `<root>/.dohc/engine/`.
+// settled watcher batch is captured into the workspace engine's versioned
+// text store beside the untouched legacy .dohc/history recording. The history
+// UI still reads legacy records; lane 0M-5 flips the UI to engine moments and
+// disables legacy recording for flagged workspaces. Engine state lives under
+// `<root>/.dohc/engine/`.
+//
+// PR 0M-4: the workspace folder on disk always materializes the ACTIVE
+// version (engine-owned, persisted in engine.db, default Main). Capture and
+// reconciliation route to the active version — read per chain task, never
+// cached across switches. Version operations (create/switch/compare/merge/
+// resolve) run as tasks on the SAME chain, so they can never interleave with
+// batch capture or with each other.
 //
 // What the engine owns (shared policy, not local heuristics):
 //   - classifyEngineFilePath (workspace-engine) excludes ignored segments and
@@ -29,26 +42,42 @@ import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 //     no metadata-only engine moments; if a previously captured path stops
 //     being engine-ownable text, it is removed from engine state so engine
 //     state never goes stale-but-authoritative.
+//   - The same boundary limits SWITCHING: versions cover engine-owned text
+//     files; binary/secret/ignored files are untouched by a version switch
+//     (the UI states this honestly).
 //
 // Single engine record per physical write:
 //   - a settled batch carries one final on-disk state per path, so rapid
 //     writes coalesce into at most one engine moment per path per batch;
 //   - a batch whose content already equals engine state is a no-op (this
 //     also makes startup reconciliation idempotent);
-//   - engine-originated disk writes (restore flows, future engine API/MCP
-//     writes) register expected events via registerExpectedEngineEvents and
-//     the matching watcher observation skips engine re-capture (consume-once
-//     with expiry, the ActiveLocalOperation/expectedEvents precedent).
-//     Legacy history still records those observations with the provenance it
-//     gets today — only the ENGINE re-capture is suppressed.
+//   - engine-originated disk writes (restore flows, version switch/merge
+//     materialization) register expected events via
+//     registerExpectedEngineEvents and the matching watcher observation skips
+//     engine re-capture (consume-once with expiry, the
+//     ActiveLocalOperation/expectedEvents precedent). Legacy history still
+//     records those observations with the provenance it gets today — only the
+//     ENGINE re-capture is suppressed.
+//
+// Switch-flow crash ordering (the honest story): the engine records the
+// DESTINATION as active BEFORE the disk is rewritten, and the recovery
+// invariant is "disk state reconciles into whichever version is recorded as
+// active". A failure mid-materialization (live error or process crash)
+// therefore resolves the same way: the next reconcile — run immediately on a
+// live error, or by the startup pass after a crash — captures the actual disk
+// state into the destination version. Nothing is ever lost: the previous
+// version's tip was captured in full before the switch began, and the
+// destination's pre-switch tip remains in its moment history.
 //
 // Concurrency and failure:
 //   - all engine work runs on one internal promise chain in the main process,
-//     off the IPC hot path: batch capture and startup reconciliation are
-//     serialized against each other and never block the renderer;
+//     off the IPC hot path: batch capture, startup reconciliation, and
+//     version operations are serialized against each other and never block
+//     the renderer;
 //   - engine failures are logged and surfaced via onError but never crash the
 //     watcher; legacy recording is untouched (fail open for legacy, fail
-//     visible for engine).
+//     visible for engine). Version operations reject to their caller so the
+//     UI can surface the failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
@@ -61,9 +90,36 @@ export interface ExpectedEngineEvent {
   sha256?: string;
 }
 
+export interface WorkspaceVersionsSnapshot {
+  versions: VersionRecord[];
+  activeVersionId: string;
+}
+
+export interface WorkspaceVersionSwitchResult {
+  activeVersionId: string;
+  changedFileCount: number;
+}
+
+export interface WorkspaceVersionMergeResult {
+  mergedFileCount: number;
+  unchangedFileCount: number;
+  conflicts: VersionedTextConflictRecord[];
+}
+
+export type WorkspaceVersionConflictResolution =
+  | { kind: "keep-current" }
+  | { kind: "apply-incoming" }
+  | { kind: "apply-merged"; text: string };
+
+export interface WorkspaceVersionConflictResolveOutcome {
+  conflict: VersionedTextConflictRecord;
+  remaining: VersionedTextConflictRecord[];
+}
+
 export interface WorkspaceEngineCapture {
-  // Kicks the background startup reconciliation (closed-period edits). Runs
-  // on the capture chain, so it cannot interleave with live batch capture.
+  // Kicks the background startup reconciliation (closed-period edits — and,
+  // after a mid-switch crash, the recovery pass). Runs on the capture chain,
+  // so it cannot interleave with live batch capture.
   start(): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
@@ -71,6 +127,31 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
+  // Version operations (PR 0M-4). Mutating operations run on the capture
+  // chain; reads are served directly by the store (which already orders
+  // reads after its own writes). All reject to the caller on failure.
+  listVersions(): Promise<WorkspaceVersionsSnapshot>;
+  // Creates a named version forked from the ACTIVE version's current disk
+  // state and makes it active. Disk content is untouched (the fork starts as
+  // an identical copy).
+  createVersion(name: string): Promise<WorkspaceVersionsSnapshot>;
+  // Captures current disk state into the active version, then rewrites the
+  // workspace folder to the target version's engine-owned text files.
+  switchVersion(versionId: string): Promise<WorkspaceVersionSwitchResult>;
+  // Changed paths between a version and a target (default Main), computed
+  // after capturing the latest disk edits so the answer is never stale.
+  compareVersions(
+    sourceVersionId: string,
+    targetVersionId?: string,
+  ): Promise<VersionFileChange[]>;
+  // Merges a named version into Main through the engine merge API. When Main
+  // is the active version, merged results are materialized to disk.
+  mergeVersionIntoMain(sourceVersionId: string): Promise<WorkspaceVersionMergeResult>;
+  listOpenConflicts(): Promise<VersionedTextConflictRecord[]>;
+  resolveConflict(
+    conflictId: string,
+    resolution: WorkspaceVersionConflictResolution,
+  ): Promise<WorkspaceVersionConflictResolveOutcome>;
   // Resolves when everything enqueued so far has been captured (tests).
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -86,6 +167,15 @@ export interface WorkspaceEngineCaptureOptions {
   store?: VersionedTextStore;
   now?: () => number;
   onError?: (context: string, error: unknown) => void;
+  // Injectable disk mutation seam so tests can exercise mid-switch failures
+  // without real fs faults. Defaults to careful direct fs writes with
+  // containment checks.
+  diskWriter?: EngineDiskWriter;
+}
+
+export interface EngineDiskWriter {
+  writeTextFile(absolutePath: string, text: string): Promise<void>;
+  deletePath(absolutePath: string): Promise<void>;
 }
 
 const ENGINE_MAIN_VERSION_ID = "main";
@@ -129,6 +219,50 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
   }
 }
 
+// A disk mutation the engine performs when materializing a version's text
+// files (switch, merge into the active version, conflict resolution).
+type MaterializeOperation =
+  | { kind: "write"; path: string; text: string }
+  | { kind: "delete"; path: string };
+
+function assertEngineWritablePath(path: string): void {
+  const check = validateUserWritePath(path);
+  if (!check.ok || check.normalized !== path) {
+    throw new Error(`Engine refused to write unsafe workspace path: ${path}`);
+  }
+  if (classifyEngineFilePath(path).kind !== "tracked") {
+    throw new Error(`Engine refused to write non-engine-owned path: ${path}`);
+  }
+}
+
+function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
+  // Symlink containment: after any mkdir, the REAL parent directory must
+  // still resolve inside the workspace root — a symlinked segment cannot
+  // redirect an engine write outside the workspace (the same defense
+  // versionedFileWorkspace applies to its write path).
+  async function assertContainedDir(absoluteDir: string): Promise<void> {
+    const [realRoot, realDir] = await Promise.all([
+      realpath(resolve(rootPath)),
+      realpath(absoluteDir),
+    ]);
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+      throw new Error(`Engine write escaped the workspace root: ${absoluteDir}`);
+    }
+  }
+  return {
+    async writeTextFile(absolutePath, text) {
+      const dir = dirname(absolutePath);
+      await mkdir(dir, { recursive: true });
+      await assertContainedDir(dir);
+      await writeFile(absolutePath, text, "utf8");
+    },
+    async deletePath(absolutePath) {
+      await assertContainedDir(dirname(absolutePath));
+      await rm(absolutePath, { force: true });
+    },
+  };
+}
+
 export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
@@ -142,15 +276,18 @@ export function createWorkspaceEngineCapture(
         error,
       );
     });
+  const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
   let store: VersionedTextStore | null = options.store ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
 
-  // THE serialization point: batch capture and reconciliation both run here,
-  // strictly in order. A failed task logs and the chain stays alive. Work
-  // enqueued before stop() still runs (stop refuses only NEW work), so the
-  // final settled batch is never dropped on shutdown.
+  // THE serialization point: batch capture, reconciliation, and version
+  // operations all run here, strictly in order. A failed background task logs
+  // and the chain stays alive; a failed version operation rejects to its
+  // caller and the chain stays alive. Work enqueued before stop() still runs
+  // (stop refuses only NEW work), so the final settled batch is never dropped
+  // on shutdown.
   let chain: Promise<void> = Promise.resolve();
   function enqueue(context: string, task: () => Promise<void>): void {
     if (stopped) return;
@@ -163,6 +300,23 @@ export function createWorkspaceEngineCapture(
     });
   }
 
+  // Chain task whose result (or failure) belongs to the caller — used by the
+  // version operations so the IPC layer can surface real errors. The chain
+  // itself never rejects.
+  function enqueueResult<T>(context: string, task: () => Promise<T>): Promise<T> {
+    if (stopped) {
+      return Promise.reject(
+        new Error(`Workspace engine is shutting down (${context}).`),
+      );
+    }
+    const result = chain.then(task);
+    chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   let initialized: Promise<VersionedTextStore> | null = null;
   function engineStore(): Promise<VersionedTextStore> {
     initialized ??= (async () => {
@@ -171,6 +325,14 @@ export function createWorkspaceEngineCapture(
       return store;
     })();
     return initialized;
+  }
+
+  // The active version is read PER TASK on the chain — never cached across
+  // tasks — so a batch enqueued before a switch and captured after it can
+  // never write into the wrong version.
+  async function activeVersionIdOf(engine: VersionedTextStore): Promise<string> {
+    const active = await engine.getActiveVersion({ workspaceId });
+    return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
 
   function consumeExpectedEvent(
@@ -191,53 +353,50 @@ export function createWorkspaceEngineCapture(
     return true;
   }
 
+  function registerExpectedEngineEvents(
+    events: readonly ExpectedEngineEvent[],
+  ): () => void {
+    const registered: RegisteredExpectedEngineEvent[] = events.map((event) => ({
+      ...event,
+      expiresAtMs: now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+    }));
+    expectedEvents.push(...registered);
+    return () => {
+      expectedEvents = expectedEvents.filter((event) => !registered.includes(event));
+    };
+  }
+
   async function deleteIfTracked(
     engine: VersionedTextStore,
+    versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
   ): Promise<boolean> {
-    const current = await engine.readTextFile({
-      workspaceId,
-      versionId: ENGINE_MAIN_VERSION_ID,
-      path,
-    });
+    const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
-    await engine.deleteTextFile({
-      workspaceId,
-      versionId: ENGINE_MAIN_VERSION_ID,
-      path,
-      metadata,
-    });
+    await engine.deleteTextFile({ workspaceId, versionId, path, metadata });
     return true;
   }
 
   async function writeIfChanged(
     engine: VersionedTextStore,
+    versionId: string,
     path: string,
     disk: { text: string; sha256: string },
     metadata: ActorNeutralWriteMetadata,
   ): Promise<boolean> {
-    const current = await engine.readTextFile({
-      workspaceId,
-      versionId: ENGINE_MAIN_VERSION_ID,
-      path,
-    });
+    const current = await engine.readTextFile({ workspaceId, versionId, path });
     // Content equality is the no-op rule: it keeps one engine record per
     // physical write across settle windows and makes reconciliation
     // idempotent.
     if (current && current.text === disk.text) return false;
-    await engine.writeTextFile({
-      workspaceId,
-      versionId: ENGINE_MAIN_VERSION_ID,
-      path,
-      text: disk.text,
-      metadata,
-    });
+    await engine.writeTextFile({ workspaceId, versionId, path, text: disk.text, metadata });
     return true;
   }
 
   async function captureOnePath(
     engine: VersionedTextStore,
+    versionId: string,
     event: WatcherEvent,
     metadata: ActorNeutralWriteMetadata,
   ): Promise<void> {
@@ -247,27 +406,61 @@ export function createWorkspaceEngineCapture(
     // content instead of replaying stale event snapshots.
     if (event.operation === "delete") {
       if (consumeExpectedEvent("delete", event.path)) return;
-      await deleteIfTracked(engine, event.path, metadata);
+      await deleteIfTracked(engine, versionId, event.path, metadata);
       return;
     }
     const disk = await readDiskTextState(rootPath, event.path);
     if (disk.kind === "unreadable") return;
     if (disk.kind === "absent") {
       if (consumeExpectedEvent("delete", event.path)) return;
-      await deleteIfTracked(engine, event.path, metadata);
+      await deleteIfTracked(engine, versionId, event.path, metadata);
       return;
     }
     if (disk.kind === "untracked-content") {
       // The path stopped being engine-ownable text: retire it from engine
       // state rather than leaving a stale snapshot behind.
-      await deleteIfTracked(engine, event.path, {
+      await deleteIfTracked(engine, versionId, event.path, {
         ...metadata,
         summary: "Stopped tracking non-text content",
       });
       return;
     }
     if (consumeExpectedEvent("write", event.path, disk.sha256)) return;
-    await writeIfChanged(engine, event.path, disk, metadata);
+    await writeIfChanged(engine, versionId, event.path, disk, metadata);
+  }
+
+  // Disk -> engine reconciliation for one version: after it completes, the
+  // version's engine state mirrors the workspace folder's engine-ownable text
+  // files exactly. Used for startup (closed-period edits), as the
+  // nothing-is-ever-lost capture before a switch, and as the crash-honest
+  // recovery when a switch fails mid-materialization.
+  async function reconcileDiskIntoVersion(
+    engine: VersionedTextStore,
+    versionId: string,
+    metadata: ActorNeutralWriteMetadata,
+  ): Promise<void> {
+    const scanned = await scanWorkspaceFiles(rootPath);
+    const diskPaths = new Set<string>();
+    for (const file of scanned) {
+      if (classifyEngineFilePath(file.path).kind !== "tracked") continue;
+      diskPaths.add(file.path);
+      const disk = await readDiskTextState(rootPath, file.path);
+      if (disk.kind === "unreadable") continue;
+      if (disk.kind === "text") {
+        await writeIfChanged(engine, versionId, file.path, disk, metadata);
+      } else {
+        // absent (raced a delete) or no longer engine-ownable text.
+        await deleteIfTracked(engine, versionId, file.path, metadata);
+        diskPaths.delete(file.path);
+      }
+    }
+    // Files the engine tracked that no longer exist on disk were deleted
+    // outside a live capture window; reconcile the deletions too.
+    const tracked = await engine.listTextFiles({ workspaceId, versionId });
+    for (const snapshot of tracked) {
+      if (diskPaths.has(snapshot.path)) continue;
+      await deleteIfTracked(engine, versionId, snapshot.path, metadata);
+    }
   }
 
   async function reconcile(): Promise<void> {
@@ -279,31 +472,94 @@ export function createWorkspaceEngineCapture(
       summary: "Reconciled offline edits",
       correlationId: `reconcile-${randomUUID()}`,
     };
-    const scanned = await scanWorkspaceFiles(rootPath);
-    const diskPaths = new Set<string>();
-    for (const file of scanned) {
-      if (classifyEngineFilePath(file.path).kind !== "tracked") continue;
-      diskPaths.add(file.path);
-      const disk = await readDiskTextState(rootPath, file.path);
-      if (disk.kind === "unreadable") continue;
-      if (disk.kind === "text") {
-        await writeIfChanged(engine, file.path, disk, metadata);
-      } else {
-        // absent (raced a delete) or no longer engine-ownable text.
-        await deleteIfTracked(engine, file.path, metadata);
-        diskPaths.delete(file.path);
+    // Routes to the ACTIVE version: after a mid-switch crash this is the
+    // recovery pass (the destination was recorded active before the disk was
+    // rewritten, so the actual disk state reconciles into it).
+    const versionId = await activeVersionIdOf(engine);
+    await reconcileDiskIntoVersion(engine, versionId, metadata);
+  }
+
+  // Applies engine-owned text state to the workspace folder, registering
+  // every write/delete as an expected engine event (sha256 for writes) so the
+  // watcher's observation of our own writes never re-captures them. Throws on
+  // the first failed operation; the failed operation's registration is
+  // cancelled so it can never swallow a later real user edit.
+  async function materialize(operations: readonly MaterializeOperation[]): Promise<void> {
+    for (const operation of operations) {
+      assertEngineWritablePath(operation.path);
+      const absolute = join(rootPath, operation.path);
+      const cancel =
+        operation.kind === "write"
+          ? registerExpectedEngineEvents([
+              { path: operation.path, operation: "write", sha256: sha256Utf8(operation.text) },
+            ])
+          : registerExpectedEngineEvents([
+              { path: operation.path, operation: "delete" },
+            ]);
+      try {
+        if (operation.kind === "write") {
+          await diskWriter.writeTextFile(absolute, operation.text);
+        } else {
+          await diskWriter.deletePath(absolute);
+        }
+      } catch (error) {
+        cancel();
+        throw new Error(
+          `Could not update ${operation.path} on disk: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { cause: error },
+        );
       }
     }
-    // Files the engine tracked that no longer exist on disk were deleted
-    // while dohc was closed; reconcile the deletions too.
-    const tracked = await engine.listTextFiles({
+  }
+
+  // Diff a version's engine state against the CURRENT disk state and plan the
+  // disk mutations that make the folder show that version. Binary, secret,
+  // ignored, oversized, and transiently unreadable paths are never touched.
+  async function planMaterialization(
+    engine: VersionedTextStore,
+    targetVersionId: string,
+    previousVersionId: string,
+  ): Promise<MaterializeOperation[]> {
+    const targetFiles = await engine.listTextFiles({
       workspaceId,
-      versionId: ENGINE_MAIN_VERSION_ID,
+      versionId: targetVersionId,
     });
-    for (const snapshot of tracked) {
-      if (diskPaths.has(snapshot.path)) continue;
-      await deleteIfTracked(engine, snapshot.path, metadata);
+    const targetPaths = new Set(targetFiles.map((file) => file.path));
+    const operations: MaterializeOperation[] = [];
+    for (const file of targetFiles) {
+      const disk = await readDiskTextState(rootPath, file.path);
+      // Never clobber content the engine does not own (binary-in-disguise,
+      // oversized) and never write over a transiently unreadable path.
+      if (disk.kind === "untracked-content" || disk.kind === "unreadable") continue;
+      if (disk.kind === "text" && disk.text === file.text) continue;
+      operations.push({ kind: "write", path: file.path, text: file.text });
     }
+    // Only paths the PREVIOUS version tracked are deletable: the pre-switch
+    // reconcile captured every engine-ownable text file into it, so this set
+    // is exactly "text files the engine owns on disk right now".
+    const previousFiles = await engine.listTextFiles({
+      workspaceId,
+      versionId: previousVersionId,
+    });
+    for (const file of previousFiles) {
+      if (targetPaths.has(file.path)) continue;
+      const disk = await readDiskTextState(rootPath, file.path);
+      if (disk.kind !== "text") continue;
+      operations.push({ kind: "delete", path: file.path });
+    }
+    return operations;
+  }
+
+  async function versionsSnapshot(
+    engine: VersionedTextStore,
+  ): Promise<WorkspaceVersionsSnapshot> {
+    const [versions, activeVersionId] = await Promise.all([
+      engine.listVersions({ workspaceId }),
+      activeVersionIdOf(engine),
+    ]);
+    return { versions, activeVersionId };
   }
 
   return {
@@ -316,10 +572,11 @@ export function createWorkspaceEngineCapture(
       const batch = events.map((event) => ({ ...event }));
       enqueue("batch capture", async () => {
         const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = { origin: "local-file" };
         for (const event of batch) {
           try {
-            await captureOnePath(engine, event, metadata);
+            await captureOnePath(engine, versionId, event, metadata);
           } catch (error) {
             // One bad path must not drop the rest of the batch.
             onError(`batch capture of ${event.path}`, error);
@@ -328,15 +585,229 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    registerExpectedEngineEvents(events) {
-      const registered: RegisteredExpectedEngineEvent[] = events.map((event) => ({
-        ...event,
-        expiresAtMs: now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
-      }));
-      expectedEvents.push(...registered);
-      return () => {
-        expectedEvents = expectedEvents.filter((event) => !registered.includes(event));
-      };
+    registerExpectedEngineEvents,
+
+    async listVersions() {
+      const engine = await engineStore();
+      return versionsSnapshot(engine);
+    },
+
+    createVersion(name) {
+      return enqueueResult("create version", async () => {
+        const engine = await engineStore();
+        const fromVersionId = await activeVersionIdOf(engine);
+        // Fork from exactly what's on disk right now — capture the latest
+        // edits first so the new version starts as a faithful copy.
+        await reconcileDiskIntoVersion(engine, fromVersionId, {
+          origin: "local-file",
+          summary: "Saved latest edits",
+          correlationId: `version-create-${randomUUID()}`,
+        });
+        const version = await engine.createNamedVersion({
+          workspaceId,
+          name,
+          fromVersionId,
+        });
+        // Create-and-switch: the fork is content-identical to the disk, so no
+        // materialization is needed.
+        await engine.setActiveVersion({ workspaceId, versionId: version.id });
+        return versionsSnapshot(engine);
+      });
+    },
+
+    switchVersion(versionId) {
+      return enqueueResult("switch version", async () => {
+        const engine = await engineStore();
+        const fromVersionId = await activeVersionIdOf(engine);
+        if (versionId === fromVersionId) {
+          return { activeVersionId: fromVersionId, changedFileCount: 0 };
+        }
+        // Fail closed before any mutation: an unknown target throws here.
+        await engine.listTextFiles({ workspaceId, versionId });
+        // Nothing is ever lost: the current disk state (including edits still
+        // inside the watcher settle window) is captured into the version the
+        // user is leaving.
+        const correlationId = `version-switch-${randomUUID()}`;
+        await reconcileDiskIntoVersion(engine, fromVersionId, {
+          origin: "local-file",
+          summary: "Saved latest edits before switching versions",
+          correlationId,
+        });
+        const operations = await planMaterialization(engine, versionId, fromVersionId);
+        // Record the destination BEFORE rewriting the disk (see the module
+        // note on crash ordering): recovery always reconciles disk state into
+        // the version recorded as active.
+        await engine.setActiveVersion({ workspaceId, versionId });
+        try {
+          await materialize(operations);
+        } catch (error) {
+          // Live-failure recovery mirrors crash recovery: capture the actual
+          // (possibly partial) disk state into the now-active destination so
+          // engine and disk agree, then surface the failure.
+          await reconcileDiskIntoVersion(engine, versionId, {
+            origin: "local-file",
+            summary: "Recovered from an interrupted version switch",
+            correlationId,
+          }).catch((recoveryError) => {
+            onError("switch recovery reconciliation", recoveryError);
+          });
+          throw error;
+        }
+        return { activeVersionId: versionId, changedFileCount: operations.length };
+      });
+    },
+
+    compareVersions(sourceVersionId, targetVersionId = ENGINE_MAIN_VERSION_ID) {
+      return enqueueResult("compare versions", async () => {
+        const engine = await engineStore();
+        // Capture the latest disk edits first so the comparison reflects what
+        // the user actually sees in the folder.
+        const activeVersionId = await activeVersionIdOf(engine);
+        await reconcileDiskIntoVersion(engine, activeVersionId, {
+          origin: "local-file",
+          summary: "Saved latest edits",
+          correlationId: `version-compare-${randomUUID()}`,
+        });
+        return compareVersionFiles(engine, {
+          workspaceId,
+          sourceVersionId,
+          targetVersionId,
+        });
+      });
+    },
+
+    mergeVersionIntoMain(sourceVersionId) {
+      return enqueueResult("merge version into Main", async () => {
+        const engine = await engineStore();
+        const activeVersionId = await activeVersionIdOf(engine);
+        const correlationId = `version-merge-${randomUUID()}`;
+        // Capture the latest disk edits so the merge sees them (whichever
+        // side is active).
+        await reconcileDiskIntoVersion(engine, activeVersionId, {
+          origin: "local-file",
+          summary: "Saved latest edits",
+          correlationId,
+        });
+        const versions = await engine.listVersions({ workspaceId });
+        const source = versions.find((version) => version.id === sourceVersionId);
+        if (!source || source.kind !== "named") {
+          throw new Error("Only a named version can merge into Main.");
+        }
+        const metadata: ActorNeutralWriteMetadata = {
+          origin: "api",
+          summary: `Merged version "${source.name}" into Main`,
+          correlationId,
+        };
+        // Paths identical on both sides need no merge; everything else goes
+        // through the engine's three-way per-file merge (which preserves
+        // base/current/incoming when it conflicts).
+        const changes = await compareVersionFiles(engine, {
+          workspaceId,
+          sourceVersionId,
+          targetVersionId: ENGINE_MAIN_VERSION_ID,
+        });
+        // Re-running the merge RESUMES: a path that already has an open
+        // conflict for this version pair re-surfaces that conflict instead of
+        // recording a duplicate.
+        const openConflicts = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+        });
+        const openConflictByPath = new Map(
+          openConflicts
+            .filter(
+              (conflict) =>
+                conflict.sourceVersionId === sourceVersionId &&
+                conflict.targetVersionId === ENGINE_MAIN_VERSION_ID,
+            )
+            .map((conflict) => [conflict.path, conflict]),
+        );
+        const materializations: MaterializeOperation[] = [];
+        const conflicts: VersionedTextConflictRecord[] = [];
+        let mergedFileCount = 0;
+        let unchangedFileCount = 0;
+        for (const change of changes) {
+          const existingConflict = openConflictByPath.get(change.path);
+          if (existingConflict) {
+            conflicts.push(existingConflict);
+            continue;
+          }
+          const result = await engine.mergeTextFileFromVersion({
+            workspaceId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            sourceVersionId,
+            path: change.path,
+            metadata,
+          });
+          if (result.kind === "unchanged") {
+            unchangedFileCount += 1;
+            continue;
+          }
+          if (result.kind === "conflict") {
+            conflicts.push(result.conflict);
+            continue;
+          }
+          mergedFileCount += 1;
+          if (result.operation === "write") {
+            materializations.push({
+              kind: "write",
+              path: change.path,
+              text: result.write.snapshot.text,
+            });
+          } else {
+            materializations.push({ kind: "delete", path: change.path });
+          }
+        }
+        // The folder shows the active version; only a merge into the active
+        // version changes what is on disk.
+        if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
+          await materialize(materializations);
+        }
+        return { mergedFileCount, unchangedFileCount, conflicts };
+      });
+    },
+
+    async listOpenConflicts() {
+      const engine = await engineStore();
+      return engine.listTextConflicts({ workspaceId, status: "open" });
+    },
+
+    resolveConflict(conflictId, resolution) {
+      return enqueueResult("resolve conflict", async () => {
+        const engine = await engineStore();
+        const result = await engine.resolveTextConflict({
+          workspaceId,
+          conflictId,
+          resolution,
+          metadata: {
+            origin: "api",
+            summary: "Resolved a merge conflict",
+            correlationId: `conflict-${conflictId}`,
+          },
+        });
+        // Materialize only when the resolution changed the ACTIVE version's
+        // state (keep-current writes nothing; a resolution into a version
+        // that is not on disk changes nothing visible).
+        const activeVersionId = await activeVersionIdOf(engine);
+        if (result.conflict.targetVersionId === activeVersionId) {
+          if (result.write) {
+            await materialize([
+              {
+                kind: "write",
+                path: result.write.snapshot.path,
+                text: result.write.snapshot.text,
+              },
+            ]);
+          } else if (result.delete) {
+            await materialize([{ kind: "delete", path: result.delete.before.path }]);
+          }
+        }
+        const remaining = await engine.listTextConflicts({
+          workspaceId,
+          status: "open",
+        });
+        return { conflict: result.conflict, remaining };
+      });
     },
 
     flush() {

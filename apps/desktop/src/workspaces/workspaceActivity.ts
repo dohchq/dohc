@@ -437,6 +437,13 @@ export function createWorkspaceActivity(
     return entry.capture?.registerExpectedEngineEvents(events) ?? null;
   }
 
+  // The per-workspace engine capture instance (null when the workspace-engine
+  // alpha flag is off or the workspace is not open). Version-operation IPC
+  // handlers gate on this: no capture, no versions surface.
+  function engineCaptureFor(workspaceId: string): WorkspaceEngineCapture | null {
+    return watched.get(workspaceId)?.capture ?? null;
+  }
+
   function beginLocalOperation(
     workspaceId: string,
     operation: ActiveLocalOperation,
@@ -478,6 +485,7 @@ export function createWorkspaceActivity(
     readChangeSet,
     getStatus,
     setAgentRun,
+    engineCaptureFor,
     registerExpectedEngineEvents,
     beginLocalOperation,
     stopAll,

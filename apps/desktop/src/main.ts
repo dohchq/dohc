@@ -78,6 +78,19 @@ import {
   ListChangeSetsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  ListWorkspaceVersionsResult,
+  CreateWorkspaceVersionPayload,
+  SwitchWorkspaceVersionPayload,
+  SwitchWorkspaceVersionResult,
+  CompareWorkspaceVersionsPayload,
+  CompareWorkspaceVersionsResult,
+  MergeWorkspaceVersionPayload,
+  MergeWorkspaceVersionResult,
+  ListWorkspaceVersionConflictsResult,
+  ResolveWorkspaceVersionConflictPayload,
+  ResolveWorkspaceVersionConflictResult,
+  WorkspaceVersionConflict,
+  WorkspaceVersionRecord,
   OpenFileExternallyPayload,
   OpenWorkspacePayload,
   AgentRunPayload,
@@ -1854,6 +1867,143 @@ function registerIpcHandlers(): void {
     refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await activity.open(workspace));
   });
+
+  // Named versions (PR 0M-4). Every handler resolves the workspace through
+  // requireWorkspace (renderer identity is never trusted) and is gated on the
+  // workspace-engine alpha capture being attached — for unflagged workspaces
+  // the calls reject.
+  async function requireVersionOperations(workspaceId: string) {
+    const workspace = requireWorkspace(workspaceId);
+    // Idempotent: guarantees the watcher + capture are live before any
+    // version operation touches the chain.
+    await activity.open(workspace);
+    const capture = activity.engineCaptureFor(workspace.workspaceId);
+    if (!capture) {
+      throw new Error("Versions are not enabled for this workspace.");
+    }
+    return capture;
+  }
+
+  function workspaceVersionForIpc(version: {
+    id: string;
+    name: string;
+    kind: "main" | "named";
+    createdAtMs: number;
+    forkPoint?: { versionId: string };
+  }): WorkspaceVersionRecord {
+    return {
+      id: version.id,
+      name: version.name,
+      kind: version.kind,
+      createdAtMs: version.createdAtMs,
+      canMergeIntoMain:
+        version.kind === "named" && version.forkPoint?.versionId === "main",
+    };
+  }
+
+  function versionConflictForIpc(conflict: {
+    id: string;
+    path: string;
+    sourceVersionId: string;
+    targetVersionId: string;
+    current: { exists: boolean; text?: string };
+    incoming: { exists: boolean; text?: string };
+    base: { exists: boolean; text?: string };
+  }): WorkspaceVersionConflict {
+    return {
+      conflictId: conflict.id,
+      path: conflict.path,
+      sourceVersionId: conflict.sourceVersionId,
+      targetVersionId: conflict.targetVersionId,
+      currentText: conflict.current.exists ? (conflict.current.text ?? "") : null,
+      incomingText: conflict.incoming.exists ? (conflict.incoming.text ?? "") : null,
+      baseText: conflict.base.exists ? (conflict.base.text ?? "") : null,
+    };
+  }
+
+  ipcMain.handle(CHANNELS.listWorkspaceVersions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    const capture = await requireVersionOperations(input.workspaceId);
+    const snapshot = await capture.listVersions();
+    return ListWorkspaceVersionsResult.parse({
+      versions: snapshot.versions.map(workspaceVersionForIpc),
+      activeVersionId: snapshot.activeVersionId,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.createWorkspaceVersion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateWorkspaceVersionPayload.parse(payload);
+    const capture = await requireVersionOperations(input.workspaceId);
+    const snapshot = await capture.createVersion(input.name);
+    notifyRenderer();
+    return ListWorkspaceVersionsResult.parse({
+      versions: snapshot.versions.map(workspaceVersionForIpc),
+      activeVersionId: snapshot.activeVersionId,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.switchWorkspaceVersion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SwitchWorkspaceVersionPayload.parse(payload);
+    const capture = await requireVersionOperations(input.workspaceId);
+    const result = await capture.switchVersion(input.versionId);
+    notifyRenderer();
+    return SwitchWorkspaceVersionResult.parse(result);
+  });
+
+  ipcMain.handle(CHANNELS.compareWorkspaceVersions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CompareWorkspaceVersionsPayload.parse(payload);
+    const capture = await requireVersionOperations(input.workspaceId);
+    return CompareWorkspaceVersionsResult.parse({
+      files: await capture.compareVersions(input.versionId),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.mergeWorkspaceVersion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = MergeWorkspaceVersionPayload.parse(payload);
+    const capture = await requireVersionOperations(input.workspaceId);
+    const result = await capture.mergeVersionIntoMain(input.versionId);
+    notifyRenderer();
+    return MergeWorkspaceVersionResult.parse({
+      mergedFileCount: result.mergedFileCount,
+      unchangedFileCount: result.unchangedFileCount,
+      conflicts: result.conflicts.map(versionConflictForIpc),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.listWorkspaceVersionConflicts, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    const capture = await requireVersionOperations(input.workspaceId);
+    const conflicts = await capture.listOpenConflicts();
+    return ListWorkspaceVersionConflictsResult.parse({
+      conflicts: conflicts.map(versionConflictForIpc),
+    });
+  });
+
+  ipcMain.handle(
+    CHANNELS.resolveWorkspaceVersionConflict,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ResolveWorkspaceVersionConflictPayload.parse(payload);
+      const capture = await requireVersionOperations(input.workspaceId);
+      const resolution =
+        input.resolution.kind === "keep-current"
+          ? ({ kind: "keep-current" } as const)
+          : input.resolution.kind === "keep-incoming"
+            ? ({ kind: "apply-incoming" } as const)
+            : ({ kind: "apply-merged", text: input.resolution.text } as const);
+      const outcome = await capture.resolveConflict(input.conflictId, resolution);
+      notifyRenderer();
+      return ResolveWorkspaceVersionConflictResult.parse({
+        conflicts: outcome.remaining.map(versionConflictForIpc),
+      });
+    },
+  );
 
   ipcMain.handle(CHANNELS.listChangeSets, async (event, payload) => {
     assertTrustedSender(event);

@@ -525,6 +525,132 @@ export const RestoreHistoryFileResult = z.object({
 });
 export type RestoreHistoryFileResult = z.infer<typeof RestoreHistoryFileResult>;
 
+// Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
+// a Version is a live parallel line of work; Main is the default one. All of
+// these handlers are gated in main on the workspace's engine capture being
+// attached (flag on) — for unflagged workspaces they reject.
+const VERSION_ID = z.string().min(1).max(200);
+export const WORKSPACE_VERSION_NAME_MAX = 80;
+// Versions cover engine-owned text files (<=128KiB each during alpha); the
+// bound is defensive headroom, not a promise of 2MB texts.
+const VERSION_TEXT = z.string().max(2_000_000);
+
+export const WorkspaceVersionRecord = z.object({
+  id: VERSION_ID,
+  name: z.string().min(1).max(200),
+  kind: z.enum(["main", "named"]),
+  createdAtMs: z.number(),
+  // False for versions created from another named version — the alpha merge
+  // surface only combines a version with the Main it was created from.
+  canMergeIntoMain: z.boolean(),
+});
+export type WorkspaceVersionRecord = z.infer<typeof WorkspaceVersionRecord>;
+
+export const ListWorkspaceVersionsResult = z.object({
+  versions: z.array(WorkspaceVersionRecord),
+  activeVersionId: VERSION_ID,
+});
+export type ListWorkspaceVersionsResult = z.infer<typeof ListWorkspaceVersionsResult>;
+
+export const CreateWorkspaceVersionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  name: z
+    .string()
+    .min(1)
+    .max(WORKSPACE_VERSION_NAME_MAX)
+    .refine((value) => value.trim() === value && value.length > 0, {
+      message: "version name must not start or end with spaces",
+    }),
+});
+export type CreateWorkspaceVersionPayload = z.infer<typeof CreateWorkspaceVersionPayload>;
+
+export const SwitchWorkspaceVersionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  versionId: VERSION_ID,
+});
+export type SwitchWorkspaceVersionPayload = z.infer<typeof SwitchWorkspaceVersionPayload>;
+
+export const SwitchWorkspaceVersionResult = z.object({
+  activeVersionId: VERSION_ID,
+  changedFileCount: z.number().int().min(0),
+});
+export type SwitchWorkspaceVersionResult = z.infer<typeof SwitchWorkspaceVersionResult>;
+
+export const WorkspaceVersionFileChange = z.object({
+  path: PATH_STRING,
+  status: z.enum(["added", "modified", "deleted"]),
+  // Main's side; absent when the file only exists in the compared version.
+  currentText: VERSION_TEXT.optional(),
+  // The compared version's side; absent when the file only exists in Main.
+  incomingText: VERSION_TEXT.optional(),
+});
+export type WorkspaceVersionFileChange = z.infer<typeof WorkspaceVersionFileChange>;
+
+export const CompareWorkspaceVersionsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  versionId: VERSION_ID,
+});
+export type CompareWorkspaceVersionsPayload = z.infer<
+  typeof CompareWorkspaceVersionsPayload
+>;
+
+export const CompareWorkspaceVersionsResult = z.object({
+  files: z.array(WorkspaceVersionFileChange),
+});
+export type CompareWorkspaceVersionsResult = z.infer<
+  typeof CompareWorkspaceVersionsResult
+>;
+
+export const WorkspaceVersionConflict = z.object({
+  conflictId: z.string().min(1).max(200),
+  path: PATH_STRING,
+  sourceVersionId: VERSION_ID,
+  targetVersionId: VERSION_ID,
+  // null means "no file on that side" (added on one side, deleted on the
+  // other). Raw texts only — the UI renders sides, never conflict markers.
+  currentText: VERSION_TEXT.nullable(),
+  incomingText: VERSION_TEXT.nullable(),
+  baseText: VERSION_TEXT.nullable(),
+});
+export type WorkspaceVersionConflict = z.infer<typeof WorkspaceVersionConflict>;
+
+export const MergeWorkspaceVersionPayload = SwitchWorkspaceVersionPayload;
+export type MergeWorkspaceVersionPayload = z.infer<typeof MergeWorkspaceVersionPayload>;
+
+export const MergeWorkspaceVersionResult = z.object({
+  mergedFileCount: z.number().int().min(0),
+  unchangedFileCount: z.number().int().min(0),
+  conflicts: z.array(WorkspaceVersionConflict),
+});
+export type MergeWorkspaceVersionResult = z.infer<typeof MergeWorkspaceVersionResult>;
+
+export const ListWorkspaceVersionConflictsResult = z.object({
+  conflicts: z.array(WorkspaceVersionConflict),
+});
+export type ListWorkspaceVersionConflictsResult = z.infer<
+  typeof ListWorkspaceVersionConflictsResult
+>;
+
+export const ResolveWorkspaceVersionConflictPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  conflictId: z.string().min(1).max(200),
+  resolution: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("keep-current") }),
+    z.object({ kind: z.literal("keep-incoming") }),
+    z.object({ kind: z.literal("keep-combined"), text: VERSION_TEXT }),
+  ]),
+});
+export type ResolveWorkspaceVersionConflictPayload = z.infer<
+  typeof ResolveWorkspaceVersionConflictPayload
+>;
+
+export const ResolveWorkspaceVersionConflictResult = z.object({
+  conflicts: z.array(WorkspaceVersionConflict),
+});
+export type ResolveWorkspaceVersionConflictResult = z.infer<
+  typeof ResolveWorkspaceVersionConflictResult
+>;
+
 const SiteDiagnostic = z.object({
   path: PATH_STRING.optional(),
   severity: z.enum(["warning", "error"]),
@@ -1310,6 +1436,29 @@ export interface DohcDesktopBridge {
   revokeWorkspaceInvite(payload: RevokeWorkspaceInvitePayload): Promise<void>;
   collabToken(payload: CollabTokenPayload): Promise<CollabTokenResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
+  // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
+  // flag: for unflagged workspaces every call rejects.
+  listWorkspaceVersions(
+    payload: ListWorkspaceFilesPayload,
+  ): Promise<ListWorkspaceVersionsResult>;
+  createWorkspaceVersion(
+    payload: CreateWorkspaceVersionPayload,
+  ): Promise<ListWorkspaceVersionsResult>;
+  switchWorkspaceVersion(
+    payload: SwitchWorkspaceVersionPayload,
+  ): Promise<SwitchWorkspaceVersionResult>;
+  compareWorkspaceVersions(
+    payload: CompareWorkspaceVersionsPayload,
+  ): Promise<CompareWorkspaceVersionsResult>;
+  mergeWorkspaceVersion(
+    payload: MergeWorkspaceVersionPayload,
+  ): Promise<MergeWorkspaceVersionResult>;
+  listWorkspaceVersionConflicts(
+    payload: ListWorkspaceFilesPayload,
+  ): Promise<ListWorkspaceVersionConflictsResult>;
+  resolveWorkspaceVersionConflict(
+    payload: ResolveWorkspaceVersionConflictPayload,
+  ): Promise<ResolveWorkspaceVersionConflictResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;

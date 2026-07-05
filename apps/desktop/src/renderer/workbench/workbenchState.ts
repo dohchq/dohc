@@ -19,6 +19,7 @@ export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
 export const SITE_TAB_PREFIX = "dohc://site/";
+export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 
 export function historyDiffTabPath(changeSetId: string, filePath: string): string {
   return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
@@ -76,11 +77,32 @@ export function parseHistoryDiffTabPath(
   }
 }
 
+// Versions compare page (PR 0M-4): one tab per compared version, keyed by
+// the version id so re-comparing re-activates instead of duplicating.
+export function versionCompareTabPath(versionId: string): string {
+  return `${VERSION_COMPARE_TAB_PREFIX}${encodeURIComponent(versionId)}`;
+}
+
+export function isVersionCompareTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(VERSION_COMPARE_TAB_PREFIX);
+}
+
+export function parseVersionCompareTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isVersionCompareTabPath(path)) return null;
+  try {
+    const versionId = decodeURIComponent(path.slice(VERSION_COMPARE_TAB_PREFIX.length));
+    return versionId.length > 0 ? versionId : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isVirtualTabPath(path: string | null): boolean {
   return (
     isGraphTabPath(path) ||
     isHistoryTabPath(path) ||
     isHistoryDiffTabPath(path) ||
+    isVersionCompareTabPath(path) ||
     isSiteTabPath(path)
   );
 }

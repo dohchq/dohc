@@ -141,6 +141,20 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.revokeWorkspaceInvite, payload),
   collabToken: (payload) => ipcRenderer.invoke(CHANNELS.collabToken, payload),
   openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
+  listWorkspaceVersions: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listWorkspaceVersions, payload),
+  createWorkspaceVersion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.createWorkspaceVersion, payload),
+  switchWorkspaceVersion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.switchWorkspaceVersion, payload),
+  compareWorkspaceVersions: (payload) =>
+    ipcRenderer.invoke(CHANNELS.compareWorkspaceVersions, payload),
+  mergeWorkspaceVersion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.mergeWorkspaceVersion, payload),
+  listWorkspaceVersionConflicts: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listWorkspaceVersionConflicts, payload),
+  resolveWorkspaceVersionConflict: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resolveWorkspaceVersionConflict, payload),
   listChangeSets: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChangeSets, payload),
   readChangeSet: (payload) =>
