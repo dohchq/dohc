@@ -111,6 +111,63 @@ export async function seedWorkspaceSettings(
   );
 }
 
+// Seeds .dohc/manifest.json with a KNOWN workspace id before launch so a
+// spec can pre-populate per-workspace state (engine.db moments, chats) that
+// the app will adopt — createWorkspaceFolder preserves an existing manifest's
+// identity.
+export async function seedWorkspaceManifest(
+  workspace: Pick<TempWorkspace, "rootPath">,
+  workspaceId: string,
+): Promise<void> {
+  const dir = join(workspace.rootPath, ".dohc");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "manifest.json"),
+    `${JSON.stringify(
+      { version: 1, workspaceId, kind: "personal", mode: "local-first" },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+// A second workspace root beside the primary one (same temp sandbox, same
+// hermetic DOHC_TEST_HOME).
+export async function createSiblingWorkspaceDir(
+  workspace: Pick<TempWorkspace, "baseDir">,
+  name: string,
+): Promise<{ rootPath: string }> {
+  const rootPath = join(workspace.baseDir, name);
+  await mkdir(rootPath, { recursive: true });
+  return { rootPath };
+}
+
+// Pre-seeds the hermetic registry (dohc-workspaces.json under the test home)
+// so the app launches with multiple known workspaces and the titlebar
+// switcher can move between them.
+export async function seedWorkspaceRegistry(
+  workspace: Pick<TempWorkspace, "homeDir">,
+  entries: Array<{ workspaceId: string; rootPath: string }>,
+): Promise<void> {
+  await mkdir(workspace.homeDir, { recursive: true });
+  await writeFile(
+    join(workspace.homeDir, "dohc-workspaces.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        workspaces: entries.map((entry) => ({
+          workspaceId: entry.workspaceId,
+          rootPath: entry.rootPath,
+          kind: "personal",
+          mode: "local-first",
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 export async function writeWorkspaceFiles(
   workspace: Pick<TempWorkspace, "rootPath">,
   files: WorkspaceFileWrite[],

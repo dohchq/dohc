@@ -180,8 +180,10 @@ export interface WorkspaceEngineCapture {
     resolution: WorkspaceVersionConflictResolution,
   ): Promise<WorkspaceVersionConflictResolveOutcome>;
   // History reads (PR 0M-5): the ACTIVE version's moment timeline and one
-  // moment's full payload. Reads are served by the store directly (it orders
-  // reads after its own writes) — never blocked behind the capture chain.
+  // moment's full payload. Reads DRAIN the capture chain first so the
+  // timeline the UI paints always includes the batch whose onRecorded
+  // notification triggered the refresh (read-your-writes; the chain never
+  // rejects, so this can only wait, not fail).
   listMoments(input?: {
     limit?: number;
     beforeMomentOrder?: number;
@@ -863,6 +865,7 @@ export function createWorkspaceEngineCapture(
     },
 
     async listMoments(input = {}) {
+      await chain;
       const engine = await engineStore();
       const activeVersionId = await activeVersionIdOf(engine);
       const page = await engine.listMoments({
@@ -877,6 +880,7 @@ export function createWorkspaceEngineCapture(
     },
 
     async readMoment(momentId) {
+      await chain;
       const engine = await engineStore();
       return engine.getMoment({ workspaceId, momentId });
     },
@@ -975,6 +979,8 @@ export function createWorkspaceEngineCapture(
     },
 
     async fileObjectIdForPath(path) {
+      // Drain the chain so a just-captured file is immediately chat-able.
+      await chain;
       const engine = await engineStore();
       const activeVersionId = await activeVersionIdOf(engine);
       const snapshot = await engine.readTextFile({
