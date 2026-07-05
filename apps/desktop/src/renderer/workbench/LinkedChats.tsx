@@ -1,0 +1,414 @@
+import { ArrowLeft, MessageSquare, Send } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatMessageRecord, ChatThreadRecord } from "../../ipc/bridgeContract";
+import { bridge } from "../bridge";
+
+// Linked Chats side rail (PR 0M-5, workspace-engine alpha). Per-file Chats
+// stored in the engine and linked to the file's STABLE object id, so a chat
+// follows its file through renames. Product vocabulary: these are Chats.
+//
+// Authorship display rule (plan non-negotiable): agent-authored messages
+// render as "<User Name>'s agent"; human messages show the author's name.
+export function chatAuthorLabel(
+  author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
+): string {
+  return author.authorKind === "agent"
+    ? `${author.authorDisplayName}'s agent`
+    : author.authorDisplayName;
+}
+
+function ipcErrorMessage(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : "";
+  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+  return message.trim().length > 0 ? message.trim() : fallback;
+}
+
+function basename(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index >= 0 ? path.slice(index + 1) : path;
+}
+
+function formatChatTime(createdAtMs: number): { label: string; iso: string } {
+  const createdAt = new Date(createdAtMs);
+  return {
+    label: createdAt.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+    iso: createdAt.toISOString(),
+  };
+}
+
+type ThreadsState =
+  | { status: "loading" }
+  | { status: "unavailable"; message: string }
+  | { status: "ready"; fileObjectId: string | null; threads: ChatThreadRecord[] };
+
+// The per-file Chats panel: thread list with a calm empty state, inline
+// create, and a thread view with a composer. Every async response is gated
+// by a liveness token before it touches state (workspace/file switches must
+// never repaint stale data).
+export function LinkedChatsPanel(props: {
+  workspaceId: string;
+  filePath: string | null;
+  onError: (message: string) => void;
+}) {
+  const { workspaceId, filePath } = props;
+  const [threadsState, setThreadsState] = useState<ThreadsState>({ status: "loading" });
+  const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
+  const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [creating, setCreating] = useState<string | null>(null);
+  const [composer, setComposer] = useState("");
+  const [sending, setSending] = useState(false);
+  const liveToken = useRef(0);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const refreshThreads = useCallback(async () => {
+    if (!filePath) return;
+    const token = ++liveToken.current;
+    setThreadsState({ status: "loading" });
+    try {
+      const result = await bridge().listFileChats({ workspaceId, path: filePath });
+      if (token !== liveToken.current) return;
+      setThreadsState({
+        status: "ready",
+        fileObjectId: result.fileObjectId,
+        threads: result.threads,
+      });
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      setThreadsState({
+        status: "unavailable",
+        message: ipcErrorMessage(error, "Could not load Chats for this file."),
+      });
+    }
+  }, [filePath, workspaceId]);
+
+  // File (or workspace) switch: drop everything stale and reload.
+  useEffect(() => {
+    liveToken.current += 1;
+    setActiveThread(null);
+    setMessages([]);
+    setComposer("");
+    setCreating(null);
+    if (!filePath) {
+      setThreadsState({ status: "ready", fileObjectId: null, threads: [] });
+      return;
+    }
+    void refreshThreads();
+    return () => {
+      liveToken.current += 1;
+    };
+  }, [filePath, refreshThreads]);
+
+  const openThread = useCallback(
+    async (thread: ChatThreadRecord) => {
+      const token = ++liveToken.current;
+      setActiveThread(thread);
+      setMessages([]);
+      setMessagesLoading(true);
+      try {
+        const result = await bridge().listChatMessages({
+          workspaceId,
+          threadId: thread.id,
+        });
+        if (token !== liveToken.current) return;
+        setMessages(result.messages);
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not load this chat."));
+      } finally {
+        if (token === liveToken.current) setMessagesLoading(false);
+      }
+    },
+    [props, workspaceId],
+  );
+
+  const createChat = useCallback(
+    async (title: string) => {
+      if (!filePath) return;
+      const trimmed = title.trim();
+      if (trimmed.length === 0) return;
+      const token = ++liveToken.current;
+      try {
+        const result = await bridge().createFileChat({
+          workspaceId,
+          path: filePath,
+          title: trimmed,
+        });
+        if (token !== liveToken.current) return;
+        setCreating(null);
+        setThreadsState((current) =>
+          current.status === "ready"
+            ? { ...current, threads: [...current.threads, result.thread] }
+            : current,
+        );
+        void openThread(result.thread);
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not start a chat for this file."));
+      }
+    },
+    [filePath, openThread, props, workspaceId],
+  );
+
+  const sendMessage = useCallback(async () => {
+    const thread = activeThread;
+    const body = composer.trim();
+    if (!thread || body.length === 0 || sending) return;
+    const token = liveToken.current;
+    setSending(true);
+    try {
+      const result = await bridge().sendChatMessage({
+        workspaceId,
+        threadId: thread.id,
+        body,
+      });
+      if (token !== liveToken.current) return;
+      setMessages((current) => [...current, result.message]);
+      setComposer("");
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      props.onError(ipcErrorMessage(error, "Could not send that message."));
+    } finally {
+      if (token === liveToken.current) setSending(false);
+    }
+  }, [activeThread, composer, props, sending, workspaceId]);
+
+  if (!filePath) {
+    return (
+      <div
+        data-testid="linked-chats-empty"
+        className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+      >
+        <span className="text-xs text-muted">No file open</span>
+        <span className="text-[11px] text-subtle">
+          Open a file to see its Chats.
+        </span>
+      </div>
+    );
+  }
+
+  if (threadsState.status === "loading") {
+    return (
+      <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
+        Loading Chats...
+      </div>
+    );
+  }
+
+  if (threadsState.status === "unavailable") {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
+        <span className="text-xs text-danger">{threadsState.message}</span>
+        <button
+          type="button"
+          onClick={() => void refreshThreads()}
+          className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  if (activeThread) {
+    return (
+      <div data-testid="linked-chat-thread" className="flex min-h-0 flex-1 flex-col">
+        <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
+          <button
+            type="button"
+            data-testid="linked-chat-back"
+            aria-label="Back to Chats"
+            title="Back to Chats"
+            onClick={() => {
+              liveToken.current += 1;
+              setActiveThread(null);
+              setMessages([]);
+            }}
+            className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          >
+            <ArrowLeft size={13} aria-hidden />
+          </button>
+          <span
+            data-testid="linked-chat-title"
+            className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
+          >
+            {activeThread.title}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+          {messagesLoading ? (
+            <p className="m-0 text-center text-[11px] text-subtle">Loading...</p>
+          ) : messages.length === 0 ? (
+            <p className="m-0 pt-4 text-center text-[11px] text-subtle">
+              No messages yet. Say something about {basename(filePath)}.
+            </p>
+          ) : (
+            <ul className="m-0 flex list-none flex-col gap-2 p-0">
+              {messages.map((message) => {
+                const time = formatChatTime(message.createdAtMs);
+                return (
+                  <li key={message.id} data-testid="linked-chat-message">
+                    <span className="flex items-baseline gap-1.5">
+                      <span
+                        data-testid="linked-chat-message-author"
+                        data-author-kind={message.authorKind}
+                        className="shrink-0 text-[11px] font-semibold text-ink"
+                      >
+                        {chatAuthorLabel(message)}
+                      </span>
+                      <time
+                        dateTime={time.iso}
+                        title={time.iso}
+                        className="shrink-0 text-[10px] text-subtle"
+                      >
+                        {time.label}
+                      </time>
+                    </span>
+                    <p
+                      data-testid="linked-chat-message-body"
+                      className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
+                    >
+                      {message.body}
+                    </p>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+        <form
+          className="flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void sendMessage();
+          }}
+        >
+          <label className="sr-only" htmlFor="linked-chat-composer">
+            Message
+          </label>
+          <textarea
+            id="linked-chat-composer"
+            data-testid="linked-chat-composer"
+            value={composer}
+            disabled={sending}
+            rows={2}
+            placeholder="Write a message…"
+            onChange={(event) => setComposer(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void sendMessage();
+              }
+            }}
+            className="min-w-0 flex-1 resize-none rounded border border-line bg-bg px-2 py-1.5 text-[12px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+          />
+          <button
+            type="submit"
+            data-testid="linked-chat-send"
+            aria-label="Send message"
+            title="Send message"
+            disabled={sending || composer.trim().length === 0}
+            className="grid size-8 shrink-0 cursor-pointer place-items-center rounded bg-ink text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Send size={13} aria-hidden />
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div data-testid="linked-chats-panel" className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {threadsState.threads.length === 0 ? (
+          <div
+            data-testid="linked-chats-empty"
+            className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center"
+          >
+            <MessageSquare size={16} aria-hidden className="text-subtle" />
+            <span className="text-xs text-muted">
+              No chats about this file yet.
+            </span>
+            <span className="text-[11px] text-subtle">Start one.</span>
+          </div>
+        ) : (
+          <ul className="m-0 list-none p-0">
+            {threadsState.threads.map((thread) => (
+              <li key={thread.id} className="border-b border-line">
+                <button
+                  type="button"
+                  data-testid="linked-chat-open"
+                  data-thread-id={thread.id}
+                  onClick={() => void openThread(thread)}
+                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                >
+                  <span className="block truncate text-[12px] font-medium text-ink">
+                    {thread.title}
+                  </span>
+                  <span className="block text-[10px] text-subtle">
+                    {formatChatTime(thread.updatedAtMs).label}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="shrink-0 border-t border-line p-2">
+        {threadsState.fileObjectId === null ? (
+          <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
+            Chats aren't available for this file yet — only text files dohc
+            tracks can have Chats.
+          </p>
+        ) : creating === null ? (
+          <button
+            type="button"
+            data-testid="linked-chat-new"
+            onClick={() => setCreating(basename(filePath))}
+            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          >
+            <MessageSquare size={12} aria-hidden />
+            New chat
+          </button>
+        ) : (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createChat(creating);
+            }}
+          >
+            <label className="sr-only" htmlFor="linked-chat-new-title">
+              Chat title
+            </label>
+            <input
+              id="linked-chat-new-title"
+              data-testid="linked-chat-new-title"
+              autoFocus
+              value={creating}
+              maxLength={200}
+              placeholder="Chat title"
+              onChange={(event) => setCreating(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.stopPropagation();
+                  setCreating(null);
+                }
+              }}
+              className="h-7 w-full rounded border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+            />
+            <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
+              Press Enter to start the chat.
+            </p>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -28,6 +28,8 @@ import type {
   ChangeSetDetailRecord,
   ChangeSetFileRecord,
   ChangeSetRecord,
+  EngineMomentDetailRecord,
+  EngineMomentRecord,
   FileChangeSnapshot,
   SyncStatusResult,
   WorkbenchMenuCommand,
@@ -67,6 +69,7 @@ import {
   changedLineCounts,
   type UnifiedDiffLine,
 } from "./workbench/unifiedDiff";
+import { EngineHistoryView, engineMomentSummary } from "./workbench/EngineHistory";
 import {
   VersionComparePage,
   VersionMenu,
@@ -78,6 +81,9 @@ import {
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
   versionCompareTabPath,
+  isMomentDiffTabPath,
+  momentDiffTabPath,
+  parseMomentDiffTabPath,
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
@@ -163,6 +169,11 @@ const LazySitePreviewPage = lazy(() =>
 );
 const LazyAgentPanelView = lazy(() =>
   import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
+);
+const LazyLinkedChatsPanel = lazy(() =>
+  import("./workbench/LinkedChats").then((mod) => ({
+    default: mod.LinkedChatsPanel,
+  })),
 );
 
 // Every folder above a path — expanded when a create/open must REVEAL it.
@@ -814,6 +825,372 @@ function HistoryDiffPage({
   );
 }
 
+// Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
+// before/after through the shared unified-diff rendering, with engine-routed
+// restore. Restore returns the file to its state BEFORE this moment and
+// records a forward "Restored <file>" moment; undo restores to before THAT
+// moment — history is never rewritten.
+function EngineMomentDiffPage({
+  workspaceId,
+  tabPath,
+  onBeforeRestore,
+  onOpenFile,
+  registerActiveUndo,
+  onRestored,
+}: {
+  workspaceId: string;
+  tabPath: string;
+  onBeforeRestore: () => Promise<void>;
+  onOpenFile: (path: string) => void;
+  registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
+  onRestored: () => void;
+}) {
+  const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "ready"; moment: EngineMomentDetailRecord | null }
+    | { status: "error" }
+  >({ status: "loading" });
+  const [restoreState, setRestoreState] = useState<
+    | { status: "idle" }
+    | { status: "restoring" }
+    | { status: "undoing" }
+    | { status: "restored"; restored: "text" | "deleted"; message: string }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+  const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
+  // The forward restore moment to undo against; null = nothing to undo.
+  const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
+  const pageRef = useRef<HTMLElement | null>(null);
+  const restoreInFlight = useRef(false);
+  // Liveness: bumped when the tab changes/unmounts so a slow response can
+  // never repaint another moment's page.
+  const liveToken = useRef(0);
+
+  useEffect(() => {
+    const token = ++liveToken.current;
+    if (!momentId) {
+      setState({ status: "error" });
+      return;
+    }
+    setState({ status: "loading" });
+    void bridge()
+      .readEngineMoment({ workspaceId, momentId })
+      .then((result) => {
+        if (token !== liveToken.current) return;
+        setState({ status: "ready", moment: result.moment });
+      })
+      .catch(() => {
+        if (token !== liveToken.current) return;
+        setState({ status: "error" });
+      });
+    return () => {
+      liveToken.current += 1;
+    };
+  }, [momentId, workspaceId]);
+  useEffect(() => {
+    setRestoreState({ status: "idle" });
+    setConfirmRestoreOpen(false);
+    setUndoMomentId(null);
+  }, [tabPath]);
+
+  const moment = state.status === "ready" ? state.moment : null;
+  const restoreBusy =
+    restoreState.status === "restoring" || restoreState.status === "undoing";
+  const canRestore = moment !== null && moment.operation !== "rename" && !undoMomentId;
+
+  const undoRestore = useCallback(async () => {
+    const target = undoMomentId;
+    if (!target || restoreBusy || restoreInFlight.current) return;
+    restoreInFlight.current = true;
+    const token = liveToken.current;
+    setRestoreState({ status: "undoing" });
+    try {
+      await onBeforeRestore();
+      const result = await bridge().restoreEngineMomentFile({
+        workspaceId,
+        momentId: target,
+      });
+      if (token !== liveToken.current) return;
+      setRestoreState({
+        status: "restored",
+        restored: result.restored,
+        message:
+          result.restored === "deleted"
+            ? "Undid the restore by removing the file again. This was recorded in history."
+            : "Undid the restore. This was recorded in history.",
+      });
+      setUndoMomentId(null);
+      onRestored();
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      setRestoreState({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Could not undo this restore.",
+      });
+    } finally {
+      restoreInFlight.current = false;
+    }
+  }, [onBeforeRestore, onRestored, restoreBusy, undoMomentId, workspaceId]);
+
+  useEffect(() => {
+    if (!undoMomentId || restoreBusy) {
+      registerActiveUndo(null);
+      return;
+    }
+    registerActiveUndo({
+      run: undoRestore,
+      acceptsEvent: (event) => {
+        if (isEditableShortcutTarget(event.target)) return false;
+        const page = pageRef.current;
+        const target = event.target instanceof Element ? event.target : null;
+        const active =
+          document.activeElement instanceof Element ? document.activeElement : null;
+        const focusOwner = target ?? active;
+        if (
+          page &&
+          focusOwner &&
+          focusOwner !== document.body &&
+          focusOwner !== document.documentElement &&
+          !page.contains(focusOwner)
+        ) {
+          return false;
+        }
+        return !hasBlockingModal();
+      },
+    });
+    return () => registerActiveUndo(null);
+  }, [registerActiveUndo, restoreBusy, undoMomentId, undoRestore]);
+
+  if (!momentId || state.status === "error") {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-danger">
+        Could not load this history diff.
+      </div>
+    );
+  }
+  if (state.status === "loading") {
+    return <PanelLoading label="history diff" />;
+  }
+  if (!moment) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
+        This change is no longer in the history record.
+      </div>
+    );
+  }
+
+  const before = moment.beforeText ?? undefined;
+  const after = moment.afterText ?? undefined;
+  const counts = changedLineCounts(before, after);
+  const createdFile = moment.beforeText === null;
+  const restoreDetail = createdFile
+    ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
+    : "The file will be returned to how it was before this change.";
+  const canOpenFile =
+    moment.operation !== "delete" ||
+    (restoreState.status === "restored" && restoreState.restored === "text");
+  const diffLines: UnifiedDiffLine[] = buildUnifiedDiffLines(before, after, 800);
+
+  const restoreFile = async () => {
+    if (!canRestore || restoreBusy || restoreInFlight.current) return;
+    restoreInFlight.current = true;
+    const token = liveToken.current;
+    setConfirmRestoreOpen(false);
+    setRestoreState({ status: "restoring" });
+    try {
+      await onBeforeRestore();
+      const result = await bridge().restoreEngineMomentFile({
+        workspaceId,
+        momentId: moment.id,
+      });
+      if (token !== liveToken.current) return;
+      setRestoreState({
+        status: "restored",
+        restored: result.restored,
+        message:
+          result.restored === "deleted"
+            ? "Removed the file this change created. Undo restore is available here."
+            : "Restored the earlier state. Undo restore is available here.",
+      });
+      setUndoMomentId(result.restoredMomentId);
+      onRestored();
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      setRestoreState({
+        status: "error",
+        message:
+          error instanceof Error ? error.message : "Could not restore this file.",
+      });
+    } finally {
+      restoreInFlight.current = false;
+    }
+  };
+
+  return (
+    <section
+      ref={pageRef}
+      data-testid="engine-moment-diff-page"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
+    >
+      <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            History diff
+          </span>
+          <h2 className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink">
+            {canOpenFile ? (
+              <button
+                type="button"
+                data-testid="engine-diff-title-open-file"
+                onClick={() => onOpenFile(moment.path)}
+                className="max-w-full cursor-pointer truncate rounded text-left hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                title={`Open ${moment.path}`}
+              >
+                {moment.path}
+              </button>
+            ) : (
+              moment.path
+            )}
+          </h2>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+            <span>
+              {moment.operation === "delete"
+                ? "Deleted"
+                : createdFile
+                  ? "Created"
+                  : "Changed"}
+            </span>
+            {counts ? (
+              <span className="font-mono" data-testid="engine-diff-counts">
+                +{counts.added} -{counts.removed}
+              </span>
+            ) : null}
+          </div>
+          <p
+            data-testid="engine-diff-summary"
+            className="mb-0 mt-1 truncate text-[11px] text-subtle"
+          >
+            {engineMomentSummary(moment)}
+          </p>
+          {restoreState.status === "restored" || restoreState.status === "error" ? (
+            <p
+              data-testid="engine-diff-restore-status"
+              className={`mb-0 mt-1 text-[11px] ${
+                restoreState.status === "error" ? "text-danger" : "text-success"
+              }`}
+            >
+              {restoreState.message}
+            </p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          data-testid="engine-diff-restore-file"
+          onClick={() => setConfirmRestoreOpen(true)}
+          disabled={!canRestore || restoreBusy}
+          title={
+            undoMomentId
+              ? "This restore has already been applied"
+              : canRestore
+                ? "Restore this file to how it was before this change"
+                : "This change can't be restored directly"
+          }
+          className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Undo2 size={12} aria-hidden />
+          {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
+        </button>
+        {undoMomentId ? (
+          <button
+            type="button"
+            data-testid="engine-diff-undo-restore"
+            onClick={() => void undoRestore()}
+            disabled={restoreBusy}
+            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Undo2 size={12} aria-hidden />
+            {restoreState.status === "undoing" ? "Undoing..." : "Undo restore"}
+          </button>
+        ) : null}
+        {canOpenFile ? (
+          <button
+            type="button"
+            data-testid="engine-diff-open-file"
+            onClick={() => onOpenFile(moment.path)}
+            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          >
+            <ExternalLink size={12} aria-hidden />
+            Open file
+          </button>
+        ) : null}
+      </header>
+      <div className="min-h-0 overflow-auto overflow-x-hidden p-4">
+        <section className="overflow-hidden rounded border border-line bg-bg shadow-sm">
+          <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
+            <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+              {moment.path}
+            </span>
+            {counts ? (
+              <span className="shrink-0 font-mono text-[11px] text-subtle">
+                +{counts.added} -{counts.removed}
+              </span>
+            ) : null}
+          </div>
+          <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
+        </section>
+      </div>
+      {confirmRestoreOpen ? (
+        <Overlay onClose={() => setConfirmRestoreOpen(false)}>
+          <div
+            data-testid="engine-diff-restore-confirm"
+            className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="engine-diff-restore-confirm-title"
+          >
+            <h3
+              id="engine-diff-restore-confirm-title"
+              className="m-0 text-sm font-semibold text-ink"
+            >
+              Restore this file?
+            </h3>
+            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
+              This only changes this one file and records a new history entry.
+              Any edits you made since are saved into history first.
+            </p>
+            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
+              <span className="font-mono text-ink">{moment.path}</span>
+              <br />
+              {restoreDetail}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                data-testid="engine-diff-cancel-restore"
+                onClick={() => setConfirmRestoreOpen(false)}
+                className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="engine-diff-confirm-restore"
+                onClick={() => void restoreFile()}
+                className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
+              >
+                Restore
+              </button>
+            </div>
+          </div>
+        </Overlay>
+      ) : null}
+    </section>
+  );
+}
+
 // The timeline body, shared by the right history rail and the side panel's
 // History view (both render the same root-owned changeSets — never a second
 // subscription). The pinned history-timeline testid stays on the RAIL only.
@@ -1088,6 +1465,11 @@ function HistoryRail(props: {
   width: number;
   onWidthChange: (width: number) => void;
   onCollapse: () => void;
+  // Flagged workspaces swap the static "History" label for the
+  // History/Chats tab pair; the rail element (and its pinned testid) is the
+  // same either way.
+  header?: ReactNode;
+  ariaLabel?: string;
   children: ReactNode;
 }) {
   const railRef = useRef<HTMLElement>(null);
@@ -1097,7 +1479,7 @@ function HistoryRail(props: {
     <aside
       ref={railRef}
       data-testid="history-timeline"
-      aria-label="History"
+      aria-label={props.ariaLabel ?? "History"}
       className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"
       style={{ width: props.width }}
     >
@@ -1135,9 +1517,11 @@ function HistoryRail(props: {
           peer chrome surfaces speak one language and their hairlines
           meet the tab strip's on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-          History
-        </span>
+        {props.header ?? (
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+            History
+          </span>
+        )}
         <button
           type="button"
           data-testid="history-collapse"
@@ -1423,7 +1807,52 @@ export function DesktopWorkspaceShell(props: {
     );
   }, [refreshFiles, reportShellError]);
 
+  // Workspace-engine alpha (PR 0M-4/0M-5): versions surface, ENGINE history
+  // source, and the linked Chats rail all key off this one per-workspace
+  // capability, read once from the existing settings IPC below — never a
+  // second settings read.
+  const [engineEnabled, setEngineEnabled] = useState(false);
+  // Engine history page state (flagged workspaces): newest-first moments,
+  // the keyset cursor for older pages, and the monotonic latest order used
+  // as the open-file refresh key.
+  const [engineHistory, setEngineHistory] = useState<{
+    moments: EngineMomentRecord[];
+    nextBeforeMomentOrder: number | null;
+    latestMomentOrder: number;
+  } | null>(null);
+  const [engineHistoryLoadingMore, setEngineHistoryLoadingMore] = useState(false);
+  // Liveness token for the engine history loads (bumped on unmount): a slow
+  // response for one workspace must never repaint another.
+  const engineHistoryToken = useRef(0);
+  useEffect(
+    () => () => {
+      engineHistoryToken.current += 1;
+    },
+    [],
+  );
+  // Right rail content for flagged workspaces: History timeline or the
+  // active file's Chats. Runtime-only — not persisted.
+  const [railView, setRailView] = useState<"history" | "chats">("history");
+
   const refreshHistory = useCallback(async () => {
+    if (engineEnabled) {
+      const token = engineHistoryToken.current;
+      const [page, status, agent] = await Promise.all([
+        bridge().listEngineMoments({ workspaceId, limit: 200 }),
+        bridge().getSyncStatus({ workspaceId }),
+        bridge().getAgentRunStatus({ workspaceId }),
+      ]);
+      if (token !== engineHistoryToken.current) return;
+      // A refresh returns to the newest page; older pages reload on demand.
+      setEngineHistory({
+        moments: page.moments,
+        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+        latestMomentOrder: page.latestMomentOrder,
+      });
+      setSyncStatus(status);
+      setAgentActive(agent.activeRun !== null);
+      return;
+    }
     const [history, status, agent] = await Promise.all([
       bridge().listChangeSets({ workspaceId }),
       bridge().getSyncStatus({ workspaceId }),
@@ -1432,11 +1861,44 @@ export function DesktopWorkspaceShell(props: {
     setChangeSets(history.changeSets);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
-  }, [workspaceId]);
+  }, [engineEnabled, workspaceId]);
+
+  const loadMoreEngineHistory = useCallback(async () => {
+    const cursor = engineHistory?.nextBeforeMomentOrder;
+    if (cursor === null || cursor === undefined || engineHistoryLoadingMore) return;
+    const token = engineHistoryToken.current;
+    setEngineHistoryLoadingMore(true);
+    try {
+      const page = await bridge().listEngineMoments({
+        workspaceId,
+        limit: 200,
+        beforeMomentOrder: cursor,
+      });
+      if (token !== engineHistoryToken.current) return;
+      setEngineHistory((current) =>
+        current
+          ? {
+              moments: [...current.moments, ...page.moments],
+              nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+              latestMomentOrder: Math.max(
+                current.latestMomentOrder,
+                page.latestMomentOrder,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      if (token !== engineHistoryToken.current) return;
+      reportShellError("Could not load earlier history.", error);
+    } finally {
+      if (token === engineHistoryToken.current) setEngineHistoryLoadingMore(false);
+    }
+  }, [engineHistory, engineHistoryLoadingMore, reportShellError, workspaceId]);
 
   // Named versions (PR 0M-4): the surface exists only for workspaces with the
   // workspace-engine alpha flag on — unflagged workspaces render nothing.
-  const [versionsEnabled, setVersionsEnabled] = useState(false);
+  const versionsEnabled = engineEnabled;
+  const setVersionsEnabled = setEngineEnabled;
   // Bumped after a version switch/merge/conflict resolution so open editors
   // re-read their file content immediately (FileInspector refreshKey).
   const [versionEpoch, setVersionEpoch] = useState(0);
@@ -1529,6 +1991,19 @@ export function DesktopWorkspaceShell(props: {
           mutateWb((state) =>
             openTab(state, historyDiffTabPath(changeSetId, filePath)),
           );
+        })
+        .catch((error) => {
+          reportShellError("Could not save the active draft before opening history.", error);
+        });
+    },
+    [flushActiveDraft, mutateWb, reportShellError],
+  );
+  // Engine history diff (flagged workspaces): one tab per moment.
+  const openMomentDiffTab = useCallback(
+    (momentId: string) => {
+      void flushActiveDraft()
+        .then(() => {
+          mutateWb((state) => openTab(state, momentDiffTabPath(momentId)));
         })
         .catch((error) => {
           reportShellError("Could not save the active draft before opening history.", error);
@@ -2051,6 +2526,30 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
+  // ONE history timeline element per source, rendered by the side panel's
+  // History view, the history tab, and the right rail — the engine page state
+  // is root-owned exactly like changeSets (never a second subscription).
+  const historyTimeline = engineEnabled ? (
+    <EngineHistoryView
+      moments={engineHistory?.moments ?? []}
+      hasMore={engineHistory?.nextBeforeMomentOrder != null}
+      loadingMore={engineHistoryLoadingMore}
+      onLoadMore={() => void loadMoreEngineHistory()}
+      onOpenMoment={openMomentDiffTab}
+    />
+  ) : (
+    <HistoryView changeSets={changeSets} onOpenDiff={openHistoryDiffTab} />
+  );
+  // Open-file refresh: history growth re-reads the active file. Engine
+  // workspaces use the monotonic latest moment order; legacy uses the
+  // change-set count (both only ever increase within a session).
+  const historyRefreshCounter = engineEnabled
+    ? (engineHistory ? engineHistory.latestMomentOrder + 1 : 0)
+    : changeSets.length;
+  const graphKey = engineEnabled
+    ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
+    : graphRefreshKey;
+
   const explorerView = (
     <>
       <Explorer
@@ -2216,7 +2715,7 @@ export function DesktopWorkspaceShell(props: {
                 <LazyGraphView
                   workspaceId={workspaceId}
                   activePath={activeDocumentPath}
-                  refreshKey={graphRefreshKey}
+                  refreshKey={graphKey}
                   onOpenPath={openFile}
                   variant="panel"
                 />
@@ -2231,10 +2730,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (
-              <HistoryView
-                changeSets={changeSets}
-                onOpenDiff={openHistoryDiffTab}
-              />
+              historyTimeline
             ) : wb.activeView === "agent" ? (
               <Suspense fallback={<PanelLoading label="agent" />}>
                 <LazyAgentPanelView
@@ -2303,7 +2799,7 @@ export function DesktopWorkspaceShell(props: {
                 <LazyGraphView
                   workspaceId={workspaceId}
                   activePath={activeDocumentPath}
-                  refreshKey={graphRefreshKey}
+                  refreshKey={graphKey}
                   onOpenPath={openFile}
                   variant="page"
                 />
@@ -2313,11 +2809,17 @@ export function DesktopWorkspaceShell(props: {
                 data-testid="history-page"
                 className="flex min-h-0 flex-1 flex-col bg-bg"
               >
-                <HistoryView
-                  changeSets={changeSets}
-                  onOpenDiff={openHistoryDiffTab}
-                />
+                {historyTimeline}
               </div>
+            ) : isMomentDiffTabPath(wb.activeTab) ? (
+              <EngineMomentDiffPage
+                workspaceId={workspaceId}
+                tabPath={wb.activeTab ?? ""}
+                onBeforeRestore={flushActiveDraft}
+                onOpenFile={openFile}
+                registerActiveUndo={registerActiveUndo}
+                onRestored={refreshAfterHistoryRestore}
+              />
             ) : isHistoryDiffTabPath(wb.activeTab) ? (
               <HistoryDiffPage
                 workspaceId={workspaceId}
@@ -2356,7 +2858,7 @@ export function DesktopWorkspaceShell(props: {
                 path={wb.activeTab}
                 // History growth AND version switches both re-read the open
                 // file (both counters only ever increase).
-                refreshKey={changeSets.length + versionEpoch}
+                refreshKey={historyRefreshCounter + versionEpoch}
                 onOpenPath={openFile}
                 scrollTarget={searchScrollTarget ?? undefined}
                 onScrollConsumed={consumeScrollTarget}
@@ -2419,11 +2921,46 @@ export function DesktopWorkspaceShell(props: {
             width={wb.historyWidth}
             onWidthChange={(width) => mutateWb((state) => setHistoryWidth(state, width))}
             onCollapse={() => mutateWb(toggleHistory)}
+            ariaLabel={engineEnabled && railView === "chats" ? "Chats" : "History"}
+            header={
+              engineEnabled ? (
+                <div className="flex items-center gap-0.5">
+                  {(
+                    [
+                      ["history", "History"],
+                      ["chats", "Chats"],
+                    ] as const
+                  ).map(([view, label]) => (
+                    <button
+                      key={view}
+                      type="button"
+                      data-testid={`rail-tab-${view}`}
+                      aria-pressed={railView === view}
+                      onClick={() => setRailView(view)}
+                      className={`h-6 rounded px-2 text-[11px] font-semibold uppercase tracking-wide ${
+                        railView === view
+                          ? "bg-line/60 text-ink"
+                          : "text-muted hover:bg-line/40 hover:text-ink"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : undefined
+            }
           >
-            <HistoryView
-              changeSets={changeSets}
-              onOpenDiff={openHistoryDiffTab}
-            />
+            {engineEnabled && railView === "chats" ? (
+              <Suspense fallback={<PanelLoading label="Chats" />}>
+                <LazyLinkedChatsPanel
+                  workspaceId={workspaceId}
+                  filePath={activeDocumentPath}
+                  onError={(message) => setShellError(message)}
+                />
+              </Suspense>
+            ) : (
+              historyTimeline
+            )}
           </HistoryRail>
         ) : (
           <aside

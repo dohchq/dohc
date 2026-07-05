@@ -12,6 +12,9 @@ import {
   HISTORY_TAB_PATH,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isMomentDiffTabPath,
+  momentDiffTabPath,
+  parseMomentDiffTabPath,
   isSiteTabPath,
   isVirtualTabPath,
   moveTab,
@@ -96,6 +99,17 @@ describe("tabs", () => {
     });
     expect(parseHistoryDiffTabPath("dohc://history-diff/change-only")).toBeNull();
     expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
+  });
+
+  it("recognizes engine moment diffs as virtual tabs with encoded moment ids", () => {
+    const path = momentDiffTabPath("moment id/with strange chars");
+    expect(isMomentDiffTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parseMomentDiffTabPath(path)).toBe("moment id/with strange chars");
+    expect(parseMomentDiffTabPath("dohc://moment-diff/")).toBeNull();
+    expect(parseMomentDiffTabPath("dohc://moment-diff/%ZZ")).toBeNull();
+    expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
+    expect(parseMomentDiffTabPath(null)).toBeNull();
   });
 
   it("recognizes site previews as virtual tabs with encoded site roots", () => {
