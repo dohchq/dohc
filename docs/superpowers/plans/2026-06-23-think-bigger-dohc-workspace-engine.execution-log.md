@@ -13656,3 +13656,129 @@ grep -rn "versioned-text-store.json|linked-chat-store.json" packages/ services/ 
 
 - Multiplatform anchored-writer fallback is lane 0M-2; live Postgres
   validation leg re-runs at the arc gate.
+
+## PR 0M-2 - Multiplatform Portable Writer
+
+Status: merged to main via PR #56 (merge commit a9daf5b0)
+Branch: codex/think-bigger-0m2-portable-writer
+Worktree: /home/ice/dev/dohc-0m2-portable-writer (removed after merge)
+Implementation workstream, if used: codex CLI (gpt-5.5) driven by a Claude lane
+driver, one round plus two cosmetic hand-fixes; orchestrator (fable-5) merge
+review
+PR Link: https://github.com/dohc-ai/dohc/pull/56
+Date started: 2026-07-05
+Date completed: 2026-07-05
+
+### Scope
+
+- [x] Replace fail-closed non-Linux construction with a portable write path
+      (User Decision 4)
+- [x] Keep the hardened Linux anchored writer unchanged (descriptor-relative
+      mutation via /proc/self/fd, O_NOFOLLOW, fd pinning)
+- [x] Portable path preserves the safety contract: temp-file+rename atomic
+      replace in-directory, O_NOFOLLOW where available, lstat symlink refusal
+      on the exact target immediately before use, parent dev+ino identity
+      re-checked before each mutating syscall, realpath root containment, file
+      fsync, parent-dir fsync best-effort (documented no-op on Windows)
+- [x] Exported, tested per-platform capability report
+      (`getFileWorkspaceCapabilityReport`) with every degradation explicit
+- [x] Test-only `forcePlatformMode` hook exercises the portable backend on
+      Linux CI; no production env override
+- [x] Zero diff to versionedTextStore.ts and linkedChatStore.ts; rebased
+      cleanly onto the 0M-1 SQLite baseline before verification
+
+### Files Changed
+
+- packages/workspace-engine/src/versionedFileWorkspacePlatform.ts (new)
+- packages/workspace-engine/src/versionedFileWorkspace.ts
+- packages/workspace-engine/src/versionedFileWorkspace.test.ts
+- packages/workspace-engine/src/index.ts
+
+### Tests Added Or Updated
+
+- New forced-portable-backend suite (unconditional on Linux): write/snapshot/
+  history, atomic overwrite without temp artifacts, delete, restore-from-
+  history, symlink-escape rejection (file and directory symlinks out of root),
+  capability report assertions.
+- "Rejects unsupported platforms" replaced with "constructs portable versioned
+  file workspaces on desktop platforms" (darwin and win32 construction succeed
+  with correct capability fields).
+- Suite: 184/184 green (baseline 178); no anchored-Linux test removed or
+  weakened. Verified independently by the orchestrator.
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-engine test      # 184/184, pre- and post-rebase
+pnpm --filter @dohc/workspace-engine typecheck # clean
+git diff --check                               # clean
+git fetch origin && git rebase origin/main     # clean rebase onto 0M-1
+```
+
+### E2E / Visual / Manual QA
+
+- N/A (engine-level lane; portable path exercised via forced-mode tests).
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not run for this engine lane; covered at the arc gate.
+- Local agent result: N/A
+- Transcript/artifact path: N/A
+- Secret redaction notes: N/A
+
+### CodeRabbit
+
+- Status: deferred to the PR 0M arc gate (User Decision 5).
+- Findings: -
+- Fixes: -
+- Overrides: -
+- Override approval reference: -
+
+### Unresolved Findings
+
+- Portable path is logic-verified on Linux only. Before multiplatform is
+  claimed, the full @dohc/workspace-engine suite must run on real macOS and
+  Windows runners: rename-over-open-handle and O_EXCL semantics on win32,
+  ELOOP/O_NOFOLLOW mapping and APFS dir-fsync on darwin, path.win32 separator
+  handling in containment checks. Tracked as an arc-gate follow-up.
+
+### Subagent Reviews
+
+- Architecture: lane driver reviewed the VerifiedDirectoryHandle discriminated
+  union and platformMode threading through ~40 helpers.
+- Security: orchestrator verified per-syscall dev+ino re-verification and
+  lstat refusal; portable mode never silently claims anchored guarantees; no
+  production force-mode override exists.
+- QA: forced-portable tests run unconditionally on Linux; capability report
+  tested per platform.
+- Accessibility: N/A
+
+### Security / Privacy Notes
+
+- Portable mode drops directory-fd pinning (impossible off Linux via Node fs):
+  the TOCTOU directory-swap window is narrowed by pre-syscall dev+ino
+  re-checks, not eliminated, and is explicitly reported via capabilities().
+- Windows loses open-time O_NOFOLLOW; symlink refusal relies on lstat
+  immediately before the operation (symlinkDefense: "lstat-only").
+- Both degradations remain stronger than git or a plain editor, which perform
+  path-based writes with no identity re-checks.
+
+### Performance Notes
+
+- Budget areas touched: none; portable mode swaps an fd open for an lstat per
+  mutation — negligible.
+- Budget pass/fail: pass (no measurable change).
+
+### Migration Notes
+
+- None.
+
+### Remaining Risk
+
+- Real-platform verification outstanding (macOS/Windows runners) — arc gate.
+
+### Follow-Up / Deletion Conditions
+
+- Add a macOS/Windows CI matrix job running the workspace-engine suite as a
+  PR 0M arc-gate follow-up; remove the forced-mode hook only if real-platform
+  CI makes it redundant (unlikely — keep for Linux coverage).
