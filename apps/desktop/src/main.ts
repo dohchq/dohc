@@ -857,10 +857,11 @@ const activity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
-  // Workspace-engine alpha (PR 0M-3): when the per-workspace flag is on,
-  // watcher batches are dual-written into the engine store under
-  // .dohc/engine/ beside the untouched legacy history. Flag is read at open;
-  // toggling it takes effect on the next open of the workspace.
+  // Workspace-engine alpha (PR 0M-3/0M-5): when the per-workspace flag is
+  // on, the engine store under .dohc/engine/ is the workspace's SOLE history
+  // recorder — watcher batches become engine moments and no legacy
+  // .dohc/history change set is written. Flag is read at open; toggling it
+  // takes effect on the next open of the workspace.
   captureFor: async (workspace) => {
     const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
     if (!settings.experimental.workspaceEngineAlpha) return null;

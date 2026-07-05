@@ -377,11 +377,77 @@ describe("workspaceEngineCapture startup reconciliation", () => {
   });
 });
 
-describe("workspaceEngineCapture failure isolation", () => {
-  it("keeps legacy watcher history recording when the engine store fails", async () => {
+describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
+  it("records flagged-workspace batches into the engine only — no legacy change set", async () => {
     const root = await tempRoot();
     const workspace: CreatedWorkspace = {
-      workspaceId: "engine-capture-fail-open",
+      workspaceId: "engine-sole-recorder",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const engine = capture(root);
+    let resolveRecorded: (() => void) | null = null;
+    const recorded = new Promise<void>((resolve) => {
+      resolveRecorded = resolve;
+    });
+    const handle = startWorkspaceWatch(workspace, {
+      settleMs: 60,
+      engineCapture: () => engine,
+      onRecorded: () => resolveRecorded?.(),
+    });
+    await handle.ready;
+    await write(root, "notes.md", "# Notes\n");
+    await recorded;
+    await handle.stop();
+    await engine.stop();
+
+    const moments = readEngineMoments(root);
+    expect(moments.map((moment) => moment.path)).toEqual(["notes.md"]);
+    expect(moments[0].text).toBe("# Notes\n");
+    expect(await createChangeSetStore(root).list()).toHaveLength(0);
+  });
+
+  it("keeps legacy recording byte-for-byte for unflagged workspaces", async () => {
+    const root = await tempRoot();
+    const workspace: CreatedWorkspace = {
+      workspaceId: "legacy-unflagged",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    let resolveRecorded: (() => void) | null = null;
+    const recorded = new Promise<void>((resolve) => {
+      resolveRecorded = resolve;
+    });
+    const handle = startWorkspaceWatch(workspace, {
+      settleMs: 60,
+      onRecorded: () => resolveRecorded?.(),
+    });
+    await handle.ready;
+    await write(root, "notes.md", "# Notes\n");
+    await recorded;
+    await handle.stop();
+
+    const records = await createChangeSetStore(root).list();
+    expect(records).toHaveLength(1);
+    expect(records[0].files.map((file) => file.path)).toEqual(["notes.md"]);
+    expect(records[0].files[0].after?.text).toBe("# Notes\n");
+  });
+});
+
+describe("workspaceEngineCapture failure isolation", () => {
+  // PR 0M-5 ended the 0M-3 interim dual-write: with the engine as the sole
+  // recorder, an engine-store failure surfaces via onError and the watcher
+  // keeps running, but no legacy change set is written for the flagged
+  // workspace (fail visible, no second source of truth — the disk stays the
+  // source and the next reconcile pass recovers the missed capture). This
+  // test previously asserted the legacy fail-open record; the change is the
+  // deliberate 0M-5 behavior flip.
+  it("surfaces engine failures without crashing the watcher and without a legacy record", async () => {
+    const root = await tempRoot();
+    const workspace: CreatedWorkspace = {
+      workspaceId: "engine-capture-fail-visible",
       rootPath: root,
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
@@ -401,6 +467,7 @@ describe("workspaceEngineCapture failure isolation", () => {
       },
     });
 
+    let recordedCount = 0;
     let resolveRecorded: (() => void) | null = null;
     const recorded = new Promise<void>((resolve) => {
       resolveRecorded = resolve;
@@ -408,7 +475,10 @@ describe("workspaceEngineCapture failure isolation", () => {
     const handle = startWorkspaceWatch(workspace, {
       settleMs: 60,
       engineCapture: () => engine,
-      onRecorded: () => resolveRecorded?.(),
+      onRecorded: () => {
+        recordedCount += 1;
+        resolveRecorded?.();
+      },
     });
     await handle.ready;
     await write(root, "notes.md", "# Notes\n");
@@ -416,11 +486,12 @@ describe("workspaceEngineCapture failure isolation", () => {
     await handle.stop();
     await engine.stop();
 
-    // Legacy history recorded the edit even though every engine call threw.
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    expect(records[0].files.map((file) => file.path)).toEqual(["notes.md"]);
+    // The watcher survived and completed the batch, the failure surfaced,
+    // and NO legacy change set was written for the flagged workspace.
+    expect(recordedCount).toBe(1);
     expect(errors.length).toBeGreaterThan(0);
+    const records = await createChangeSetStore(root).list();
+    expect(records).toHaveLength(0);
   });
 
   it("one bad path does not drop the rest of the batch", async () => {

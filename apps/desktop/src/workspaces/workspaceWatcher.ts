@@ -287,9 +287,10 @@ export function startWorkspaceWatch(
     activeLocalOperation?: (
       batch: ActiveLocalOperationBatch,
     ) => ActiveLocalOperation | null;
-    // Read at the moment a batch settles: a non-null capture also records the
-    // batch into the workspace engine (alpha flag). Enqueue-only — the legacy
-    // record chain never waits on the engine.
+    // Read at the moment a batch settles: a non-null capture makes the
+    // workspace engine the SOLE recorder for the batch (workspace-engine
+    // alpha) — no legacy .dohc/history change set is written. Enqueue-only:
+    // the watcher never waits on the engine.
     engineCapture?: () => Pick<WorkspaceEngineCapture, "captureBatch"> | null;
   } = {},
 ): WorkspaceWatchHandle {
@@ -335,6 +336,29 @@ export function startWorkspaceWatch(
     // history shows "wallet.sqlite changed", never the transient sidecars.
     const events = collapseSqliteSidecars(rawEvents);
     if (events.length === 0) return;
+    // PR 0M-5: one recorder per workspace, no second source of truth. When
+    // the workspace-engine alpha capture is attached (flagged workspace), the
+    // ENGINE is the sole history: the batch is enqueued onto the capture
+    // chain and no legacy .dohc/history change set is written. Unflagged
+    // workspaces keep the legacy path below byte-for-byte. Engine errors are
+    // handled on the capture chain (fail visible, never a watcher crash);
+    // engine-originated writes were registered as expected events and are
+    // skipped there.
+    const engineCapture = options.engineCapture?.() ?? null;
+    if (engineCapture) {
+      try {
+        engineCapture.captureBatch(events);
+      } catch (error) {
+        console.error(
+          `[desktop] failed to enqueue engine capture for ${workspace.rootPath}:`,
+          error,
+        );
+      }
+      desktopMarks.measureSince("sync-batch", "sync-batch-start");
+      desktopMarks.mark("sync-batch-complete");
+      options.onRecorded?.();
+      return;
+    }
     const batch: WatcherEventBatch = {
       settledAtMs: now(),
       windowMs: options.settleMs ?? 500,
@@ -374,20 +398,6 @@ export function startWorkspaceWatch(
       if (!isDurableChangeSetRecordingUnsupportedError(error)) throw error;
       warnDurableHistoryUnavailable();
     }
-    // PR 0M-3 interim dual-write: legacy .dohc/history above stays the store
-    // the history UI reads; when the workspace-engine alpha flag is on the
-    // batch is ALSO captured into the engine (lane 0M-5 flips the UI to
-    // engine moments and disables legacy recording for flagged workspaces).
-    // captureBatch only enqueues onto the capture chain — engine errors are
-    // handled there and can never fail this record.
-    try {
-      options.engineCapture?.()?.captureBatch(events);
-    } catch (error) {
-      console.error(
-        `[desktop] failed to enqueue engine capture for ${workspace.rootPath}:`,
-        error,
-      );
-    }
     desktopMarks.measureSince("sync-batch", "sync-batch-start");
     desktopMarks.mark("sync-batch-complete");
     options.onRecorded?.();
@@ -414,7 +424,12 @@ export function startWorkspaceWatch(
   );
 
   const ready = watcher.ready.then(async () => {
-    snapshotCache = await seedHistorySnapshotCache(workspace.rootPath);
+    // The snapshot cache only feeds legacy change-set records; when the
+    // engine capture is the sole recorder there is nothing to seed (and no
+    // reason to read every text file at open).
+    if (!options.engineCapture?.()) {
+      snapshotCache = await seedHistorySnapshotCache(workspace.rootPath);
+    }
   });
 
   return {

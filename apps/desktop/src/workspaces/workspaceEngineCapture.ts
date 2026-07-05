@@ -18,14 +18,15 @@ import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises
 import { dirname, join, resolve, sep } from "node:path";
 import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 
-// PR 0M-3 watcher->engine capture (interim dual-write) + PR 0M-4 named-version
-// operations.
+// PR 0M-3 watcher->engine capture + PR 0M-4 named-version operations +
+// PR 0M-5 history/restore (which ended the 0M-3 interim dual-write).
 //
-// While a workspace's `experimental.workspaceEngineAlpha` flag is on, every
-// settled watcher batch is captured into the workspace engine's versioned
-// text store beside the untouched legacy .dohc/history recording. The history
-// UI still reads legacy records; lane 0M-5 flips the UI to engine moments and
-// disables legacy recording for flagged workspaces. Engine state lives under
+// While a workspace's `experimental.workspaceEngineAlpha` flag is on, the
+// engine is the workspace's SOLE history recorder: every settled watcher
+// batch is captured into the versioned text store, the history UI reads
+// engine moments, and restore routes through the engine. No legacy
+// .dohc/history change set is written for flagged workspaces; unflagged
+// workspaces keep the legacy path untouched. Engine state lives under
 // `<root>/.dohc/engine/`.
 //
 // PR 0M-4: the workspace folder on disk always materializes the ACTIVE
@@ -54,12 +55,12 @@ import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 //   - a batch whose content already equals engine state is a no-op (this
 //     also makes startup reconciliation idempotent);
 //   - engine-originated disk writes (restore flows, version switch/merge
-//     materialization) register expected events via
+//     materialization, coordinated renames) register expected events via
 //     registerExpectedEngineEvents and the matching watcher observation skips
 //     engine re-capture (consume-once with expiry, the
-//     ActiveLocalOperation/expectedEvents precedent). Legacy history still
-//     records those observations with the provenance it gets today — only the
-//     ENGINE re-capture is suppressed.
+//     ActiveLocalOperation/expectedEvents precedent). With legacy recording
+//     off for flagged workspaces this registry is the ONLY suppression a
+//     self-write needs.
 //
 // Switch-flow crash ordering (the honest story): the engine records the
 // DESTINATION as active BEFORE the disk is rewritten, and the recovery
@@ -77,9 +78,10 @@ import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 //     version operations are serialized against each other and never block
 //     the renderer;
 //   - engine failures are logged and surfaced via onError but never crash the
-//     watcher; legacy recording is untouched (fail open for legacy, fail
-//     visible for engine). Version operations reject to their caller so the
-//     UI can surface the failure.
+//     watcher (fail visible; the disk stays the source of record and the next
+//     reconcile pass captures anything a failed batch missed). Version and
+//     restore operations reject to their caller so the UI can surface the
+//     failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
