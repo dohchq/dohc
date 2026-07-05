@@ -13519,3 +13519,140 @@ Gate evidence:
 - [ ] Full QA hardening complete.
 - [ ] No skipped critical E2E.
 - [ ] No unresolved P0/P1 findings.
+
+## PR 0M-1 - Engine Storage Baseline (SQLite WAL Plus Content-Addressed Blobs)
+
+Status: merged to main via PR #55 (merge commit ab449e32)
+Branch: codex/think-bigger-0m1-storage-baseline
+Worktree: /home/ice/dev/dohc-0m1-storage-baseline
+Implementation workstream, if used: codex CLI (gpt-5.5) driven by a Claude lane
+driver, two iterations; orchestrator (fable-5) merge review
+PR Link: https://github.com/dohc-ai/dohc/pull/55
+Date started: 2026-07-05
+Date completed: 2026-07-05
+
+### Scope
+
+- [x] Replace whole-file JSON persistence of versionedTextStore and
+      linkedChatStore with SQLite (User Decision 3)
+- [x] One database per workspace at `.dohc/engine/engine.db`; WAL,
+      busy_timeout=5000, foreign_keys=ON, integrity_check on open
+- [x] Content-addressed snapshot bodies in a SHA-256-keyed blobs table with
+      dedupe; relational metadata tables; one BEGIN IMMEDIATE transaction per
+      mutation with row-level reads/writes (whole-store hydration explicitly
+      rejected in round 1 review)
+- [x] Exported TypeScript API of both stores unchanged; versionedFileWorkspace
+      and phase0Proof suites pass unmodified
+- [x] Legacy JSON codepath and lock-file machinery deleted entirely
+      (replacement, not migration; User Decision 6)
+- [x] schema_version fail-closed validation on load
+- [x] Old-vs-new performance evidence recorded
+
+### Files Changed
+
+- packages/workspace-engine/src/versionedTextStore.ts
+- packages/workspace-engine/src/linkedChatStore.ts
+- packages/workspace-engine/src/versionedTextStore.test.ts
+- packages/workspace-engine/src/linkedChatStore.test.ts
+- packages/workspace-engine/src/versionedTextMerge.test.ts
+- packages/workspace-engine/src/testing.ts
+- packages/workspace-engine/src/bench/storageBench.ts (new)
+- packages/workspace-engine/src/bench/vitest.storageBench.config.ts (new)
+
+### Tests Added Or Updated
+
+- Per-file test counts preserved; JSON-corruption and lock-reclaim tests
+  replaced one-for-one with SQLite analogs plus new invariants: unknown
+  schema_version/missing table/non-database bytes fail closed, raw-row
+  assertions, alias/snapshot/lineage disagreement rejections, blob dedupe,
+  and two-instance concurrent writes without loss.
+- Full suite: 178/178 green (verified independently by the orchestrator).
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-engine test          # 6 files, 178/178 passed
+pnpm --filter @dohc/workspace-engine typecheck     # clean
+pnpm --filter @dohc/workspace-engine exec vitest run --config src/bench/vitest.storageBench.config.ts
+git diff --check                                   # clean
+grep -rn "versioned-text-store.json|linked-chat-store.json" packages/ services/ apps/  # no matches
+```
+
+### E2E / Visual / Manual QA
+
+- N/A (internal storage layer; consumer suites versionedFileWorkspace.test.ts
+  and phase0Proof.test.ts pass unmodified).
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not run for this internal storage lane; covered at the
+  arc gate.
+- Local agent result: N/A
+- Transcript/artifact path: N/A
+- Secret redaction notes: N/A
+
+### CodeRabbit
+
+- Status: deferred to the PR 0M arc gate (User Decision 5: sparing, batched
+  major-gate usage).
+- Findings: -
+- Fixes: -
+- Overrides: -
+- Override approval reference: -
+
+### Unresolved Findings
+
+- None at merge.
+
+### Subagent Reviews
+
+- Architecture: lane-driver review rejected round 1 (whole-state rewrite per
+  mutation, 26 percent slower writes and 175x slower cold reads than JSON);
+  round 2 incremental row-level design accepted.
+- Security: `.dohc/engine/` still 0o700; fail-closed on corrupt or unknown
+  schema; no new attack surface.
+- QA: orchestrator verified test-count parity and reviewed the test-adaptation
+  diff for weakening; structural invariants (single main version, reserved
+  main id) enforced by schema and validation.
+- Accessibility: N/A
+
+### Security / Privacy Notes
+
+- Blobs table contains full text bodies, same exposure as the prior JSON file.
+
+### Performance Notes
+
+- Budget areas touched: engine store write path, cold open/read path.
+- Baseline profile: legacy JSON store measured from HEAD b93687a8 sources.
+- Baseline commit/fixture: b93687a8; 1,000 files, ~50-byte bodies, one
+  workspace, main version.
+- Baseline values: writes 42,017 ms; cold open+read 90 ms.
+- Accepted tolerance/variance: single-run wall clock on WSL2; repro within
+  0.3 percent.
+- Metrics: new writes 4,702 ms (~8.9x faster); new cold open+read 76 ms.
+- Cold/warm distinction: cold includes once-per-instance full validation.
+- Workspace/file/chat sizes: 1,000 files, 1 workspace.
+- Machine/CI context: WSL2 Linux 6.18, node v25.2.1, local disk.
+- Budget pass/fail: pass.
+- Jank/blocking notes: BEGIN IMMEDIATE held per mutation; busy_timeout=5000
+  bounds cross-process stalls.
+- Regression risk: full-hydration regressions guarded only by the committed
+  benchmark, not CI-enforced.
+- Follow-up required: consider CI perf smoke; optional store dispose() for
+  connection lifecycle.
+
+### Migration Notes
+
+- None. Replacement, not migration (User Decision 6); only Phase 0 tests ever
+  created the JSON files.
+
+### Remaining Risk
+
+- node:sqlite remains experimental in Node; long-lived connection has no
+  explicit close; cross-process concurrency exercised via same-process dual
+  instances; SQLITE_BUSY beyond 5s surfaces as persist-failed.
+
+### Follow-Up / Deletion Conditions
+
+- Multiplatform anchored-writer fallback is lane 0M-2; live Postgres
+  validation leg re-runs at the arc gate.
