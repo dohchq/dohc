@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLinkedChatStore, linkedChatProjectionPath } from "./linkedChatStore";
 import { createVersionedTextStore } from "./versionedTextStore";
-import { searchWorkspaceEngine } from "./workspaceSearch";
+import { classifyEngineFilePath, searchWorkspaceEngine } from "./workspaceSearch";
 
 let root: string;
 let now = 1000;
@@ -200,5 +200,27 @@ describe("workspace engine search", () => {
         chats,
       }),
     ).resolves.toEqual([]);
+  });
+});
+
+describe("engine file path classifier (shared by search and capture)", () => {
+  it("tracks ordinary workspace text paths", () => {
+    expect(classifyEngineFilePath("notes/today.md")).toEqual({ kind: "tracked" });
+    expect(classifyEngineFilePath("environment.md")).toEqual({ kind: "tracked" });
+  });
+
+  it("classifies .env-style secret paths at any depth or case", () => {
+    expect(classifyEngineFilePath(".env")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("config/.ENV")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("apps/site/.env/local")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("deploy/prod.env")).toEqual({ kind: "secret" });
+  });
+
+  it("classifies ignored and invalid paths as ignored", () => {
+    expect(classifyEngineFilePath(".dohc/engine/engine.db")).toEqual({ kind: "ignored" });
+    expect(classifyEngineFilePath("node_modules/pkg/index.js")).toEqual({ kind: "ignored" });
+    expect(classifyEngineFilePath(".git/HEAD")).toEqual({ kind: "ignored" });
+    expect(classifyEngineFilePath("../outside.md")).toEqual({ kind: "ignored" });
+    expect(classifyEngineFilePath("")).toEqual({ kind: "ignored" });
   });
 });

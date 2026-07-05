@@ -85,6 +85,32 @@ function assertSafeRelativePath(path: string): void {
   }
 }
 
+// Seeds .dohc/settings.local.json before launch so a spec can flip
+// per-workspace flags (e.g. experimental.workspaceEngineAlpha) without
+// driving the settings UI. Mirrors DEFAULT_WORKSPACE_SETTINGS; the schema is
+// strict, so keep this shape in sync with workspaceSettings.ts.
+export async function seedWorkspaceSettings(
+  workspace: Pick<TempWorkspace, "rootPath">,
+  overrides: { experimental?: { workspaceEngineAlpha?: boolean } } = {},
+): Promise<void> {
+  const settings = {
+    version: 1,
+    agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+    sites: { defaultPreviewMode: "auto" },
+    privacy: { confirmExternalLinks: true },
+    experimental: {
+      workspaceEngineAlpha: false,
+      ...overrides.experimental,
+    },
+  };
+  const dir = join(workspace.rootPath, ".dohc");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "settings.local.json"),
+    `${JSON.stringify(settings, null, 2)}\n`,
+  );
+}
+
 export async function writeWorkspaceFiles(
   workspace: Pick<TempWorkspace, "rootPath">,
   files: WorkspaceFileWrite[],

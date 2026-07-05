@@ -8,6 +8,7 @@ import type {
 } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./cloudSyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
   DESKTOP_HISTORY_STORE_OPTIONS,
   createChangeSetStore,
@@ -25,6 +26,10 @@ interface WatchedWorkspace {
   inFlight: boolean;
   lastSyncedAtMs: number | null;
   engine: CloudSyncEngine | null;
+  // Per-workspace engine-capture singleton (workspace-engine alpha flag);
+  // null while the flag is off. Torn down in stopAll AFTER the watcher stops
+  // so the final settled batch is captured before shutdown completes.
+  capture: WorkspaceEngineCapture | null;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -134,6 +139,12 @@ export interface WorkspaceActivityOptions {
   // Builds a sync engine for a workspace when it is enabled AND connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
   engineFor?: (workspace: CreatedWorkspace) => CloudSyncEngine | null;
+  // Builds the watcher->engine capture for a workspace when its
+  // workspace-engine alpha flag is on; null keeps the workspace on legacy
+  // history only. Called once per open; main owns the flag read.
+  captureFor?: (
+    workspace: CreatedWorkspace,
+  ) => Promise<WorkspaceEngineCapture | null> | WorkspaceEngineCapture | null;
 }
 
 function mergeHistoryRecords(
@@ -227,6 +238,7 @@ export function createWorkspaceActivity(
         lastSyncedAtMs: null,
         handle: { stop: async () => {}, ready: Promise.resolve() },
         engine: null,
+        capture: null,
         agentRun: null,
         pendingLocalOperations: [],
       };
@@ -235,6 +247,10 @@ export function createWorkspaceActivity(
         // Read live at settle time so a batch is attributed to whatever run is
         // active then — the slot may flip between batches within one open.
         activeAgentRun: () => entry.agentRun,
+        // Read live at settle time: null until the alpha-flag capture is
+        // attached below; batches settling before then are reconciled by the
+        // capture's startup pass instead of being lost.
+        engineCapture: () => entry.capture,
         activeLocalOperation: ({ paths, events }) => {
           const now = Date.now();
           entry.pendingLocalOperations = entry.pendingLocalOperations.filter(
@@ -262,6 +278,24 @@ export function createWorkspaceActivity(
         entry.handle.ready,
         new Promise<void>((resolve) => setTimeout(resolve, 5000)),
       ]);
+      // Attach the engine capture (alpha flag) after the watcher is live and
+      // kick its startup reconciliation in the background: closed-period
+      // edits become engine moments without blocking the open. A failure
+      // keeps the workspace on legacy history only — never a failed open.
+      if (options.captureFor) {
+        try {
+          const capture = await options.captureFor(workspace);
+          if (capture) {
+            entry.capture = capture;
+            capture.start();
+          }
+        } catch (error) {
+          console.error(
+            `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
+            error,
+          );
+        }
+      }
       const engine = options.engineFor?.(workspace) ?? null;
       if (engine) {
         entry.engine = engine;
@@ -390,6 +424,19 @@ export function createWorkspaceActivity(
     entry.agentRun = run;
   }
 
+  // Registers engine-originated disk writes (restore flows, future engine
+  // API/MCP writes) so the watcher's engine capture does not re-record them.
+  // Returns null when the workspace has no active engine capture — callers
+  // then need no suppression because nothing engine-side is recording.
+  function registerExpectedEngineEvents(
+    workspaceId: string,
+    events: Parameters<WorkspaceEngineCapture["registerExpectedEngineEvents"]>[0],
+  ): (() => void) | null {
+    const entry = watched.get(workspaceId);
+    if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
+    return entry.capture?.registerExpectedEngineEvents(events) ?? null;
+  }
+
   function beginLocalOperation(
     workspaceId: string,
     operation: ActiveLocalOperation,
@@ -410,11 +457,14 @@ export function createWorkspaceActivity(
 
   // Resolves once every watcher has flushed AND its in-flight records are
   // written — the quit path awaits this so the last save is never dropped.
+  // The engine capture stops AFTER its watcher: the watcher's final flush
+  // enqueues the last batch, then capture.stop() awaits the capture chain so
+  // the last engine record is durably written too.
   async function stopAll(): Promise<void> {
-    const stops = [...watched.values()].flatMap((w) => [
-      w.handle.stop(),
-      w.engine?.stop() ?? Promise.resolve(),
-    ]);
+    const stops = [...watched.values()].map(async (w) => {
+      await Promise.all([w.handle.stop(), w.engine?.stop() ?? Promise.resolve()]);
+      await (w.capture?.stop() ?? Promise.resolve());
+    });
     watched.clear();
     await Promise.all(stops);
   }
@@ -428,6 +478,7 @@ export function createWorkspaceActivity(
     readChangeSet,
     getStatus,
     setAgentRun,
+    registerExpectedEngineEvents,
     beginLocalOperation,
     stopAll,
   };

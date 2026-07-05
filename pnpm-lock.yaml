@@ -53,6 +53,9 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core
+      '@dohc/workspace-engine':
+        specifier: workspace:*
+        version: link:../../packages/workspace-engine
       '@dohc/workspace-fs':
         specifier: workspace:*
         version: link:../../packages/workspace-fs

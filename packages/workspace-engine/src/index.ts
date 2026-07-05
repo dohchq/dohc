@@ -74,9 +74,11 @@ export type {
 } from "./linkedChatStore";
 export {
   WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS,
+  classifyEngineFilePath,
   searchWorkspaceEngine,
 } from "./workspaceSearch";
 export type {
+  EngineFilePathClassification,
   SearchSurface,
   SearchVisibility,
   WorkspaceEngineSearchOptions,

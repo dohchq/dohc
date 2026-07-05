@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
+  mergeWorkspaceSettings,
   parseWorkspaceSettings,
   workspaceSettingsModified,
 } from "./workspaceSettings";
@@ -53,6 +54,31 @@ describe("workspace settings model", () => {
       }),
     ).toBe(true);
   });
+
+  it("parses a pre-experimental settings shape without resetting it", () => {
+    // Files written before the experimental group existed: the strict schema
+    // must default the new group instead of silently resetting everything.
+    const oldShape = {
+      version: 1,
+      agents: { mcpAutoStart: true, defaultDriverId: "claude", defaultModel: null },
+      sites: { defaultPreviewMode: "static" },
+      privacy: { confirmExternalLinks: false },
+    };
+    expect(parseWorkspaceSettings(oldShape)).toEqual({
+      ...oldShape,
+      experimental: { workspaceEngineAlpha: false },
+    });
+  });
+
+  it("merges and round-trips the workspace engine alpha flag", () => {
+    const enabled = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    expect(enabled.experimental.workspaceEngineAlpha).toBe(true);
+    expect(enabled.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
+    expect(workspaceSettingsModified(enabled)).toBe(true);
+    expect(parseWorkspaceSettings(enabled)).toEqual(enabled);
+  });
 });
 
 describe("workspace settings file store", () => {
@@ -75,6 +101,27 @@ describe("workspace settings file store", () => {
     expect(await readWorkspaceSettingsFile(await tempRoot())).toEqual({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "default",
+    });
+  });
+
+  it("an on-disk file from before the experimental group still parses as stored", async () => {
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await writeFile(
+      join(root, ".dohc", WORKSPACE_SETTINGS_FILE),
+      JSON.stringify({
+        version: 1,
+        agents: { mcpAutoStart: true, defaultDriverId: null, defaultModel: null },
+        sites: { defaultPreviewMode: "auto" },
+        privacy: { confirmExternalLinks: true },
+      }),
+    );
+    expect(await readWorkspaceSettingsFile(root)).toEqual({
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, mcpAutoStart: true },
+      },
+      source: "stored",
     });
   });
 

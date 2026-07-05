@@ -51,18 +51,33 @@ function normalizeQuery(query: string): string {
   return query.trim().toLowerCase();
 }
 
+export type EngineFilePathClassification =
+  | { kind: "tracked" }
+  | { kind: "ignored" }
+  | { kind: "secret" };
+
+// THE shared engine path policy: one classifier decides which workspace paths
+// the engine owns at all, shared by engine search visibility and the desktop
+// watcher->engine capture path so "what the engine records" and "what engine
+// search may surface" cannot drift apart.
+export function classifyEngineFilePath(path: string): EngineFilePathClassification {
+  const normalized = validateUserWritePath(path);
+  if (!normalized.ok || hasIgnoredSegment(path)) {
+    return { kind: "ignored" };
+  }
+  if (path.split("/").some((segment) => segment.toLowerCase() === ".env")) {
+    return { kind: "secret" };
+  }
+  if (path.toLowerCase().endsWith(".env")) {
+    return { kind: "secret" };
+  }
+  return { kind: "tracked" };
+}
+
 function defaultFileVisibility(file: TextFileSnapshot): SearchVisibility {
-  const normalized = validateUserWritePath(file.path);
-  if (!normalized.ok || hasIgnoredSegment(file.path)) {
-    return { searchable: false, reason: "ignored" };
-  }
-  if (file.path.split("/").some((segment) => segment.toLowerCase() === ".env")) {
-    return { searchable: false, reason: "secret" };
-  }
-  if (file.path.toLowerCase().endsWith(".env")) {
-    return { searchable: false, reason: "secret" };
-  }
-  return { searchable: true };
+  const classification = classifyEngineFilePath(file.path);
+  if (classification.kind === "tracked") return { searchable: true };
+  return { searchable: false, reason: classification.kind };
 }
 
 function defaultChatVisibility(_thread: ChatThread): SearchVisibility {

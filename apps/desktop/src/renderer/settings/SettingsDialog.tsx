@@ -589,6 +589,34 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-advanced">
             <SettingRow
+              title="Workspace engine (alpha)"
+              description="Experimental: also capture this workspace's file history into the versioned workspace engine. Legacy history keeps recording while the alpha flag is on. Takes effect the next time the workspace is opened."
+              modified={isModified(
+                workspaceSettings.experimental.workspaceEngineAlpha,
+                DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
+              )}
+              onReset={() =>
+                void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                  experimental: {
+                    ...workspaceSettings.experimental,
+                    workspaceEngineAlpha:
+                      DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
+                  },
+                }))
+              }
+              testId="settings-row-workspace-engine-alpha"
+            >
+              <SwitchControl
+                label="Workspace engine (alpha)"
+                checked={workspaceSettings.experimental.workspaceEngineAlpha}
+                onChange={(workspaceEngineAlpha) =>
+                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                    experimental: { ...workspaceSettings.experimental, workspaceEngineAlpha },
+                  }))
+                }
+              />
+            </SettingRow>
+            <SettingRow
               title="Reset user settings"
               description="Restore local user settings for this desktop install to defaults."
               modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
