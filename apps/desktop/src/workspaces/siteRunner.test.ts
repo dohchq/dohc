@@ -88,6 +88,14 @@ describe("package manager helpers", () => {
     expect(detectDevUrl("ready on http://[2001:db8::1]:5173")).toBeNull();
     expect(detectDevUrl("ready on http://example.com:5173")).toBeNull();
     expect(detectDevUrl("ready on http://mysite.local:5173")).toBeNull();
+    // Vite with FORCE_COLOR reaching it (Playwright workers set it; user
+    // shells can too) bolds the PORT with ANSI SGR sequences mid-URL — the
+    // port must not be dropped (a port-less URL loads a dead preview).
+    expect(
+      detectDevUrl(
+        "  \u001B[32m→\u001B[39m  \u001B[1mLocal\u001B[22m:   \u001B[36mhttp://127.0.0.1:\u001B[1m5173\u001B[22m/\u001B[39m",
+      ),
+    ).toBe("http://127.0.0.1:5173/");
   });
 
   it("splits simple configured command strings", () => {

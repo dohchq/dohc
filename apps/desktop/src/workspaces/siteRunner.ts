@@ -41,6 +41,13 @@ const MAX_LOG_ENTRIES = 500;
 const BUILD_TIMEOUT_MS = 120000;
 const BUILD_HARD_KILL_GRACE_MS = 5000;
 const DEV_URL_RE = /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?)/i;
+// Dev tools colorize their "Local: http://..." line when FORCE_COLOR reaches
+// them (Playwright workers set it; user shells can too). Vite bolds the PORT
+// — "http://127.0.0.1:\x1b[1m5173\x1b[22m/" — which used to split the URL at
+// the escape and silently drop the port, loading a dead preview. Strip ANSI
+// SGR sequences before matching.
+// eslint-disable-next-line no-control-regex
+const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
 const HOST_BIND_FLAGS = new Set(["--host", "--hostname", "-H"]);
 const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -281,7 +288,8 @@ export function assertLoopbackOnlyDevServerCommand(command: string, args: string
 }
 
 export function detectDevUrl(text: string): string | null {
-  return DEV_URL_RE.exec(text)?.[1]?.replace("[::1]", "127.0.0.1") ?? null;
+  const plain = text.replace(ANSI_SGR_RE, "");
+  return DEV_URL_RE.exec(plain)?.[1]?.replace("[::1]", "127.0.0.1") ?? null;
 }
 
 export async function startSiteDevServer(input: {
