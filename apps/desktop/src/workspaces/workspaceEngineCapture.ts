@@ -8,6 +8,8 @@ import {
   type VersionFileChange,
   type VersionRecord,
   type VersionedTextConflictRecord,
+  type VersionedTextMoment,
+  type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import { isTextMediaType, mediaTypeForPath, scanWorkspaceFiles } from "@dohc/workspace-fs";
@@ -106,6 +108,29 @@ export interface WorkspaceVersionMergeResult {
   conflicts: VersionedTextConflictRecord[];
 }
 
+// One page of the ACTIVE version's timeline (the folder shows the active
+// version, so its history is what the history UI shows).
+export interface WorkspaceEngineMomentPage {
+  moments: VersionedTextMomentSummary[];
+  nextBeforeMomentOrder: number | null;
+  latestMomentOrder: number;
+  activeVersionId: string;
+}
+
+export interface WorkspaceEngineRestoreResult {
+  // "text" wrote the pre-moment snapshot back; "deleted" removed a file the
+  // moment had created.
+  restored: "text" | "deleted";
+  // The forward moment the restore recorded (restore never rewrites history).
+  // Undo = restore to before THIS moment through the same API.
+  restoredMomentId: string;
+  path: string;
+}
+
+// Finishes an engine-coordinated single-file rename: call with ok=true after
+// the disk move succeeded, ok=false to roll the engine rename back.
+export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
+
 export type WorkspaceVersionConflictResolution =
   | { kind: "keep-current" }
   | { kind: "apply-incoming" }
@@ -152,6 +177,31 @@ export interface WorkspaceEngineCapture {
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
   ): Promise<WorkspaceVersionConflictResolveOutcome>;
+  // History reads (PR 0M-5): the ACTIVE version's moment timeline and one
+  // moment's full payload. Reads are served by the store directly (it orders
+  // reads after its own writes) — never blocked behind the capture chain.
+  listMoments(input?: {
+    limit?: number;
+    beforeMomentOrder?: number;
+  }): Promise<WorkspaceEngineMomentPage>;
+  readMoment(momentId: string): Promise<VersionedTextMoment | null>;
+  // Engine restore (PR 0M-5): returns the file to its state BEFORE the given
+  // moment. Runs on the capture chain; records a forward "Restored <file>"
+  // moment (history is never rewritten) and materializes the result to disk
+  // with expected-event registration so the watcher's observation of our own
+  // write is not re-captured. Undo = call again with the returned
+  // restoredMomentId.
+  restoreFileToBeforeMoment(momentId: string): Promise<WorkspaceEngineRestoreResult>;
+  // Stable-identity seam for the linked-chat rail: the active version's
+  // engine object id for a path, or null when the engine does not own it.
+  fileObjectIdForPath(path: string): Promise<string | null>;
+  // Engine-coordinated single-file rename (product rename flows call this
+  // BEFORE moving the file on disk). When both sides are engine-owned text,
+  // the engine records a rename moment — preserving the stable object id the
+  // linked-chat rail keys on — and registers the expected watcher
+  // observations. All other shapes (folders, binary, untracked) return a
+  // no-op finisher and are captured as delete+write by the normal path.
+  beginFileRename(fromPath: string, toPath: string): Promise<WorkspaceEngineRenameFinisher>;
   // Resolves when everything enqueued so far has been captured (tests).
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -807,6 +857,199 @@ export function createWorkspaceEngineCapture(
           status: "open",
         });
         return { conflict: result.conflict, remaining };
+      });
+    },
+
+    async listMoments(input = {}) {
+      const engine = await engineStore();
+      const activeVersionId = await activeVersionIdOf(engine);
+      const page = await engine.listMoments({
+        workspaceId,
+        versionId: activeVersionId,
+        ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        ...(input.beforeMomentOrder !== undefined
+          ? { beforeMomentOrder: input.beforeMomentOrder }
+          : {}),
+      });
+      return { ...page, activeVersionId };
+    },
+
+    async readMoment(momentId) {
+      const engine = await engineStore();
+      return engine.getMoment({ workspaceId, momentId });
+    },
+
+    restoreFileToBeforeMoment(momentId) {
+      return enqueueResult("restore file", async () => {
+        const engine = await engineStore();
+        const activeVersionId = await activeVersionIdOf(engine);
+        const moment = await engine.getMoment({ workspaceId, momentId });
+        if (!moment) {
+          throw new Error("This history moment is no longer available.");
+        }
+        if (moment.versionId !== activeVersionId) {
+          throw new Error(
+            "This moment belongs to a different version. Switch to that version to restore it.",
+          );
+        }
+        if (moment.operation === "rename") {
+          throw new Error("A rename can't be restored directly.");
+        }
+        const path = moment.path;
+        const correlationId = `restore-${randomUUID()}`;
+        // Capture the file's latest disk state first so a restore can never
+        // destroy an edit the engine has not recorded yet — the pre-restore
+        // content stays one moment back in history.
+        const disk = await readDiskTextState(rootPath, path);
+        if (disk.kind === "unreadable") {
+          throw new Error(`Could not read the current ${path} on disk.`);
+        }
+        if (disk.kind === "untracked-content") {
+          throw new Error(
+            `Only text files can be restored — ${path} is no longer a text file.`,
+          );
+        }
+        const saveMetadata: ActorNeutralWriteMetadata = {
+          origin: "local-file",
+          summary: "Saved latest edits",
+          correlationId,
+        };
+        if (disk.kind === "text") {
+          await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
+        } else {
+          // Confirmed absent: reconcile the deletion so engine and disk agree
+          // before the restore moment is recorded.
+          await deleteIfTracked(engine, activeVersionId, path, saveMetadata);
+        }
+        const target = moment.payload.before;
+        const metadata: ActorNeutralWriteMetadata = {
+          origin: "restore",
+          summary: `Restored ${path}`,
+          correlationId,
+        };
+        const current = await engine.readTextFile({
+          workspaceId,
+          versionId: activeVersionId,
+          path,
+        });
+        if (target) {
+          if (current && current.text === target.text) {
+            // Already in the pre-moment state. Returning the SAME moment id
+            // keeps undo a no-op (undoing an idempotent restore restores the
+            // identical state again).
+            return { restored: "text" as const, restoredMomentId: momentId, path };
+          }
+          const result = await engine.writeTextFile({
+            workspaceId,
+            versionId: activeVersionId,
+            path,
+            text: target.text,
+            metadata,
+          });
+          await materialize([{ kind: "write", path, text: target.text }]);
+          return {
+            restored: "text" as const,
+            restoredMomentId: result.moment.id,
+            path,
+          };
+        }
+        // The moment created the file: restoring to before it removes it.
+        if (!current) {
+          return { restored: "deleted" as const, restoredMomentId: momentId, path };
+        }
+        const result = await engine.deleteTextFile({
+          workspaceId,
+          versionId: activeVersionId,
+          path,
+          metadata,
+        });
+        await materialize([{ kind: "delete", path }]);
+        return {
+          restored: "deleted" as const,
+          restoredMomentId: result.moment.id,
+          path,
+        };
+      });
+    },
+
+    async fileObjectIdForPath(path) {
+      const engine = await engineStore();
+      const activeVersionId = await activeVersionIdOf(engine);
+      const snapshot = await engine.readTextFile({
+        workspaceId,
+        versionId: activeVersionId,
+        path,
+      });
+      return snapshot?.objectId ?? null;
+    },
+
+    beginFileRename(fromPath, toPath) {
+      return enqueueResult("prepare rename", async () => {
+        const noop: WorkspaceEngineRenameFinisher = async () => {};
+        // Only a clean single-file rename between two engine-owned text paths
+        // goes through the engine rename (preserving the stable object id);
+        // everything else falls back to the watcher's delete+write capture.
+        if (
+          classifyEngineFilePath(fromPath).kind !== "tracked" ||
+          classifyEngineFilePath(toPath).kind !== "tracked"
+        ) {
+          return noop;
+        }
+        const toCheck = validateUserWritePath(toPath);
+        if (!toCheck.ok || toCheck.normalized !== toPath) return noop;
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        const disk = await readDiskTextState(rootPath, fromPath);
+        if (disk.kind !== "text") return noop;
+        try {
+          // Sync the latest disk content first so the rename moment carries
+          // exactly what moves on disk.
+          await writeIfChanged(engine, versionId, fromPath, disk, {
+            origin: "local-file",
+            summary: "Saved latest edits",
+          });
+          await engine.renameTextFile({
+            workspaceId,
+            versionId,
+            fromPath,
+            toPath,
+            metadata: {
+              origin: "local-file",
+              summary: `Renamed ${fromPath} to ${toPath}`,
+            },
+          });
+        } catch (error) {
+          // Best-effort coordination: an engine refusal (for example the
+          // destination already tracked) must never block the disk rename —
+          // the watcher's plain capture takes over.
+          onError(`prepare rename of ${fromPath}`, error);
+          return noop;
+        }
+        const cancel = registerExpectedEngineEvents([
+          { path: fromPath, operation: "delete" },
+          { path: toPath, operation: "write", sha256: disk.sha256 },
+        ]);
+        return async (ok: boolean) => {
+          if (ok) return;
+          cancel();
+          // The disk move failed after the engine recorded the rename: rename
+          // back so engine state keeps mirroring the folder. Forward history —
+          // both rename moments stay visible.
+          await enqueueResult("rename rollback", async () => {
+            await engine.renameTextFile({
+              workspaceId,
+              versionId,
+              fromPath: toPath,
+              toPath: fromPath,
+              metadata: {
+                origin: "local-file",
+                summary: `Rename of ${fromPath} did not complete`,
+              },
+            });
+          }).catch((error) => {
+            onError("rename rollback", error);
+          });
+        };
       });
     },
 
