@@ -227,6 +227,17 @@ export interface VersionedTextDeleteResult {
 export interface VersionedTextStore {
   ensureMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord>;
   getMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord | null>;
+  // Engine-owned "which version does the workspace folder show right now".
+  // Defaults to main until setActiveVersion persists a different choice; null
+  // only when the workspace has never been initialized in this store.
+  getActiveVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord | null>;
+  // Fails closed: an unknown or other-workspace version id throws
+  // (version-not-found / workspace-mismatch) and the active version is
+  // unchanged.
+  setActiveVersion(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+  }): Promise<VersionRecord>;
   createNamedVersion(input: {
     workspaceId: WorkspaceId;
     name: string;
@@ -635,6 +646,20 @@ function initializeOrValidateSchema(db: SqliteDb): void {
   const version = db.prepare("SELECT version FROM schema_version WHERE id = 1").get();
   if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corruptStore();
   assertRequiredTables(db);
+  // Lazy additive upgrade for stores created before active-version tracking
+  // (PR 0M-4): the table is created if missing rather than bumping the schema
+  // version — older readers ignore it, and a missing row still reads as
+  // "main is active".
+  createActiveVersionsTableIfMissing(db);
+}
+
+function createActiveVersionsTableIfMissing(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS active_versions (
+      workspace_id TEXT PRIMARY KEY,
+      version_id TEXT NOT NULL
+    )
+  `);
 }
 
 function assertSqliteIntegrity(db: SqliteDb): void {
@@ -849,6 +874,10 @@ function createSchema(db: SqliteDb): void {
         PRIMARY KEY (workspace_id, message_id),
         UNIQUE (workspace_id, thread_id, message_order),
         FOREIGN KEY (workspace_id, thread_id) REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
+      );
+      CREATE TABLE active_versions (
+        workspace_id TEXT PRIMARY KEY,
+        version_id TEXT NOT NULL
       );
       CREATE INDEX idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
@@ -3402,6 +3431,57 @@ function createVersionedTextStoreWithHooks(
           )
           .get(workspaceId);
         return version ? cloneVersion(versionFromRow(version)) : null;
+      });
+    },
+
+    getActiveVersion(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const txDb = db();
+        const workspaceRow = txDb
+          .prepare("SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?")
+          .get(workspaceId);
+        if (!workspaceRow) return null;
+        const mainVersionId = rowString(workspaceRow, "main_version_id");
+        const activeRow = txDb
+          .prepare("SELECT version_id FROM active_versions WHERE workspace_id = ?")
+          .get(workspaceId);
+        const activeVersionId = activeRow ? rowString(activeRow, "version_id") : mainVersionId;
+        const versionRow = txDb
+          .prepare("SELECT * FROM versions WHERE workspace_id = ? AND version_id = ?")
+          .get(workspaceId, activeVersionId);
+        // A stale active row (should be unreachable: versions are never
+        // deleted) reads as main rather than bricking every active-version
+        // read for the workspace.
+        const resolvedRow =
+          versionRow ??
+          txDb
+            .prepare("SELECT * FROM versions WHERE workspace_id = ? AND version_id = ?")
+            .get(workspaceId, mainVersionId);
+        if (!resolvedRow) throw corruptStore();
+        return cloneVersion(versionFromRow(resolvedRow));
+      });
+    },
+
+    setActiveVersion(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        await beforeWriteMutation();
+        const txDb = db();
+        // Fail closed: unknown ids and other-workspace ids throw before any
+        // mutation (version-not-found / workspace-mismatch).
+        const version = requireWorkspaceVersionRow(txDb, workspaceId, versionId);
+        txDb
+          .prepare(
+            `INSERT INTO active_versions (workspace_id, version_id) VALUES (?, ?)
+             ON CONFLICT(workspace_id) DO UPDATE SET version_id = excluded.version_id`,
+          )
+          .run(workspaceId, version.id);
+        await persistBarrier();
+        return cloneVersion(version);
       });
     },
 

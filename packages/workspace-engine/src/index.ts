@@ -10,6 +10,11 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+export { compareVersionFiles } from "./versionCompare";
+export type {
+  VersionFileChange,
+  VersionFileChangeStatus,
+} from "./versionCompare";
 export {
   VersionedFileWorkspaceError,
   getFileWorkspaceCapabilityReport,

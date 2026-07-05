@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   CreateDataFragmentPayload,
+  CreateWorkspaceVersionPayload,
+  ListWorkspaceVersionsResult,
+  ResolveWorkspaceVersionConflictPayload,
+  SwitchWorkspaceVersionPayload,
+  WorkspaceVersionConflict,
   ListSitesResult,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
@@ -375,6 +380,92 @@ describe("data fragment IPC contract", () => {
         workspaceId: "ws-fragments",
         body: "10 apples",
         recipientEmail: "not-an-email",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("workspace versions IPC contract (PR 0M-4)", () => {
+  it("accepts well-formed version payloads and results", () => {
+    expect(
+      CreateWorkspaceVersionPayload.parse({
+        workspaceId: "ws-versions",
+        name: "Client Draft",
+      }).name,
+    ).toBe("Client Draft");
+    expect(
+      ListWorkspaceVersionsResult.parse({
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main",
+            createdAtMs: 1,
+            canMergeIntoMain: false,
+          },
+        ],
+        activeVersionId: "main",
+      }).activeVersionId,
+    ).toBe("main");
+    expect(
+      ResolveWorkspaceVersionConflictPayload.parse({
+        workspaceId: "ws-versions",
+        conflictId: "conflict-1",
+        resolution: { kind: "keep-combined", text: "combined\n" },
+      }).resolution.kind,
+    ).toBe("keep-combined");
+    // Conflict sides may be null (file only exists on one side).
+    expect(
+      WorkspaceVersionConflict.parse({
+        conflictId: "conflict-1",
+        path: "plan.md",
+        sourceVersionId: "version-1",
+        targetVersionId: "main",
+        currentText: null,
+        incomingText: "incoming\n",
+        baseText: null,
+      }).currentText,
+    ).toBeNull();
+  });
+
+  it("rejects padded names, oversized inputs, and unknown resolution kinds", () => {
+    expect(
+      CreateWorkspaceVersionPayload.safeParse({
+        workspaceId: "ws-versions",
+        name: "  padded  ",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateWorkspaceVersionPayload.safeParse({
+        workspaceId: "ws-versions",
+        name: "x".repeat(81),
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateWorkspaceVersionPayload.safeParse({
+        workspaceId: "ws-versions",
+        name: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      SwitchWorkspaceVersionPayload.safeParse({
+        workspaceId: "ws-versions",
+        versionId: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      ResolveWorkspaceVersionConflictPayload.safeParse({
+        workspaceId: "ws-versions",
+        conflictId: "conflict-1",
+        resolution: { kind: "overwrite-everything" },
+      }).success,
+    ).toBe(false);
+    // keep-combined requires the combined text.
+    expect(
+      ResolveWorkspaceVersionConflictPayload.safeParse({
+        workspaceId: "ws-versions",
+        conflictId: "conflict-1",
+        resolution: { kind: "keep-combined" },
       }).success,
     ).toBe(false);
   });

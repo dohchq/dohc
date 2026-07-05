@@ -62,9 +62,22 @@ import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
+  UnifiedDiffLines,
+  buildUnifiedDiffLines,
+  changedLineCounts,
+  type UnifiedDiffLine,
+} from "./workbench/unifiedDiff";
+import {
+  VersionComparePage,
+  VersionMenu,
+} from "./workbench/WorkspaceVersions";
+import {
   activateTab,
   closeTab,
   clampHistoryWidth,
+  isVersionCompareTabPath,
+  parseVersionCompareTabPath,
+  versionCompareTabPath,
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
@@ -171,262 +184,7 @@ function uniqueUntitledTextPath(
   return `Untitled ${Date.now()}.txt`;
 }
 
-type DiffLine = {
-  kind: "context" | "added" | "removed";
-  text: string;
-};
-
-type UnifiedDiffLine = {
-  kind: DiffLine["kind"] | "note";
-  text: string;
-  oldLineNumber: number | null;
-  newLineNumber: number | null;
-};
-
 type HistoryAuthorFilter = "all" | ChangeSetRecord["author"]["kind"];
-
-const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
-
-function splitDiffLines(text: string): string[] {
-  const normalized = text.replace(/\r\n?/g, "\n");
-  if (normalized.length === 0) return [];
-  const lines = normalized.split("\n");
-  if (lines[lines.length - 1] === "") lines.pop();
-  return lines;
-}
-
-function buildContiguousDiff(before: string[], after: string[]): DiffLine[] {
-  let prefix = 0;
-  while (
-    prefix < before.length &&
-    prefix < after.length &&
-    before[prefix] === after[prefix]
-  ) {
-    prefix += 1;
-  }
-
-  let suffix = 0;
-  while (
-    suffix + prefix < before.length &&
-    suffix + prefix < after.length &&
-    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) {
-    suffix += 1;
-  }
-
-  const out: DiffLine[] = [];
-  const contextBefore = before.slice(Math.max(0, prefix - 2), prefix);
-  for (const line of contextBefore) out.push({ kind: "context", text: line });
-
-  const removed = before.slice(prefix, before.length - suffix);
-  const added = after.slice(prefix, after.length - suffix);
-  for (const line of removed) out.push({ kind: "removed", text: line });
-  for (const line of added) out.push({ kind: "added", text: line });
-
-  const contextAfter = after.slice(after.length - suffix, after.length - suffix + 2);
-  for (const line of contextAfter) out.push({ kind: "context", text: line });
-  return out;
-}
-
-function buildLineDiff(before: string[], after: string[]): DiffLine[] {
-  if (before.length === 0) {
-    return after.map((text) => ({ kind: "added", text }));
-  }
-  if (after.length === 0) {
-    return before.map((text) => ({ kind: "removed", text }));
-  }
-
-  const cellCount = (before.length + 1) * (after.length + 1);
-  if (cellCount > HISTORY_LCS_DIFF_CELL_LIMIT) {
-    return buildContiguousDiff(before, after);
-  }
-
-  const columnCount = after.length + 1;
-  const table = new Uint32Array(cellCount);
-  const at = (beforeIndex: number, afterIndex: number) =>
-    beforeIndex * columnCount + afterIndex;
-
-  for (let beforeIndex = before.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
-    for (let afterIndex = after.length - 1; afterIndex >= 0; afterIndex -= 1) {
-      if (before[beforeIndex] === after[afterIndex]) {
-        table[at(beforeIndex, afterIndex)] =
-          table[at(beforeIndex + 1, afterIndex + 1)] + 1;
-      } else {
-        table[at(beforeIndex, afterIndex)] = Math.max(
-          table[at(beforeIndex + 1, afterIndex)],
-          table[at(beforeIndex, afterIndex + 1)],
-        );
-      }
-    }
-  }
-
-  const out: DiffLine[] = [];
-  let beforeIndex = 0;
-  let afterIndex = 0;
-  while (beforeIndex < before.length && afterIndex < after.length) {
-    if (before[beforeIndex] === after[afterIndex]) {
-      out.push({ kind: "context", text: before[beforeIndex] });
-      beforeIndex += 1;
-      afterIndex += 1;
-    } else if (
-      table[at(beforeIndex + 1, afterIndex)] >=
-      table[at(beforeIndex, afterIndex + 1)]
-    ) {
-      out.push({ kind: "removed", text: before[beforeIndex] });
-      beforeIndex += 1;
-    } else {
-      out.push({ kind: "added", text: after[afterIndex] });
-      afterIndex += 1;
-    }
-  }
-
-  while (beforeIndex < before.length) {
-    out.push({ kind: "removed", text: before[beforeIndex] });
-    beforeIndex += 1;
-  }
-  while (afterIndex < after.length) {
-    out.push({ kind: "added", text: after[afterIndex] });
-    afterIndex += 1;
-  }
-  return out;
-}
-
-function compactUnifiedDiffLines(
-  lines: UnifiedDiffLine[],
-  contextRadius = 2,
-  limit = 80,
-): UnifiedDiffLine[] {
-  const changedIndexes = lines.flatMap((line, index) =>
-    line.kind === "added" || line.kind === "removed" ? [index] : [],
-  );
-  if (changedIndexes.length === 0) {
-    return [
-      {
-        kind: "note",
-        text: "No text changes",
-        oldLineNumber: null,
-        newLineNumber: null,
-      },
-    ];
-  }
-
-  const keep = new Set<number>();
-  for (const changedIndex of changedIndexes) {
-    for (
-      let index = Math.max(0, changedIndex - contextRadius);
-      index <= Math.min(lines.length - 1, changedIndex + contextRadius);
-      index += 1
-    ) {
-      keep.add(index);
-    }
-  }
-
-  const out: UnifiedDiffLine[] = [];
-  let hiddenCount = 0;
-  const flushHidden = () => {
-    if (hiddenCount === 0) return;
-    out.push({
-      kind: "note",
-      text: `${hiddenCount} unchanged line${hiddenCount === 1 ? "" : "s"} hidden`,
-      oldLineNumber: null,
-      newLineNumber: null,
-    });
-    hiddenCount = 0;
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.kind === "context" && !keep.has(index)) {
-      hiddenCount += 1;
-      continue;
-    }
-    flushHidden();
-    out.push(line);
-  }
-  flushHidden();
-
-  if (out.length <= limit) return out;
-  return [
-    ...out.slice(0, limit),
-    {
-      kind: "note",
-      text: `${out.length - limit} more diff line${
-        out.length - limit === 1 ? "" : "s"
-      } hidden`,
-      oldLineNumber: null,
-      newLineNumber: null,
-    },
-  ];
-}
-
-function buildUnifiedDiffLines(
-  beforeText: string | undefined,
-  afterText: string | undefined,
-  limit = 600,
-): UnifiedDiffLine[] {
-  const before = splitDiffLines(beforeText ?? "");
-  const after = splitDiffLines(afterText ?? "");
-  if (beforeText === afterText) {
-    return [
-      {
-        kind: "note",
-        text: "No text changes",
-        oldLineNumber: null,
-        newLineNumber: null,
-      },
-    ];
-  }
-
-  let oldLineNumber = 1;
-  let newLineNumber = 1;
-  const numbered = buildLineDiff(before, after).map<UnifiedDiffLine>((line) => {
-    if (line.kind === "added") {
-      const out = {
-        ...line,
-        oldLineNumber: null,
-        newLineNumber,
-      };
-      newLineNumber += 1;
-      return out;
-    }
-    if (line.kind === "removed") {
-      const out = {
-        ...line,
-        oldLineNumber,
-        newLineNumber: null,
-      };
-      oldLineNumber += 1;
-      return out;
-    }
-    const out = {
-      ...line,
-      oldLineNumber,
-      newLineNumber,
-    };
-    oldLineNumber += 1;
-    newLineNumber += 1;
-    return out;
-  });
-  return compactUnifiedDiffLines(numbered, 3, limit);
-}
-
-function changedLineCounts(
-  beforeText: string | undefined,
-  afterText: string | undefined,
-): { added: number; removed: number } | null {
-  if (beforeText === undefined && afterText === undefined) return null;
-  const before = splitDiffLines(beforeText ?? "");
-  const after = splitDiffLines(afterText ?? "");
-  if (beforeText === afterText) return { added: 0, removed: 0 };
-  return buildLineDiff(before, after).reduce(
-    (counts, line) => {
-      if (line.kind === "added") counts.added += 1;
-      if (line.kind === "removed") counts.removed += 1;
-      return counts;
-    },
-    { added: 0, removed: 0 },
-  );
-}
 
 function fileOperationLabel(
   file: Pick<ChangeSetFileRecord, "operation"> &
@@ -1002,53 +760,7 @@ function HistoryDiffPage({
               </span>
             ) : null}
           </div>
-          <div
-            data-testid="history-diff-lines"
-            className="overflow-x-hidden py-1 font-mono text-[12px] leading-5"
-          >
-            {diffLines.map((line, index) => (
-              line.kind === "note" ? (
-                <div
-                  key={`${index}:${line.text}`}
-                  data-kind={line.kind}
-                  className="border-y border-line/70 bg-panel px-3 py-1.5 text-center text-[11px] text-subtle"
-                >
-                  {line.text}
-                </div>
-              ) : (
-                <div
-                  key={`${index}:${line.kind}:${line.text}`}
-                  data-kind={line.kind}
-                  className={`grid min-w-0 grid-cols-[44px_44px_24px_minmax(0,1fr)] ${
-                    line.kind === "added"
-                      ? "bg-success/10 text-success"
-                      : line.kind === "removed"
-                        ? "bg-danger/10 text-danger"
-                        : "text-muted"
-                  }`}
-                >
-                  <span
-                    aria-hidden
-                    className="select-none border-r border-line/60 px-2 text-right text-[11px] text-subtle"
-                  >
-                    {line.oldLineNumber ?? ""}
-                  </span>
-                  <span
-                    aria-hidden
-                    className="select-none border-r border-line/60 px-2 text-right text-[11px] text-subtle"
-                  >
-                    {line.newLineNumber ?? ""}
-                  </span>
-                  <span aria-hidden className="select-none text-center">
-                    {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
-                  </span>
-                  <code className="min-w-0 whitespace-pre-wrap break-words pr-3 font-inherit text-inherit">
-                    {line.text.length > 0 ? line.text : " "}
-                  </code>
-                </div>
-              )
-            ))}
-          </div>
+          <UnifiedDiffLines lines={diffLines} testId="history-diff-lines" />
         </section>
       </div>
       {confirmRestoreOpen ? (
@@ -1721,6 +1433,44 @@ export function DesktopWorkspaceShell(props: {
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
   }, [workspaceId]);
+
+  // Named versions (PR 0M-4): the surface exists only for workspaces with the
+  // workspace-engine alpha flag on — unflagged workspaces render nothing.
+  const [versionsEnabled, setVersionsEnabled] = useState(false);
+  // Bumped after a version switch/merge/conflict resolution so open editors
+  // re-read their file content immediately (FileInspector refreshKey).
+  const [versionEpoch, setVersionEpoch] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setVersionsEnabled(false);
+    void bridge()
+      .getWorkspaceSettings({ workspaceId })
+      .then((result) => {
+        if (cancelled) return;
+        setVersionsEnabled(result.settings.experimental.workspaceEngineAlpha);
+      })
+      .catch(() => {
+        // Settings unavailable reads as flag off — never a broken shell.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+  const onVersionWorkspaceStateChanged = useCallback(() => {
+    setVersionEpoch((epoch) => epoch + 1);
+    void refreshFiles().catch((error) =>
+      reportShellError("Could not refresh workspace files.", error),
+    );
+    void refreshHistory().catch((error) =>
+      reportShellError("Could not refresh history.", error),
+    );
+  }, [refreshFiles, refreshHistory, reportShellError]);
+  const openVersionCompareTab = useCallback(
+    (versionId: string) => {
+      mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));
+    },
+    [mutateWb],
+  );
 
   // One import seam for the dialog flow AND the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
@@ -2497,17 +2247,50 @@ export function DesktopWorkspaceShell(props: {
           </SidePanel>
         ) : null}
 
-        {/* Editor area: tab strip + the active tab's inspector */}
+        {/* Editor area: tab strip + the active tab's inspector. When the
+            workspace-engine alpha flag is on, the version selector shares the
+            tab-strip band (right side); unflagged workspaces render the strip
+            exactly as before. */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          <EditorTabs
-            tabs={wb.tabs}
-            activeTab={wb.activeTab}
-            activeTabDirty={activeTabDirty}
-            onActivate={activateEditorTab}
-            onClose={closeFileTab}
-            onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
-            onMove={moveFileTab}
-          />
+          {versionsEnabled ? (
+            <div className="flex shrink-0 bg-panel-2">
+              <div
+                className={`min-w-0 flex-1 ${
+                  wb.tabs.length === 0 ? "border-b border-line" : ""
+                }`}
+              >
+                <EditorTabs
+                  tabs={wb.tabs}
+                  activeTab={wb.activeTab}
+                  activeTabDirty={activeTabDirty}
+                  onActivate={activateEditorTab}
+                  onClose={closeFileTab}
+                  onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
+                  onMove={moveFileTab}
+                />
+              </div>
+              <div className="flex h-9 shrink-0 items-center border-b border-l border-line pl-1 pr-1.5">
+                <VersionMenu
+                  workspaceId={workspaceId}
+                  activeTabDirty={activeTabDirty}
+                  flushActiveDraft={flushActiveDraft}
+                  onOpenCompare={openVersionCompareTab}
+                  onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
+                  onError={(message) => setShellError(message)}
+                />
+              </div>
+            </div>
+          ) : (
+            <EditorTabs
+              tabs={wb.tabs}
+              activeTab={wb.activeTab}
+              activeTabDirty={activeTabDirty}
+              onActivate={activateEditorTab}
+              onClose={closeFileTab}
+              onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
+              onMove={moveFileTab}
+            />
+          )}
           <div
             className="flex min-h-0 flex-1 flex-col"
             onContextMenu={(event) => {
@@ -2544,6 +2327,14 @@ export function DesktopWorkspaceShell(props: {
                 registerActiveUndo={registerActiveUndo}
                 onRestored={refreshAfterHistoryRestore}
               />
+            ) : isVersionCompareTabPath(wb.activeTab) ? (
+              <VersionComparePage
+                // Remount per version AND per state change so the diff always
+                // reflects the latest disk/engine state.
+                key={`${wb.activeTab}:${versionEpoch}`}
+                workspaceId={workspaceId}
+                versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
+              />
             ) : isSiteTabPath(wb.activeTab) ? (
               activeSiteRoot ? (
                 <Suspense fallback={<PanelLoading label="site" />}>
@@ -2563,7 +2354,9 @@ export function DesktopWorkspaceShell(props: {
                 key={wb.activeTab}
                 workspaceId={workspaceId}
                 path={wb.activeTab}
-                refreshKey={changeSets.length}
+                // History growth AND version switches both re-read the open
+                // file (both counters only ever increase).
+                refreshKey={changeSets.length + versionEpoch}
                 onOpenPath={openFile}
                 scrollTarget={searchScrollTarget ?? undefined}
                 onScrollConsumed={consumeScrollTarget}
