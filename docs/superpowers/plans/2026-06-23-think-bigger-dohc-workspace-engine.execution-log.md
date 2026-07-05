@@ -14231,3 +14231,125 @@ git diff --check
 - 0M-7 owns: user-visible engine-capture-failure notice, engine search flip
   decision, arc-gate CodeRabbit batch review, live Postgres re-run, agent
   CLI QA, and the arc acceptance checklist sweep.
+
+## PR 0M-6 - Contracts Extraction (PR 01A Narrow Slice)
+
+Status: merged to main via PR #60 (merge commit a6cde67b)
+Branch: codex/think-bigger-0m6-contracts
+Worktree: /home/ice/dev/dohc-0m6-contracts (removed after merge)
+Implementation workstream, if used: codex CLI (gpt-5.5) driven by a Claude
+lane, one round plus lane hand-fixes; orchestrator merge review
+PR Link: https://github.com/dohc-ai/dohc/pull/60
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] @dohc/workspace-contracts is the canonical TYPE source for the engine's
+      exported contract surface via a new `./engine` subpath (~65 symbols:
+      versioned text store records/results/interface, versioned file
+      workspace surface, capability report, linked chat types, search
+      policy/result types, version-compare types)
+- [x] Engine re-exports the contracts types under unchanged names — zero
+      consumer churn, zero runtime change (type-only slice; zod mirrors
+      explicitly deferred with rationale: engine validates at its edges and
+      desktop IPC has its own zod contract)
+- [x] Plan-symbol -> shipped-symbol rename mapping recorded in engine.ts and
+      the contracts README, each entry verified against source:
+      WorkspaceObject->FileObjectRecord, WorkspaceVersion->VersionRecord(+
+      VersionKind), HistoryMoment->VersionedTextMoment(+Summary),
+      ConflictRecord->VersionedTextConflictRecord, ChatThread->ChatThread,
+      ThreadMessage->ChatMessage, WorkspaceLinkRef->LinkedChatFileRef
+      (partial), VersionRef -> not implemented (plain version ids + fork
+      fields), Phase0EffectivePolicy* -> WorkspaceSearchPolicy +
+      classifyEngineFilePath (partial), WorkspaceEvent/DurabilityEvent -> not
+      implemented (engine coalesces directly into moments)
+- [x] Branded NonEmptyLocalAuthorLabel + ChangeAuthor re-homed to contracts
+      as the canonical nominal types; workspace-core re-exports them. The
+      naive structural copy would have silently widened the validated
+      local-author label to plain string — caught by the new exact-identity
+      drift gates (3/7 failed until fixed)
+- [x] History/provenance shapes embedded in VersionedFileWorkspace remain
+      structural copies (dependency direction forbids importing
+      workspace-core) pinned by engineContracts.compile.ts exact-identity
+      checks that fail the engine typecheck on any drift
+
+### Files Changed
+
+- packages/workspace-contracts: src/engine.ts (new, 716), engine.compile.ts
+  (new), README.md (new), src/index.ts, src/backend.test.ts, package.json
+- packages/workspace-engine: src/engineContracts.compile.ts (new),
+  versionedTextStore.ts, versionedFileWorkspace.ts,
+  versionedFileWorkspacePlatform.ts, linkedChatStore.ts, workspaceSearch.ts,
+  versionCompare.ts, versionCompare.test.ts
+- packages/workspace-core/src/changeSet.ts (type re-export only)
+- pnpm-lock.yaml (@types/node devDep for contracts)
+
+### Tests Added Or Updated
+
+- Compile gates: contracts engine.compile.ts constructs a value of every
+  extracted type; engine engineContracts.compile.ts asserts exact identity
+  both directions for all re-exported symbols plus 7 drift-pinning checks
+  against real workspace-core/history types. No test counts changed; no test
+  weakened.
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-contracts test   # 10/10
+pnpm --filter @dohc/workspace-engine test      # 201/201
+pnpm --filter @dohc/desktop test               # 811 passed + 1 pre-existing env failure
+pnpm --filter @dohc/workspace-core test        # 108/108
+pnpm --filter @dohc/workspace-history test     # 47/47
+# typechecks across contracts/core/history/engine/desktop/mcp/fs/sync/postgres/sdk/web
+git diff --check
+```
+
+### E2E / Visual / Manual QA
+
+- Not run: type-only refactor with zero runtime diff; unit suites and
+  dependent typechecks cover the compile surface.
+
+### Local Agent CLI QA
+
+- Not touched (no agent-facing runtime change).
+
+### CodeRabbit
+
+- Status: deferred to the PR 0M arc gate (User Decision 5).
+
+### Unresolved Findings
+
+- None at merge.
+
+### Subagent Reviews
+
+- Lane driver reviewed codex output line-by-line: caught the branded-type
+  widening, added the drift gates, restored moved doc comments.
+- Orchestrator independently re-ran the suites and typechecks.
+
+### Security / Privacy Notes
+
+- The validated-local-author-label invariant is preserved as one nominal
+  type across packages rather than silently widened.
+
+### Performance Notes
+
+- None (no runtime change).
+
+### Migration Notes
+
+- Import paths and exported names unchanged for every consumer. Downstream
+  code may now import engine types from @dohc/workspace-contracts/engine;
+  the fuller PR 01 import-enforcement gate remains follow-up work.
+
+### Remaining Risk
+
+- Structural history copies drift only if the compile gate is deleted; the
+  gate fails the engine typecheck on any drift.
+
+### Follow-Up / Deletion Conditions
+
+- When PR 01 proper lands its import-enforcement gate, migrate consumers to
+  contracts imports and review engine re-exports for retirement; add zod
+  mirrors only if a runtime validation site appears.
