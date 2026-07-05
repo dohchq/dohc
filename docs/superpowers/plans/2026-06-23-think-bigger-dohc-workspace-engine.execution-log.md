@@ -13782,3 +13782,167 @@ git fetch origin && git rebase origin/main     # clean rebase onto 0M-1
 - Add a macOS/Windows CI matrix job running the workspace-engine suite as a
   PR 0M arc-gate follow-up; remove the forced-mode hook only if real-platform
   CI makes it redundant (unlikely — keep for Linux coverage).
+
+## PR 0M-3 - Watcher To Engine Capture
+
+Status: merged to main via PR #57 (merge commit c3beecc8)
+Branch: codex/think-bigger-0m3-engine-capture
+Worktree: /home/ice/dev/dohc-0m3-engine-capture (removed after merge)
+Implementation workstream, if used: direct implementation by a Claude lane
+(fable-5), tests-first; orchestrator merge review including independent E2E
+re-run
+PR Link: https://github.com/dohc-ai/dohc/pull/57
+Date started: 2026-07-05
+Date completed: 2026-07-05
+
+### Scope
+
+- [x] `experimental.workspaceEngineAlpha` per-workspace flag as a defaulted
+      group inside the strict WorkspaceSettings schema (old-shape files keep
+      parsing, regression-tested), with an Advanced-section settings toggle
+- [x] Per-workspace engine singleton on WatchedWorkspace
+      (createVersionedTextStore, workspaceId = registered id, version = main,
+      state under .dohc/engine/); capture stops after its watcher in stopAll
+      so the final settled batch is flushed before shutdown
+- [x] Watcher->engine capture in recordBatch after the legacy record.
+      Interim DUAL-WRITE: legacy .dohc/history untouched; lane 0M-5 flips the
+      history UI to engine moments and disables legacy for flagged workspaces
+- [x] Single engine record per physical write: settled-batch re-read of final
+      disk state (rapid writes coalesce), content-equality no-ops, and a
+      consume-once expected-engine-events registry (path+operation+sha256,
+      10s expiry) exposed via activity.registerExpectedEngineEvents for the
+      0M-5 restore path — the minimal honest subset of the P0A
+      write-observation ledger
+- [x] Shared classifyEngineFilePath (workspace-engine) gives capture and
+      engine search one secret/ignored policy; binary/oversized/non-UTF-8
+      files skipped; a tracked path that stops being ownable text is retired
+      with a delete moment
+- [x] Startup reconciliation after watcher ready on the same serialized chain
+      as batch capture: scanWorkspaceFiles diff vs engine main state,
+      per-file moments sharing one reconcile-<uuid> correlationId,
+      actor-neutral provenance, deletions reconcile, idempotent, background
+- [x] Fail open for legacy, fail visible for engine
+- [x] @dohc/workspace-engine added to mainBundledWorkspaceDeps
+      (electron.vite.config.ts) — raw-TS workspace packages must be bundled
+      into the Electron main build; caught by the new E2E
+
+### Files Changed
+
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts (new, 353)
+- apps/desktop/src/workspaces/workspaceEngineCapture.test.ts (new, 584)
+- apps/desktop/e2e/workspace-engine-capture.spec.ts (new, 185)
+- apps/desktop/src/workspaces/workspaceSettings.ts, workspaceSettings.test.ts
+- apps/desktop/src/workspaces/workspaceActivity.ts, workspaceWatcher.ts
+- apps/desktop/src/main.ts (+13)
+- apps/desktop/src/renderer/settings/SettingsDialog.tsx, settingsRegistry.ts
+- apps/desktop/e2e/helpers/workspace.ts (seedWorkspaceSettings)
+- apps/desktop/package.json, electron.vite.config.ts
+- packages/workspace-engine/src/workspaceSearch.ts, workspaceSearch.test.ts,
+  index.ts
+- pnpm-lock.yaml
+
+### Tests Added Or Updated
+
+- 17-test capture suite (batch capture, coalescing/no-op dedupe, delete
+  capture, secret/ignored/binary/oversized exclusion, become-binary
+  retirement, expected-event suppression/consume-once/expiry/cancel/
+  later-edit-not-swallowed, reconciliation edits/deletes/idempotency/
+  provenance, reconcile-vs-batch serialization, engine-failure fail-open,
+  lifecycle singleton + shutdown flush) plus 3 settings-compat tests and 3
+  shared-classifier tests.
+- Suites: workspace-engine 187/187 (baseline 184); desktop vitest 766 passed
+  (+20 new) with 1 pre-existing env failure (theme.test.ts localStorage.clear,
+  reproduced by the orchestrator on clean main).
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-engine test        # 187/187
+pnpm --filter @dohc/desktop test                 # 766 passed, 1 pre-existing env failure
+pnpm --filter @dohc/workspace-engine typecheck   # clean
+pnpm --filter @dohc/desktop typecheck            # clean
+pnpm --filter @dohc/desktop build                # electron-vite build for e2e
+npx playwright test workspace-engine-capture.spec.ts workspace-direct-disk.spec.ts  # independently re-run by orchestrator: 3/3
+git diff --check                                 # clean
+```
+
+### E2E / Visual / Manual QA
+
+- New serial Playwright spec (fixtures on /tmp per the WSL inotify
+  constraint): flagged workspace captures a live external edit into engine.db
+  (exact text asserted via read-only node:sqlite from the test process) while
+  legacy history keeps recording; stop -> offline edit -> relaunch captures
+  via startup reconciliation with no duplicates; unflagged workspace never
+  grows an engine store. Re-verified independently by the orchestrator after
+  a fresh build: 3/3.
+- Full desktop e2e: 7 passed, 2 sites-preview failures pre-existing on clean
+  main in this environment.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not run for this lane; the arc-gate QA covers the
+  agent-edit-through-normal-files loop against the flagged capture path.
+- Local agent result: N/A
+- Transcript/artifact path: N/A
+- Secret redaction notes: capture excludes `.env`-style paths via the shared
+  classifier; covered by unit tests.
+
+### CodeRabbit
+
+- Status: deferred to the PR 0M arc gate (User Decision 5).
+- Findings: -
+- Fixes: -
+- Overrides: -
+- Override approval reference: -
+
+### Unresolved Findings
+
+- None at merge.
+
+### Subagent Reviews
+
+- Architecture: orchestrator reviewed the single-promise-chain serialization,
+  the live-read watcher hook (24-line diff), and shutdown ordering
+  (watcher flush before capture drain).
+- Security: shared secret/ignored classifier between capture and search;
+  no new IPC surface; engine writes stay under .dohc/engine/.
+- QA: orchestrator independently re-ran unit suites, typechecks, and the E2E
+  specs after a fresh build; verified the desktop failure and the two
+  sites-preview e2e failures reproduce on untouched main.
+- Accessibility: settings toggle uses the existing SwitchControl row pattern.
+
+### Security / Privacy Notes
+
+- Engine capture enforces the same `.env`/ignored exclusions as engine search
+  through one classifier; binary and oversized content never enters the
+  engine store.
+
+### Performance Notes
+
+- Machine: AMD Ryzen 9 7950X, WSL2 Linux 6.18, node v25.2.1, /tmp tmpfs.
+- Watcher-batch capture, 100-file burst: ~533-539 ms total (~5.3 ms/file),
+  main process, off the IPC path.
+- Startup reconciliation, 1,000 files / 10 changed: ~752-760 ms background.
+- Budget pass/fail: pass for alpha scale; batched store transactions and the
+  Rust scan/hash path are the pre-default-on follow-ups.
+
+### Migration Notes
+
+- Interim dual-write: legacy .dohc/history remains UI-authoritative; the
+  engine store is write-behind. Lane 0M-5 must flip the history UI to engine
+  moments for flagged workspaces, disable legacy recording for them, and
+  route restore through the engine using registerExpectedEngineEvents.
+
+### Remaining Risk
+
+- Expected-events API has no production writer until 0M-5 restore adopts it.
+- 128 KiB text cap matches legacy history; revisit when engine history
+  becomes user-facing.
+- Flag toggles take effect at next workspace open (documented in the UI).
+- Pre-existing local failures (theme unit test, 2 sites-preview e2e) should
+  be fixed for a trustworthy local gate.
+
+### Follow-Up / Deletion Conditions
+
+- The dual-write hook comment in workspaceWatcher.recordBatch plus the
+  Migration Notes above are the deletion checklist for lane 0M-5.
