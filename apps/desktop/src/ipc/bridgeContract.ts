@@ -525,6 +525,154 @@ export const RestoreHistoryFileResult = z.object({
 });
 export type RestoreHistoryFileResult = z.infer<typeof RestoreHistoryFileResult>;
 
+// Engine history (PR 0M-5, workspace-engine alpha): flagged workspaces read
+// their timeline from ENGINE moments instead of legacy change sets. Every
+// handler is gated in main on the workspace's engine capture — unflagged
+// workspaces reject.
+const MOMENT_ID = z.string().min(1).max(200);
+const MOMENT_TEXT = z.string().max(2_000_000);
+
+export const EngineMomentRecord = z.object({
+  id: MOMENT_ID,
+  versionId: z.string().min(1).max(200),
+  path: PATH_STRING,
+  recordedAtMs: z.number(),
+  operation: z.enum(["write", "rename", "delete"]),
+  origin: z.enum(["api", "local-file", "restore", "sync", "unknown"]),
+  summary: z.string().max(500).optional(),
+  correlationId: z.string().max(200).optional(),
+  // Workspace-global recording order: the pagination cursor and a monotonic
+  // refresh key.
+  momentOrder: z.number().int(),
+});
+export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
+
+export const ListEngineMomentsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  limit: z.number().int().min(1).max(500).optional(),
+  beforeMomentOrder: z.number().int().optional(),
+});
+export type ListEngineMomentsPayload = z.infer<typeof ListEngineMomentsPayload>;
+
+export const ListEngineMomentsResult = z.object({
+  moments: z.array(EngineMomentRecord),
+  nextBeforeMomentOrder: z.number().int().nullable(),
+  latestMomentOrder: z.number().int(),
+  activeVersionId: z.string().min(1).max(200),
+});
+export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
+
+export const ReadEngineMomentPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  momentId: MOMENT_ID,
+});
+export type ReadEngineMomentPayload = z.infer<typeof ReadEngineMomentPayload>;
+
+export const EngineMomentDetailRecord = EngineMomentRecord.omit({
+  momentOrder: true,
+}).extend({
+  // null before-text = the moment created the file; delete moments carry the
+  // removed content as beforeText and null afterText.
+  beforeText: MOMENT_TEXT.nullable(),
+  afterText: MOMENT_TEXT.nullable(),
+});
+export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
+
+export const ReadEngineMomentResult = z.object({
+  moment: EngineMomentDetailRecord.nullable(),
+});
+export type ReadEngineMomentResult = z.infer<typeof ReadEngineMomentResult>;
+
+export const RestoreEngineMomentFilePayload = ReadEngineMomentPayload;
+export type RestoreEngineMomentFilePayload = z.infer<
+  typeof RestoreEngineMomentFilePayload
+>;
+
+export const RestoreEngineMomentFileResult = z.object({
+  restored: z.enum(["text", "deleted"]),
+  // The forward moment the restore recorded; undoing = restoring to before
+  // THIS moment through the same channel.
+  restoredMomentId: MOMENT_ID,
+  path: PATH_STRING,
+});
+export type RestoreEngineMomentFileResult = z.infer<
+  typeof RestoreEngineMomentFileResult
+>;
+
+// Linked Chats (PR 0M-5, workspace-engine alpha): per-file Chats stored in
+// the engine, linked to the file's stable engine object id so the link
+// survives renames. The renderer never supplies identity — main derives the
+// author for every sent message.
+const CHAT_THREAD_ID = z.string().min(1).max(200);
+const CHAT_BODY = z.string().min(1).max(65_536);
+
+export const ChatThreadRecord = z.object({
+  id: CHAT_THREAD_ID,
+  title: z.string().min(1).max(200),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
+export type ChatThreadRecord = z.infer<typeof ChatThreadRecord>;
+
+export const ChatMessageRecord = z.object({
+  id: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  authorKind: z.enum(["human", "agent"]),
+  authorDisplayName: z.string().min(1).max(200),
+  body: CHAT_BODY,
+  createdAtMs: z.number(),
+});
+export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
+
+export const ListFileChatsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type ListFileChatsPayload = z.infer<typeof ListFileChatsPayload>;
+
+export const ListFileChatsResult = z.object({
+  // null when the engine does not own the file (yet) — the rail explains
+  // rather than failing.
+  fileObjectId: z.string().min(1).max(200).nullable(),
+  threads: z.array(ChatThreadRecord),
+});
+export type ListFileChatsResult = z.infer<typeof ListFileChatsResult>;
+
+export const CreateFileChatPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+  title: z.string().min(1).max(200),
+});
+export type CreateFileChatPayload = z.infer<typeof CreateFileChatPayload>;
+
+export const CreateFileChatResult = z.object({
+  thread: ChatThreadRecord,
+});
+export type CreateFileChatResult = z.infer<typeof CreateFileChatResult>;
+
+export const ListChatMessagesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ListChatMessagesPayload = z.infer<typeof ListChatMessagesPayload>;
+
+export const ListChatMessagesResult = z.object({
+  messages: z.array(ChatMessageRecord),
+});
+export type ListChatMessagesResult = z.infer<typeof ListChatMessagesResult>;
+
+export const SendChatMessagePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+  body: CHAT_BODY,
+});
+export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
+
+export const SendChatMessageResult = z.object({
+  message: ChatMessageRecord,
+});
+export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
+
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
@@ -1459,6 +1607,23 @@ export interface DohcDesktopBridge {
   resolveWorkspaceVersionConflict(
     payload: ResolveWorkspaceVersionConflictPayload,
   ): Promise<ResolveWorkspaceVersionConflictResult>;
+  // Engine history + linked Chats (PR 0M-5). Gated in main on the
+  // workspace-engine alpha flag: for unflagged workspaces every call rejects.
+  listEngineMoments(
+    payload: ListEngineMomentsPayload,
+  ): Promise<ListEngineMomentsResult>;
+  readEngineMoment(
+    payload: ReadEngineMomentPayload,
+  ): Promise<ReadEngineMomentResult>;
+  restoreEngineMomentFile(
+    payload: RestoreEngineMomentFilePayload,
+  ): Promise<RestoreEngineMomentFileResult>;
+  listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResult>;
+  createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
+  listChatMessages(
+    payload: ListChatMessagesPayload,
+  ): Promise<ListChatMessagesResult>;
+  sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;

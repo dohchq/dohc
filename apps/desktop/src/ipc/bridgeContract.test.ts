@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   CreateDataFragmentPayload,
+  CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
+  EngineMomentDetailRecord,
+  ListEngineMomentsPayload,
+  ListEngineMomentsResult,
+  ListFileChatsPayload,
+  RestoreEngineMomentFileResult,
+  SendChatMessagePayload,
+  SendChatMessageResult,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
@@ -468,5 +476,127 @@ describe("workspace versions IPC contract (PR 0M-4)", () => {
         resolution: { kind: "keep-combined" },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
+  it("accepts well-formed moment pages, details, and restore results", () => {
+    expect(
+      ListEngineMomentsPayload.parse({
+        workspaceId: "ws-engine",
+        limit: 200,
+        beforeMomentOrder: 41,
+      }).limit,
+    ).toBe(200);
+    const page = ListEngineMomentsResult.parse({
+      moments: [
+        {
+          id: "moment_1",
+          versionId: "main",
+          path: "notes/plan.md",
+          recordedAtMs: 100,
+          operation: "write",
+          origin: "local-file",
+          summary: "Reconciled offline edits",
+          correlationId: "reconcile-1",
+          momentOrder: 7,
+        },
+      ],
+      nextBeforeMomentOrder: null,
+      latestMomentOrder: 7,
+      activeVersionId: "main",
+    });
+    expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(
+      EngineMomentDetailRecord.parse({
+        id: "moment_2",
+        versionId: "main",
+        path: "notes/plan.md",
+        recordedAtMs: 100,
+        operation: "delete",
+        origin: "restore",
+        beforeText: "removed content\n",
+        afterText: null,
+      }).afterText,
+    ).toBeNull();
+    expect(
+      RestoreEngineMomentFileResult.parse({
+        restored: "text",
+        restoredMomentId: "moment_3",
+        path: "notes/plan.md",
+      }).restored,
+    ).toBe("text");
+  });
+
+  it("rejects empty paths, bad limits, and oversized chat bodies", () => {
+    // Path CONTAINMENT is enforced main-side (validateUserWritePath and the
+    // engine's own path normalization); the wire schema only bounds shape.
+    expect(
+      ListFileChatsPayload.safeParse({
+        workspaceId: "ws-engine",
+        path: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      ListEngineMomentsPayload.safeParse({
+        workspaceId: "ws-engine",
+        limit: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      ListEngineMomentsPayload.safeParse({
+        workspaceId: "ws-engine",
+        limit: 501,
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateFileChatPayload.safeParse({
+        workspaceId: "ws-engine",
+        path: "notes/plan.md",
+        title: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      SendChatMessagePayload.safeParse({
+        workspaceId: "ws-engine",
+        threadId: "thread_1",
+        body: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      SendChatMessagePayload.safeParse({
+        workspaceId: "ws-engine",
+        threadId: "thread_1",
+        body: "x".repeat(65_537),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("round-trips a sent chat message with main-derived authorship", () => {
+    const result = SendChatMessageResult.parse({
+      message: {
+        id: "message_1",
+        threadId: "thread_1",
+        authorKind: "human",
+        authorDisplayName: "You",
+        body: "First message",
+        createdAtMs: 100,
+      },
+    });
+    expect(result.message.authorKind).toBe("human");
+    // The agent author kind is a first-class wire value (rendered as
+    // "<User Name>\'s agent" in the UI).
+    expect(
+      SendChatMessageResult.parse({
+        message: {
+          id: "message_2",
+          threadId: "thread_1",
+          authorKind: "agent",
+          authorDisplayName: "iestyndevera@gmail.com",
+          body: "Agent reply",
+          createdAtMs: 101,
+        },
+      }).message.authorKind,
+    ).toBe("agent");
   });
 });
