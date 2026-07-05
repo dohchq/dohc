@@ -101,9 +101,9 @@ describe("chatAuthorLabel", () => {
     expect(
       chatAuthorLabel({
         authorKind: "human",
-        authorDisplayName: "iestyndevera@gmail.com",
+        authorDisplayName: "user@example.com",
       }),
-    ).toBe("iestyndevera@gmail.com");
+    ).toBe("user@example.com");
   });
 
   it("shows agent-authored messages as \"<User Name>'s agent\"", () => {

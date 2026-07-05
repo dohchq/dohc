@@ -2164,3 +2164,57 @@ describe("versioned text store", () => {
     );
   });
 });
+
+describe("engine schema bootstrap (shared with linkedChatStore)", () => {
+  // Regression (CodeRabbit arc gate): two brand-new opens can race — a
+  // second window, or the chat store beside the text store. The loser's
+  // schema creation must no-op and validate, never read "table already
+  // exists" as state-corrupt.
+  it("createEngineSchema is idempotent on an already-initialized database", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.close();
+
+    const { createEngineSchema, initializeOrValidateEngineSchema } = await import(
+      "./engineDbSchema"
+    );
+    withRawDb((db) => {
+      // The exact loser-of-the-race path: schema already fully exists.
+      createEngineSchema(db);
+      initializeOrValidateEngineSchema(db, () => new Error("corrupt"));
+    });
+
+    // The store still opens and validates cleanly afterwards.
+    await expect(
+      createVersionedTextStore(root).getMainVersion({ workspaceId: "workspace-a" }),
+    ).resolves.toMatchObject({ id: "main" });
+  });
+
+  it("close releases the handle and a later call lazily reopens", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Persisted\n",
+      metadata: { origin: "api" },
+    });
+    await store.close();
+    // Closing twice is safe.
+    await store.close();
+
+    // The same instance reopens lazily; a fresh instance reads the data.
+    await expect(
+      store.readTextFile({ workspaceId: "workspace-a", versionId: main.id, path: "notes/today.md" }),
+    ).resolves.toMatchObject({ text: "Persisted\n" });
+    await store.close();
+    await expect(
+      createVersionedTextStore(root).readTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: "notes/today.md",
+      }),
+    ).resolves.toMatchObject({ text: "Persisted\n" });
+  });
+});

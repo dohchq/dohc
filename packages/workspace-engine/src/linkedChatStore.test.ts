@@ -82,6 +82,12 @@ function rawRows(sql: string, ...params: unknown[]): Array<Record<string, unknow
   return withRawDb((db) => db.prepare(sql).all(...params));
 }
 
+function rawExec(sql: string, ...params: unknown[]): void {
+  withRawDb((db) => {
+    db.prepare(sql).run(...params);
+  });
+}
+
 describe("linked chat store", () => {
   it("creates a thread linked to a stable file object and sends messages", async () => {
     const versions = versionStore();
@@ -333,5 +339,58 @@ describe("linked chat store", () => {
     await expect(
       reloaded.listMessages({ workspaceId: "workspace-a", threadId: thread.id }),
     ).resolves.toMatchObject([{ body: "This survives reload." }]);
+  });
+});
+
+describe("linked chat store hardening (CodeRabbit arc gate)", () => {
+  it("fails closed on a corrupt persisted author_kind", async () => {
+    const chats = chatStore();
+    const thread = await chats.createThread({
+      workspaceId: "workspace-a",
+      title: "Corrupt author",
+    });
+    await chats.sendMessage({
+      workspaceId: "workspace-a",
+      threadId: thread.id,
+      author: { kind: "agent", displayName: "Ice" },
+      body: "Real agent message.",
+    });
+    rawExec("UPDATE chat_messages SET author_kind = 'ghost'");
+
+    const reloaded = createLinkedChatStore(root);
+    await expect(
+      reloaded.listMessages({ workspaceId: "workspace-a", threadId: thread.id }),
+    ).rejects.toMatchObject({ code: "state-corrupt" });
+  });
+
+  it("close releases the handle and a later call lazily reopens", async () => {
+    const chats = chatStore();
+    const thread = await chats.createThread({
+      workspaceId: "workspace-a",
+      title: "Closable",
+    });
+    await chats.close();
+    await chats.close();
+
+    await expect(chats.listThreads({ workspaceId: "workspace-a" })).resolves.toMatchObject([
+      { id: thread.id },
+    ]);
+    await chats.close();
+  });
+
+  // Single-source schema: whichever store opens a brand-new workspace FIRST
+  // must create a database the OTHER store validates cleanly (this order —
+  // chat store first — is the one the old duplicated DDL drifted on).
+  it("a chat-store-created database validates for the versioned text store", async () => {
+    const chats = chatStore();
+    await chats.createThread({ workspaceId: "workspace-a", title: "First" });
+
+    const texts = versionStore();
+    await expect(
+      texts.ensureMainVersion({ workspaceId: "workspace-a" }),
+    ).resolves.toMatchObject({ id: "main" });
+    await expect(
+      texts.setActiveVersion({ workspaceId: "workspace-a", versionId: "main" }),
+    ).resolves.toMatchObject({ id: "main" });
   });
 });

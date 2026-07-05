@@ -196,7 +196,7 @@ import {
   type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
-import { createWorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
+import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import {
@@ -883,19 +883,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
-  // Workspace-engine alpha (PR 0M-3/0M-5): when the per-workspace flag is
-  // on, the engine store under .dohc/engine/ is the workspace's SOLE history
-  // recorder — watcher batches become engine moments and no legacy
-  // .dohc/history change set is written. Flag is read at open; toggling it
-  // takes effect on the next open of the workspace.
-  captureFor: async (workspace) => {
-    const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
-    if (!settings.experimental.workspaceEngineAlpha) return null;
-    return createWorkspaceEngineCapture({
-      workspaceId: workspace.workspaceId,
-      rootPath: workspace.rootPath,
-    });
-  },
+  // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
+  // arc-gate QA harness so the harness asserts against the REAL gate).
+  captureFor: captureForFlaggedWorkspace,
 });
 // Local agent integration: owns the per-workspace MCP child + active-run slot
 // and persists agent-run records. The run slot is wired into the watcher
@@ -996,8 +986,15 @@ app.on("will-quit", (event) => {
   searchRegistry.killAll();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
   agentIntegration.stopAll();
+  // Linked chat stores are lazy singletons with SQLite handles on the shared
+  // engine.db; close them at quit so WAL locks never outlive the app.
+  const chatStoreStop = Promise.all(
+    [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
+  );
   void Promise.race([
-    Promise.all([agentSessionStop, activity.stopAll()]).then(() => undefined),
+    Promise.all([agentSessionStop, activity.stopAll(), chatStoreStop]).then(
+      () => undefined,
+    ),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
   ]).finally(() => app.exit(0));
 });
@@ -2078,7 +2075,14 @@ function registerIpcHandlers(): void {
   // Engine history + linked Chats (PR 0M-5). Flagged workspaces read their
   // timeline from engine moments; every handler resolves the workspace via
   // requireWorkspace and rejects when the engine capture is not attached.
-  function engineMomentForIpc(moment: VersionedTextMomentSummary): EngineMomentRecord {
+  // The shared id/version/path/timestamp/metadata shape both engine-moment
+  // record formats are built from — one mapper so they can never drift.
+  function engineMomentBaseForIpc(
+    moment: Pick<
+      VersionedTextMomentSummary,
+      "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata"
+    >,
+  ) {
     return {
       id: moment.id,
       versionId: moment.versionId,
@@ -2092,6 +2096,12 @@ function registerIpcHandlers(): void {
       ...(moment.metadata.correlationId !== undefined
         ? { correlationId: moment.metadata.correlationId }
         : {}),
+    };
+  }
+
+  function engineMomentForIpc(moment: VersionedTextMomentSummary): EngineMomentRecord {
+    return {
+      ...engineMomentBaseForIpc(moment),
       momentOrder: moment.momentOrder,
     };
   }
@@ -2100,18 +2110,7 @@ function registerIpcHandlers(): void {
     moment: VersionedTextMoment,
   ): EngineMomentDetailRecord {
     return {
-      id: moment.id,
-      versionId: moment.versionId,
-      path: moment.path,
-      recordedAtMs: moment.recordedAtMs,
-      operation: moment.operation,
-      origin: moment.metadata.origin,
-      ...(moment.metadata.summary !== undefined
-        ? { summary: moment.metadata.summary }
-        : {}),
-      ...(moment.metadata.correlationId !== undefined
-        ? { correlationId: moment.metadata.correlationId }
-        : {}),
+      ...engineMomentBaseForIpc(moment),
       beforeText: moment.payload.before?.text ?? null,
       // A delete moment stores the removed content as its payload; the diff
       // page renders it as before -> nothing.

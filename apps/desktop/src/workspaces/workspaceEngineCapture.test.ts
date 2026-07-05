@@ -2,7 +2,8 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import type { VersionedTextStore } from "@dohc/workspace-engine";
 import { createVersionedTextStore } from "@dohc/workspace-engine";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,6 +14,7 @@ import { createWorkspaceActivity } from "./workspaceActivity";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
+  createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
@@ -87,6 +89,7 @@ function capture(root: string, options: {
   store?: VersionedTextStore;
   now?: () => number;
   onError?: (context: string, error: unknown) => void;
+  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
@@ -187,6 +190,57 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
 
     expect(readEngineMoments(root).map((m) => m.path)).toEqual(["ok.md"]);
+  });
+
+  // Symlink containment (CodeRabbit arc gate): the live watcher can emit a
+  // symlink LEAF path even though the scanner skips symlinks, and stat()
+  // would dereference it OUTSIDE the workspace — foreign content must never
+  // enter durable engine history as owned text.
+  it("never captures a symlink leaf, even when it dereferences outside the workspace", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "secret.md", "outside secret\n");
+    await mkdir(join(root, "notes"), { recursive: true });
+    await symlink(join(outside, "secret.md"), join(root, "notes", "today.md"));
+    await write(root, "inside.md", "real inside text\n");
+    await symlink(join(root, "inside.md"), join(root, "alias.md"));
+
+    const engine = capture(root);
+    engine.captureBatch([
+      { path: "notes/today.md", operation: "update" },
+      { path: "alias.md", operation: "update" },
+      { path: "inside.md", operation: "update" },
+    ]);
+    await engine.stop();
+
+    // Only the real file was captured; neither symlink (outside-pointing or
+    // workspace-internal) produced an engine moment.
+    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+      ["inside.md", "real inside text\n"],
+    ]);
+  });
+
+  it("retires a tracked path that later becomes a symlink", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "secret.md", "outside secret\n");
+    await write(root, "notes.md", "honest text\n");
+    const engine = capture(root);
+    engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+    await engine.flush();
+
+    await unlink(join(root, "notes.md"));
+    await symlink(join(outside, "secret.md"), join(root, "notes.md"));
+    engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+    await engine.stop();
+
+    const moments = readEngineMoments(root);
+    expect(moments.map((m) => [m.path, m.operation])).toEqual([
+      ["notes.md", "write"],
+      ["notes.md", "delete"],
+    ]);
+    // The symlink target's content never entered the store.
+    expect(moments.some((m) => m.text.includes("outside secret"))).toBe(false);
   });
 
   it("retires a tracked path that stops being engine-ownable text", async () => {
@@ -524,6 +578,146 @@ describe("workspaceEngineCapture failure isolation", () => {
   });
 });
 
+describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
+  // A real store wrapped so every method throws while `failing` is true —
+  // flip it to simulate an engine store that recovers.
+  function flakyStore(root: string) {
+    const real = createVersionedTextStore(root);
+    const state = { failing: true };
+    const store = new Proxy(real, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (state.failing) throw new Error("engine store unavailable");
+          return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as VersionedTextStore;
+    return { store, state };
+  }
+
+  it("reports a failed outcome per failing capture pass and success on recovery", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", "v1\n");
+    const { store, state } = flakyStore(root);
+    const outcomes: boolean[] = [];
+    const engine = capture(root, {
+      store,
+      onError: () => {},
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    });
+
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    expect(outcomes).toEqual([false]);
+
+    state.failing = false;
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.stop();
+    expect(outcomes).toEqual([false, true]);
+    // The recovered pass really captured: a transient open failure must not
+    // be cached forever.
+    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["note.md"]);
+  });
+
+  it("reports a failed outcome when only one path in a batch fails", async () => {
+    const root = await tempRoot();
+    await write(root, "good.md", "fine\n");
+    await write(root, "bad.md", "poison\n");
+    const real = createVersionedTextStore(root);
+    const poisonedStore: VersionedTextStore = {
+      ...real,
+      async writeTextFile(input) {
+        if (input.path === "bad.md") throw new Error("poisoned path");
+        return real.writeTextFile(input);
+      },
+    };
+    const outcomes: boolean[] = [];
+    const engine = capture(root, {
+      store: poisonedStore,
+      onError: () => {},
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    });
+    engine.captureBatch([
+      { path: "bad.md", operation: "update" },
+      { path: "good.md", operation: "update" },
+    ]);
+    await engine.stop();
+    expect(outcomes).toEqual([false]);
+  });
+
+  it("raises the workspace notice once without spam and clears it when capture recovers", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", "v1\n");
+    const workspace: CreatedWorkspace = {
+      workspaceId: "engine-capture-notice",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const { store, state } = flakyStore(root);
+    let notifyCount = 0;
+    const activity = createWorkspaceActivity(
+      () => {
+        notifyCount += 1;
+      },
+      {
+        captureFor: (w, hooks) =>
+          createWorkspaceEngineCapture({
+            workspaceId: w.workspaceId,
+            rootPath: w.rootPath,
+            store,
+            onError: () => {},
+            onCaptureOutcome: hooks.onCaptureOutcome,
+          }),
+      },
+    );
+    await activity.open(workspace);
+    const engineCapture = activity.engineCaptureFor(workspace.workspaceId);
+    expect(engineCapture).not.toBeNull();
+    // Startup reconciliation fails against the broken store: the notice is
+    // raised (one notify for the transition).
+    await engineCapture!.flush();
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(true);
+    const notifiesAtRaise = notifyCount;
+    expect(notifiesAtRaise).toBeGreaterThan(0);
+
+    // Repeated failures keep the flag raised but never re-notify (no spam).
+    engineCapture!.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engineCapture!.flush();
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(true);
+    expect(notifyCount).toBe(notifiesAtRaise);
+
+    // A later successful capture clears the notice (one more notify).
+    state.failing = false;
+    engineCapture!.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engineCapture!.flush();
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    expect(notifyCount).toBe(notifiesAtRaise + 1);
+
+    await activity.stopAll();
+  }, 15_000);
+
+  it("keeps unflagged workspaces unaffected", async () => {
+    const root = await tempRoot();
+    const workspace: CreatedWorkspace = {
+      workspaceId: "engine-capture-unflagged-notice",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => null,
+    });
+    await activity.open(workspace);
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    await activity.stopAll();
+    // Not-open workspaces report a clean status too.
+    expect(activity.getStatus("never-opened").historyCaptureFailed).toBe(false);
+  }, 15_000);
+});
+
 describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
   it("attaches per open workspace and flushes the last capture on stopAll", async () => {
     const root = await tempRoot();
@@ -652,4 +846,56 @@ describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
         `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
     );
   }, 120_000);
+});
+
+describe("createDefaultDiskWriter symlink containment", () => {
+  // The engine's own materialization writes (switch/merge/restore) must stay
+  // inside the workspace even against adversarial symlinks on disk.
+  it("refuses to write through a symlink leaf", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "target.md", "original outside content\n");
+    await symlink(join(outside, "target.md"), join(root, "notes.md"));
+
+    const writer = createDefaultDiskWriter(root);
+    await expect(
+      writer.writeTextFile(join(root, "notes.md"), "engine text\n"),
+    ).rejects.toThrow(/symlink/);
+    // The symlink target outside the workspace was never touched.
+    expect(await readFile(join(outside, "target.md"), "utf8")).toBe(
+      "original outside content\n",
+    );
+  });
+
+  it("refuses to mkdir through a symlinked ancestor pointing outside the workspace", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await symlink(outside, join(root, "escape"));
+
+    const writer = createDefaultDiskWriter(root);
+    await expect(
+      writer.writeTextFile(join(root, "escape", "deep", "file.md"), "x\n"),
+    ).rejects.toThrow(/escaped the workspace root/);
+    // mkdir -p never created directories on the far side of the symlink.
+    expect(existsSync(join(outside, "deep"))).toBe(false);
+  });
+
+  it("writes normally inside the workspace, creating missing directories", async () => {
+    const root = await tempRoot();
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeTextFile(join(root, "a", "b", "c.md"), "nested\n");
+    expect(await readFile(join(root, "a", "b", "c.md"), "utf8")).toBe("nested\n");
+  });
+
+  it("deleting a symlink leaf removes the link, not its target", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "keep.md", "must survive\n");
+    await symlink(join(outside, "keep.md"), join(root, "gone.md"));
+
+    const writer = createDefaultDiskWriter(root);
+    await writer.deletePath(join(root, "gone.md"));
+    expect(existsSync(join(root, "gone.md"))).toBe(false);
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
 });

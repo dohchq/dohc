@@ -12,7 +12,12 @@ import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContrac
 import { bridge } from "../bridge";
 
 type Notice = {
-  id: "sync-conflict" | "cloud-disconnected" | "agent-active" | "update-ready";
+  id:
+    | "sync-conflict"
+    | "cloud-disconnected"
+    | "history-capture-failed"
+    | "agent-active"
+    | "update-ready";
   tone: "danger" | "warning" | "success" | "neutral";
   title: string;
   body: string;
@@ -147,6 +152,21 @@ export function NoticeCenter(props: {
         title: "Cloud disconnected",
         body: "Local work is safe. Reconnect dohc Cloud when you want sync again.",
         Icon: CloudOff,
+      });
+    }
+
+    // Persistent while true (PR 0M-7): the flagged workspace's engine capture
+    // is its sole history recorder, so a failing capture means History is
+    // silently incomplete. Main clears the flag when a later capture
+    // succeeds; one notice per workspace by construction (per-workspace flag).
+    if (props.syncStatus?.historyCaptureFailed) {
+      next.push({
+        id: "history-capture-failed",
+        tone: "warning",
+        title: "History paused",
+        body: "dohc couldn't record history for this workspace. Your files are safe on disk, but recent changes may be missing from History.",
+        action: { label: "Open History", onClick: props.onOpenHistory },
+        Icon: AlertTriangle,
       });
     }
 

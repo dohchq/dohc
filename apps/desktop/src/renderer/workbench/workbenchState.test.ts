@@ -15,6 +15,9 @@ import {
   isMomentDiffTabPath,
   momentDiffTabPath,
   parseMomentDiffTabPath,
+  isVersionCompareTabPath,
+  parseVersionCompareTabPath,
+  versionCompareTabPath,
   isSiteTabPath,
   isVirtualTabPath,
   moveTab,
@@ -110,6 +113,17 @@ describe("tabs", () => {
     expect(parseMomentDiffTabPath("dohc://moment-diff/%ZZ")).toBeNull();
     expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
     expect(parseMomentDiffTabPath(null)).toBeNull();
+  });
+
+  it("recognizes version compare pages as virtual tabs with encoded version ids", () => {
+    const path = versionCompareTabPath("version id/with strange chars");
+    expect(isVersionCompareTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parseVersionCompareTabPath(path)).toBe("version id/with strange chars");
+    expect(parseVersionCompareTabPath("dohc://versions/compare/")).toBeNull();
+    expect(parseVersionCompareTabPath("dohc://versions/compare/%ZZ")).toBeNull();
+    expect(parseVersionCompareTabPath("notes/today.md")).toBeNull();
+    expect(parseVersionCompareTabPath(null)).toBeNull();
   });
 
   it("recognizes site previews as virtual tabs with encoded site roots", () => {

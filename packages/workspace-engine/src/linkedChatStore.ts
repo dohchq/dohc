@@ -17,6 +17,11 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
+  ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+  assertEngineSqliteIntegrity,
+  initializeOrValidateEngineSchema,
+} from "./engineDbSchema";
+import {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   type WorkspaceId,
   type WorkspaceObjectId,
@@ -24,8 +29,6 @@ import {
 
 export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
-const SQLITE_BUSY_TIMEOUT_MS = 5_000;
-const ENGINE_SCHEMA_VERSION = 1;
 
 export type {
   ChatActor,
@@ -100,11 +103,14 @@ function openDatabase(rootDir: string): SqliteDb {
     throw corruptStore(error);
   }
   try {
-    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    db.exec(`PRAGMA busy_timeout = ${ENGINE_SQLITE_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
-    initializeOrValidateSchema(db);
-    assertSqliteIntegrity(db);
+    // Schema bootstrap + integrity are shared with versionedTextStore (one
+    // engine.db, one DDL owner — see engineDbSchema.ts). Whichever store
+    // opens a brand-new workspace first creates the exact same schema.
+    initializeOrValidateEngineSchema(db, corruptStore);
+    assertEngineSqliteIntegrity(db, corruptStore);
     return db;
   } catch (error) {
     try {
@@ -112,168 +118,6 @@ function openDatabase(rootDir: string): SqliteDb {
     } catch {}
     if (error instanceof LinkedChatStoreError) throw error;
     throw corruptStore(error);
-  }
-}
-
-function initializeOrValidateSchema(db: SqliteDb): void {
-  const schemaRow = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'")
-    .get();
-  if (!schemaRow) {
-    const userTables = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-      .all();
-    if (userTables.length > 0) throw corruptStore();
-    createSchema(db);
-    return;
-  }
-  const version = db.prepare("SELECT version FROM schema_version WHERE id = 1").get();
-  if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corruptStore();
-  assertRequiredTables(db);
-}
-
-function assertSqliteIntegrity(db: SqliteDb): void {
-  const integrity = db.prepare("PRAGMA integrity_check").all();
-  if (integrity.length !== 1 || String(integrity[0]?.integrity_check) !== "ok") {
-    throw corruptStore();
-  }
-}
-
-function assertRequiredTables(db: SqliteDb): void {
-  const required = new Set([
-    "schema_version",
-    "blobs",
-    "versioned_workspaces",
-    "versions",
-    "file_objects",
-    "path_aliases",
-    "snapshots",
-    "fork_base_snapshots",
-    "moments",
-    "conflicts",
-    "chat_threads",
-    "chat_messages",
-  ]);
-  const names = new Set(
-    db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-      .all()
-      .map((row) => String(row.name)),
-  );
-  for (const table of required) {
-    if (!names.has(table)) throw corruptStore();
-  }
-}
-
-function createSchema(db: SqliteDb): void {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec(`
-      CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
-      CREATE TABLE blobs (sha256 TEXT PRIMARY KEY, byte_length INTEGER NOT NULL, text TEXT NOT NULL);
-      CREATE TABLE versioned_workspaces (workspace_id TEXT PRIMARY KEY, main_version_id TEXT NOT NULL);
-      CREATE TABLE versions (
-        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
-        created_at_ms REAL NOT NULL, fork_version_id TEXT, fork_moment_id TEXT,
-        PRIMARY KEY (workspace_id, version_id),
-        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
-      );
-      CREATE TABLE file_objects (
-        workspace_id TEXT NOT NULL, object_id TEXT NOT NULL, created_at_ms REAL NOT NULL,
-        PRIMARY KEY (workspace_id, object_id), UNIQUE (object_id),
-        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
-      );
-      CREATE TABLE path_aliases (
-        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, path TEXT NOT NULL, object_id TEXT NOT NULL,
-        PRIMARY KEY (workspace_id, version_id, path),
-        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
-      );
-      CREATE TABLE snapshots (
-        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL,
-        blob_sha256 TEXT NOT NULL, updated_at_ms REAL NOT NULL, latest_moment_id TEXT NOT NULL,
-        metadata_origin TEXT NOT NULL, metadata_summary TEXT, metadata_correlation_id TEXT,
-        PRIMARY KEY (workspace_id, version_id, object_id),
-        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-        FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
-      );
-      CREATE TABLE fork_base_snapshots (
-        workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL,
-        blob_sha256 TEXT NOT NULL, updated_at_ms REAL NOT NULL, latest_moment_id TEXT NOT NULL,
-        metadata_origin TEXT NOT NULL, metadata_summary TEXT, metadata_correlation_id TEXT,
-        PRIMARY KEY (workspace_id, version_id, object_id),
-        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-        FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
-      );
-      CREATE TABLE moments (
-        workspace_id TEXT NOT NULL, moment_order INTEGER NOT NULL, moment_id TEXT NOT NULL,
-        version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, recorded_at_ms REAL NOT NULL,
-        operation TEXT NOT NULL, payload_before_path TEXT, payload_before_blob_sha256 TEXT,
-        payload_after_path TEXT NOT NULL, payload_after_blob_sha256 TEXT NOT NULL,
-        metadata_origin TEXT NOT NULL, metadata_summary TEXT, metadata_correlation_id TEXT,
-        before_present INTEGER NOT NULL, before_object_id TEXT, before_version_id TEXT, before_path TEXT,
-        before_blob_sha256 TEXT, before_updated_at_ms REAL, before_latest_moment_id TEXT,
-        before_metadata_origin TEXT, before_metadata_summary TEXT, before_metadata_correlation_id TEXT,
-        PRIMARY KEY (workspace_id, moment_id), UNIQUE (workspace_id, moment_order),
-        FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-        FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-        FOREIGN KEY (payload_before_blob_sha256) REFERENCES blobs(sha256),
-        FOREIGN KEY (payload_after_blob_sha256) REFERENCES blobs(sha256),
-        FOREIGN KEY (before_blob_sha256) REFERENCES blobs(sha256)
-      );
-      CREATE TABLE conflicts (
-        workspace_id TEXT NOT NULL, conflict_id TEXT NOT NULL, path TEXT NOT NULL, target_version_id TEXT NOT NULL,
-        source_version_id TEXT NOT NULL, created_at_ms REAL NOT NULL, updated_at_ms REAL NOT NULL,
-        status TEXT NOT NULL, chosen_from TEXT NOT NULL, resolution TEXT, metadata_origin TEXT NOT NULL,
-        metadata_summary TEXT, metadata_correlation_id TEXT, base_exists INTEGER NOT NULL, base_path TEXT NOT NULL,
-        base_object_id TEXT, base_blob_sha256 TEXT, base_updated_at_ms REAL, base_latest_moment_id TEXT,
-        base_metadata_origin TEXT, base_metadata_summary TEXT, base_metadata_correlation_id TEXT,
-        current_exists INTEGER NOT NULL, current_path TEXT NOT NULL, current_object_id TEXT,
-        current_blob_sha256 TEXT, current_updated_at_ms REAL, current_latest_moment_id TEXT,
-        current_metadata_origin TEXT, current_metadata_summary TEXT, current_metadata_correlation_id TEXT,
-        incoming_exists INTEGER NOT NULL, incoming_path TEXT NOT NULL, incoming_object_id TEXT,
-        incoming_blob_sha256 TEXT, incoming_updated_at_ms REAL, incoming_latest_moment_id TEXT,
-        incoming_metadata_origin TEXT, incoming_metadata_summary TEXT, incoming_metadata_correlation_id TEXT,
-        PRIMARY KEY (workspace_id, conflict_id),
-        FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
-        FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
-        FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
-        FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256)
-      );
-      CREATE TABLE chat_threads (
-        workspace_id TEXT NOT NULL, thread_id TEXT NOT NULL, title TEXT NOT NULL,
-        created_at_ms REAL NOT NULL, updated_at_ms REAL NOT NULL, linked_object_id TEXT,
-        linked_path_hint TEXT, linked_at_ms REAL, PRIMARY KEY (workspace_id, thread_id)
-      );
-      CREATE TABLE chat_messages (
-        workspace_id TEXT NOT NULL, thread_id TEXT NOT NULL, message_order INTEGER NOT NULL,
-        message_id TEXT NOT NULL, author_kind TEXT NOT NULL, author_display_name TEXT NOT NULL,
-        body TEXT NOT NULL, created_at_ms REAL NOT NULL, PRIMARY KEY (workspace_id, message_id),
-        UNIQUE (workspace_id, thread_id, message_order),
-        FOREIGN KEY (workspace_id, thread_id) REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
-      );
-      CREATE INDEX idx_versions_workspace_name ON versions(workspace_id, name);
-      CREATE INDEX idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
-      CREATE INDEX idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);
-      CREATE INDEX idx_snapshots_path ON snapshots(workspace_id, version_id, path);
-      CREATE INDEX idx_fork_base_snapshots_path ON fork_base_snapshots(workspace_id, version_id, path);
-      CREATE INDEX idx_moments_version_object_order ON moments(workspace_id, version_id, object_id, moment_order);
-      CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order);
-      CREATE INDEX idx_moments_object_before ON moments(workspace_id, object_id, before_latest_moment_id);
-      CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
-      CREATE INDEX idx_chat_threads_workspace_created ON chat_threads(workspace_id, created_at_ms, thread_id);
-      CREATE INDEX idx_chat_threads_linked_file ON chat_threads(workspace_id, linked_object_id, created_at_ms, thread_id);
-      CREATE INDEX idx_chat_messages_thread_order ON chat_messages(workspace_id, thread_id, message_order);
-      INSERT INTO schema_version (id, version) VALUES (1, ${ENGINE_SCHEMA_VERSION});
-    `);
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
   }
 }
 
@@ -423,12 +267,20 @@ function messageFromRow(row: Record<string, unknown>): ChatMessage {
     workspaceId: stringValue(row.workspace_id),
     threadId: stringValue(row.thread_id),
     author: {
-      kind: stringValue(row.author_kind) as ChatActor["kind"],
+      kind: actorKindValue(row.author_kind),
       displayName: stringValue(row.author_display_name),
     },
     body: stringValue(row.body),
     createdAtMs: numberValue(row.created_at_ms),
   };
+}
+
+// Fail closed on a corrupt/hand-edited author_kind: an unknown kind must
+// never render as a valid-looking non-agent message.
+function actorKindValue(value: unknown): ChatActor["kind"] {
+  const kind = stringValue(value);
+  if (kind !== "human" && kind !== "agent") throw corruptStore();
+  return kind;
 }
 
 function stringValue(value: unknown): string {
@@ -709,6 +561,20 @@ export function createLinkedChatStore(
           };
         });
       });
+    },
+
+    // Releases the SQLite handle (and its WAL locks) after in-flight writes
+    // drain. The store stays usable: a later call lazily reopens, so close is
+    // safe to call from workspace teardown/app quit without poisoning late
+    // readers.
+    async close() {
+      await writeChain;
+      if (dbHandle) {
+        try {
+          dbHandle.close();
+        } catch {}
+        dbHandle = null;
+      }
     },
   };
 }

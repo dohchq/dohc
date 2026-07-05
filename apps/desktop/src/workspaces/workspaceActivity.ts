@@ -30,6 +30,11 @@ interface WatchedWorkspace {
   // null while the flag is off. Torn down in stopAll AFTER the watcher stops
   // so the final settled batch is captured before shutdown completes.
   capture: WorkspaceEngineCapture | null;
+  // True while the engine capture (this workspace's SOLE history recorder
+  // when flagged) is failing. Drives the persistent history-capture notice:
+  // set on the first failed capture pass, cleared when a later pass succeeds,
+  // notify() only on transitions so repeated failures never spam the UI.
+  captureFailed: boolean;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -141,10 +146,20 @@ export interface WorkspaceActivityOptions {
   engineFor?: (workspace: CreatedWorkspace) => CloudSyncEngine | null;
   // Builds the watcher->engine capture for a workspace when its
   // workspace-engine alpha flag is on; null keeps the workspace on legacy
-  // history only. Called once per open; main owns the flag read.
+  // history only. Called once per open; main owns the flag read. The hooks
+  // are activity-owned callbacks the builder must wire into the capture it
+  // creates (they feed the workspace's history-capture notice state).
   captureFor?: (
     workspace: CreatedWorkspace,
+    hooks: WorkspaceCaptureHooks,
   ) => Promise<WorkspaceEngineCapture | null> | WorkspaceEngineCapture | null;
+}
+
+export interface WorkspaceCaptureHooks {
+  // Wire into WorkspaceEngineCaptureOptions.onCaptureOutcome: each background
+  // capture pass reports here, and the activity layer turns failure/recovery
+  // transitions into the workspace's persistent capture-failure notice.
+  onCaptureOutcome: (outcome: { ok: boolean }) => void;
 }
 
 function mergeHistoryRecords(
@@ -226,8 +241,11 @@ export function createWorkspaceActivity(
       cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
-    // Additive surface: the status bar shows HOW MANY files conflict.
-    return { ...status, conflictCount };
+    // Additive surface: the status bar shows HOW MANY files conflict, and
+    // the notice center shows when history capture is failing (the engine is
+    // a flagged workspace's sole recorder, so a silent failure would mean no
+    // history at all).
+    return { ...status, conflictCount, historyCaptureFailed: w?.captureFailed ?? false };
   }
 
   async function open(workspace: CreatedWorkspace): Promise<SyncStatusResult> {
@@ -239,6 +257,7 @@ export function createWorkspaceActivity(
         handle: { stop: async () => {}, ready: Promise.resolve() },
         engine: null,
         capture: null,
+        captureFailed: false,
         agentRun: null,
         pendingLocalOperations: [],
       };
@@ -250,7 +269,25 @@ export function createWorkspaceActivity(
       // workspace on legacy history only — never a failed open.
       if (options.captureFor) {
         try {
-          entry.capture = (await options.captureFor(workspace)) ?? null;
+          const capture =
+            (await options.captureFor(workspace, {
+              onCaptureOutcome: ({ ok }) => {
+                // Transition-only: the FIRST failure raises the notice, the
+                // first success after a failure clears it, and repeated
+                // failures (a persistently broken store retries every batch)
+                // never re-notify.
+                if (entry.captureFailed === !ok) return;
+                entry.captureFailed = !ok;
+                notify();
+              },
+            })) ?? null;
+          // stopAll may have raced the capture build; stop the capture no
+          // one will ever own instead of leaking its chain/store handle.
+          if (watched.get(workspace.workspaceId) !== entry) {
+            await capture?.stop().catch(() => undefined);
+            return statusFor(workspace.workspaceId);
+          }
+          entry.capture = capture;
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,

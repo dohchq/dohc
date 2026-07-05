@@ -390,6 +390,11 @@ export const SyncStatusResult = z.object({
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
+  // Additive (PR 0M-7): true while the workspace-engine capture — a flagged
+  // workspace's SOLE history recorder — is failing, so the notice center can
+  // say history is not being recorded. Optional so older producers/fixtures
+  // keep parsing.
+  historyCaptureFailed: z.boolean().optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
@@ -542,22 +547,24 @@ export const EngineMomentRecord = z.object({
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
-  // refresh key.
-  momentOrder: z.number().int(),
+  // refresh key. Real moments always have a nonnegative order.
+  momentOrder: z.number().int().nonnegative(),
 });
 export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
 export const ListEngineMomentsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   limit: z.number().int().min(1).max(500).optional(),
-  beforeMomentOrder: z.number().int().optional(),
+  beforeMomentOrder: z.number().int().nonnegative().optional(),
 });
 export type ListEngineMomentsPayload = z.infer<typeof ListEngineMomentsPayload>;
 
 export const ListEngineMomentsResult = z.object({
   moments: z.array(EngineMomentRecord),
-  nextBeforeMomentOrder: z.number().int().nullable(),
-  latestMomentOrder: z.number().int(),
+  nextBeforeMomentOrder: z.number().int().nonnegative().nullable(),
+  // -1 is the store's honest "no moments yet" sentinel for an empty
+  // timeline; anything below that is malformed.
+  latestMomentOrder: z.number().int().min(-1),
   activeVersionId: z.string().min(1).max(200),
 });
 export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;

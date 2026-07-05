@@ -70,6 +70,8 @@ export function Titlebar(props: {
                 <li
                   key={candidate.workspaceId}
                   role="option"
+                  data-testid="workspace-switcher-option"
+                  data-workspace-id={candidate.workspaceId}
                   aria-selected={
                     candidate.workspaceId === props.workspace?.workspaceId
                   }

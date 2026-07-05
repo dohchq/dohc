@@ -117,6 +117,10 @@ export function LinkedChatsPanel(props: {
         });
         if (token !== liveToken.current) return;
         setMessages(result.messages);
+        // Land on the most recent message, matching the post-send scroll.
+        requestAnimationFrame(() =>
+          messagesEndRef.current?.scrollIntoView({ block: "end" }),
+        );
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."));
@@ -175,7 +179,12 @@ export function LinkedChatsPanel(props: {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
     } finally {
-      if (token === liveToken.current) setSending(false);
+      // Reset unconditionally: switching threads/files bumps liveToken
+      // without resetting `sending`, so a token-gated reset could leave this
+      // panel instance's composer disabled forever. The token guard on the
+      // `sending` READ (line above the IPC call) already prevents concurrent
+      // sends, so an unconditional reset is race-free.
+      setSending(false);
     }
   }, [activeThread, composer, props, sending, workspaceId]);
 
