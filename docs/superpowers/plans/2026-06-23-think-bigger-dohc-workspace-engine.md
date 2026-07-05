@@ -946,6 +946,13 @@ PR 01-owned contracts. The baseline package must export every Phase 0 baseline
 symbol in the matrix below, with tests proving consumers import those symbols
 from the baseline package.
 
+> **Reality note (2026-07-05):** this freeze was not executed as written. No
+> `Phase0SharedSubstrateBaseline` package was created; the Phase 0 lanes
+> shipped their provisional symbols directly inside `@dohc/workspace-engine`.
+> See
+> [Phase 0 Outcome And Roadmap Revision (2026-07-05)](#phase-0-outcome-and-roadmap-revision-2026-07-05)
+> for how PR 01 adoption is re-targeted at the shipped symbols.
+
 #### PR 01 Canonical Adoption Handoff
 
 PR 01 ends with a separate **PR 01 Canonical Adoption Handoff** recorded in the
@@ -962,6 +969,17 @@ symbol-specific, not a blanket removal of every baseline import on PR 01 merge:
 `ChatThread`, `ThreadMessage`, and chat `ThreadLink` remain allowed through the
 PR 01 bridge until the PR 12 chat ownership boundary explicitly adopts or
 migrates them.
+
+> **Reality note (2026-07-05):** because the baseline package never existed,
+> the handoff's source material is the de facto provisional baseline in
+> `@dohc/workspace-engine`. PR 01 must record a rename mapping from each
+> matrix symbol to the shipped engine symbol (or introduce the matrix symbol
+> and migrate), and the import-enforcement gate targets
+> `@dohc/workspace-engine` imports instead of `Phase0SharedSubstrateBaseline`
+> imports. Sequencing is revised by
+> [Phase 0 Outcome And Roadmap Revision (2026-07-05)](#phase-0-outcome-and-roadmap-revision-2026-07-05):
+> PR 0M mounts the engine into the product first, and PR 01 adopts what the
+> mount exercises.
 
 #### Phase 0 / PR 01 / PR 12 Schema Ownership Matrix
 
@@ -1285,6 +1303,155 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 - external VCS export fidelity.
 - semantic code merge.
 
+## Phase 0 Outcome And Roadmap Revision (2026-07-05)
+
+This section is the "expansion roadmap revised with lessons learned" artifact
+required by the P0G acceptance gate. It records what Phase 0 actually proved
+after PRs #46-#54 merged to main, where the landed tree diverges from this
+plan's earlier text, and how the next phase changes as a result. Where this
+section disagrees with earlier Phase 0/PR 01 prose in this document, this
+section wins.
+
+### What Phase 0 Proved
+
+- The engine semantics work in isolation. `packages/workspace-engine` (~8.5k
+  source lines, ~6.5k test lines) implements stable file object IDs, Main plus
+  named versions with fork points, history moments, restore, 3-way merge with
+  base/current/incoming conflict preservation, a linked chat thread with a
+  read-only projection, policy-hooked search, and `.env` exclusion — all
+  exercised end to end by `phase0Proof.test.ts` against disposable local
+  workspaces.
+- The watcher-backed normal-folder philosophy survived contact with the code.
+  No Phase 0 lane needed a virtual filesystem, and external editors and agent
+  CLIs keep editing plain files.
+- P0R answered the Rust question with evidence: TypeScript-owned contracts,
+  Rust kernel behind them, JSON-RPC over stdio/named pipes as the preferred
+  bridge, and a ~44x scan/hash margin (7.7ms vs 335.7ms average for 1,000
+  files) that justifies promoting Rust for scan/reconcile/hash before large
+  workspaces ship.
+- Chats-as-actions and files-as-files coexisted cleanly in one substrate; the
+  linked-chat proof did not contaminate file versioning, and restore does not
+  touch chat state.
+
+### What Phase 0 Did Not Prove
+
+- **Product integration: none.** Nothing in `apps/` or `services/` imports
+  `@dohc/workspace-engine`. Every proof is a vitest suite against a temp
+  directory. The shipping desktop watcher/history/search paths still run the
+  pre-existing `workspace-history`/ripgrep stack. The engine has not survived
+  contact with the real product, which was the stated purpose of a proof arc.
+- **The Phase 0 Baseline Freeze never happened as specified.** No
+  `Phase0SharedSubstrateBaseline` package exists. The lanes shipped their own
+  symbol names inside `@dohc/workspace-engine` (`FileObjectRecord`,
+  `VersionRecord`, `VersionedTextMoment`, `VersionedTextConflictRecord`,
+  `ChatThread`, `ChatMessage`, `LinkedChatFileRef`, `WorkspaceSearchPolicy`).
+  The plan-named symbols (`WorkspaceObject`, `WorkspaceVersion`, `VersionRef`,
+  `WorkspaceEvent`, `DurabilityEvent`, `HistoryMoment`,
+  `Phase0EffectivePolicyInput`/`Phase0EffectivePolicyResult`) do not exist in
+  code.
+- **Storage baseline is a placeholder.** Both engine stores persist as single
+  JSON documents under `.dohc/engine/` rewritten atomically per mutation. That
+  was right for the proof and is wrong for the product: whole-store rewrite
+  per write, no content-addressed snapshots, and two Critical concurrency
+  findings already surfaced during P0B review.
+- **Performance budgets were never measured against budgets.** Only package
+  test runtimes and the P0R micro-benchmark exist. No startup, reconciliation,
+  watcher-capture, history-render, or search measurement on a realistic
+  workspace was recorded.
+- **Portability gap.** The P0C anchored writer is Linux-only and fails closed
+  on macOS/Windows pending the Rust kernel lane.
+- **Deferred desktop surfaces.** The file-adjacent chat side rail,
+  engine-backed desktop search, watcher-to-engine capture (including the P0A
+  write-observation ledger/dedupe design), and the workspace-switch race E2E
+  were all left unbuilt.
+- **Validation gaps on the landing tree.** GitHub Actions disabled by user
+  direction; CodeRabbit major gates deferred for P0D-P0G; the Postgres-backed
+  conformance suite could not run locally (no Docker) and in any case covers
+  the legacy atoms backend, not the engine; the P0G local-agent smoke passed
+  only with `DOHC_CODEX_SANDBOX=danger-full-access` and a non-default Claude
+  model, recorded as one-off QA exceptions.
+
+### Roadmap Revision
+
+1. **PR 0M (Product Mount Arc) is the next phase, before the full PR 01
+   contracts ceremony.** Canonicalizing contracts for a package with zero
+   consumers would repeat the Baseline Freeze failure: vocabulary without a
+   consumer to validate it. The engine must first be mounted into the desktop
+   product behind an alpha flag. PR 0M is specified in the PR Roadmap below.
+2. **PR 01 is re-scoped to adopt the engine's real exports.** The
+   [Phase 0 / PR 01 / PR 12 Schema Ownership Matrix](#phase-0--pr-01--pr-12-schema-ownership-matrix)
+   remains the ownership map, but the provisional baseline PR 01 adopts is the
+   actual `@dohc/workspace-engine` symbol set, with an explicit rename mapping
+   (plan name -> shipped name) recorded at handoff. PR 01A-D run alongside or
+   after PR 0M, extracting the contracts the mount actually exercises.
+3. **The storage baseline decision is a PR 0M gate.** Before contracts are
+   canonicalized around it, the engine store must move from whole-file JSON
+   rewrite to a scalable local baseline (candidates: SQLite or an append-only
+   content-addressed log; the engine already computes SHA-256 content hashes).
+   The P0R Rust lane may own the hot path.
+4. **The versioned-workspace spec's holding-area write lifecycle is explicitly
+   deferred.** Phase 0 shipped and validated the simple model: authorized
+   writes land immediately and conflicts preserve both sides. The full
+   `durable-pending`/`quarantined`/`overdue_disposition` machine is not a
+   Phase 1 contract and must not be imported into PR 01 without a product
+   surface that needs it.
+5. **`VersionRef` needs one definition.** The chats spec uses
+   `object_version` (with etag) / `workspace_version` / `history_moment`; this
+   plan uses `version` / `fork-point` / `history-moment`; the shipped engine
+   uses plain version IDs. PR 01A must reconcile these into one discriminated
+   union and record the mapping.
+6. **Restore one enforced validation leg before PR 0M merges.** Either local
+   Docker for the Postgres-backed suites or a minimal paid CI runner. A plan
+   whose gates are all deferred by direction stops being a plan.
+
+### User Decisions (2026-07-05)
+
+Ice answered the post-Phase-0 questions on 2026-07-05. These decisions are
+binding on the roadmap below:
+
+1. **Mount-first approved.** PR 0M runs before the full PR 01 contracts
+   ceremony, exactly as revised above.
+2. **Named versions are the wedge surface.** PR 0M is sequenced around a user
+   working in named versions: create a named version, edit in it, compare and
+   merge back to Main through the engine, in the product UI. History/restore
+   and the linked-chat rail support that loop rather than leading it.
+3. **Storage baseline decided: SQLite in WAL mode with content-addressed
+   snapshots.** One database per workspace under `.dohc/engine/`, snapshot
+   bodies stored as SHA-256-addressed blobs. Rationale: transactional
+   multi-process safety (closes the P0B concurrency findings), incremental
+   writes instead of whole-store rewrite, first-class libraries in both
+   TypeScript and Rust, already operationally familiar in this repo
+   (`services/sqlite-worker`), and content addressing preserves git-grade
+   snapshot durability and dedupe.
+4. **Multiplatform is required.** The Linux-only anchored writer gets a
+   portable fallback inside PR 0M; macOS and Windows are first-class targets,
+   not a deferred Rust milestone.
+5. **Enforced validation leg: local Docker Postgres.** Docker Desktop is
+   available locally; the live Postgres suites run before PR 0M merges.
+   CodeRabbit is used sparingly and efficiently at genuine major gates only —
+   never per-step, because it is slow and rate-limits quickly. Either the
+   CodeRabbit CLI or GitHub PR reviews may be used, whichever is faster;
+   batch accumulated changes into one review rather than re-reviewing each
+   follow-up commit.
+6. **Replacement, not migration.** The new engine replaces the legacy
+   atoms/Postgres/Y.Doc stack entirely. No backwards compatibility and no
+   migration path are required; the old system is scrapped except where a
+   specific capability is explicitly salvaged. Consequences: PR 21 as
+   originally scoped is superseded (see its supersession note); PR 02's
+   migration/backfill scope is void; every "existing workspace opens
+   unchanged" acceptance item applies only to workspaces created on the new
+   engine; and the Hocuspocus write-policy-parity gap from P0A is a
+   salvage-review input, not a parity work item.
+7. **No chat feel-test gate.** Build the linked-chat side rail in PR 0M and
+   proceed to the chats roadmap (PR 12+) as planned when reached.
+
+### Carried-Forward Gates
+
+The unchecked Phase 0 proof-arc gate items carry forward as PR 0M acceptance
+inputs. The authoritative list is recorded in the execution log's
+[Phase 0 Landing Status (2026-07-05)](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md#phase-0-landing-status-2026-07-05)
+section.
+
 ## Agent And Review Workflow
 
 ### Execution Topology: Worktrees And Focused Implementation Workstreams
@@ -1410,6 +1577,11 @@ Repository configuration must reflect this policy: `.coderabbit.yaml` keeps
 automatic and incremental reviews disabled so CodeRabbit is invoked manually for
 major gates instead of consuming review quota on every push, ready-for-review
 transition, or restack commit.
+
+Per the 2026-07-05 user direction, CodeRabbit is slow and rate-limits quickly,
+so use it sparingly and wisely: either the CodeRabbit CLI or GitHub PR reviews
+are acceptable (whichever is faster for the gate), and accumulated changes are
+batched into one review rather than re-reviewed per follow-up commit.
 
 At a CodeRabbit gate:
 
@@ -1710,6 +1882,11 @@ Milestones:
 - **Phase 0 gate:** P0A-P0G must complete, keep that baseline stable, and update
   the plan with proof-arc evidence before PR 01-04 begin Foundation alpha
   implementation work.
+- **Product mount (PR 0M):** added by the
+  [Phase 0 Outcome And Roadmap Revision (2026-07-05)](#phase-0-outcome-and-roadmap-revision-2026-07-05).
+  Mount the Phase 0 engine into the desktop product behind an alpha flag,
+  settle the engine storage baseline, and close the carried-forward Phase 0
+  gates before the broad Foundation alpha ceremony.
 - **PR 01 Canonical Adoption Handoff:** PR 01 records the
   [PR 01 Canonical Adoption Handoff](#pr-01-canonical-adoption-handoff), adopts
   or bridges each provisional symbol, and activates the symbol-specific
@@ -1775,6 +1952,77 @@ Foundation alpha and the relevant surface proof are complete.
 - user approves plan.
 - execution log exists.
 - no implementation starts before approval.
+
+### PR 0M - Product Mount Arc
+
+**Goal:** Make the Phase 0 engine real by mounting it into the desktop product
+behind an alpha flag, with one workspace surface running on engine state end to
+end. Added by the
+[Phase 0 Outcome And Roadmap Revision (2026-07-05)](#phase-0-outcome-and-roadmap-revision-2026-07-05);
+runs before the full PR 01 contracts ceremony. Split into stacked reviewable
+slices as needed; the acceptance below applies to the arc, not one omnibus PR.
+
+**Scope:**
+
+The arc is sequenced around the named-versions wedge (User Decision 2): a user
+in the product creates a named version, edits in it, compares, and merges back
+to Main through the engine.
+
+- Named-versions surface for the flagged workspace: create a named version,
+  edit files in it, compare against Main, clean-merge back, and inspect/resolve
+  a preserved conflict — all through the engine, in the product UI.
+- Behind an alpha flag, route the desktop watcher/capture path for one real
+  workspace into the engine: watcher events feed engine history, implementing
+  the P0A write-observation ledger/ownership rule so watcher, MCP, and engine
+  writes cannot double-record one physical write.
+- Read the file history/timeline UI for that workspace from engine moments;
+  restore flows through the engine.
+- Mount the P0E linked-chat side rail beside the file view (the unchecked P0E
+  scope item).
+- Route desktop search for the flagged workspace through the engine search
+  path, or record explicitly why ripgrep remains the interim surface.
+- Implement the decided storage baseline (User Decision 3): SQLite in WAL mode
+  with SHA-256 content-addressed snapshot blobs, one database per workspace
+  under `.dohc/engine/`, replacing whole-file JSON rewrite before the flag
+  defaults on for any user.
+- Replace the Linux-only anchored writer with a portable multiplatform write
+  path (User Decision 4); macOS and Windows must pass the write/capture tests,
+  not fail closed.
+- Extract the engine's exported contracts that the mount consumes into the
+  shared contracts package as the narrow first PR 01A slice, with the rename
+  mapping recorded.
+
+**Tests:**
+
+- All Phase 0 engine suites keep passing.
+- Watcher-to-engine capture E2E: external editor edit while dohc runs; edit
+  while dohc is stopped, then startup reconciliation records it.
+- Duplicate-observation regression: watcher plus MCP observing the same
+  physical write produce exactly one history entry.
+- Workspace-switch async race E2E for history/chat/search loading.
+- Performance: measured startup, reconciliation, watcher capture latency,
+  history render, and search on a realistic (1,000+ file) workspace against
+  the initial budgets, with the machine profile recorded.
+
+**CodeRabbit focus:**
+
+- watcher/engine double-capture races.
+- data loss during storage-baseline migration.
+- alpha-flag isolation from non-flagged workspaces.
+- renderer blocking during capture/reconciliation.
+
+**Acceptance:**
+
+- One real workspace runs file -> history -> restore -> version -> merge ->
+  linked chat -> search on the engine behind the flag, on a developer machine,
+  with measured budgets recorded.
+- The carried-forward Phase 0 gate items owned by this arc are checked or
+  explicitly re-deferred with user approval.
+- No second source of truth: while the flag is on, engine state is
+  authoritative for the flagged surfaces and the legacy path is read-only or
+  disabled for them.
+- At least one enforced validation leg (local Docker Postgres or minimal CI)
+  runs before merge.
 
 ### PR 01 - Workspace Engine Contracts And Substrate
 
@@ -1866,6 +2114,10 @@ TypeScript and Rust consumers generated or conformance-tested from it.
 - every future PR can depend on the same object/event/policy/projection shapes.
 
 ### PR 02 - Version Registry And Typed Event Skeleton
+
+> **Scope note (2026-07-05, User Decision 6):** replacement, not migration.
+> The migration/backfill items below apply only to workspaces created on the
+> new engine; there is no legacy-substrate backfill obligation.
 
 **Goal:** Introduce the internal version and typed event model without changing
 default user behavior.
@@ -2689,6 +2941,15 @@ version-control knowledge.
 - the AI-native loop is real and user-visible.
 
 ### PR 21 - Migration And Backwards Compatibility
+
+> **Superseded (2026-07-05, User Decision 6):** the engine replaces the legacy
+> atoms/Postgres/Y.Doc stack entirely; no migration path and no backwards
+> compatibility are required. PR 21 shrinks to a **legacy retirement and
+> salvage audit**: enumerate what the old system does, explicitly salvage the
+> few capabilities the new engine needs (with fresh implementations, not
+> compatibility bridges), delete the rest, and verify no shipping surface
+> still depends on retired code. The original scope below is retained for
+> reference only; do not implement it as written.
 
 **Goal:** Migrate existing docs, chat, app, data, and agent state into the new
 substrate without data loss.

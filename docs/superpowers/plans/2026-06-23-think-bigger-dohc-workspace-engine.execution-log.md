@@ -61,6 +61,63 @@ Phase 0 decision-note entries are recorded in the PR00 pass history below. This
 heading is the stable machine-checkable anchor for specs that cite the execution
 log as the decision-note source of truth.
 
+## Phase 0 Landing Status (2026-07-05)
+
+PRs #46-#54 merged to `main` (merge commits `bce90e08` through `1fb5cc80`).
+Per-lane `Status:` fields below were written while the stacked PRs were open
+drafts and are historical; this section is the post-landing record.
+
+What landed: the Phase 0 engine proof in `packages/workspace-engine` plus the
+`crates/workspace-kernel-spike` benchmark, P0A share-revocation hardening, and
+P0C desktop activity/watcher improvements. The engine is package-level proof
+only: no `apps/` or `services/` code imports it yet, and no
+`Phase0SharedSubstrateBaseline` package was created — the lanes shipped their
+provisional symbols directly in `@dohc/workspace-engine`.
+
+Validation at landing: local package suites passed (workspace-engine 177 tests,
+workspace-history 47, workspace-fs 40, workspace-core 108, MCP 58, plus Rust
+fmt/test and the local-agent smokes). The live Postgres/Docker-backed suites
+could not run locally (Docker unavailable in this WSL distro); GitHub Actions
+remained disabled by user direction; the P0G Codex agent smoke passed only
+under `DOHC_CODEX_SANDBOX=danger-full-access`, and the Claude compatibility
+smoke only with `DOHC_CLAUDE_MODEL=sonnet`, both recorded as one-off QA
+exceptions.
+
+Post-landing validation closure (2026-07-05): with Docker Desktop running and
+the dev Postgres container up (`docker compose -f docker-compose.dev.yml up -d
+postgres`), the previously blocked live suites passed on the landing tree
+plus docs-only edits: `@dohc/workspace-postgres` 23/23 tests across 8 files
+including the live `conformance.test.ts`, and `@dohc/workspace-api` 76/76
+tests across 10 files including the live-pg `shares.test.ts` and the
+better-auth device-authorization flow. The Phase 0 external-infra validation
+blocker is closed; local Docker Postgres is the enforced validation leg going
+forward per User Decision 5.
+
+Carried-forward unchecked proof-arc gates (see the Phase 0 Proof Arc gate
+checklist below): shared substrate baseline package; server/engine-derived
+actor identity on write paths; full workspace scoping; lock/protected-path
+enforcement for agent writes; external-edit detection and startup
+reconciliation through the product watcher; linked chat appearing beside the
+file; agent chat display name; workspace-switch race E2E; performance
+measurements and budget passes; CodeRabbit major gates. These become PR 0M
+acceptance inputs.
+
+The "expansion roadmap revised with Phase 0 findings" artifact required by the
+P0G gate is now recorded in the plan:
+[Phase 0 Outcome And Roadmap Revision (2026-07-05)](./2026-06-23-think-bigger-dohc-workspace-engine.md#phase-0-outcome-and-roadmap-revision-2026-07-05).
+The next phase is PR 0M (Product Mount Arc) with a re-scoped PR 01; see the
+plan's PR Roadmap.
+
+Post-landing user decisions (2026-07-05), recorded in full in the plan's
+User Decisions subsection of the outcome section: mount-first approved; named
+versions are the PR 0M wedge surface; storage baseline is SQLite (WAL) with
+SHA-256 content-addressed snapshot blobs; multiplatform write path required in
+PR 0M (no Linux-only fail-closed writer); local Docker Postgres is the
+enforced validation leg; CodeRabbit used sparingly at major gates via CLI or
+GitHub PR review with batched fixes; the legacy stack is replaced outright
+with no migration or backwards compatibility (PR 21 superseded into a legacy
+retirement/salvage audit); no chat feel-test gate before the chats roadmap.
+
 ## PR Lane Inventory
 
 P0A and P0R are provisional throughput work started after user approval for
@@ -13370,7 +13427,10 @@ Gate evidence:
 - [ ] Required Phase 0 CodeRabbit major gates are complete or user approved
       documented non-critical documentation-only exceptions.
 - [x] Architecture/security/QA subagent reviews complete.
-- [ ] Expansion roadmap has been revised with Phase 0 findings.
+- [x] Expansion roadmap has been revised with Phase 0 findings. Recorded
+      2026-07-05 in the plan's Phase 0 Outcome And Roadmap Revision section;
+      the remaining unchecked items above carry forward as PR 0M acceptance
+      inputs per the Phase 0 Landing Status section.
 
 ### Foundation Alpha
 
