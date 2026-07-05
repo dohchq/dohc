@@ -13946,3 +13946,146 @@ git diff --check                                 # clean
 
 - The dual-write hook comment in workspaceWatcher.recordBatch plus the
   Migration Notes above are the deletion checklist for lane 0M-5.
+
+## PR 0M-4 - Named Versions Product Surface
+
+Status: merged to main via PR #58 (merge commit 2975d357)
+Branch: codex/think-bigger-0m4-versions-ui
+Worktree: /home/ice/dev/dohc-0m4-versions-ui (removed after merge)
+Implementation workstream, if used: direct implementation by a Claude lane
+(fable-5), tests-first; resumed once after a session-limit interruption;
+orchestrator merge review with independent E2E re-run
+PR Link: https://github.com/dohc-ai/dohc/pull/58
+Date started: 2026-07-05
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] The wedge (User Decision 2): create a named Version, edit in it, compare
+      with Main, merge back — in the product UI, zero git vocabulary
+      (grep-verified), gated on `experimental.workspaceEngineAlpha`
+- [x] Engine active-version API (default Main, lazily created
+      `active_versions` table so 0M-3 databases upgrade in place, fail-closed
+      ids) and `compareVersionFiles` (added/modified/deleted + both texts)
+- [x] Capture and startup reconciliation route to the ACTIVE version, read per
+      chain task so batches enqueued across a switch land correctly
+- [x] Switch flow serialized on the capture chain: flush + capture current
+      state (nothing ever lost), materialize only engine-owned text via the
+      shared classifier, expected-event registration suppresses self
+      re-capture, destination recorded active BEFORE the disk rewrite — one
+      recovery invariant (disk reconciles into the recorded active version)
+      covers live failures and process crashes identically; injected
+      mid-switch fs-failure recovery tested
+- [x] New versions fork from the active version's latest disk state; versions
+      created inside another version expose canMergeIntoMain: false with an
+      honest UI explanation (P0D requires a Main fork base)
+- [x] Merge into Main on the chain (materialized when Main is active);
+      re-running a merge resumes existing open conflicts; conflict resolution
+      keep-current / keep-incoming / combined-copy with disk materialization
+- [x] 7 zod-validated IPC channels; every handler rejects unflagged
+      workspaces; renderer supplies no trusted identity
+- [x] Flag-gated UI: version selector in the tab-strip band, inline create,
+      compare-with-Main virtual tab reusing shared unified-diff rendering
+      (pure extraction from HistoryDiffPage), merge dialog with side-by-side
+      conflict panels, save-first prompt for dirty editors, liveness-token
+      race gating, keyboard navigable, no raw conflict markers anywhere
+
+### Files Changed
+
+- packages/workspace-engine/src/versionedTextStore.ts, versionCompare.ts
+  (new), index.ts, activeVersion.test.ts (new), versionCompare.test.ts (new)
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts, workspaceActivity.ts,
+  workspaceVersionOperations.test.ts (new)
+- apps/desktop/src/main.ts, preload.ts, ipc/channels.ts, ipc/bridgeContract.ts
+  (+ contract tests)
+- apps/desktop/src/renderer/workbench/WorkspaceVersions.tsx (new),
+  unifiedDiff.tsx (new), workbenchState.ts, EditorTabs.tsx,
+  DesktopWorkspaceShell.tsx
+- apps/desktop/e2e/workspace-versions.spec.ts (new)
+
+### Tests Added Or Updated
+
+- Engine 195/195 (8 new: active-version default/persist/fail-closed/lazy
+  upgrade; compare added/modified/deleted/empty/fail-closed).
+- Desktop vitest 785 passed (19 new: version operations incl. switch disk
+  swap, expected-event suppression via moment counts, injected mid-switch
+  failure recovery, merge clean/conflict/all resolution kinds, merge-resume,
+  capture-not-cached-across-switch, zod contract accept/reject; 1 pre-existing
+  theme.test.ts env failure).
+- Orchestrator independently re-verified both suites, both typechecks, and
+  the E2E set after a fresh build.
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-engine test   # 195/195
+pnpm --filter @dohc/desktop test            # 785 passed + 1 pre-existing env failure
+pnpm --filter @dohc/workspace-engine typecheck && pnpm --filter @dohc/desktop typecheck
+pnpm --filter @dohc/desktop build
+npx playwright test workspace-versions.spec.ts workspace-engine-capture.spec.ts workspace-direct-disk.spec.ts  # 6/6 (orchestrator re-run)
+git diff --check
+```
+
+### E2E / Visual / Manual QA
+
+- workspace-versions.spec.ts 3/3: the wedge demo (create Draft -> disk edit
+  captured into Draft -> switch to Main reverts disk -> switch back -> compare
+  -> clean merge -> Main updated on disk and in engine); conflict path with a
+  calm no-marker conflict panel and keep-incoming resolution; unflagged
+  workspaces show no versions surface and the IPC rejects.
+- Capture, direct-disk, and settings E2E regressions green; 2 sites-preview
+  failures remain pre-existing on this machine.
+
+### Local Agent CLI QA
+
+- Not run for this lane; the arc gate covers agent-editing-in-a-version.
+
+### CodeRabbit
+
+- Status: deferred to the PR 0M arc gate (User Decision 5).
+- Findings: - / Fixes: - / Overrides: -
+
+### Unresolved Findings
+
+- None at merge.
+
+### Subagent Reviews
+
+- Architecture: orchestrator reviewed switch-flow ordering
+  (active-before-rewrite recovery invariant) and chain serialization.
+- Security: IPC handlers fail closed for unflagged workspaces; materialization
+  writes go through validateUserWritePath + realpath containment.
+- QA: orchestrator independently re-ran suites and E2E.
+- Accessibility: keyboard-navigable menu/dialogs; no color-only indicators.
+
+### Security / Privacy Notes
+
+- Switching never touches binary/secret/ignored paths (shared classifier);
+  UI copy states the text-only alpha limitation honestly.
+
+### Performance Notes
+
+- Version switch, 200 files / 20 differing: 213.7 ms (Ryzen 9 7950X, WSL2,
+  node v25.2.1) — well under the 1 s target; recorded by an always-on perf
+  test.
+- Compare/merge run a disk reconcile first (~0.7 s at 1,000 files) — fine at
+  alpha scale, revisit for large workspaces.
+
+### Migration Notes
+
+- Interrupted switches honestly record partial disk state as the destination
+  tip; prior tips remain recoverable in moment history.
+
+### Remaining Risk
+
+- Legacy history shows switch/merge materialization as plain local edits
+  until 0M-5 flips the history source to engine moments (which carry real
+  summaries and correlation ids).
+- Merge issues one store transaction per changed file; batchable later.
+
+### Follow-Up / Deletion Conditions
+
+- 0M-5 owns: history UI flip to engine moments for flagged workspaces,
+  legacy-recording disablement (including the switch/merge materialization
+  suppression decision), and engine-routed restore via
+  registerExpectedEngineEvents.
