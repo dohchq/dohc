@@ -188,6 +188,32 @@ export interface VersionedTextMoment {
   before?: TextFileSnapshot | null;
 }
 
+// Timeline row (PR 0M-5 history flip): everything the history list needs
+// without hauling snapshot text bodies. momentOrder is the workspace-global
+// recording order — the keyset-pagination cursor and a monotonic refresh key.
+export interface VersionedTextMomentSummary {
+  id: VersionedTextMomentId;
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  objectId: WorkspaceObjectId;
+  path: string;
+  recordedAtMs: number;
+  operation: "write" | "rename" | "delete";
+  metadata: ActorNeutralWriteMetadata;
+  momentOrder: number;
+}
+
+export interface VersionedTextMomentPage {
+  // Newest first (descending momentOrder).
+  moments: VersionedTextMomentSummary[];
+  // Pass back as beforeMomentOrder to fetch the next (older) page; null when
+  // this page reached the beginning of the timeline.
+  nextBeforeMomentOrder: number | null;
+  // The workspace's newest moment order for the given filter (-1 when empty),
+  // regardless of pagination position.
+  latestMomentOrder: number;
+}
+
 export interface VersionedTextMomentPayloadSnapshot {
   path: string;
   text: string;
@@ -312,6 +338,21 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     objectId: WorkspaceObjectId;
   }): Promise<FileObjectRecord | null>;
+  // Timeline reads (PR 0M-5 history flip). listMoments serves the history
+  // list without payload bodies; getMoment serves the diff page with the full
+  // before/after payload. Both are workspace-scoped: a moment id from another
+  // workspace reads as null / absent.
+  listMoments(input: {
+    workspaceId: WorkspaceId;
+    versionId?: VersionId;
+    objectId?: WorkspaceObjectId;
+    limit?: number;
+    beforeMomentOrder?: number;
+  }): Promise<VersionedTextMomentPage>;
+  getMoment(input: {
+    workspaceId: WorkspaceId;
+    momentId: VersionedTextMomentId;
+  }): Promise<VersionedTextMoment | null>;
 }
 
 export interface VersionedTextStoreOptions {
@@ -1868,6 +1909,31 @@ function assertInputEnvelope(input: unknown): asserts input is Record<string, un
   if (!isRecord(input)) {
     throw new VersionedTextStoreError("invalid-input", "Versioned text store input is required.");
   }
+}
+
+const MOMENT_LIST_DEFAULT_LIMIT = 200;
+const MOMENT_LIST_MAX_LIMIT = 500;
+
+function normalizeMomentListLimit(limit: number | undefined): number {
+  if (limit === undefined) return MOMENT_LIST_DEFAULT_LIMIT;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1) {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      "Moment list limit must be a positive integer.",
+    );
+  }
+  return Math.min(limit, MOMENT_LIST_MAX_LIMIT);
+}
+
+function normalizeMomentListCursor(cursor: number | undefined): number | undefined {
+  if (cursor === undefined) return undefined;
+  if (typeof cursor !== "number" || !Number.isFinite(cursor)) {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      "Moment list cursor must be a finite number.",
+    );
+  }
+  return cursor;
 }
 
 function normalizeRootDir(rootDir: string): string {
@@ -3595,6 +3661,95 @@ function createVersionedTextStoreWithHooks(
           .all(workspaceId)
           .map(versionFromRow)
           .map(cloneVersion);
+      });
+    },
+
+    listMoments(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId =
+          input.versionId === undefined ? undefined : normalizeVersionId(input.versionId);
+        const objectId =
+          input.objectId === undefined ? undefined : normalizeObjectId(input.objectId);
+        const limit = normalizeMomentListLimit(input.limit);
+        const beforeMomentOrder = normalizeMomentListCursor(input.beforeMomentOrder);
+        const txDb = db();
+        // Fail closed on an unknown or other-workspace version filter instead
+        // of silently returning an empty timeline for it.
+        if (versionId !== undefined) {
+          requireWorkspaceVersionRow(txDb, workspaceId, versionId);
+        }
+        const conditions = ["m.workspace_id = ?"];
+        const params: unknown[] = [workspaceId];
+        if (versionId !== undefined) {
+          conditions.push("m.version_id = ?");
+          params.push(versionId);
+        }
+        if (objectId !== undefined) {
+          conditions.push("m.object_id = ?");
+          params.push(objectId);
+        }
+        const filterSql = conditions.join(" AND ");
+        const latestRow = txDb
+          .prepare(
+            `SELECT COALESCE(MAX(m.moment_order), -1) AS latest_order
+             FROM moments m WHERE ${filterSql}`,
+          )
+          .get(...params);
+        const latestMomentOrder = rowNumber(latestRow ?? {}, "latest_order");
+        const pageConditions = [...conditions];
+        const pageParams = [...params];
+        if (beforeMomentOrder !== undefined) {
+          pageConditions.push("m.moment_order < ?");
+          pageParams.push(beforeMomentOrder);
+        }
+        // limit + 1 answers "is there an older page" without a second count.
+        const rows = txDb
+          .prepare(
+            `SELECT m.moment_id, m.workspace_id, m.version_id, m.object_id, m.path,
+                    m.recorded_at_ms, m.operation, m.metadata_origin,
+                    m.metadata_summary, m.metadata_correlation_id, m.moment_order
+             FROM moments m
+             WHERE ${pageConditions.join(" AND ")}
+             ORDER BY m.moment_order DESC
+             LIMIT ?`,
+          )
+          .all(...pageParams, limit + 1);
+        const hasMore = rows.length > limit;
+        const pageRows = hasMore ? rows.slice(0, limit) : rows;
+        const moments = pageRows.map<VersionedTextMomentSummary>((row) => ({
+          id: rowString(row, "moment_id"),
+          workspaceId: rowString(row, "workspace_id"),
+          versionId: rowString(row, "version_id"),
+          objectId: rowString(row, "object_id"),
+          path: rowString(row, "path"),
+          recordedAtMs: rowNumber(row, "recorded_at_ms"),
+          operation: rowString(row, "operation") as VersionedTextMomentSummary["operation"],
+          metadata: metadataFromRow(row),
+          momentOrder: rowNumber(row, "moment_order"),
+        }));
+        return cloneJson({
+          moments,
+          nextBeforeMomentOrder: hasMore
+            ? (moments[moments.length - 1]?.momentOrder ?? null)
+            : null,
+          latestMomentOrder,
+        });
+      });
+    },
+
+    getMoment(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        if (typeof input.momentId !== "string" || input.momentId.trim().length === 0) {
+          throw new VersionedTextStoreError("invalid-input", "Moment id is required.");
+        }
+        const row = db()
+          .prepare(momentSelectSql("WHERE m.workspace_id = ? AND m.moment_id = ?"))
+          .get(workspaceId, input.momentId.trim());
+        return row ? cloneMoment(momentFromRow(row)) : null;
       });
     },
 

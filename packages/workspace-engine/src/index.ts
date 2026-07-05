@@ -41,6 +41,8 @@ export type {
   VersionedTextMergeResult,
   VersionedTextMoment,
   VersionedTextMomentId,
+  VersionedTextMomentPage,
+  VersionedTextMomentSummary,
   VersionedTextRenameResult,
   VersionedTextStore,
   VersionedTextStoreErrorCode,

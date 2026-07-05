@@ -102,13 +102,13 @@ test("flagged workspace captures live edits and reconciles closed-period edits i
     );
     expect(liveMoment?.text).toBe("# Engine live\n\nCaptured while running.\n");
 
-    // Legacy history still records for the flagged workspace (interim
-    // dual-write until lane 0M-5 flips the history UI to engine moments).
+    // PR 0M-5 ended the dual-write: the engine is the SOLE recorder for the
+    // flagged workspace — no legacy .dohc/history change set may appear.
+    // (This assertion previously required legacy records to keep appearing;
+    // the flip is the deliberate 0M-5 behavior change.)
     const legacyIndex = join(temp.rootPath, ".dohc", "history");
     const { readdir } = await import("node:fs/promises");
-    await expect
-      .poll(async () => (await readdir(legacyIndex).catch(() => [])).length)
-      .toBeGreaterThan(0);
+    expect((await readdir(legacyIndex).catch(() => [])).length).toBe(0);
 
     await desktop.close();
     desktop = null;

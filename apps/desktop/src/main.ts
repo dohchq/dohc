@@ -91,6 +91,24 @@ import {
   ResolveWorkspaceVersionConflictResult,
   WorkspaceVersionConflict,
   WorkspaceVersionRecord,
+  ListEngineMomentsPayload,
+  ListEngineMomentsResult,
+  ReadEngineMomentPayload,
+  ReadEngineMomentResult,
+  RestoreEngineMomentFilePayload,
+  RestoreEngineMomentFileResult,
+  ListFileChatsPayload,
+  ListFileChatsResult,
+  CreateFileChatPayload,
+  CreateFileChatResult,
+  ListChatMessagesPayload,
+  ListChatMessagesResult,
+  SendChatMessagePayload,
+  SendChatMessageResult,
+  EngineMomentRecord,
+  EngineMomentDetailRecord,
+  ChatThreadRecord,
+  ChatMessageRecord,
   OpenFileExternallyPayload,
   OpenWorkspacePayload,
   AgentRunPayload,
@@ -169,6 +187,14 @@ import {
 } from "./workspaces/cloudDataFragments";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
+import {
+  createLinkedChatStore,
+  type ChatMessage,
+  type ChatThread,
+  type LinkedChatStore,
+  type VersionedTextMoment,
+  type VersionedTextMomentSummary,
+} from "@dohc/workspace-engine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { createWorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { createAgentIntegration } from "./agents/AgentIntegration";
@@ -857,10 +883,11 @@ const activity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
-  // Workspace-engine alpha (PR 0M-3): when the per-workspace flag is on,
-  // watcher batches are dual-written into the engine store under
-  // .dohc/engine/ beside the untouched legacy history. Flag is read at open;
-  // toggling it takes effect on the next open of the workspace.
+  // Workspace-engine alpha (PR 0M-3/0M-5): when the per-workspace flag is
+  // on, the engine store under .dohc/engine/ is the workspace's SOLE history
+  // recorder — watcher batches become engine moments and no legacy
+  // .dohc/history change set is written. Flag is read at open; toggling it
+  // takes effect on the next open of the workspace.
   captureFor: async (workspace) => {
     const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
     if (!settings.experimental.workspaceEngineAlpha) return null;
@@ -898,6 +925,27 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
     });
   }
   return cachedAgentSessions;
+}
+
+// Linked Chats (PR 0M-5): per-workspace store over the SAME engine.db the
+// versioned text store uses (separate WAL-safe connection). Built lazily on
+// first chat IPC and only ever for flagged workspaces (the handlers gate on
+// the engine capture being attached).
+const linkedChatStores = new Map<string, LinkedChatStore>();
+function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }): LinkedChatStore {
+  const existing = linkedChatStores.get(workspace.workspaceId);
+  if (existing) return existing;
+  const store = createLinkedChatStore(workspace.rootPath);
+  linkedChatStores.set(workspace.workspaceId, store);
+  return store;
+}
+
+// The human author every renderer-sent chat message is attributed to. Main
+// derives it — the renderer never supplies identity. At alpha the desktop's
+// only durable identity is the dohc Cloud session email; signed-out
+// workspaces fall back to "You".
+function localUserDisplayName(): string {
+  return cachedCredentials?.email ?? "You";
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
@@ -1227,8 +1275,22 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = MoveWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const path = await movePath(workspace.rootPath, input.fromPath, input.toPath);
-    return CreateWorkspaceFileResult.parse({ path });
+    // Flagged workspaces coordinate single-file renames through the engine
+    // FIRST so the file keeps its stable object id (linked Chats survive the
+    // rename). Anything the engine declines — folders, binary, untracked —
+    // returns a no-op finisher and is captured as delete+write as before.
+    const capture = activity.engineCaptureFor(workspace.workspaceId);
+    const finishRename = capture
+      ? await capture.beginFileRename(input.fromPath, input.toPath)
+      : null;
+    try {
+      const path = await movePath(workspace.rootPath, input.fromPath, input.toPath);
+      await finishRename?.(true);
+      return CreateWorkspaceFileResult.parse({ path });
+    } catch (error) {
+      await finishRename?.(false);
+      throw error;
+    }
   });
 
   ipcMain.handle(CHANNELS.deleteWorkspacePath, async (event, payload) => {
@@ -1872,15 +1934,23 @@ function registerIpcHandlers(): void {
   // requireWorkspace (renderer identity is never trusted) and is gated on the
   // workspace-engine alpha capture being attached — for unflagged workspaces
   // the calls reject.
-  async function requireVersionOperations(workspaceId: string) {
+  async function requireEngineCapture(workspaceId: string, unavailable: string) {
     const workspace = requireWorkspace(workspaceId);
     // Idempotent: guarantees the watcher + capture are live before any
-    // version operation touches the chain.
+    // engine operation touches the chain.
     await activity.open(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      throw new Error("Versions are not enabled for this workspace.");
+      throw new Error(unavailable);
     }
+    return { workspace, capture };
+  }
+
+  async function requireVersionOperations(workspaceId: string) {
+    const { capture } = await requireEngineCapture(
+      workspaceId,
+      "Versions are not enabled for this workspace.",
+    );
     return capture;
   }
 
@@ -2004,6 +2074,194 @@ function registerIpcHandlers(): void {
       });
     },
   );
+
+  // Engine history + linked Chats (PR 0M-5). Flagged workspaces read their
+  // timeline from engine moments; every handler resolves the workspace via
+  // requireWorkspace and rejects when the engine capture is not attached.
+  function engineMomentForIpc(moment: VersionedTextMomentSummary): EngineMomentRecord {
+    return {
+      id: moment.id,
+      versionId: moment.versionId,
+      path: moment.path,
+      recordedAtMs: moment.recordedAtMs,
+      operation: moment.operation,
+      origin: moment.metadata.origin,
+      ...(moment.metadata.summary !== undefined
+        ? { summary: moment.metadata.summary }
+        : {}),
+      ...(moment.metadata.correlationId !== undefined
+        ? { correlationId: moment.metadata.correlationId }
+        : {}),
+      momentOrder: moment.momentOrder,
+    };
+  }
+
+  function engineMomentDetailForIpc(
+    moment: VersionedTextMoment,
+  ): EngineMomentDetailRecord {
+    return {
+      id: moment.id,
+      versionId: moment.versionId,
+      path: moment.path,
+      recordedAtMs: moment.recordedAtMs,
+      operation: moment.operation,
+      origin: moment.metadata.origin,
+      ...(moment.metadata.summary !== undefined
+        ? { summary: moment.metadata.summary }
+        : {}),
+      ...(moment.metadata.correlationId !== undefined
+        ? { correlationId: moment.metadata.correlationId }
+        : {}),
+      beforeText: moment.payload.before?.text ?? null,
+      // A delete moment stores the removed content as its payload; the diff
+      // page renders it as before -> nothing.
+      afterText: moment.operation === "delete" ? null : moment.payload.after.text,
+    };
+  }
+
+  function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
+    return {
+      id: thread.id,
+      title: thread.title,
+      createdAtMs: thread.createdAtMs,
+      updatedAtMs: thread.updatedAtMs,
+    };
+  }
+
+  function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
+    return {
+      id: message.id,
+      threadId: message.threadId,
+      authorKind: message.author.kind,
+      authorDisplayName: message.author.displayName,
+      body: message.body,
+      createdAtMs: message.createdAtMs,
+    };
+  }
+
+  ipcMain.handle(CHANNELS.listEngineMoments, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListEngineMomentsPayload.parse(payload);
+    const { capture } = await requireEngineCapture(
+      input.workspaceId,
+      "Engine history is not enabled for this workspace.",
+    );
+    const page = await capture.listMoments({
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.beforeMomentOrder !== undefined
+        ? { beforeMomentOrder: input.beforeMomentOrder }
+        : {}),
+    });
+    return ListEngineMomentsResult.parse({
+      moments: page.moments.map(engineMomentForIpc),
+      nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+      latestMomentOrder: page.latestMomentOrder,
+      activeVersionId: page.activeVersionId,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.readEngineMoment, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadEngineMomentPayload.parse(payload);
+    const { capture } = await requireEngineCapture(
+      input.workspaceId,
+      "Engine history is not enabled for this workspace.",
+    );
+    const moment = await capture.readMoment(input.momentId);
+    return ReadEngineMomentResult.parse({
+      moment: moment ? engineMomentDetailForIpc(moment) : null,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RestoreEngineMomentFilePayload.parse(payload);
+    const { capture } = await requireEngineCapture(
+      input.workspaceId,
+      "Engine history is not enabled for this workspace.",
+    );
+    const result = await capture.restoreFileToBeforeMoment(input.momentId);
+    notifyRenderer();
+    return RestoreEngineMomentFileResult.parse(result);
+  });
+
+  ipcMain.handle(CHANNELS.listFileChats, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListFileChatsPayload.parse(payload);
+    const { workspace, capture } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const fileObjectId = await capture.fileObjectIdForPath(input.path);
+    const threads = fileObjectId
+      ? await linkedChatStoreFor(workspace).listThreadsForFile({
+          workspaceId: workspace.workspaceId,
+          objectId: fileObjectId,
+        })
+      : [];
+    return ListFileChatsResult.parse({
+      fileObjectId,
+      threads: threads.map(chatThreadForIpc),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.createFileChat, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateFileChatPayload.parse(payload);
+    const { workspace, capture } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    // The chat links to the file's STABLE engine object id (never the path),
+    // so the link survives renames; the path rides along as a display hint.
+    const fileObjectId = await capture.fileObjectIdForPath(input.path);
+    if (!fileObjectId) {
+      throw new Error(
+        "Chats aren't available for this file yet — only text files dohc tracks can have Chats.",
+      );
+    }
+    const thread = await linkedChatStoreFor(workspace).createThread({
+      workspaceId: workspace.workspaceId,
+      title: input.title,
+      linkedFile: { objectId: fileObjectId, pathHint: input.path },
+    });
+    return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
+  });
+
+  ipcMain.handle(CHANNELS.listChatMessages, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatMessagesPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const messages = await linkedChatStoreFor(workspace).listMessages({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+    });
+    return ListChatMessagesResult.parse({
+      messages: messages.map(chatMessageForIpc),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.sendChatMessage, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SendChatMessagePayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    // Author is derived HERE: renderer-sent messages are always the local
+    // human user. Agent authorship arrives through agent tooling, never
+    // through this channel.
+    const message = await linkedChatStoreFor(workspace).sendMessage({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+      author: { kind: "human", displayName: localUserDisplayName() },
+      body: input.body,
+    });
+    return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
+  });
 
   ipcMain.handle(CHANNELS.listChangeSets, async (event, payload) => {
     assertTrustedSender(event);

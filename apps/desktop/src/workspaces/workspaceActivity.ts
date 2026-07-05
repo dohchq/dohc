@@ -243,13 +243,32 @@ export function createWorkspaceActivity(
         pendingLocalOperations: [],
       };
       watched.set(workspace.workspaceId, entry);
+      // Resolve the alpha-flag engine capture BEFORE the watcher starts: the
+      // watcher records each settled batch into exactly ONE history (engine
+      // moments for flagged workspaces, legacy change sets otherwise), so the
+      // mode must be known from the first batch. A capture failure keeps the
+      // workspace on legacy history only — never a failed open.
+      if (options.captureFor) {
+        try {
+          entry.capture = (await options.captureFor(workspace)) ?? null;
+        } catch (error) {
+          console.error(
+            `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
+            error,
+          );
+        }
+      }
+      // stopAll may have raced the capture build; do not start a watcher no
+      // one will ever stop.
+      if (watched.get(workspace.workspaceId) !== entry) {
+        return statusFor(workspace.workspaceId);
+      }
       entry.handle = startWorkspaceWatch(workspace, {
         // Read live at settle time so a batch is attributed to whatever run is
         // active then — the slot may flip between batches within one open.
         activeAgentRun: () => entry.agentRun,
-        // Read live at settle time: null until the alpha-flag capture is
-        // attached below; batches settling before then are reconciled by the
-        // capture's startup pass instead of being lost.
+        // Non-null for flagged workspaces from the FIRST batch: the engine is
+        // the sole recorder (no legacy change sets, no snapshot-cache seed).
         engineCapture: () => entry.capture,
         activeLocalOperation: ({ paths, events }) => {
           const now = Date.now();
@@ -278,24 +297,10 @@ export function createWorkspaceActivity(
         entry.handle.ready,
         new Promise<void>((resolve) => setTimeout(resolve, 5000)),
       ]);
-      // Attach the engine capture (alpha flag) after the watcher is live and
-      // kick its startup reconciliation in the background: closed-period
-      // edits become engine moments without blocking the open. A failure
-      // keeps the workspace on legacy history only — never a failed open.
-      if (options.captureFor) {
-        try {
-          const capture = await options.captureFor(workspace);
-          if (capture) {
-            entry.capture = capture;
-            capture.start();
-          }
-        } catch (error) {
-          console.error(
-            `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
-            error,
-          );
-        }
-      }
+      // Kick the capture's startup reconciliation in the background once the
+      // watcher is live: closed-period edits become engine moments without
+      // blocking the open.
+      entry.capture?.start();
       const engine = options.engineFor?.(workspace) ?? null;
       if (engine) {
         entry.engine = engine;

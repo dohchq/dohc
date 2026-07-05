@@ -20,6 +20,27 @@ export const HISTORY_TAB_PATH = "dohc://history";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
 export const SITE_TAB_PREFIX = "dohc://site/";
 export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
+// Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
+// MOMENT id, not legacy change-set id.
+export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
+
+export function momentDiffTabPath(momentId: string): string {
+  return `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
+}
+
+export function isMomentDiffTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(MOMENT_DIFF_TAB_PREFIX);
+}
+
+export function parseMomentDiffTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
+  try {
+    const momentId = decodeURIComponent(path.slice(MOMENT_DIFF_TAB_PREFIX.length));
+    return momentId.length > 0 ? momentId : null;
+  } catch {
+    return null;
+  }
+}
 
 export function historyDiffTabPath(changeSetId: string, filePath: string): string {
   return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
@@ -102,6 +123,7 @@ export function isVirtualTabPath(path: string | null): boolean {
     isGraphTabPath(path) ||
     isHistoryTabPath(path) ||
     isHistoryDiffTabPath(path) ||
+    isMomentDiffTabPath(path) ||
     isVersionCompareTabPath(path) ||
     isSiteTabPath(path)
   );
