@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,6 +10,23 @@ import {
   linkedChatProjectionPath,
 } from "./linkedChatStore";
 import { createVersionedTextStore } from "./versionedTextStore";
+
+interface RawSqliteStatement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes: number };
+}
+
+interface RawSqliteDb {
+  exec(sql: string): void;
+  prepare(sql: string): RawSqliteStatement;
+  close(): void;
+}
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => RawSqliteDb;
+};
 
 let root: string;
 let now = 1000;
@@ -48,6 +66,20 @@ function versionStore() {
       return `${kind}-${counters[kind]}`;
     },
   });
+}
+
+function withRawDb<T>(fn: (db: RawSqliteDb) => T): T {
+  const db = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function rawRows(sql: string, ...params: unknown[]): Array<Record<string, unknown>> {
+  return withRawDb((db) => db.prepare(sql).all(...params));
 }
 
 describe("linked chat store", () => {
@@ -258,19 +290,22 @@ describe("linked chat store", () => {
   });
 
   it("fails closed on corrupt persisted state", async () => {
-    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-    await writeFile(join(root, LINKED_CHAT_STORE_RELATIVE_PATH), "{\"schemaVersion\":2}\n");
     const chats = createLinkedChatStore(root);
+    await chats.createThread({ workspaceId: "workspace-a", title: "Seed" });
+    withRawDb((db) => {
+      db.prepare("UPDATE schema_version SET version = 2 WHERE id = 1").run();
+    });
+    const reloadedChats = createLinkedChatStore(root);
 
-    await expect(chats.listThreads({ workspaceId: "workspace-a" })).rejects.toBeInstanceOf(
+    await expect(reloadedChats.listThreads({ workspaceId: "workspace-a" })).rejects.toBeInstanceOf(
       LinkedChatStoreError,
     );
-    await expect(chats.listThreads({ workspaceId: "workspace-a" })).rejects.toMatchObject({
+    await expect(reloadedChats.listThreads({ workspaceId: "workspace-a" })).rejects.toMatchObject({
       code: "state-corrupt",
     });
   });
 
-  it("persists inspectable JSON and reloads the same thread", async () => {
+  it("persists inspectable SQLite rows and reloads the same thread", async () => {
     const chats = chatStore();
     const thread = await chats.createThread({
       workspaceId: "workspace-a",
@@ -283,8 +318,13 @@ describe("linked chat store", () => {
       body: "This survives reload.",
     });
 
-    const raw = await readFile(join(root, LINKED_CHAT_STORE_RELATIVE_PATH), "utf8");
-    expect(JSON.parse(raw).schemaVersion).toBe(1);
+    expect(rawRows("SELECT version FROM schema_version WHERE id = 1")).toEqual([{ version: 1 }]);
+    expect(rawRows("SELECT thread_id, title FROM chat_threads")).toEqual([
+      { thread_id: thread.id, title: "Durable thread" },
+    ]);
+    expect(rawRows("SELECT body FROM chat_messages")).toEqual([
+      { body: "This survives reload." },
+    ]);
     const reloaded = createLinkedChatStore(root);
 
     await expect(reloaded.listThreads({ workspaceId: "workspace-a" })).resolves.toMatchObject([
