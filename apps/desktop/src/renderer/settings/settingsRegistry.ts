@@ -74,7 +74,7 @@ export const SETTINGS_SECTIONS = [
     id: "advanced",
     label: "Advanced",
     scope: "Mixed",
-    keywords: ["reset", "json", "diagnostics", "defaults"],
+    keywords: ["reset", "json", "diagnostics", "defaults", "experimental", "engine", "alpha"],
     Icon: Wrench,
   },
 ] as const satisfies readonly SettingsSection[];

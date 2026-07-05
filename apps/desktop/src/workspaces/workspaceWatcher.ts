@@ -26,12 +26,16 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { desktopMarks } from "../performance/desktopMarks";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 // Raw filesystem edits can come from a person, an editor, a shell command, or
 // an agent. Attribute them to the local file surface unless dohc has trusted
 // active-run context.
 const LOCAL_AUTHOR: ChangeAuthor = createLocalChangeAuthor("Local file edit");
-const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
+// Shared text-ownership cap: the legacy history snapshot pipeline and the
+// engine capture path (workspaceEngineCapture.ts) both treat larger files as
+// not text-owned, so the two histories cannot disagree about what has text.
+export const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
 export const DESKTOP_HISTORY_STORE_OPTIONS = {
   ephemeralIfUnsupported: true,
 } as const;
@@ -283,6 +287,10 @@ export function startWorkspaceWatch(
     activeLocalOperation?: (
       batch: ActiveLocalOperationBatch,
     ) => ActiveLocalOperation | null;
+    // Read at the moment a batch settles: a non-null capture also records the
+    // batch into the workspace engine (alpha flag). Enqueue-only — the legacy
+    // record chain never waits on the engine.
+    engineCapture?: () => Pick<WorkspaceEngineCapture, "captureBatch"> | null;
   } = {},
 ): WorkspaceWatchHandle {
   const store = createChangeSetStore(workspace.rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
@@ -365,6 +373,20 @@ export function startWorkspaceWatch(
     } catch (error) {
       if (!isDurableChangeSetRecordingUnsupportedError(error)) throw error;
       warnDurableHistoryUnavailable();
+    }
+    // PR 0M-3 interim dual-write: legacy .dohc/history above stays the store
+    // the history UI reads; when the workspace-engine alpha flag is on the
+    // batch is ALSO captured into the engine (lane 0M-5 flips the UI to
+    // engine moments and disables legacy recording for flagged workspaces).
+    // captureBatch only enqueues onto the capture chain — engine errors are
+    // handled there and can never fail this record.
+    try {
+      options.engineCapture?.()?.captureBatch(events);
+    } catch (error) {
+      console.error(
+        `[desktop] failed to enqueue engine capture for ${workspace.rootPath}:`,
+        error,
+      );
     }
     desktopMarks.measureSince("sync-batch", "sync-batch-start");
     desktopMarks.mark("sync-batch-complete");

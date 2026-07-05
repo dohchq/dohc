@@ -157,6 +157,7 @@ import {
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
+import { createWorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import {
@@ -843,6 +844,18 @@ const activity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
+  // Workspace-engine alpha (PR 0M-3): when the per-workspace flag is on,
+  // watcher batches are dual-written into the engine store under
+  // .dohc/engine/ beside the untouched legacy history. Flag is read at open;
+  // toggling it takes effect on the next open of the workspace.
+  captureFor: async (workspace) => {
+    const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
+    if (!settings.experimental.workspaceEngineAlpha) return null;
+    return createWorkspaceEngineCapture({
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+    });
+  },
 });
 // Local agent integration: owns the per-workspace MCP child + active-run slot
 // and persists agent-run records. The run slot is wired into the watcher

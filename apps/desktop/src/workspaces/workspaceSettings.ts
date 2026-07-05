@@ -17,6 +17,12 @@ export const WorkspaceSettings = z.object({
   privacy: z.object({
     confirmExternalLinks: z.boolean(),
   }).strict(),
+  // Defaulted, not required: the top-level schema is .strict() and a failed
+  // parse silently resets the whole file, so settings written before this
+  // group existed must keep parsing as-is (see the old-shape regression test).
+  experimental: z.object({
+    workspaceEngineAlpha: z.boolean(),
+  }).strict().default({ workspaceEngineAlpha: false }),
 }).strict();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
 
@@ -33,6 +39,9 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   privacy: {
     confirmExternalLinks: true,
   },
+  experimental: {
+    workspaceEngineAlpha: false,
+  },
 };
 
 export const WorkspaceSettingsResult = z.object({
@@ -43,10 +52,11 @@ export const WorkspaceSettingsResult = z.object({
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 
 export type WorkspaceSettingsPatch =
-  Partial<Omit<WorkspaceSettings, "agents" | "sites" | "privacy">> & {
+  Partial<Omit<WorkspaceSettings, "agents" | "sites" | "privacy" | "experimental">> & {
     agents?: Partial<WorkspaceSettings["agents"]>;
     sites?: Partial<WorkspaceSettings["sites"]>;
     privacy?: Partial<WorkspaceSettings["privacy"]>;
+    experimental?: Partial<WorkspaceSettings["experimental"]>;
   };
 
 export function parseWorkspaceSettings(raw: unknown): WorkspaceSettings {
@@ -64,6 +74,7 @@ export function mergeWorkspaceSettings(
     agents: { ...current.agents, ...patch.agents },
     sites: { ...current.sites, ...patch.sites },
     privacy: { ...current.privacy, ...patch.privacy },
+    experimental: { ...current.experimental, ...patch.experimental },
   });
 }
 
