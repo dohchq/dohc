@@ -269,7 +269,7 @@ export function createWorkspaceActivity(
       // workspace on legacy history only — never a failed open.
       if (options.captureFor) {
         try {
-          entry.capture =
+          const capture =
             (await options.captureFor(workspace, {
               onCaptureOutcome: ({ ok }) => {
                 // Transition-only: the FIRST failure raises the notice, the
@@ -281,6 +281,13 @@ export function createWorkspaceActivity(
                 notify();
               },
             })) ?? null;
+          // stopAll may have raced the capture build; stop the capture no
+          // one will ever own instead of leaking its chain/store handle.
+          if (watched.get(workspace.workspaceId) !== entry) {
+            await capture?.stop().catch(() => undefined);
+            return statusFor(workspace.workspaceId);
+          }
+          entry.capture = capture;
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,

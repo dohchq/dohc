@@ -2,7 +2,8 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import type { VersionedTextStore } from "@dohc/workspace-engine";
 import { createVersionedTextStore } from "@dohc/workspace-engine";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,6 +14,7 @@ import { createWorkspaceActivity } from "./workspaceActivity";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
+  createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
@@ -188,6 +190,57 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
 
     expect(readEngineMoments(root).map((m) => m.path)).toEqual(["ok.md"]);
+  });
+
+  // Symlink containment (CodeRabbit arc gate): the live watcher can emit a
+  // symlink LEAF path even though the scanner skips symlinks, and stat()
+  // would dereference it OUTSIDE the workspace — foreign content must never
+  // enter durable engine history as owned text.
+  it("never captures a symlink leaf, even when it dereferences outside the workspace", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "secret.md", "outside secret\n");
+    await mkdir(join(root, "notes"), { recursive: true });
+    await symlink(join(outside, "secret.md"), join(root, "notes", "today.md"));
+    await write(root, "inside.md", "real inside text\n");
+    await symlink(join(root, "inside.md"), join(root, "alias.md"));
+
+    const engine = capture(root);
+    engine.captureBatch([
+      { path: "notes/today.md", operation: "update" },
+      { path: "alias.md", operation: "update" },
+      { path: "inside.md", operation: "update" },
+    ]);
+    await engine.stop();
+
+    // Only the real file was captured; neither symlink (outside-pointing or
+    // workspace-internal) produced an engine moment.
+    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+      ["inside.md", "real inside text\n"],
+    ]);
+  });
+
+  it("retires a tracked path that later becomes a symlink", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "secret.md", "outside secret\n");
+    await write(root, "notes.md", "honest text\n");
+    const engine = capture(root);
+    engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+    await engine.flush();
+
+    await unlink(join(root, "notes.md"));
+    await symlink(join(outside, "secret.md"), join(root, "notes.md"));
+    engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+    await engine.stop();
+
+    const moments = readEngineMoments(root);
+    expect(moments.map((m) => [m.path, m.operation])).toEqual([
+      ["notes.md", "write"],
+      ["notes.md", "delete"],
+    ]);
+    // The symlink target's content never entered the store.
+    expect(moments.some((m) => m.text.includes("outside secret"))).toBe(false);
   });
 
   it("retires a tracked path that stops being engine-ownable text", async () => {
@@ -793,4 +846,56 @@ describe("workspaceEngineCapture performance evidence (PR 0M-3)", () => {
         `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
     );
   }, 120_000);
+});
+
+describe("createDefaultDiskWriter symlink containment", () => {
+  // The engine's own materialization writes (switch/merge/restore) must stay
+  // inside the workspace even against adversarial symlinks on disk.
+  it("refuses to write through a symlink leaf", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "target.md", "original outside content\n");
+    await symlink(join(outside, "target.md"), join(root, "notes.md"));
+
+    const writer = createDefaultDiskWriter(root);
+    await expect(
+      writer.writeTextFile(join(root, "notes.md"), "engine text\n"),
+    ).rejects.toThrow(/symlink/);
+    // The symlink target outside the workspace was never touched.
+    expect(await readFile(join(outside, "target.md"), "utf8")).toBe(
+      "original outside content\n",
+    );
+  });
+
+  it("refuses to mkdir through a symlinked ancestor pointing outside the workspace", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await symlink(outside, join(root, "escape"));
+
+    const writer = createDefaultDiskWriter(root);
+    await expect(
+      writer.writeTextFile(join(root, "escape", "deep", "file.md"), "x\n"),
+    ).rejects.toThrow(/escaped the workspace root/);
+    // mkdir -p never created directories on the far side of the symlink.
+    expect(existsSync(join(outside, "deep"))).toBe(false);
+  });
+
+  it("writes normally inside the workspace, creating missing directories", async () => {
+    const root = await tempRoot();
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeTextFile(join(root, "a", "b", "c.md"), "nested\n");
+    expect(await readFile(join(root, "a", "b", "c.md"), "utf8")).toBe("nested\n");
+  });
+
+  it("deleting a symlink leaf removes the link, not its target", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await write(outside, "keep.md", "must survive\n");
+    await symlink(join(outside, "keep.md"), join(root, "gone.md"));
+
+    const writer = createDefaultDiskWriter(root);
+    await writer.deletePath(join(root, "gone.md"));
+    expect(existsSync(join(root, "gone.md"))).toBe(false);
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
 });

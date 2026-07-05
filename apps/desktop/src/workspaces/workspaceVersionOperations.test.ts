@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { createVersionedTextStore, type VersionedTextStore } from "@dohc/workspace-engine";
 import { nativeTmpdir } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
@@ -89,6 +90,7 @@ function sha256Utf8(text: string): string {
 function capture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   diskWriter?: EngineDiskWriter;
+  store?: VersionedTextStore;
 } = {}): WorkspaceEngineCapture {
   return createWorkspaceEngineCapture({
     workspaceId: "version-ops-test",
@@ -200,7 +202,8 @@ describe("switchVersion", () => {
   it("swaps disk content between versions and loses nothing from either side", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    await writeBytes(root, "logo.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
+    const logoBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+    await writeBytes(root, "logo.png", logoBytes);
     const engine = capture(root);
     engine.start();
     await engine.flush();
@@ -213,8 +216,10 @@ describe("switchVersion", () => {
     expect(toMain.activeVersionId).toBe("main");
     expect(await readText(root, "plan.md")).toBe("v1 text\n");
     expect(existsSync(join(root, "draft-only.md"))).toBe(false);
-    // Binary files are untouched by switching.
+    // Binary files are untouched by switching — byte-for-byte, not merely
+    // still present (a truncating/rewriting switch must fail this).
     expect(existsSync(join(root, "logo.png"))).toBe(true);
+    expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(logoBytes);
 
     const draftId = await versionIdByName(engine, "Draft");
     const backToDraft = await engine.switchVersion(draftId);
@@ -227,7 +232,22 @@ describe("switchVersion", () => {
   it("suppresses engine re-capture of its own switch writes via expected events", async () => {
     const root = await tempRoot();
     await write(root, "plan.md", "v1 text\n");
-    const engine = capture(root);
+    // Boundary signal for suppression: after the switch, processing the
+    // simulated watcher event must never touch the engine store for the
+    // path at all. "No new moments" alone would pass vacuously (the disk
+    // content equals the engine tip, so an unsuppressed capture records
+    // nothing either) — the read counter is what fails when suppression
+    // breaks.
+    const store = createVersionedTextStore(root);
+    let planReads = 0;
+    const countingStore: VersionedTextStore = {
+      ...store,
+      async readTextFile(input) {
+        if (input.path === "plan.md") planReads += 1;
+        return store.readTextFile(input);
+      },
+    };
+    const engine = capture(root, { store: countingStore });
     engine.start();
     await engine.flush();
     await engine.createVersion("Draft");
@@ -235,10 +255,13 @@ describe("switchVersion", () => {
     await engine.switchVersion("main");
 
     const momentsBefore = readEngineMoments(root).length;
+    planReads = 0;
     // Simulate the watcher observing the switch's disk writes: the expected
-    // event registrations must swallow them — zero new engine moments.
+    // event registrations must swallow them — zero new engine moments AND
+    // zero engine reads for the suppressed path.
     engine.captureBatch([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
+    expect(planReads).toBe(0);
     expect(readEngineMoments(root)).toHaveLength(momentsBefore);
     expect(
       sha256Utf8(await readText(root, "plan.md")),
@@ -431,6 +454,18 @@ describe("mergeVersionIntoMain", () => {
       .filter((moment) => moment.versionId === "main" && moment.path === "plan.md")
       .at(-1);
     expect(mainTip?.text).toBe("draft text\n");
+    // Data durability: the merge captured Other's UNSETTLED edit into
+    // Other's own tip first — a later switch away can't lose "other text".
+    const otherId = await versionIdByName(engine, "Other");
+    const otherTip = readEngineMoments(root)
+      .filter((moment) => moment.versionId === otherId && moment.path === "plan.md")
+      .at(-1);
+    expect(otherTip?.text).toBe("other text\n");
+    // Switching away and back materializes exactly that captured edit.
+    await engine.switchVersion("main");
+    expect(await readText(root, "plan.md")).toBe("draft text\n");
+    await engine.switchVersion(otherId);
+    expect(await readText(root, "plan.md")).toBe("other text\n");
     await engine.stop();
   });
 

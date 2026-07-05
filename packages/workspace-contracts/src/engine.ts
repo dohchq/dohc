@@ -363,17 +363,38 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     momentId: VersionedTextMomentId;
   }): Promise<VersionedTextMoment | null>;
+  // Releases the underlying database handle after in-flight writes drain.
+  // Callers that own a store (workspace teardown, app quit) must close it so
+  // SQLite handles/WAL locks never outlive the workspace session.
+  close(): Promise<void>;
 }
 
 export interface VersionedTextStoreOptions {
   nowMs?: () => number;
   createId?: (kind: "conflict" | "moment" | "object" | "version") => string;
+  // "quick" (default) runs PRAGMA quick_check on open; "full" runs the
+  // O(entire-database) PRAGMA integrity_check for diagnostics.
+  integrityCheck?: "quick" | "full";
 }
 
 export type FileWorkspacePlatformMode = "linux-anchored" | "portable";
 
 export interface FileWorkspaceCapabilityReport {
-  platform: NodeJS.Platform;
+  // process.platform values as a plain literal union: this package stays
+  // dependency-light, so the contract must not require @types/node ambient
+  // types (NodeJS.Platform) to resolve for non-Node consumers.
+  platform:
+    | "aix"
+    | "android"
+    | "darwin"
+    | "freebsd"
+    | "haiku"
+    | "linux"
+    | "openbsd"
+    | "sunos"
+    | "win32"
+    | "cygwin"
+    | "netbsd";
   mode: FileWorkspacePlatformMode;
   atomicReplace: boolean;
   symlinkDefense: "descriptor-relative" | "o-nofollow-lstat" | "lstat-only";
@@ -564,6 +585,10 @@ export interface LinkedChatStore {
     threadId: ChatThreadId;
     linkedFileAccess?: LinkedChatProjectionFileAccess;
   }): Promise<LinkedChatProjection>;
+  // Releases the underlying database handle after in-flight writes drain.
+  // Callers that own a store (workspace teardown, app quit) must close it so
+  // SQLite handles/WAL locks never outlive the workspace session.
+  close(): Promise<void>;
 }
 
 export interface LinkedChatStoreOptions {

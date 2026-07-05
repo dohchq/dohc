@@ -306,7 +306,19 @@ export const engineContractCompileCheck = (() => {
       matchEnd: 5,
       objectId,
     };
-    const searchOptions = null as unknown as WorkspaceEngineSearchOptions;
+    // A concrete literal keeps this drift check real for the option FIELDS
+    // (workspaceId/versionId/query/policy/limit renames fail compilation);
+    // only the two store interfaces — unconstructible without an
+    // implementation — stay as casts.
+    const searchOptions: WorkspaceEngineSearchOptions = {
+      workspaceId: "workspace-a",
+      versionId: "main",
+      query: "day",
+      versions: null as unknown as VersionedTextStore,
+      chats: null as unknown as LinkedChatStore,
+      policy: searchPolicy,
+      limit: 20,
+    };
     const classification: EngineFilePathClassification = { kind: "tracked" };
 
     const changeStatus: VersionFileChangeStatus = "modified";

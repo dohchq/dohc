@@ -988,9 +988,14 @@ function EngineMomentDiffPage({
   const restoreDetail = createdFile
     ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
     : "The file will be returned to how it was before this change.";
+  // Restoring a create moment REMOVES the file ("deleted"): no open-file
+  // affordances for a file that is no longer in the folder (mirrors the
+  // legacy HistoryDiffPage guard).
   const canOpenFile =
-    moment.operation !== "delete" ||
-    (restoreState.status === "restored" && restoreState.restored === "text");
+    restoreState.status === "restored" && restoreState.restored === "deleted"
+      ? false
+      : moment.operation !== "delete" ||
+        (restoreState.status === "restored" && restoreState.restored === "text");
   const diffLines: UnifiedDiffLine[] = buildUnifiedDiffLines(before, after, 800);
 
   const restoreFile = async () => {
@@ -1836,7 +1841,10 @@ export function DesktopWorkspaceShell(props: {
 
   const refreshHistory = useCallback(async () => {
     if (engineEnabled) {
-      const token = engineHistoryToken.current;
+      // Latest-wins: each request ADVANCES the token, so an older slower
+      // response can never overwrite newer moments or move
+      // latestMomentOrder backward (shared with loadMoreEngineHistory).
+      const token = ++engineHistoryToken.current;
       const [page, status, agent] = await Promise.all([
         bridge().listEngineMoments({ workspaceId, limit: 200 }),
         bridge().getSyncStatus({ workspaceId }),
@@ -1844,6 +1852,9 @@ export function DesktopWorkspaceShell(props: {
       ]);
       if (token !== engineHistoryToken.current) return;
       // A refresh returns to the newest page; older pages reload on demand.
+      // It also supersedes any in-flight load-more, whose finally can no
+      // longer clear the flag (its token is stale now).
+      setEngineHistoryLoadingMore(false);
       setEngineHistory({
         moments: page.moments,
         nextBeforeMomentOrder: page.nextBeforeMomentOrder,
@@ -1866,7 +1877,10 @@ export function DesktopWorkspaceShell(props: {
   const loadMoreEngineHistory = useCallback(async () => {
     const cursor = engineHistory?.nextBeforeMomentOrder;
     if (cursor === null || cursor === undefined || engineHistoryLoadingMore) return;
-    const token = engineHistoryToken.current;
+    // Latest-wins with refreshHistory: advancing the token means a refresh
+    // started after this pagination supersedes it (and vice versa), so
+    // overlapping responses can never interleave into a mixed timeline.
+    const token = ++engineHistoryToken.current;
     setEngineHistoryLoadingMore(true);
     try {
       const page = await bridge().listEngineMoments({

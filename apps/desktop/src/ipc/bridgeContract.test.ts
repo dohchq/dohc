@@ -592,7 +592,7 @@ describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
           id: "message_2",
           threadId: "thread_1",
           authorKind: "agent",
-          authorDisplayName: "iestyndevera@gmail.com",
+          authorDisplayName: "agent-owner@example.com",
           body: "Agent reply",
           createdAtMs: 101,
         },

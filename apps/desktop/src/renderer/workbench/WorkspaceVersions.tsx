@@ -91,13 +91,22 @@ export function VersionMenu(props: {
     // The first load can race the workspace open; retry briefly instead of
     // leaving the selector missing for the session.
     void (async () => {
+      let lastError: unknown = null;
       for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
         try {
           await refresh();
           return;
-        } catch {
+        } catch (error) {
+          lastError = error;
           await new Promise((resolveDelay) => setTimeout(resolveDelay, 1000));
         }
+      }
+      // Every attempt failed: say so instead of silently dropping the whole
+      // versions surface for the session.
+      if (!cancelled) {
+        props.onError(
+          ipcErrorMessage(lastError, "Version controls are unavailable right now."),
+        );
       }
     })();
     return () => {
@@ -128,9 +137,14 @@ export function VersionMenu(props: {
       setInlineError(null);
       try {
         await props.flushActiveDraft();
+        // Re-check liveness after EVERY awaited step: the flush (or the
+        // switch) may resolve after this panel was unmounted or superseded,
+        // and a stale continuation must not mutate or repaint.
+        if (token !== liveToken.current) return;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
         if (token !== liveToken.current) return;
         await refresh();
+        if (token !== liveToken.current) return;
         props.onWorkspaceStateChanged();
       } catch (error) {
         if (token !== liveToken.current) return;
@@ -138,6 +152,7 @@ export function VersionMenu(props: {
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality.
         await refresh().catch(() => undefined);
+        if (token !== liveToken.current) return;
         props.onWorkspaceStateChanged();
       } finally {
         if (token === liveToken.current) setBusy(null);
@@ -176,6 +191,7 @@ export function VersionMenu(props: {
       setInlineError(null);
       try {
         await props.flushActiveDraft();
+        if (token !== liveToken.current) return;
         const result = await bridge().createWorkspaceVersion({
           workspaceId,
           name: trimmed,
@@ -511,6 +527,7 @@ function VersionMergeDialog(props: {
     setStage({ stage: "running" });
     try {
       await props.flushActiveDraft();
+      if (token !== liveToken.current) return;
       const result = await bridge().mergeWorkspaceVersion({
         workspaceId,
         versionId: source.id,
@@ -543,12 +560,15 @@ function VersionMergeDialog(props: {
     [props],
   );
 
-  // Only the confirm/summary stages close on backdrop click; while merging or
-  // resolving, closing is explicit so a stray click can't hide open work.
-  const closable = stage.stage !== "running";
+  // Closing while merging is never allowed. While conflicts are open, closing
+  // is EXPLICIT only ("Finish later"): a stray backdrop click or Escape must
+  // not unmount ConflictResolver and discard a hand-written combined copy.
+  const canCloseExplicitly = stage.stage !== "running";
+  const canCloseFromBackdrop =
+    stage.stage !== "running" && stage.stage !== "conflicts";
 
   return (
-    <Overlay onClose={() => (closable ? props.onClose() : undefined)}>
+    <Overlay onClose={() => (canCloseFromBackdrop ? props.onClose() : undefined)}>
       <div
         data-testid="version-merge-dialog"
         role="dialog"
@@ -668,7 +688,7 @@ function VersionMergeDialog(props: {
             <button
               type="button"
               data-testid="version-merge-done"
-              disabled={!closable}
+              disabled={!canCloseExplicitly}
               onClick={props.onClose}
               className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >

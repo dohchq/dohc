@@ -2,6 +2,7 @@ import { expect, type Page } from "@playwright/test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { DEFAULT_WORKSPACE_SETTINGS } from "../../src/workspaces/workspaceSettings";
 
 export interface TempWorkspace {
   baseDir: string;
@@ -87,19 +88,17 @@ function assertSafeRelativePath(path: string): void {
 
 // Seeds .dohc/settings.local.json before launch so a spec can flip
 // per-workspace flags (e.g. experimental.workspaceEngineAlpha) without
-// driving the settings UI. Mirrors DEFAULT_WORKSPACE_SETTINGS; the schema is
-// strict, so keep this shape in sync with workspaceSettings.ts.
+// driving the settings UI. Built FROM DEFAULT_WORKSPACE_SETTINGS (the strict
+// schema's canonical default) so the seed can never drift from the shape the
+// app parses.
 export async function seedWorkspaceSettings(
   workspace: Pick<TempWorkspace, "rootPath">,
   overrides: { experimental?: { workspaceEngineAlpha?: boolean } } = {},
 ): Promise<void> {
   const settings = {
-    version: 1,
-    agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
-    sites: { defaultPreviewMode: "auto" },
-    privacy: { confirmExternalLinks: true },
+    ...DEFAULT_WORKSPACE_SETTINGS,
     experimental: {
-      workspaceEngineAlpha: false,
+      ...DEFAULT_WORKSPACE_SETTINGS.experimental,
       ...overrides.experimental,
     },
   };
@@ -115,6 +114,11 @@ export async function seedWorkspaceSettings(
 // spec can pre-populate per-workspace state (engine.db moments, chats) that
 // the app will adopt — createWorkspaceFolder preserves an existing manifest's
 // identity.
+// One shape for every seeded workspace: seedWorkspaceManifest and
+// seedWorkspaceRegistry must agree on kind/mode or the app would see a
+// manifest/registry mismatch.
+const SEEDED_WORKSPACE_SHAPE = { kind: "personal", mode: "local-first" } as const;
+
 export async function seedWorkspaceManifest(
   workspace: Pick<TempWorkspace, "rootPath">,
   workspaceId: string,
@@ -124,7 +128,7 @@ export async function seedWorkspaceManifest(
   await writeFile(
     join(dir, "manifest.json"),
     `${JSON.stringify(
-      { version: 1, workspaceId, kind: "personal", mode: "local-first" },
+      { version: 1, workspaceId, ...SEEDED_WORKSPACE_SHAPE },
       null,
       2,
     )}\n`,
@@ -158,8 +162,7 @@ export async function seedWorkspaceRegistry(
         workspaces: entries.map((entry) => ({
           workspaceId: entry.workspaceId,
           rootPath: entry.rootPath,
-          kind: "personal",
-          mode: "local-first",
+          ...SEEDED_WORKSPACE_SHAPE,
         })),
       },
       null,

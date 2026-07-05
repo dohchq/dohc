@@ -14,7 +14,7 @@ import {
 } from "@dohc/workspace-engine";
 import { isTextMediaType, mediaTypeForPath, scanWorkspaceFiles } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
 
@@ -264,7 +264,14 @@ type DiskTextState =
 async function readDiskTextState(rootPath: string, path: string): Promise<DiskTextState> {
   const absolute = join(rootPath, path);
   try {
-    const info = await stat(absolute);
+    // lstat, never stat: a symlink LEAF dereferences outside the workspace
+    // (notes/today.md -> /outside/secret.md), and capturing its target would
+    // record foreign content into durable engine history as owned text. The
+    // scan path (scanWorkspaceFiles) and versionedFileWorkspace already
+    // refuse symlinks; the live watcher can still emit the symlink path
+    // itself, so this shared read refuses it too.
+    const info = await lstat(absolute);
+    if (info.isSymbolicLink()) return { kind: "untracked-content" };
     if (!info.isFile()) return { kind: "untracked-content" };
     if (!isTextMediaType(mediaTypeForPath(path), path)) return { kind: "untracked-content" };
     if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
@@ -298,11 +305,20 @@ function assertEngineWritablePath(path: string): void {
   }
 }
 
-function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
-  // Symlink containment: after any mkdir, the REAL parent directory must
-  // still resolve inside the workspace root — a symlinked segment cannot
-  // redirect an engine write outside the workspace (the same defense
-  // versionedFileWorkspace applies to its write path).
+// Exported for direct regression tests of the containment invariants below;
+// production code always goes through WorkspaceEngineCaptureOptions.diskWriter
+// defaulting.
+export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
+  // Symlink containment (the same defense versionedFileWorkspace applies to
+  // its write path):
+  //   1. BEFORE mkdir, the nearest EXISTING ancestor must resolve inside the
+  //      workspace root, so `mkdir -p` can never create directories through
+  //      a symlinked ancestor outside the workspace;
+  //   2. after mkdir, the real parent directory must still resolve inside
+  //      the root;
+  //   3. the leaf itself must not be a symlink — writeFile follows symlinks,
+  //      so an unchecked leaf would redirect engine content outside the
+  //      workspace (or clobber an arbitrary user file).
   async function assertContainedDir(absoluteDir: string): Promise<void> {
     const [realRoot, realDir] = await Promise.all([
       realpath(resolve(rootPath)),
@@ -312,15 +328,51 @@ function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       throw new Error(`Engine write escaped the workspace root: ${absoluteDir}`);
     }
   }
+  async function assertContainedNearestAncestor(absoluteDir: string): Promise<void> {
+    let candidate = resolve(absoluteDir);
+    const rootResolved = resolve(rootPath);
+    for (;;) {
+      try {
+        await assertContainedDir(candidate);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // Missing segment: walk up to the nearest existing ancestor. Any
+        // other failure (including escape) is a refusal.
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+      const parent = dirname(candidate);
+      if (parent === candidate || candidate === rootResolved) {
+        throw new Error(`Engine write escaped the workspace root: ${absoluteDir}`);
+      }
+      candidate = parent;
+    }
+  }
+  async function assertLeafNotSymlink(absolutePath: string): Promise<void> {
+    try {
+      const info = await lstat(absolutePath);
+      if (info.isSymbolicLink()) {
+        throw new Error(`Engine refused to write through a symlink: ${absolutePath}`);
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return;
+      throw error;
+    }
+  }
   return {
     async writeTextFile(absolutePath, text) {
       const dir = dirname(absolutePath);
+      await assertContainedNearestAncestor(dir);
       await mkdir(dir, { recursive: true });
       await assertContainedDir(dir);
+      await assertLeafNotSymlink(absolutePath);
       await writeFile(absolutePath, text, "utf8");
     },
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
+      // rm on a symlink removes the link itself, never the target, so a
+      // symlink leaf needs no extra handling here.
       await rm(absolutePath, { force: true });
     },
   };
@@ -1111,6 +1163,12 @@ export function createWorkspaceEngineCapture(
       // batch) still runs; only NEW work is refused.
       stopped = true;
       await chain;
+      // Release the SQLite handle for the store THIS capture created, so
+      // repeated workspace switches never accumulate handles/WAL locks. An
+      // injected store belongs to its creator and is left open.
+      if (!options.store && store) {
+        await store.close().catch(() => undefined);
+      }
     },
   };
 }

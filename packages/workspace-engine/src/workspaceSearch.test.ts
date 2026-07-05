@@ -216,6 +216,16 @@ describe("engine file path classifier (shared by search and capture)", () => {
     expect(classifyEngineFilePath("deploy/prod.env")).toEqual({ kind: "secret" });
   });
 
+  it("classifies percent-encoded .env disguises on the decoded path", () => {
+    // validateUserWritePath decodes %2e -> "." and %2f -> "/" (and the
+    // double-encoded forms); the secret checks must see the decoded path or
+    // "secrets%2eenv" leaks into capture and search as tracked.
+    expect(classifyEngineFilePath("secrets%2eenv")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("secrets%252eenv")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("config%2f.env")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("%2eenv")).toEqual({ kind: "secret" });
+  });
+
   it("classifies ignored and invalid paths as ignored", () => {
     expect(classifyEngineFilePath(".dohc/engine/engine.db")).toEqual({ kind: "ignored" });
     expect(classifyEngineFilePath("node_modules/pkg/index.js")).toEqual({ kind: "ignored" });

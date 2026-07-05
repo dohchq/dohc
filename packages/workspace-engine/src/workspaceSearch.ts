@@ -44,10 +44,15 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
   if (!normalized.ok || hasIgnoredSegment(path)) {
     return { kind: "ignored" };
   }
-  if (path.split("/").some((segment) => segment.toLowerCase() === ".env")) {
+  // Classify the DECODED path: validateUserWritePath decodes percent-encoded
+  // dots/separators ("secrets%2eenv" -> "secrets.env"), so running the
+  // secret checks on the raw string would let an encoded .env slip through
+  // as tracked — into engine capture and search results.
+  const candidate = normalized.normalized;
+  if (candidate.split("/").some((segment) => segment.toLowerCase() === ".env")) {
     return { kind: "secret" };
   }
-  if (path.toLowerCase().endsWith(".env")) {
+  if (candidate.toLowerCase().endsWith(".env")) {
     return { kind: "secret" };
   }
   return { kind: "tracked" };

@@ -16,6 +16,10 @@ export type UnifiedDiffLine = {
 
 const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
 
+function linesEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((line, index) => line === b[index]);
+}
+
 export function splitDiffLines(text: string): string[] {
   const normalized = text.replace(/\r\n?/g, "\n");
   if (normalized.length === 0) return [];
@@ -200,6 +204,22 @@ export function buildUnifiedDiffLines(
       {
         kind: "note",
         text: "No text changes",
+        oldLineNumber: null,
+        newLineNumber: null,
+      },
+    ];
+  }
+
+  // Texts that differ ONLY invisibly (final-newline presence or CRLF/LF line
+  // endings) split into identical line arrays, which would render as
+  // "No text changes" — a lie for an exact-text change. Name the change
+  // honestly instead. Only when BOTH sides exist: undefined-vs-empty is a
+  // create/delete of an empty file, not a line-ending change.
+  if (beforeText !== undefined && afterText !== undefined && linesEqual(before, after)) {
+    return [
+      {
+        kind: "note",
+        text: "Only line endings or the final newline changed",
         oldLineNumber: null,
         newLineNumber: null,
       },

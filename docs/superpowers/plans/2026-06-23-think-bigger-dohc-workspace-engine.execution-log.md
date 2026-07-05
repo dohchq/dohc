@@ -13970,7 +13970,9 @@ Date completed: 2026-07-06
 - [x] Capture and startup reconciliation route to the ACTIVE version, read per
       chain task so batches enqueued across a switch land correctly
 - [x] Switch flow serialized on the capture chain: flush + capture current
-      state (nothing ever lost), materialize only engine-owned text via the
+      state (the recorded tip stays recoverable even if a switch is
+      interrupted mid-materialization and leaves partial destination state on
+      disk), materialize only engine-owned text via the
       shared classifier, expected-event registration suppresses self
       re-capture, destination recorded active BEFORE the disk rewrite — one
       recovery invariant (disk reconciles into the recorded active version)

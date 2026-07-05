@@ -25,6 +25,15 @@ import {
 
 const WORKSPACE_A_ID = "race-workspace-a";
 const WORKSPACE_B_ID = "race-workspace-b";
+
+// Locate switcher options by the actual workspace id, not by substring
+// matching the rendered label (which breaks if the label format changes or
+// a third workspace joins the registry).
+function switcherOption(page: import("@playwright/test").Page, workspaceId: string) {
+  return page
+    .locator(`[data-testid="workspace-switcher-option"][data-workspace-id="${workspaceId}"]`)
+    .getByRole("button");
+}
 const MOMENT_FILES = 250;
 const EDITS_PER_FILE = 4; // 250 x 4 = 1,000 moments
 const CHAT_MESSAGES = 200;
@@ -161,7 +170,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     // immediately without awaiting them.
     await page.getByTestId("rail-tab-history").click();
     await page.getByTestId("workspace-switcher").click();
-    await page.getByRole("option", { name: /workspace-b/ }).click();
+    await switcherOption(page, WORKSPACE_B_ID).click();
     await waitForWorkspaceReady(page);
 
     // B's shell renders B's history...
@@ -171,6 +180,13 @@ test("switching A->B while panels load never shows A's history or chats in B", a
       ),
     ).toBeVisible();
     // ...and NEVER any of A's moments or chats.
+    await expect(
+      page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
+    ).toHaveCount(0);
+    // An instantaneous empty check alone could pass while a stale A response
+    // is still in flight; give any straggler time to land, then re-assert
+    // the shell stayed clean.
+    await page.waitForTimeout(750);
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);
@@ -184,7 +200,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
 
     // Switch back: A's data is intact and B's never leaked into it.
     await page.getByTestId("workspace-switcher").click();
-    await page.getByRole("option", { name: /workspace(?!-b)/ }).first().click();
+    await switcherOption(page, WORKSPACE_A_ID).click();
     await waitForWorkspaceReady(page);
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]').first(),

@@ -3,10 +3,11 @@
 // the REAL engine path. A real local agent CLI edits a normal file in a
 // disposable FLAGGED workspace (experimental.workspaceEngineAlpha on) while
 // the production watcher->engine capture pipeline is live — the exact
-// desktop main-process wiring: createWorkspaceActivity with the same
-// captureFor gate main.ts uses (readWorkspaceSettingsFile ->
-// createWorkspaceEngineCapture). The agent is told nothing about history or
-// version control; it just edits a normal file.
+// desktop main-process wiring: createWorkspaceActivity with the SAME
+// captureFor gate main.ts uses (the shared captureForFlaggedWorkspace in
+// engineCaptureGate.ts, so gate changes can never drift past this harness).
+// The agent is told nothing about history or version control; it just edits
+// a normal file.
 //
 // Asserted afterwards (read-only, from OUTSIDE the store):
 //   1. the edit landed as an ENGINE moment in .dohc/engine/engine.db with the
@@ -31,9 +32,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { CreatedWorkspace } from "../apps/desktop/src/workspaces/createWorkspaceFolder";
+import { captureForFlaggedWorkspace } from "../apps/desktop/src/workspaces/engineCaptureGate";
 import { createWorkspaceActivity } from "../apps/desktop/src/workspaces/workspaceActivity";
-import { createWorkspaceEngineCapture } from "../apps/desktop/src/workspaces/workspaceEngineCapture";
-import { readWorkspaceSettingsFile } from "../apps/desktop/src/workspaces/workspaceSettingsFile";
 import { createChangeSetStore } from "../apps/desktop/src/workspaces/workspaceWatcher";
 import { defaultWorkspaceMode } from "../packages/workspace-core/src/workspaceMode";
 
@@ -214,8 +214,8 @@ async function waitFor(
 
 // --- the QA run -------------------------------------------------------------
 
-const tempRoot = process.env.DOHC_TEST_AGENT_TMPDIR || "/tmp";
-const workspaceRoot = await mkdtemp(join(tempRoot || tmpdir(), "dohc-agent-engine-qa-"));
+const tempRoot = process.env.DOHC_TEST_AGENT_TMPDIR || tmpdir();
+const workspaceRoot = await mkdtemp(join(tempRoot, "dohc-agent-engine-qa-"));
 const targetRelativePath = "notes/agent-task.txt";
 const targetPath = join(workspaceRoot, targetRelativePath);
 const transcriptPath = join(workspaceRoot, "agent-transcript.json");
@@ -227,18 +227,11 @@ const workspace: CreatedWorkspace = {
   mode: defaultWorkspaceMode("personal"),
 };
 
-// The exact main.ts captureFor gate: flag read from the workspace settings
-// file at open; no flag, no engine capture.
+// The exact main.ts captureFor gate — the SAME shared function
+// (engineCaptureGate.ts), so this harness can never silently drift from the
+// production wiring it exists to prove.
 const activity = createWorkspaceActivity(() => {}, {
-  captureFor: async (w, hooks) => {
-    const { settings } = await readWorkspaceSettingsFile(w.rootPath);
-    if (!settings.experimental.workspaceEngineAlpha) return null;
-    return createWorkspaceEngineCapture({
-      workspaceId: w.workspaceId,
-      rootPath: w.rootPath,
-      onCaptureOutcome: hooks.onCaptureOutcome,
-    });
-  },
+  captureFor: captureForFlaggedWorkspace,
 });
 
 let transcript: Record<string, unknown> | null = null;
@@ -386,7 +379,11 @@ try {
     },
   };
 } finally {
-  await activity.stopAll().catch(() => undefined);
+  await activity.stopAll().catch((error) => {
+    // Teardown-only: the QA verdict is already decided, but a shutdown bug
+    // should still be visible across runs, not silently swallowed.
+    console.error("[phase0m-agent-engine-qa] stopAll failed:", error);
+  });
   if (transcript) {
     await writeFile(transcriptPath, `${JSON.stringify(transcript, null, 2)}\n`, "utf8");
   }
