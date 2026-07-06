@@ -2024,6 +2024,33 @@ to Main through the engine.
 - At least one enforced validation leg (local Docker Postgres or minimal CI)
   runs before merge.
 
+### Arc 0N - Agent Loop (added 2026-07-06)
+
+Approved by the user on 2026-07-06 after PR 0M completed: continue directly
+into the agent loop, the product's magic demo. User decisions recorded at the
+same time: macOS/Windows real-runner validation is deferred (the user's only
+machine is a Windows PC — it becomes mandatory before any real Windows release
+build); cloud sync is wanted eventually and is scheduled as the arc after 0N
+(orchestrator's call).
+
+- **0N-1 Agent-attributed engine writes:** dohc-launched agent runs and MCP
+  writes carry agent authorship into engine moments (History shows
+  "<User Name>'s agent"); MCP legacy recording is disabled for flagged
+  workspaces (the watcher + active-run slot capture with attribution — no
+  cross-process dedupe needed); external/raw agent CLIs remain actor-neutral
+  per the actor-neutral capture principle. Minimal MCP chat tools (read
+  linked chats, reply) make the file rail two-way, displaying
+  "<User Name>'s agent".
+- **0N-2 "Try it in a version":** one gesture creates a version, hands the
+  workspace to an agent run, streams moments into History, and ends in a
+  review card (compare + merge or discard). Builds entirely on shipped 0M
+  surfaces.
+- **0N-3 Legacy salvage audit:** read-only audit of the superseded stack
+  (User Decision 6) producing the retirement/salvage plan; deletions land as
+  separate reviewed PRs afterward.
+- **Arc 0P (next): engine sync replication** — local-first multi-machine
+  sync for engine state; scoped after 0N lands.
+
 ### PR 01 - Workspace Engine Contracts And Substrate
 
 **Goal:** Define one canonical schema source for the substrate contracts, with
