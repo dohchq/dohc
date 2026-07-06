@@ -155,6 +155,12 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listWorkspaceVersionConflicts, payload),
   resolveWorkspaceVersionConflict: (payload) =>
     ipcRenderer.invoke(CHANNELS.resolveWorkspaceVersionConflict, payload),
+  tryInWorkspaceVersion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.tryInWorkspaceVersion, payload),
+  getTryInVersionState: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getTryInVersionState, payload),
+  dismissTryInVersionReview: (payload) =>
+    ipcRenderer.invoke(CHANNELS.dismissTryInVersionReview, payload),
   listEngineMoments: (payload) =>
     ipcRenderer.invoke(CHANNELS.listEngineMoments, payload),
   readEngineMoment: (payload) =>

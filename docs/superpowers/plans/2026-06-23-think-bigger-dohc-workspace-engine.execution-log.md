@@ -14696,3 +14696,155 @@ Date completed: 2026-07-06
   run's moments by matching author.agentRunId on listMoments pages.
 - MCP chat tools give the run a two-way channel into the file rail
   (dohc_reply_to_chat) with correct display attribution.
+
+## PR 0N-2 - Try It In A Version: The Agent-Loop Gesture
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-0n2-try-in-version
+Worktree: /home/ice/dev/dohc-0n2-try-in-version
+Implementation workstream, if used: direct implementation by a Claude lane
+(fable-5), tests-first
+PR Link: (pending)
+Date started: 2026-07-05
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] The gesture: "Try in a version…" in the version menu opens a one-question
+      task dialog; Start composes EXISTING operations in one main-side
+      orchestration (agents/tryInVersion.ts): name the fork
+      "Try: <first ~40 chars>" (whitespace-collapsed, code-point-safe
+      truncation with …, " 2"/" 3" suffix on collision), 0M-4
+      capture.createVersion (capture-first create-and-switch, serialized on
+      the engine capture chain, no disk rewrite), then a dohc-tracked run —
+      via AgentSessionManager.startSession when the dialog's driver probe
+      found an installed agent tool (the task becomes the session prompt), or
+      a bare AgentIntegration.startAgentRun the user's own agent works inside.
+      Either way the run goes through AgentIntegration, so 0N-1 attribution
+      applies for free. One try per workspace at a time; a blank task and an
+      unflagged workspace are refused with product-vocabulary messages.
+- [x] During the run: a calm banner over the editor — "An agent is trying:
+      <task> — in <version>" with a Watch action that opens the EXISTING
+      agent panel. No new streaming surface; the History rail and agent panel
+      already stream.
+- [x] Review card on run end: every terminal run path already funnels through
+      AgentIntegration.endAgentRun (AgentSessionManager turn-completed /
+      fatal / stop, panel Stop, the endAgentRun IPC), so ONE new
+      onRunEnded hook there is the completion seam — not per-caller wiring.
+      The manager turns the end signal into a review state carrying the
+      changed-file count vs Main (0M-4 compareVersions on the capture chain;
+      count is null — never invented — if compare fails). The card takes
+      focus on appear (announced region, keyboard-first actions, no
+      color-only state): Review changes (existing compare tab), Merge into
+      Main (existing VersionMergeDialog incl. conflict resolution; after a
+      completed merge dohc returns to Main so the folder shows the result —
+      merging into an inactive Main materializes nothing until it is active),
+      Keep working in it (dismiss), Set aside (back to Main; version stays
+      listed). A zero-change run says so plainly and offers the way back.
+- [x] IPC: tryInWorkspaceVersion / getTryInVersionState /
+      dismissTryInVersionReview (channels + zod payloads/results + preload +
+      main handlers; gesture double-gated on the engine flag like every
+      version operation). Try state is in-memory per workspace: runs cannot
+      outlive the app (quit ends them) and the versions themselves are
+      durable engine state, so a lost card can never silently discard work.
+- [x] Set-aside/archive decision: DEFERRED archived-flag column. "Set aside"
+      switches back to Main and the version remains in the selector — at
+      alpha volumes the list stays calm without a second visibility state,
+      and an archived flag would touch engine schema + selector + fail-closed
+      semantics this PR doesn't need. Recorded here as the rationale; no
+      version deletion anywhere (no-silent-loss).
+
+### Design decisions
+
+- Gesture composition, not re-implementation: the manager
+  (createTryInVersionSessions) only calls listVersions/createVersion/
+  compareVersions on the WorkspaceEngineCapture chain plus one startRun
+  closure; switch semantics come from 0M-4 create-and-switch (capture-first
+  fork, active-version flip, zero disk mutation), so the dirty-editor story
+  is "your unsaved changes are saved first" (dialog copy + draft flush) —
+  there is nothing a fork can clobber, unlike a real switch.
+- Completion event = AgentIntegration.endAgentRun. Chosen over listening to
+  AgentSessionManager lifecycle events directly because the integration end
+  is the single funnel BOTH driver sessions and externally-driven bare runs
+  (agent panel Stop, endAgentRun IPC, e2e) pass through. A recently-ended-run
+  memory (per-workspace, capped) closes the race where a driver session
+  fails and finalizes before start() has returned its run id.
+- Run-failure honesty: if the run cannot start after the fork was created,
+  the error says the version exists and no session is recorded — the fork is
+  visible in the menu, nothing to silently clean up.
+- Renderer staleness fix that fell out of the review card: VersionMenu gains
+  an optional refreshKey (wired to the shell's versionEpoch) because an
+  EXTERNAL surface can now switch versions; without it the selector kept the
+  stale try-version name after Set aside / post-merge return (regression
+  test included).
+- VersionMergeDialog gains an optional onOutcome ("merged" /
+  "conflicts-open" / "cancelled") so the card can return to Main only after
+  a COMPLETED merge; "Finish later" keeps the card so the merge can resume
+  (0M-4 merge resumption re-surfaces open conflicts).
+
+### Tests / validation
+
+- workspace-engine: 214 passed (baseline, untouched) —
+  `pnpm --filter @dohc/workspace-engine test`.
+- MCP: 70 passed (baseline, untouched) — `pnpm --filter @dohc/mcp test`.
+- desktop vitest: 873 passed (844 baseline + 29: tryInVersion manager x14
+  incl. name collision/truncation, one-try-at-a-time, run-start failure,
+  review transition with count/zero/unavailable, duplicate + not-mine end
+  signals, ended-before-recorded race, fork-from-named mergeAvailable=false,
+  dismiss semantics; AgentIntegration onRunEnded x1; IPC contract x2
+  (payload/state shapes, blank/oversized/malformed rejections); renderer
+  component x12: dialog flush-before-start + driver hand-off + disabled/
+  error states, banner copy + Watch, review card focus/count/compare/keep/
+  set-aside/zero-change/no-merge/failed-run, VersionMenu refreshKey
+  regression) — `pnpm --filter @dohc/desktop test`.
+- Repo-wide `pnpm -r typecheck` clean; `git diff --check` clean.
+- E2E: new workspace-try-in-version.spec.ts (2 tests) drives the REAL
+  gesture through the product UI with 0N-1's run pattern: menu -> task ->
+  Start -> banner (task + version named after it) -> Watch opens the agent
+  panel -> test process edits files as the agent (attributed capture into
+  the try version, Main untouched) -> endAgentRun -> review card with "2
+  files changed" -> History row shows "You's agent" -> Review opens the
+  compare tab -> Merge into Main (existing dialog) -> auto-return to Main
+  with the merged content DISK-asserted + engine-asserted; second test: a
+  zero-change run says "didn't change any files", offers no merge/compare,
+  and Set aside returns to Main with the try version still listed.
+  Unflagged gating asserted in workspace-versions.spec.ts (gesture rejects
+  "Versions are not enabled"). Driver probing pinned hermetic via
+  DOHC_AGENT_*_COMMAND=/nonexistent so the host's installed agent CLIs can
+  neither be spawned by CI nor pollute the perf measure.
+
+### Perf
+
+- Gesture latency on the 200-file corpus (after settled startup
+  reconciliation), main-process measure "try-in-version-gesture" via
+  desktopMarks bracketing exactly create+switch+run-start: 171 ms total
+  (workspace open/gate 0 ms, fork+activate 170 ms, bare run start 1 ms);
+  Start click -> banner visible 226 ms wall clock. Budget (<1 s excluding
+  agent startup) met with 5x headroom; asserted in the spec
+  (expect(gestureMs).toBeLessThan(1000)). Earlier 1.5-2.3 s readings were
+  the driver path spawning a REAL locally-installed agent CLI — i.e. agent
+  startup, which the budget excludes and the spec now pins away.
+
+### Remaining risk
+
+- Try sessions are in-memory: quitting mid-run ends the run (existing
+  stopAll behavior) and drops the banner/card; the try version and all
+  captured moments remain durable and reachable through the version menu.
+  Revisit persistence if runs ever outlive the app.
+- A driver-path try measures run start including driver process spawn (only
+  the bare path records try-in-version-run-start); if driver startup ever
+  needs a budget it should be measured as its own phase.
+- The review card's changed-file count is computed once at run end; edits
+  made in the try version AFTER the run ends are reflected by Review changes
+  (compare recomputes) but not in the card's count line.
+
+### What later lanes build on
+
+- createTryInVersionSessions is the reusable "task -> fork -> attributed run
+  -> review" seam; a future proof/QA lane can drive it headlessly through
+  tryInWorkspaceVersion and read getTryInVersionState.
+- AgentIntegration.onRunEnded is a general run-completion hook (single
+  terminal funnel) for any future run-scoped UI.
+- VersionMenu.refreshKey + VersionMergeDialog.onOutcome make version state
+  externally drivable without staleness — any surface can now switch/merge
+  and keep the selector honest.

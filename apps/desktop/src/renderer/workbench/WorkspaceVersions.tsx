@@ -1,4 +1,4 @@
-import { Check, ChevronDown, FileText, Layers, RefreshCw } from "lucide-react";
+import { Bot, Check, ChevronDown, FileText, Layers, RefreshCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -29,8 +29,9 @@ export interface WorkspaceVersionsSnapshot {
 
 // Electron wraps handler rejections as
 // "Error invoking remote method 'channel': Error: <real message>" — show the
-// real message, or the fallback when there is none.
-function ipcErrorMessage(error: unknown, fallback: string): string {
+// real message, or the fallback when there is none. Shared with the
+// try-in-version surfaces (TryInVersion.tsx).
+export function ipcErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : "";
   const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
   return message.trim().length > 0 ? message.trim() : fallback;
@@ -60,6 +61,10 @@ export function VersionMenu(props: {
   // the shell refreshes files/history and reloads open editors.
   onWorkspaceStateChanged: () => void;
   onError: (message: string) => void;
+  // Bumped by the shell when ANOTHER surface switched versions (PR 0N-2's
+  // review card switches back to Main) so the selector re-reads the active
+  // version instead of showing a stale name.
+  refreshKey?: number;
 }) {
   const { workspaceId } = props;
   const [snapshot, setSnapshot] = useState<WorkspaceVersionsSnapshot | null>(null);
@@ -70,6 +75,8 @@ export function VersionMenu(props: {
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
   const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
+  // "Try it in a version" (PR 0N-2): the task prompt dialog.
+  const [tryOpen, setTryOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   // Liveness token: bumped on unmount and on every new mutating operation, so
@@ -113,7 +120,7 @@ export function VersionMenu(props: {
       cancelled = true;
       liveToken.current += 1;
     };
-  }, [refresh]);
+  }, [refresh, props.refreshKey]);
 
   const active = useMemo(
     () =>
@@ -321,6 +328,22 @@ export function VersionMenu(props: {
 
             <div className="mx-1 my-1 border-t border-line" aria-hidden />
 
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="version-try"
+              onClick={() => {
+                closeMenu(false);
+                setTryOpen(true);
+              }}
+              className={MENU_ITEM_CLASS}
+            >
+              <span className="grid w-4 shrink-0 place-items-center">
+                <Bot size={13} aria-hidden />
+              </span>
+              Try in a version…
+            </button>
+
             {newName === null ? (
               <button
                 type="button"
@@ -492,7 +515,189 @@ export function VersionMenu(props: {
           }}
         />
       ) : null}
+
+      {tryOpen ? (
+        <TryTaskDialog
+          workspaceId={workspaceId}
+          activeTabDirty={props.activeTabDirty}
+          flushActiveDraft={props.flushActiveDraft}
+          onStarted={() => {
+            setTryOpen(false);
+            // The gesture switched into the new version; refresh the selector
+            // and let the shell reload files/history (the running banner
+            // arrives through the same refresh).
+            void refresh().catch(() => undefined);
+            props.onWorkspaceStateChanged();
+          }}
+          onClose={() => setTryOpen(false)}
+        />
+      ) : null}
     </div>
+  );
+}
+
+// The "Try it in a version" task prompt (PR 0N-2). One short question; on
+// start, main creates the version, switches into it, and starts the run in a
+// single serialized gesture. If an installed agent driver is found, it does
+// the work; otherwise the run tracks the user's own agent tool.
+// Exported for component tests; the product opens it from the version menu.
+export function TryTaskDialog(props: {
+  workspaceId: string;
+  activeTabDirty: boolean;
+  flushActiveDraft: () => Promise<void>;
+  onStarted: () => void;
+  onClose: () => void;
+}) {
+  const { workspaceId } = props;
+  const [task, setTask] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [helper, setHelper] = useState<
+    | { status: "checking" }
+    | { status: "driver"; driverId: string; driverName: string }
+    | { status: "none" }
+  >({ status: "checking" });
+  const liveToken = useRef(0);
+  useEffect(
+    () => () => {
+      liveToken.current += 1;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const token = liveToken.current;
+    void bridge()
+      .probeAgentDrivers({ workspaceId })
+      .then((panel) => {
+        if (token !== liveToken.current) return;
+        const installed = panel.drivers.find((driver) => driver.installed);
+        setHelper(
+          installed
+            ? {
+                status: "driver",
+                driverId: installed.id,
+                driverName: installed.displayName,
+              }
+            : { status: "none" },
+        );
+      })
+      .catch(() => {
+        if (token !== liveToken.current) return;
+        setHelper({ status: "none" });
+      });
+  }, [workspaceId]);
+
+  const start = useCallback(async () => {
+    const trimmed = task.trim();
+    if (trimmed.length === 0) {
+      setError("Describe what the agent should try first.");
+      return;
+    }
+    if (helper.status === "checking" || busy) return;
+    const token = ++liveToken.current;
+    setBusy(true);
+    setError(null);
+    try {
+      await props.flushActiveDraft();
+      if (token !== liveToken.current) return;
+      await bridge().tryInWorkspaceVersion({
+        workspaceId,
+        task: trimmed,
+        ...(helper.status === "driver" ? { driverId: helper.driverId } : {}),
+      });
+      if (token !== liveToken.current) return;
+      props.onStarted();
+    } catch (caught) {
+      if (token !== liveToken.current) return;
+      setError(ipcErrorMessage(caught, "Could not start trying this."));
+      setBusy(false);
+    }
+  }, [busy, helper, props, task, workspaceId]);
+
+  return (
+    <Overlay onClose={() => (busy ? undefined : props.onClose())}>
+      <div
+        data-testid="try-task-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="try-task-title"
+        className="w-[min(460px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
+      >
+        <h3 id="try-task-title" className="m-0 text-sm font-semibold text-ink">
+          Try it in a version
+        </h3>
+        <p className="mb-0 mt-1.5 text-xs leading-5 text-muted">
+          dohc creates a fresh version of this workspace and an agent works on
+          your task there. Main stays as it is — review and merge when it's
+          done.
+          {props.activeTabDirty ? " Your unsaved changes are saved first." : ""}
+        </p>
+        <label
+          className="mt-3 block text-[11px] font-medium text-muted"
+          htmlFor="try-task-input"
+        >
+          What should the agent try?
+        </label>
+        <textarea
+          id="try-task-input"
+          data-testid="try-task-input"
+          autoFocus
+          rows={3}
+          maxLength={2000}
+          value={task}
+          disabled={busy}
+          placeholder="Tidy the meeting notes into one summary"
+          onChange={(event) => setTask(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void start();
+            }
+          }}
+          className="mt-1 w-full resize-none rounded border border-line bg-bg px-2 py-1.5 text-[12px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        />
+        <p
+          data-testid="try-task-helper"
+          className="mb-0 mt-1 text-[11px] leading-4 text-subtle"
+        >
+          {helper.status === "checking"
+            ? "Checking for agent tools…"
+            : helper.status === "driver"
+              ? `${helper.driverName} will do the work. Watch it in the agent panel.`
+              : "No agent app was found — start your own agent in this folder and dohc will follow what it changes."}
+        </p>
+        {error ? (
+          <p
+            data-testid="try-task-error"
+            role="alert"
+            className="mb-0 mt-1 text-[11px] leading-4 text-danger"
+          >
+            {error}
+          </p>
+        ) : null}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            data-testid="try-task-cancel"
+            disabled={busy}
+            onClick={props.onClose}
+            className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="try-task-start"
+            disabled={busy || helper.status === "checking" || task.trim().length === 0}
+            onClick={() => void start()}
+            className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+          >
+            {busy ? "Starting…" : "Start"}
+          </button>
+        </div>
+      </div>
+    </Overlay>
   );
 }
 
@@ -504,13 +709,19 @@ type MergeStage =
   | { stage: "resolved-all" }
   | { stage: "error"; message: string };
 
-function VersionMergeDialog(props: {
+// Exported for the try-in-version review card (PR 0N-2), which reuses THIS
+// dialog for its "Merge into Main" action — one merge flow everywhere.
+export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
   activeTabDirty: boolean;
   flushActiveDraft: () => Promise<void>;
   onWorkspaceStateChanged: () => void;
   onClose: () => void;
+  // Optional (PR 0N-2): how the dialog was left when it closed — "merged"
+  // (clean or all conflicts resolved), "conflicts-open" (Finish later), or
+  // "cancelled". Fired just before onClose.
+  onOutcome?: (outcome: "merged" | "conflicts-open" | "cancelled") => void;
 }) {
   const { workspaceId, source } = props;
   const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
@@ -567,8 +778,20 @@ function VersionMergeDialog(props: {
   const canCloseFromBackdrop =
     stage.stage !== "running" && stage.stage !== "conflicts";
 
+  // Every close path reports its outcome (when a listener asked) then closes.
+  const finish = useCallback(() => {
+    const outcome =
+      stage.stage === "clean" || stage.stage === "resolved-all"
+        ? ("merged" as const)
+        : stage.stage === "conflicts"
+          ? ("conflicts-open" as const)
+          : ("cancelled" as const);
+    props.onOutcome?.(outcome);
+    props.onClose();
+  }, [props, stage.stage]);
+
   return (
-    <Overlay onClose={() => (canCloseFromBackdrop ? props.onClose() : undefined)}>
+    <Overlay onClose={() => (canCloseFromBackdrop ? finish() : undefined)}>
       <div
         data-testid="version-merge-dialog"
         role="dialog"
@@ -669,7 +892,7 @@ function VersionMergeDialog(props: {
               <button
                 type="button"
                 data-testid="version-merge-cancel"
-                onClick={props.onClose}
+                onClick={finish}
                 className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
               >
                 Cancel
@@ -689,7 +912,7 @@ function VersionMergeDialog(props: {
               type="button"
               data-testid="version-merge-done"
               disabled={!canCloseExplicitly}
-              onClick={props.onClose}
+              onClick={finish}
               className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               {stage.stage === "conflicts" ? "Finish later" : "Done"}

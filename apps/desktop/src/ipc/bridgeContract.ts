@@ -810,6 +810,59 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
   typeof ResolveWorkspaceVersionConflictResult
 >;
 
+// "Try it in a version" (PR 0N-2): one gesture — fork a version named after
+// the task, switch into it, start a dohc-tracked agent run. Gated in main on
+// the workspace-engine alpha capture like every version operation.
+export const TRY_IN_VERSION_TASK_MAX = 2000;
+
+export const TryInWorkspaceVersionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  task: z
+    .string()
+    .min(1)
+    .max(TRY_IN_VERSION_TASK_MAX)
+    .refine((value) => value.trim().length > 0, {
+      message: "task must not be blank",
+    }),
+  // When present, main hands the task to this installed agent driver (the
+  // agent panel's session path); absent = a bare dohc-tracked run the user's
+  // own agent tool works inside.
+  driverId: z.string().min(1).max(100).optional(),
+});
+export type TryInWorkspaceVersionPayload = z.infer<
+  typeof TryInWorkspaceVersionPayload
+>;
+
+export const TryInWorkspaceVersionResult = z.object({
+  versionId: VERSION_ID,
+  versionName: z.string().min(1).max(200),
+  runId: z.string().min(1).max(200),
+});
+export type TryInWorkspaceVersionResult = z.infer<
+  typeof TryInWorkspaceVersionResult
+>;
+
+export const TryInVersionRunState = z.object({
+  status: z.enum(["running", "review"]),
+  task: z.string().min(1).max(TRY_IN_VERSION_TASK_MAX),
+  versionId: VERSION_ID,
+  versionName: z.string().min(1).max(200),
+  runId: z.string().min(1).max(200),
+  startedAtMs: z.number(),
+  endedAtMs: z.number().optional(),
+  runOutcome: z.enum(["complete", "failed"]).optional(),
+  // Review only. null = the count could not be computed; the card says so
+  // rather than guessing.
+  changedFileCount: z.number().int().min(0).nullable().optional(),
+  mergeAvailable: z.boolean(),
+});
+export type TryInVersionRunState = z.infer<typeof TryInVersionRunState>;
+
+export const TryInVersionStateResult = z.object({
+  state: TryInVersionRunState.nullable(),
+});
+export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
+
 const SiteDiagnostic = z.object({
   path: PATH_STRING.optional(),
   severity: z.enum(["warning", "error"]),
@@ -1618,6 +1671,15 @@ export interface DohcDesktopBridge {
   resolveWorkspaceVersionConflict(
     payload: ResolveWorkspaceVersionConflictPayload,
   ): Promise<ResolveWorkspaceVersionConflictResult>;
+  // "Try it in a version" (PR 0N-2). The gesture is engine-gated like the
+  // other version operations; state/dismiss are safe no-ops elsewhere.
+  tryInWorkspaceVersion(
+    payload: TryInWorkspaceVersionPayload,
+  ): Promise<TryInWorkspaceVersionResult>;
+  getTryInVersionState(
+    payload: ListWorkspaceFilesPayload,
+  ): Promise<TryInVersionStateResult>;
+  dismissTryInVersionReview(payload: ListWorkspaceFilesPayload): Promise<void>;
   // Engine history + linked Chats (PR 0M-5). Gated in main on the
   // workspace-engine alpha flag: for unflagged workspaces every call rejects.
   listEngineMoments(

@@ -308,6 +308,25 @@ test("an unflagged workspace never shows the versions surface", async () => {
       }
     }, workspace.workspaceId);
     expect(rejection).toContain("Versions are not enabled");
+
+    // PR 0N-2: the try-in-version gesture is gated by the same flag.
+    const tryRejection = await page.evaluate(async (workspaceId) => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          tryInWorkspaceVersion(payload: {
+            workspaceId: string;
+            task: string;
+          }): Promise<unknown>;
+        };
+      }).dohcDesktop;
+      try {
+        await api.tryInWorkspaceVersion({ workspaceId, task: "tidy notes" });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, workspace.workspaceId);
+    expect(tryRejection).toContain("Versions are not enabled");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
