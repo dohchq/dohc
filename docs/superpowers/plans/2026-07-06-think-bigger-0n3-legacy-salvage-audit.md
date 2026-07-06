@@ -68,15 +68,43 @@ Retire-eligible backend footprint: ~5,256 source LOC (`workspace-api` +
 
 ## Flag-default-on gate list
 
-- [ ] Live collab (Y.Doc) re-homed on the engine or explicitly decoupled so
-      the flip does not regress co-editing.
-- [ ] Binary/asset versioning in the engine, or an explicit decision that
-      assets stay on the existing asset path.
-- [ ] Engine search mounted in the desktop renderer, or ripgrep explicitly
-      reclassified KEEP-AS-IS.
-- [ ] MCP agent recording routed through engine moments (Arc 0N-1).
-- [ ] Engine restore/version/merge UX at parity for every unflagged-restore
-      scenario (verify in product during dogfooding).
+All items closed as of 2026-07-07 (lane WS-H1); the flag default flips in the
+same lane. Evidence per item:
+
+- [x] Live collab (Y.Doc) re-homed on the engine or explicitly decoupled so
+      the flip does not regress co-editing. **Closed by decoupling** per the
+      [WS-G2 collab design](./2026-07-06-think-bigger-wsg2-collab-design.md)
+      (decision (a) decouple-and-defer; (b) Y.Doc driver is the committed
+      later shape). G2-A pinning tests:
+      `apps/desktop/e2e/workspace-collab-decoupling.spec.ts` (engine-flagged
+      local workspace edits a rich doc with zero WebSockets and a refused
+      collabToken; bridge-write materializations become engine moments) and
+      the "G2-A: engine restore while a collab session is open" block in
+      `apps/desktop/src/renderer/collab/collabSession.test.ts`
+      (restore-while-open merges into the doc or rescues to `.conflict`, and
+      the advanced materialization base stops the next settle from
+      overwriting the restore).
+- [x] Binary/asset versioning in the engine (WS-G1, commit `c4148627`):
+      capped binary capture in
+      `apps/desktop/src/workspaces/workspaceEngineCapture.ts`
+      (`contentKind: "binary"`, binary blobs in the engine store) with
+      engine-side support in `packages/workspace-engine`.
+- [x] Engine search mounted in the desktop renderer (WS-D): the
+      `searchWorkspace` IPC routes flagged workspaces through
+      `searchWorkspaceEngine` (`apps/desktop/src/main.ts`), rendered by
+      `apps/desktop/src/renderer/workbench/SearchView.tsx`; E2E
+      `apps/desktop/e2e/workspace-engine-search.spec.ts`.
+- [x] MCP agent recording routed through engine moments (Arc 0N-1):
+      `packages/mcp/src/tools.ts` skips legacy change-set writes for flagged
+      workspaces (`recordChange` → `recordedBy: "workspace-engine"`); the
+      desktop watcher captures MCP's physical writes as engine moments with
+      agent authorship (`engineCaptureGate.ts` `activeAgentRun`).
+- [x] Engine restore/version/merge UX at parity for every unflagged-restore
+      scenario (0M-4/0M-5): `restoreEngineMomentFile` IPC + engine History
+      restore/undo (`apps/desktop/src/workspaces/workspaceEngineRestore.test.ts`),
+      versions/merge surfaces
+      (`apps/desktop/e2e/workspace-versions.spec.ts`,
+      `apps/desktop/e2e/workspace-engine-history.spec.ts`).
 - [x] History-capture failure notice (landed in PR 0M-7).
 
 ## Recommended retirement sequence
