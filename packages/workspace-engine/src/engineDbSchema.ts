@@ -54,6 +54,31 @@ const ACTIVE_VERSIONS_DDL = `
   )
 `;
 
+// moments.author_json is a lazy additive upgrade (PR 0N-1, same pattern as
+// active_versions): a nullable column added on open, no schema-version bump.
+// Safe because it is additive-nullable both ways — older readers select named
+// columns and ignore it, and an older writer's explicit column list simply
+// leaves it NULL (an unattributed moment is actor-neutral, the pre-0N truth).
+function ensureMomentsAuthorColumn(
+  db: EngineSqliteDb,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  const hasAuthorColumn = () =>
+    db
+      .prepare("PRAGMA table_info(moments)")
+      .all()
+      .some((row) => String(row.name) === "author_json");
+  if (hasAuthorColumn()) return;
+  try {
+    db.exec("ALTER TABLE moments ADD COLUMN author_json TEXT");
+  } catch (error) {
+    // Two first-opens can race the ALTER; the loser sees "duplicate column".
+    // Re-check instead of parsing the message: present now means the winner
+    // added it, anything else is a real failure.
+    if (!hasAuthorColumn()) throw corrupt(error);
+  }
+}
+
 function listUserTables(db: EngineSqliteDb): string[] {
   return db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
@@ -77,6 +102,7 @@ export function initializeOrValidateEngineSchema(
   if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corrupt();
   assertRequiredEngineTables(db, corrupt);
   db.exec(ACTIVE_VERSIONS_DDL);
+  ensureMomentsAuthorColumn(db, corrupt);
 }
 
 export function assertRequiredEngineTables(
@@ -213,6 +239,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         before_metadata_origin TEXT,
         before_metadata_summary TEXT,
         before_metadata_correlation_id TEXT,
+        author_json TEXT,
         PRIMARY KEY (workspace_id, moment_id),
         UNIQUE (workspace_id, moment_order),
         FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,

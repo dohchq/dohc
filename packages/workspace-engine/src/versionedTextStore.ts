@@ -5,7 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  AgentMomentAuthor,
   FileObjectRecord,
+  MomentAuthor,
   TextFileSnapshot,
   VersionId,
   VersionKind,
@@ -51,7 +53,9 @@ const MAX_WRITE_METADATA_FIELD_BYTES = 16 * 1024;
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  AgentMomentAuthor,
   FileObjectRecord,
+  MomentAuthor,
   TextFileSnapshot,
   VersionId,
   VersionKind,
@@ -255,6 +259,77 @@ function pickWriteMetadata(metadata: ActorNeutralWriteMetadata): ActorNeutralWri
   };
 }
 
+function pickMomentAuthor(author: MomentAuthor): MomentAuthor {
+  return {
+    kind: "agent",
+    agentId: author.agentId,
+    onBehalfOf: author.onBehalfOf,
+    ...(author.agentRunId !== undefined ? { agentRunId: author.agentRunId } : {}),
+  };
+}
+
+// Moment authorship is fail-closed on read: a hand-edited/corrupt author_json
+// must never render as a valid-looking attribution (the same posture as the
+// chat store's author_kind).
+function assertMomentAuthor(value: unknown): asserts value is MomentAuthor | undefined {
+  if (value === undefined) return;
+  assertRecord(value);
+  if (
+    value.kind !== "agent" ||
+    typeof value.agentId !== "string" ||
+    !value.agentId ||
+    typeof value.onBehalfOf !== "string" ||
+    !value.onBehalfOf ||
+    (value.agentRunId !== undefined &&
+      (typeof value.agentRunId !== "string" || !value.agentRunId))
+  ) {
+    throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  }
+}
+
+function normalizeMomentAuthor(author: unknown): MomentAuthor | undefined {
+  if (author === undefined) return undefined;
+  if (!isRecord(author) || author.kind !== "agent") {
+    throw new VersionedTextStoreError("invalid-metadata", "Moment author is invalid.");
+  }
+  const fields: Array<[string, unknown, boolean]> = [
+    ["agentId", author.agentId, true],
+    ["onBehalfOf", author.onBehalfOf, true],
+    ["agentRunId", author.agentRunId, false],
+  ];
+  for (const [label, value, required] of fields) {
+    if (!required && value === undefined) continue;
+    if (typeof value !== "string" || value.trim() !== value || !value) {
+      throw new VersionedTextStoreError(
+        "invalid-metadata",
+        `Moment author ${label} is invalid.`,
+      );
+    }
+    assertWriteMetadataFieldSize(value, `author ${label}`);
+  }
+  return pickMomentAuthor(author as unknown as AgentMomentAuthor);
+}
+
+function momentAuthorToJson(author: MomentAuthor | undefined): string | null {
+  return author === undefined ? null : JSON.stringify(pickMomentAuthor(author));
+}
+
+function momentAuthorFromRow(row: Record<string, unknown>): MomentAuthor | undefined {
+  // Databases created before the additive author_json upgrade surface the
+  // column as absent/NULL; both read as "actor-neutral moment".
+  const raw = row.author_json;
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== "string") throw corruptStore();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw corruptStore(error);
+  }
+  assertMomentAuthor(parsed);
+  return parsed === undefined ? undefined : pickMomentAuthor(parsed);
+}
+
 function sameWriteMetadata(
   left: ActorNeutralWriteMetadata,
   right: ActorNeutralWriteMetadata,
@@ -291,6 +366,7 @@ function cloneMoment(moment: VersionedTextMoment): VersionedTextMoment {
     operation: moment.operation,
     payload: cloneMomentPayload(moment.payload),
     metadata: pickWriteMetadata(moment.metadata),
+    ...(moment.author !== undefined ? { author: pickMomentAuthor(moment.author) } : {}),
     ...(moment.before !== undefined
       ? { before: moment.before === null ? null : cloneSnapshot(moment.before) }
       : {}),
@@ -767,6 +843,7 @@ function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void
       }
     }
     assertWriteMetadata(moment.metadata);
+    assertMomentAuthor(moment.author);
     assertMomentBefore(moment.before);
     if (moment.operation === "delete" && (moment.before === undefined || moment.before === null)) {
       throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
@@ -1053,6 +1130,7 @@ function momentFromRow(row: Record<string, unknown>): VersionedTextMoment {
             metadata: metadataFromRow(row, "before_metadata_"),
           };
   const payloadBeforePath = rowOptionalString(row, "payload_before_path");
+  const author = momentAuthorFromRow(row);
   return {
     id: rowString(row, "moment_id"),
     workspaceId: rowString(row, "workspace_id"),
@@ -1071,6 +1149,7 @@ function momentFromRow(row: Record<string, unknown>): VersionedTextMoment {
       },
     },
     metadata: metadataFromRow(row),
+    ...(author !== undefined ? { author } : {}),
     ...(beforePresent === 0 ? {} : { before }),
   };
 }
@@ -1235,6 +1314,7 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
                 metadata: metadataFromRow(row, "before_metadata_"),
               };
       const payloadBeforePath = rowOptionalString(row, "payload_before_path");
+      const author = momentAuthorFromRow(row);
       workspace.moments.push({
         id: rowString(row, "moment_id"),
         workspaceId: rowString(row, "workspace_id"),
@@ -1253,6 +1333,7 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
           },
         },
         metadata: metadataFromRow(row),
+        ...(author !== undefined ? { author } : {}),
         ...(beforePresent === 0 ? {} : { before }),
       });
     }
@@ -1895,6 +1976,7 @@ function createMoment(input: {
   operation: "write" | "rename" | "delete";
   payload: VersionedTextMomentPayload;
   metadata: ActorNeutralWriteMetadata;
+  author?: MomentAuthor;
   before: TextFileSnapshot | null;
 }): VersionedTextMoment {
   return {
@@ -1907,6 +1989,7 @@ function createMoment(input: {
     operation: input.operation,
     payload: cloneMomentPayload(input.payload),
     metadata: pickWriteMetadata(input.metadata),
+    ...(input.author !== undefined ? { author: pickMomentAuthor(input.author) } : {}),
     before: input.before === null ? null : cloneSnapshot(input.before),
   };
 }
@@ -2125,8 +2208,8 @@ function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
       metadata_summary, metadata_correlation_id, before_present, before_object_id,
       before_version_id, before_path, before_blob_sha256, before_updated_at_ms,
       before_latest_moment_id, before_metadata_origin, before_metadata_summary,
-      before_metadata_correlation_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      before_metadata_correlation_id, author_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     moment.workspaceId,
     nextMomentOrder(db, moment.workspaceId),
@@ -2149,6 +2232,7 @@ function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
     moment.before && moment.before !== null ? moment.before.updatedAtMs : null,
     moment.before && moment.before !== null ? moment.before.latestMomentId : null,
     ...(moment.before && moment.before !== null ? metadataValues(moment.before.metadata) : [null, null, null]),
+    momentAuthorToJson(moment.author),
   );
 }
 
@@ -2775,6 +2859,7 @@ function createVersionedTextStoreWithHooks(
     path: string;
     text: string;
     metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
   }): VersionedTextWriteResult {
     requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
@@ -2821,6 +2906,7 @@ function createVersionedTextStoreWithHooks(
         after: { path: input.path, text: input.text },
       },
       metadata: input.metadata,
+      ...(input.author !== undefined ? { author: input.author } : {}),
       before,
     });
     const snapshot: TextFileSnapshot = {
@@ -2856,6 +2942,7 @@ function createVersionedTextStoreWithHooks(
     versionId: VersionId;
     path: string;
     metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
   }): VersionedTextDeleteResult {
     requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
@@ -2889,6 +2976,7 @@ function createVersionedTextStoreWithHooks(
         after: { path: before.path, text: before.text },
       },
       metadata: input.metadata,
+      ...(input.author !== undefined ? { author: input.author } : {}),
       before,
     });
 
@@ -3177,7 +3265,8 @@ function createVersionedTextStoreWithHooks(
           .prepare(
             `SELECT m.moment_id, m.workspace_id, m.version_id, m.object_id, m.path,
                     m.recorded_at_ms, m.operation, m.metadata_origin,
-                    m.metadata_summary, m.metadata_correlation_id, m.moment_order
+                    m.metadata_summary, m.metadata_correlation_id, m.author_json,
+                    m.moment_order
              FROM moments m
              WHERE ${pageConditions.join(" AND ")}
              ORDER BY m.moment_order DESC
@@ -3186,17 +3275,21 @@ function createVersionedTextStoreWithHooks(
           .all(...pageParams, limit + 1);
         const hasMore = rows.length > limit;
         const pageRows = hasMore ? rows.slice(0, limit) : rows;
-        const moments = pageRows.map<VersionedTextMomentSummary>((row) => ({
-          id: rowString(row, "moment_id"),
-          workspaceId: rowString(row, "workspace_id"),
-          versionId: rowString(row, "version_id"),
-          objectId: rowString(row, "object_id"),
-          path: rowString(row, "path"),
-          recordedAtMs: rowNumber(row, "recorded_at_ms"),
-          operation: rowString(row, "operation") as VersionedTextMomentSummary["operation"],
-          metadata: metadataFromRow(row),
-          momentOrder: rowNumber(row, "moment_order"),
-        }));
+        const moments = pageRows.map<VersionedTextMomentSummary>((row) => {
+          const author = momentAuthorFromRow(row);
+          return {
+            id: rowString(row, "moment_id"),
+            workspaceId: rowString(row, "workspace_id"),
+            versionId: rowString(row, "version_id"),
+            objectId: rowString(row, "object_id"),
+            path: rowString(row, "path"),
+            recordedAtMs: rowNumber(row, "recorded_at_ms"),
+            operation: rowString(row, "operation") as VersionedTextMomentSummary["operation"],
+            metadata: metadataFromRow(row),
+            ...(author !== undefined ? { author } : {}),
+            momentOrder: rowNumber(row, "moment_order"),
+          };
+        });
         return cloneJson({
           moments,
           nextBeforeMomentOrder: hasMore
@@ -3229,6 +3322,7 @@ function createVersionedTextStoreWithHooks(
         const path = normalizeWritePath(input.path);
         const text = normalizeWriteText(input.text);
         const metadata = normalizeWriteMetadata(input.metadata);
+        const author = normalizeMomentAuthor(input.author);
         await beforeWriteMutation();
         const result = writeTextFileInDb({
           db: db(),
@@ -3237,6 +3331,7 @@ function createVersionedTextStoreWithHooks(
           path,
           text,
           metadata,
+          ...(author !== undefined ? { author } : {}),
           momentId: input.momentId,
         });
         await persistBarrier();
@@ -3593,6 +3688,7 @@ function createVersionedTextStoreWithHooks(
         const versionId = normalizeVersionId(input.versionId);
         const path = normalizeWritePath(input.path);
         const metadata = normalizeWriteMetadata(input.metadata);
+        const author = normalizeMomentAuthor(input.author);
         await beforeWriteMutation();
         const result = deleteTextFileInDb({
           db: db(),
@@ -3600,6 +3696,7 @@ function createVersionedTextStoreWithHooks(
           versionId,
           path,
           metadata,
+          ...(author !== undefined ? { author } : {}),
           momentId: input.momentId,
         });
         await persistBarrier();

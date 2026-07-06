@@ -24,5 +24,8 @@ export async function captureForFlaggedWorkspace(
     // recording off for flagged workspaces, a failing engine store must be
     // user-visible, not console-only.
     onCaptureOutcome: hooks.onCaptureOutcome,
+    // PR 0N-1: batches settled while a dohc-tracked agent run is active are
+    // stamped with agent authorship (History shows "<User Name>'s agent").
+    activeAgentRun: hooks.activeAgentRun,
   });
 }

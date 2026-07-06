@@ -2077,10 +2077,18 @@ function registerIpcHandlers(): void {
   // requireWorkspace and rejects when the engine capture is not attached.
   // The shared id/version/path/timestamp/metadata shape both engine-moment
   // record formats are built from — one mapper so they can never drift.
+  // PR 0N-1: the SAME display-name rule the chat rail uses. AgentIntegration
+  // stamps onBehalfOf "local" for the desktop's own user, which displays as
+  // the cloud email (or "You" when signed out); any other onBehalfOf is
+  // already a user-facing label and displays as-is.
+  function agentAuthorDisplayName(author: NonNullable<VersionedTextMomentSummary["author"]>): string {
+    return author.onBehalfOf === "local" ? localUserDisplayName() : author.onBehalfOf;
+  }
+
   function engineMomentBaseForIpc(
     moment: Pick<
       VersionedTextMomentSummary,
-      "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata"
+      "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "author"
     >,
   ) {
     return {
@@ -2090,6 +2098,9 @@ function registerIpcHandlers(): void {
       recordedAtMs: moment.recordedAtMs,
       operation: moment.operation,
       origin: moment.metadata.origin,
+      ...(moment.author !== undefined
+        ? { agentAuthorName: agentAuthorDisplayName(moment.author) }
+        : {}),
       ...(moment.metadata.summary !== undefined
         ? { summary: moment.metadata.summary }
         : {}),

@@ -14559,3 +14559,140 @@ linear scan is not yet a product search surface); macOS/Windows runners;
 aged-workspace cold-open benchmark; sha-only compare listing;
 apps/web Blob#arrayBuffer test fix; legacy-stack retirement plan (superseded
 PR 21 scope).
+
+## PR 0N-1 - Agent-Attributed Engine Writes And Two-Way Agent Chat
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-0n1-agent-attribution
+Worktree: /home/ice/dev/dohc-0n1-agent-attribution
+Implementation workstream, if used: direct implementation by a Claude lane
+(fable-5), tests-first
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] Optional agent author on engine moments: contracts gain
+      `AgentMomentAuthor` / `MomentAuthor` (`{ kind: "agent", agentId,
+      onBehalfOf, agentRunId? }`, mirroring ChangeAuthor's agent variant plus
+      the locally meaningful run id); `VersionedTextMoment` /
+      `VersionedTextMomentSummary` carry `author?`; writeTextFile /
+      deleteTextFile accept `author?`. Snapshot and conflict metadata stay
+      actor-neutral by construction — authorship is a MOMENT fact only.
+- [x] Schema: one nullable `author_json` column on `moments` (JSON of the
+      author shape), added lazily on open exactly like 0M-4's
+      `active_versions` (no schema-version bump: additive-nullable is safe
+      both directions — old readers ignore it, old writers leave it NULL =
+      actor-neutral). Race-safe ALTER with re-check; fresh DDL includes the
+      column. Fail-closed read validation: corrupt/hand-edited author_json is
+      state-corrupt, never a valid-looking attribution.
+- [x] Capture attribution: createWorkspaceEngineCapture reads the SAME live
+      agent-run slot the legacy recorder read (workspaceActivity entry ->
+      WorkspaceCaptureHooks.activeAgentRun -> engineCaptureGate). Settle-read
+      rule kept from legacy and documented: the slot is read once when the
+      batch SETTLES (captureBatch call), not when the chain drains — a run
+      that ends mid-chain still owns the batches it caused; batches settling
+      after the run ends are neutral. Reconciliation, version ops, and
+      restore stay actor-neutral/dohc-origin as before.
+- [x] MCP on flagged workspaces: recordChange/ensureRecordable read the same
+      .dohc/settings.local.json the desktop reads (symlink-refused,
+      size-capped, fail-closed to OFF); flagged workspaces get NO direct
+      legacy .dohc/history record from MCP (was already invisible to the
+      flagged UI per 0M-5; the double-record hazard ends) — the watcher +
+      run slot capture the physical write with attribution. Tool results say
+      `recordedBy: "workspace-engine"` instead of a changeSetId. Unflagged
+      byte-for-byte (58 pre-existing MCP tests untouched and green).
+      Documented honestly: an MCP client running WITHOUT a dohc-tracked run
+      (external agent CLI) yields actor-neutral engine capture, per the
+      unchanged actor-neutral principle.
+- [x] History UI: moment rows, correlation groups (when authorship is
+      uniform across the group — mixed/neutral groups never guess), and the
+      diff page show "<User Name>'s agent" via the SAME chatAuthorLabel the
+      chat rail uses; main derives the display name (onBehalfOf "local" ->
+      cloud email / "You", any other onBehalfOf displays as-is) — the
+      renderer never derives identity.
+- [x] MCP chat tools (two-way rail): dohc_list_file_chats (path -> stable
+      object id -> threads), dohc_read_chat (messages + read-only
+      projection), dohc_reply_to_chat (posts kind=agent with the desktop's
+      display-name rule: DOHC_MCP_CLOUD_EMAIL / dohc-cloud.json email /
+      "You"). Flag absent/off -> honest refusal, never an empty list.
+      Workspace identity from the workspace's own .dohc/manifest.json
+      (registry fallback). Paths via safeResolve (lexical + realpath
+      containment). Per-call store open/close so MCP never pins WAL locks
+      between calls; replies retry briefly on busy after SQLite's 5s
+      busy_timeout.
+
+### Design decisions
+
+- Author shape: separate optional `author` field beside `metadata` (NOT a
+  field inside ActorNeutralWriteMetadata) — the neutral metadata type keeps
+  meaning what its name says, and snapshots/conflicts (which embed that
+  metadata) can never accidentally claim authorship.
+- Slot-read rule: at settle, matching legacy recordBatch semantics exactly;
+  stamp is a synchronous closure read + one extra column bind — no extra IO
+  on the capture path.
+- MCP flag detection: direct settings-file read per mutating call (small
+  JSON, symlink/size guarded); no IPC to the desktop and no cache to go
+  stale across desktop opens.
+- Chat write contention: WAL + busy_timeout 5000 is the primary mechanism; a
+  REAL two-process test (spawned child holds BEGIN IMMEDIATE, store write
+  waits it out and lands) proves it. In-process competing connections would
+  deadlock (node:sqlite's busy wait blocks the JS thread) — documented in
+  the test; desktop and MCP only ever hold locks from separate processes.
+  replyToChat adds a 3-attempt retry for holds longer than the timeout.
+
+### Tests / validation
+
+- workspace-engine: 214 passed (207 + 6 momentAuthor.test.ts incl. old-DB
+  in-place upgrade via DROP COLUMN simulation and corrupt-author fail-closed,
+  + 1 two-process chat write contention) —
+  `pnpm --filter @dohc/workspace-engine test`.
+- desktop vitest: 844 passed (832 + capture attribution x4, activity hook
+  wiring x1, source-label/group-author mapping x7) —
+  `pnpm --filter @dohc/desktop test`.
+- contracts: 10 passed; repo-wide `pnpm -r typecheck` clean.
+- MCP: 70 passed (58 existing + 12 engineChats.test.ts: flag detection incl.
+  symlink refusal, flagged write/delete skip legacy while unflagged keeps
+  it, chat tool happy path/refusals/traversal rejection, busy-error
+  classification, protocol-level tool schema registration via
+  InMemoryTransport).
+- E2E: 19 passed (17 existing regression incl. capture/versions/history/
+  chats/switch-race + 2 new workspace-agent-attribution.spec.ts: dohc-tracked
+  run via the real startAgentRun IPC -> History row and diff page show
+  "You's agent", post-run edit shows "Local file edit"; MCP replyToChat
+  invoked from the TEST process against the running app (genuine second
+  process on the same engine.db) -> rail renders "You's agent").
+
+### Perf
+
+- Attribution adds no measurable capture latency: the stamp is a settle-time
+  closure read plus one nullable column bind. Storage bench after the
+  change: sequential_writes 1000 = 4,758-5,036 ms across two runs vs the
+  0M-2 recorded baseline 4,702 ms (run-to-run noise band on WSL);
+  cold_open_list_and_read 62-69 ms vs 76 ms baseline.
+
+### Remaining risk
+
+- The desktop's history display name for onBehalfOf "local" is resolved at
+  IPC-read time from the CURRENT cloud session — signing in after an agent
+  run re-labels old rows from "You's agent" to "<email>'s agent". Same
+  posture as the chat rail's human "You"; revisit if identity becomes
+  durable per-moment.
+- MCP flagged-workspace writes rely on the DESKTOP being open to capture
+  history (watcher-based). An external MCP write while the desktop is closed
+  is captured by the next startup reconciliation as actor-neutral offline
+  edits — honest, but attribution is lost for that window.
+- renameTextFile does not accept an author yet (product rename flows are
+  user gestures; agent renames via MCP move arrive as delete+write and ARE
+  attributed).
+
+### What 0N-2 builds on
+
+- WorkspaceCaptureHooks.activeAgentRun / workspaceActivity.setAgentRun is
+  the run-lifecycle seam: any "Try it in a version" driver that starts a run
+  through AgentIntegration.startAgentRun gets attributed capture for free.
+- Engine moments now carry agentRunId — a review card can filter/stream a
+  run's moments by matching author.agentRunId on listMoments pages.
+- MCP chat tools give the run a two-way channel into the file rail
+  (dohc_reply_to_chat) with correct display attribution.

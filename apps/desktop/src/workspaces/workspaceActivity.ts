@@ -160,6 +160,11 @@ export interface WorkspaceCaptureHooks {
   // capture pass reports here, and the activity layer turns failure/recovery
   // transitions into the workspace's persistent capture-failure notice.
   onCaptureOutcome: (outcome: { ok: boolean }) => void;
+  // Wire into WorkspaceEngineCaptureOptions.activeAgentRun: the workspace's
+  // live agent-run slot (the SAME slot the legacy recorder read), so settled
+  // batches captured while a dohc-tracked run is active carry agent
+  // authorship into engine moments (PR 0N-1).
+  activeAgentRun: () => ActiveAgentRun | null;
 }
 
 function mergeHistoryRecords(
@@ -271,6 +276,10 @@ export function createWorkspaceActivity(
         try {
           const capture =
             (await options.captureFor(workspace, {
+              // Live slot read: the capture stamps a settled batch with
+              // whatever run is active at that moment (may flip between
+              // batches within one open).
+              activeAgentRun: () => entry.agentRun,
               onCaptureOutcome: ({ ok }) => {
                 // Transition-only: the FIRST failure raises the notice, the
                 // first success after a failure clears it, and repeated

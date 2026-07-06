@@ -289,6 +289,9 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../workspace-core
+      '@dohc/workspace-engine':
+        specifier: workspace:*
+        version: link:../workspace-engine
       '@dohc/workspace-history':
         specifier: workspace:*
         version: link:../workspace-history

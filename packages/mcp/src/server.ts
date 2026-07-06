@@ -14,6 +14,9 @@ import { z } from "zod";
 import {
   createWorkspaceDirectory,
   addSiteSdk,
+  listFileChats,
+  readChat,
+  replyToChat,
   buildSite,
   createSite,
   deleteWorkspacePath,
@@ -361,6 +364,43 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await share(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_file_chats",
+    {
+      description:
+        "List the dohc Chats linked to a workspace file. Chats follow the file's stable dohc identity across renames. Requires the workspace engine.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await listFileChats(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_read_chat",
+    {
+      description:
+        "Read one dohc Chat thread: its messages (with author kind and display name) and a read-only text projection.",
+      inputSchema: {
+        threadId: z.string().min(1).max(200),
+      },
+    },
+    async (args) => text(await readChat(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_reply_to_chat",
+    {
+      description:
+        "Reply to a dohc Chat thread as the agent. The message is attributed to the user's agent and appears in the desktop file rail.",
+      inputSchema: {
+        threadId: z.string().min(1).max(200),
+        body: z.string().min(1).max(65536),
+      },
+    },
+    async (args) => text(await replyToChat(ctx, args)),
   );
 
   server.registerTool(

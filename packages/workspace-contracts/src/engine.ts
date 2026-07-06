@@ -92,6 +92,21 @@ export interface ActorNeutralWriteMetadata {
   correlationId?: string;
 }
 
+// Optional authorship carried by a MOMENT (never by snapshot metadata, which
+// stays actor-neutral). Mirrors the agent variant of ChangeAuthor plus the
+// locally meaningful agent-run id (the .dohc/agent-runs.json record). Only
+// dohc-TRACKED agent runs stamp this; ordinary edits, reconciliation, and raw
+// external agent CLIs remain actor-neutral — an absent author is the honest
+// default, not a fallback.
+export interface AgentMomentAuthor {
+  kind: "agent";
+  agentId: string;
+  onBehalfOf: string;
+  agentRunId?: string;
+}
+
+export type MomentAuthor = AgentMomentAuthor;
+
 export interface TextFileSnapshot {
   objectId: WorkspaceObjectId;
   versionId: VersionId;
@@ -195,6 +210,8 @@ export interface VersionedTextMoment {
   operation: "write" | "rename" | "delete";
   payload: VersionedTextMomentPayload;
   metadata: ActorNeutralWriteMetadata;
+  // Present only when a dohc-tracked agent run authored this moment.
+  author?: MomentAuthor;
   before?: TextFileSnapshot | null;
 }
 
@@ -210,6 +227,8 @@ export interface VersionedTextMomentSummary {
   recordedAtMs: number;
   operation: "write" | "rename" | "delete";
   metadata: ActorNeutralWriteMetadata;
+  // Present only when a dohc-tracked agent run authored this moment.
+  author?: MomentAuthor;
   momentOrder: number;
 }
 
@@ -286,6 +305,7 @@ export interface VersionedTextStore {
     path: string;
     text: string;
     metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   readTextFile(input: {
@@ -335,6 +355,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextDeleteResult>;
   rollbackTextFileMutation(input: {

@@ -544,6 +544,10 @@ export const EngineMomentRecord = z.object({
   recordedAtMs: z.number(),
   operation: z.enum(["write", "rename", "delete"]),
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown"]),
+  // Present only when a dohc-tracked agent run authored the moment; main
+  // derives the display name (cloud email or the run's onBehalfOf label) —
+  // the renderer only formats it as "<User Name>'s agent".
+  agentAuthorName: z.string().min(1).max(500).optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic

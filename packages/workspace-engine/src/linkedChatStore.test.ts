@@ -378,6 +378,72 @@ describe("linked chat store hardening (CodeRabbit arc gate)", () => {
     await chats.close();
   });
 
+  // PR 0N-1 two-writer posture: the desktop AND the MCP process both write
+  // chats over separate WAL connections to the same engine.db. A writer that
+  // arrives while another PROCESS holds the write lock must WAIT (via PRAGMA
+  // busy_timeout's synchronous busy wait) and then land, not fail. This must
+  // be a REAL second process: node:sqlite's busy wait blocks the JS thread,
+  // so an in-process competing connection could never release its lock while
+  // the store is waiting (that deadlock shape is exactly why the desktop and
+  // MCP hold locks from separate processes only).
+  it("a send waits out another process's write transaction and lands", async () => {
+    const chats = chatStore();
+    const thread = await chats.createThread({
+      workspaceId: "workspace-a",
+      title: "Contended",
+    });
+    // Force the store's connection open before taking the competing lock so
+    // schema bootstrap does not sit inside the contention window.
+    await chats.listThreads({ workspaceId: "workspace-a" });
+
+    const { spawn } = requireModule("node:child_process") as typeof import("node:child_process");
+    const dbPath = join(root, LINKED_CHAT_STORE_RELATIVE_PATH);
+    const holdScript = `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("BEGIN IMMEDIATE");
+      process.stdout.write("locked\\n");
+      setTimeout(() => {
+        db.exec("COMMIT");
+        db.close();
+      }, 400);
+    `;
+    const holder = spawn(process.execPath, ["-e", holdScript, dbPath], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        holder.stdout.on("data", (chunk: Buffer) => {
+          if (chunk.toString("utf8").includes("locked")) resolve();
+        });
+        holder.on("exit", (code) =>
+          reject(new Error(`lock holder exited early (${code})`)),
+        );
+        holder.on("error", reject);
+      });
+      // The other process holds the write lock right now; this send must
+      // block on busy_timeout and land once the holder commits.
+      const message = await chats.sendMessage({
+        workspaceId: "workspace-a",
+        threadId: thread.id,
+        author: { kind: "agent", displayName: "You" },
+        body: "Written under contention.",
+      });
+      expect(message.body).toBe("Written under contention.");
+    } finally {
+      holder.kill();
+    }
+
+    const messages = await chats.listMessages({
+      workspaceId: "workspace-a",
+      threadId: thread.id,
+    });
+    expect(messages.map((message) => message.body)).toEqual([
+      "Written under contention.",
+    ]);
+    await chats.close();
+  });
+
   // Single-source schema: whichever store opens a brand-new workspace FIRST
   // must create a database the OTHER store validates cleanly (this order —
   // chat store first — is the one the old duplicated DDL drifted on).

@@ -90,12 +90,32 @@ function capture(root: string, options: {
   now?: () => number;
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
+  activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
     rootPath: root,
     ...options,
   });
+}
+
+// PR 0N-1: the author a persisted moment carries (NULL = actor-neutral).
+function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown> | null> {
+  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
+    readOnly: true,
+  });
+  try {
+    return db
+      .prepare("SELECT m.author_json AS author FROM moments m ORDER BY m.moment_order")
+      .all()
+      .map((row) =>
+        typeof row.author === "string"
+          ? (JSON.parse(row.author) as Record<string, unknown>)
+          : null,
+      );
+  } finally {
+    db.close();
+  }
 }
 
 describe("workspaceEngineCapture batch capture", () => {
@@ -897,5 +917,93 @@ describe("createDefaultDiskWriter symlink containment", () => {
     await writer.deletePath(join(root, "gone.md"));
     expect(existsSync(join(root, "gone.md"))).toBe(false);
     expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
+});
+
+// PR 0N-1 agent-attributed capture: a batch settled while a dohc-tracked
+// agent run is active carries agent authorship into its engine moments;
+// everything else stays actor-neutral (the raw external-CLI principle is
+// unchanged — an absent run means an absent author).
+describe("workspaceEngineCapture agent attribution", () => {
+  const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+
+  it("stamps captured writes and deletes with the active run's author", async () => {
+    const root = await tempRoot();
+    await write(root, "notes/plan.md", "# Plan\n");
+    await write(root, "notes/scratch.md", "scratch\n");
+    const engine = capture(root, { activeAgentRun: () => run });
+    engine.captureBatch([
+      { path: "notes/plan.md", operation: "update" },
+      { path: "notes/scratch.md", operation: "update" },
+    ]);
+    await engine.flush();
+    await unlink(join(root, "notes/scratch.md"));
+    engine.captureBatch([{ path: "notes/scratch.md", operation: "delete" }]);
+    await engine.stop();
+
+    const authored = {
+      kind: "agent",
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      agentRunId: "run-1",
+    };
+    expect(readEngineMomentAuthors(root)).toEqual([authored, authored, authored]);
+    expect(readEngineMoments(root).map((m) => m.operation)).toEqual([
+      "write",
+      "write",
+      "delete",
+    ]);
+    // Attribution is a moment fact only: origin metadata stays actor-neutral.
+    expect(readEngineMoments(root).map((m) => m.origin)).toEqual([
+      "local-file",
+      "local-file",
+      "local-file",
+    ]);
+  });
+
+  it("keeps ordinary batches actor-neutral when no run is active", async () => {
+    const root = await tempRoot();
+    await write(root, "a.md", "one\n");
+    const engine = capture(root, { activeAgentRun: () => null });
+    engine.captureBatch([{ path: "a.md", operation: "update" }]);
+    await engine.stop();
+    expect(readEngineMomentAuthors(root)).toEqual([null]);
+  });
+
+  it("reads the slot at settle: a run ending before the chain drains still owns its batch, later batches are neutral", async () => {
+    const root = await tempRoot();
+    await write(root, "a.md", "one\n");
+    let active: typeof run | null = run;
+    const engine = capture(root, { activeAgentRun: () => active });
+
+    // Batch settles (captureBatch called) while the run is active...
+    engine.captureBatch([{ path: "a.md", operation: "update" }]);
+    // ...and the run ends BEFORE the capture chain executes the batch.
+    active = null;
+    await engine.flush();
+    expect(readEngineMomentAuthors(root)).toEqual([
+      { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" },
+    ]);
+
+    // A batch that settles after the run ended is the local user's.
+    await write(root, "a.md", "two\n");
+    engine.captureBatch([{ path: "a.md", operation: "update" }]);
+    await engine.stop();
+    expect(readEngineMomentAuthors(root)).toEqual([
+      { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" },
+      null,
+    ]);
+  });
+
+  it("keeps reconciliation actor-neutral even while a run is active", async () => {
+    const root = await tempRoot();
+    await write(root, "offline.md", "edited while closed\n");
+    const engine = capture(root, { activeAgentRun: () => run });
+    engine.start();
+    await engine.stop();
+    expect(readEngineMoments(root).map((m) => [m.path, m.summary])).toEqual([
+      ["offline.md", "Reconciled offline edits"],
+    ]);
+    expect(readEngineMomentAuthors(root)).toEqual([null]);
   });
 });
