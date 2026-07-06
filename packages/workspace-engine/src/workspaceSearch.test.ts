@@ -251,6 +251,20 @@ describe("engine file path classifier (shared by search and capture)", () => {
     expect(classifyEngineFilePath("deploy/prod.env")).toEqual({ kind: "secret" });
   });
 
+  it("classifies the whole .env.* family as secret (CodeRabbit critical)", () => {
+    // .env.local / .env.production previously fell through to tracked and
+    // would have been captured and indexed in PLAINTEXT.
+    expect(classifyEngineFilePath(".env.local")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath(".env.production")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("apps/site/.env.development")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("config/.ENV.LOCAL")).toEqual({ kind: "secret" });
+    // Deliberate over-classification: placeholders are protected too.
+    expect(classifyEngineFilePath(".env.example")).toEqual({ kind: "secret" });
+    // Non-family lookalikes stay tracked.
+    expect(classifyEngineFilePath("notes/envelope.md")).toEqual({ kind: "tracked" });
+    expect(classifyEngineFilePath("environments.md")).toEqual({ kind: "tracked" });
+  });
+
   it("classifies percent-encoded .env disguises on the decoded path", () => {
     // validateUserWritePath decodes %2e -> "." and %2f -> "/" (and the
     // double-encoded forms); the secret checks must see the decoded path or

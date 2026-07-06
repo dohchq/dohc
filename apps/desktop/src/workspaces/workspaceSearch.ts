@@ -93,7 +93,7 @@ export function buildRipgrepArgs(request: WorkspaceSearchRequest): string[] {
   // the same classifyEngineFilePath floor the engine enforces, expressed as
   // rg globs (case-insensitive to match the floor's lowercase rule) plus the
   // toSearchEntries backstop below. Over-exclusion is the safe direction.
-  args.push("--iglob", "!**/*.env", "--iglob", "!**/.env/**");
+  args.push("--iglob", "!**/*.env", "--iglob", "!**/.env/**", "--iglob", "!**/.env.*");
   args.push("--", request.query);
   return args;
 }

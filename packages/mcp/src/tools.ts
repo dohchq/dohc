@@ -652,6 +652,27 @@ export async function readWorkspaceFile(
   if (isSecretWorkspacePath(resolved.normalized)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
   }
+  // The alias check above classifies the REQUESTED path, but the read below
+  // follows symlinks: an in-workspace link (notes.md -> .env) passes both
+  // guards while the bytes come from the secret. Classify the resolved real
+  // target too, so no alias can read protected contents.
+  const realTarget = await realpath(resolved.absolute).catch(() => null);
+  if (realTarget) {
+    const realRoot = await realpath(ctx.root).catch(() => null);
+    if (!realRoot) {
+      return { ok: false as const, reason: `path rejected (workspace root unresolvable): ${args.path}` };
+    }
+    if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) {
+      const relativeReal = realTarget
+        .slice(realRoot.length)
+        .split(sep)
+        .filter((segment) => segment.length > 0)
+        .join("/");
+      if (relativeReal && isSecretWorkspacePath(relativeReal)) {
+        return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+      }
+    }
+  }
   try {
     const maxBytes = Math.min(
       HARD_READ_MAX_BYTES,

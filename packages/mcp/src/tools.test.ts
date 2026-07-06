@@ -862,6 +862,26 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("denies reading secrets through an in-workspace symlink alias (CodeRabbit major)", async () => {
+    await withWorkspace(async (ctx) => {
+      const marker = "MCP_ALIAS_SECRET_7";
+      await writeFile(join(ctx.root, ".env"), `API_KEY=${marker}\n`);
+      await writeFile(join(ctx.root, ".env.local"), `LOCAL=${marker}\n`);
+      // A symlink INSIDE the workspace passes lexical validation and realpath
+      // containment, but the read follows it to the secret: the resolved
+      // real target must be classified too.
+      await symlink(join(ctx.root, ".env"), join(ctx.root, "notes.md"));
+      for (const path of ["notes.md", ".env.local"]) {
+        const denied = await readWorkspaceFile(ctx, { path });
+        expect(denied).toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("protected"),
+        });
+        expect(JSON.stringify(denied)).not.toContain(marker);
+      }
+    });
+  });
+
   it("never searches secret-backed files and reports the skip honestly", async () => {
     await withWorkspace(async (ctx) => {
       const marker = "MCP_SEARCH_SECRET_99";
