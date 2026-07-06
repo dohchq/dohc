@@ -18,6 +18,7 @@ type SyncRelayRoute =
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
+  | { route: "keys"; workspaceId: string }
   | { route: "log"; workspaceId: string };
 
 // Transport cap, deliberately LARGER than the engine's 5 MiB binary-file
@@ -27,6 +28,7 @@ type SyncRelayRoute =
 // (workspace-engine syncApply) — an oversized BINARY blob a peer smuggles
 // under this cap is rejected client-side as a protocol violation.
 export const MAX_BLOB_BYTES = 10 * 1024 * 1024;
+export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
@@ -113,6 +115,34 @@ export function createSyncRelayHandler({
         });
       }
 
+      if (route.route === "keys" && request.method === "PUT") {
+        const bytes = await readBytes(request, MAX_KEY_ENVELOPE_BYTES);
+        const envelopeJson = Buffer.from(bytes).toString("utf8");
+        try {
+          const parsed = JSON.parse(envelopeJson);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("not object");
+          }
+        } catch {
+          throw badRequest("key envelope must be a JSON object");
+        }
+        storage.putKeyEnvelope({
+          workspaceId: route.workspaceId,
+          envelopeJson,
+          updatedAtMs: nowMs(),
+        });
+        return jsonResponse({ ok: true, workspaceId: route.workspaceId });
+      }
+
+      if (route.route === "keys" && request.method === "GET") {
+        const envelopeJson = storage.getKeyEnvelope(route.workspaceId);
+        if (!envelopeJson) throw keyEnvelopeNotFound();
+        return new Response(envelopeJson, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
       if (route.route === "log" && request.method === "POST") {
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
@@ -180,6 +210,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
+  }
+  if (parts.length === 3 && parts[2] === "keys") {
+    return { route: "keys", workspaceId };
   }
   throw notFound();
 }
@@ -343,6 +376,10 @@ function notFound(): HttpError {
 
 function blobNotFound(): HttpError {
   return new HttpError(404, "blob_not_found", "blob not found");
+}
+
+function keyEnvelopeNotFound(): HttpError {
+  return new HttpError(404, "key_envelope_not_found", "key envelope not found");
 }
 
 function methodNotAllowed(): HttpError {

@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLinkedChatStore } from "./linkedChatStore";
-import { createSecretFileStore } from "./secretFileStore";
+import {
+  createSecretFileStore,
+  installWorkspaceDataKey,
+  readWorkspaceDataKeyForEnrollment,
+} from "./secretFileStore";
 import { applySyncQueues } from "./syncApply";
 import { exportSyncBundle, importSyncBundle } from "./syncFolder";
 import { VERSIONED_TEXT_STORE_RELATIVE_PATH, createVersionedTextStore } from "./versionedTextStore";
@@ -112,6 +116,46 @@ function snapshotLatestMomentId(root: string, path: string): string | null {
   }
 }
 
+function secretCipherRows(root: string, versionId = "main"): Array<Record<string, unknown>> {
+  const db = rawDb(root);
+  try {
+    return db
+      .prepare(
+        `SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length,
+          updated_at_ms, latest_moment_id
+         FROM secret_files
+         WHERE workspace_id = ? AND version_id = ?
+         ORDER BY path`,
+      )
+      .all(WORKSPACE_ID, versionId);
+  } finally {
+    db.close();
+  }
+}
+
+function secretForkBaseRows(root: string, versionId: string): Array<Record<string, unknown>> {
+  const db = rawDb(root);
+  try {
+    return db
+      .prepare(
+        `SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length
+         FROM secret_fork_bases
+         WHERE workspace_id = ? AND version_id = ?
+         ORDER BY path`,
+      )
+      .all(WORKSPACE_ID, versionId);
+  } finally {
+    db.close();
+  }
+}
+
+function sealedTipDigest(root: string, versionId = "main"): string[] {
+  return secretCipherRows(root, versionId).map(
+    (row) =>
+      `${row.path}\0${row.iv_base64}\0${row.auth_tag_base64}\0${row.ciphertext_base64}`,
+  );
+}
+
 // Concatenates every UTF-8-decodable file under dir. Binary files (e.g.
 // blobs-bin payloads) are skipped via a FATAL decode instead of being
 // silently mangled by lossy utf8 conversion — mangled bytes could turn a
@@ -132,6 +176,16 @@ async function walkTextFiles(dir: string): Promise<string> {
     }
   }
   return out;
+}
+
+async function walkFileBytes(dir: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) chunks.push(await walkFileBytes(path));
+    if (entry.isFile()) chunks.push(await readFile(path));
+  }
+  return Buffer.concat(chunks);
 }
 
 function prng(seed: number): () => number {
@@ -620,11 +674,17 @@ describe("sync folder replication", () => {
     }
   });
 
-  it("excludes secret store writes from the replication log and exported bundle bytes", async () => {
+  it("replicates secret store writes as ciphertext without leaking plaintext or the raw key", async () => {
     const root = await tempRoot("sync-secret");
     const bundle = await tempRoot("sync-secret-bundle");
     const versions = createVersionedTextStore(root);
-    const secrets = createSecretFileStore(root, { createId: () => "secret-moment-1" });
+    let secretMoment = 0;
+    const secrets = createSecretFileStore(root, {
+      createId: () => {
+        secretMoment += 1;
+        return `secret-moment-${secretMoment}`;
+      },
+    });
     try {
       await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
       await secrets.writeSecretFile({
@@ -634,13 +694,420 @@ describe("sync folder replication", () => {
         text: `TOKEN=${SECRET_MARKER}\n`,
         metadata: { origin: "local-file", summary: "secret" },
       });
-      expect(replicationRows(root).map((row) => row.op_kind)).toEqual(["workspace.init"]);
+      await secrets.deleteSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        metadata: { origin: "local-file", summary: "secret delete" },
+      });
+      expect(replicationRows(root).map((row) => row.op_kind)).toEqual([
+        "workspace.init",
+        "secret.file.put",
+        "secret.file.delete",
+      ]);
       await exportSyncBundle({ rootDir: root, workspaceId: WORKSPACE_ID, toDir: bundle });
-      await expect(walkTextFiles(bundle)).resolves.not.toContain(SECRET_MARKER);
-      await expect(walkTextFiles(bundle)).resolves.not.toContain(".env");
+      const textBytes = await walkTextFiles(bundle);
+      const allBytes = await walkFileBytes(bundle);
+      const keyFile = await readFile(join(root, ".dohc/engine/secret.key"), "utf8");
+      const keyBase64 = keyFile.trim().slice("dohc-secret-key-v1:".length);
+      const rawKey = Buffer.from(keyBase64, "base64");
+      expect(textBytes).toContain("workspace.init");
+      expect(textBytes).toContain("secret.file.put");
+      expect(textBytes).toContain("secret.file.delete");
+      // 0P-D deliberately moved the boundary: secret paths may ride the
+      // authenticated replication payload so the importer can reconstruct
+      // AAD (see the design doc's Secrets section). Plaintext and the raw
+      // workspace data key still must never leave the originating store.
+      expect(textBytes).toContain(".env");
+      expect(allBytes.includes(Buffer.from(SECRET_MARKER))).toBe(false);
+      expect(allBytes.includes(Buffer.from(`TOKEN=${SECRET_MARKER}\n`))).toBe(false);
+      expect(allBytes.includes(Buffer.from(keyBase64))).toBe(false);
+      expect(allBytes.includes(rawKey)).toBe(false);
     } finally {
       await secrets.close();
       await versions.close();
+    }
+  });
+
+  it("fails closed when replicated secret ciphertext is spliced across paths (AAD binding)", async () => {
+    const a = await tempRoot("sync-secret-splice-a");
+    const b = await tempRoot("sync-secret-splice-b");
+    const bundle = await tempRoot("sync-secret-splice-bundle");
+    const versions = createVersionedTextStore(a);
+    const secrets = createSecretFileStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: `TOKEN=${SECRET_MARKER}\n`,
+        metadata: { origin: "local-file" },
+      });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "prod.env",
+        text: "PROD=1\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected protected key");
+    await installWorkspaceDataKey(b, key);
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    const opDir = join(bundle, "ops");
+    const opFile = join(opDir, (await readdir(opDir))[0]!);
+    const ops = (await readFile(opFile, "utf8"))
+      .split(/\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const envPut = ops.find(
+      (op) => op.opKind === "secret.file.put" && (op.payload as { path?: string }).path === ".env",
+    )!;
+    const prodPut = ops.find(
+      (op) => op.opKind === "secret.file.put" && (op.payload as { path?: string }).path === "prod.env",
+    )!;
+    const envPayload = envPut.payload as Record<string, unknown>;
+    const prodPayload = prodPut.payload as Record<string, unknown>;
+    prodPayload.ivBase64 = envPayload.ivBase64;
+    prodPayload.authTagBase64 = envPayload.authTagBase64;
+    prodPayload.ciphertextSha256 = envPayload.ciphertextSha256;
+    prodPayload.byteLength = envPayload.byteLength;
+    await writeFile(opFile, `${ops.map((op) => JSON.stringify(op)).join("\n")}\n`, "utf8");
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "prod.env",
+        }),
+      ).rejects.toMatchObject({ code: "decrypt-failed" });
+    } finally {
+      await imported.close();
+    }
+  });
+
+  it("converges same-timestamp divergent secret writes with a deterministic content rank", async () => {
+    const a = await tempRoot("sync-secret-tie-write-a");
+    const b = await tempRoot("sync-secret-tie-write-b");
+    const versionsA = createVersionedTextStore(a);
+    const versionsB = createVersionedTextStore(b);
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsB.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    } finally {
+      await versionsB.close();
+      await versionsA.close();
+    }
+    const secretsA = createSecretFileStore(a, {
+      nowMs: () => 9000,
+      createId: createIdFactory("a-secret-"),
+    });
+    try {
+      await secretsA.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "SIDE=a\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await secretsA.close();
+    }
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected protected key");
+    await installWorkspaceDataKey(b, key);
+    const writeB = createSecretFileStore(b, {
+      nowMs: () => 9000,
+      createId: createIdFactory("b-secret-"),
+    });
+    try {
+      await writeB.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "SIDE=b\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await writeB.close();
+    }
+
+    await syncBothWays(a, b, "sync-secret-tie-write");
+
+    const checkA = createSecretFileStore(a);
+    const checkB = createSecretFileStore(b);
+    try {
+      const tipA = await checkA.materializeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+      });
+      const tipB = await checkB.materializeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+      });
+      expect(tipA).toEqual(tipB);
+      expect(tipA.present ? ["SIDE=a\n", "SIDE=b\n"].includes(tipA.text) : false).toBe(true);
+      expect(sealedTipDigest(b)).toEqual(sealedTipDigest(a));
+    } finally {
+      await checkB.close();
+      await checkA.close();
+    }
+  });
+
+  it("converges a same-timestamp secret delete-vs-write tie with the write winning on both machines", async () => {
+    const a = await tempRoot("sync-secret-tie-delete-a");
+    const b = await tempRoot("sync-secret-tie-delete-b");
+    const versionsA = createVersionedTextStore(a);
+    const versionsB = createVersionedTextStore(b);
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsB.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    } finally {
+      await versionsB.close();
+      await versionsA.close();
+    }
+    const seedA = createSecretFileStore(a, {
+      nowMs: () => 1000,
+      createId: createIdFactory("seed-secret-"),
+    });
+    try {
+      await seedA.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "BASE=1\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await seedA.close();
+    }
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected protected key");
+    await installWorkspaceDataKey(b, key);
+    await syncBothWays(a, b, "sync-secret-tie-delete-seed");
+
+    const deleteA = createSecretFileStore(a, {
+      nowMs: () => 9000,
+      createId: createIdFactory("a-delete-secret-"),
+    });
+    const writeB = createSecretFileStore(b, {
+      nowMs: () => 9000,
+      createId: createIdFactory("b-write-secret-"),
+    });
+    try {
+      await deleteA.deleteSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        metadata: { origin: "local-file" },
+      });
+      await writeB.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "SIDE=b\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await writeB.close();
+      await deleteA.close();
+    }
+
+    await syncBothWays(a, b, "sync-secret-tie-delete");
+
+    const checkA = createSecretFileStore(a);
+    const checkB = createSecretFileStore(b);
+    try {
+      const tipA = await checkA.materializeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+      });
+      const tipB = await checkB.materializeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+      });
+      expect(tipA).toEqual({ present: true, text: "SIDE=b\n" });
+      expect(tipB).toEqual(tipA);
+      expect(sealedTipDigest(b)).toEqual(sealedTipDigest(a));
+    } finally {
+      await checkB.close();
+      await checkA.close();
+    }
+  });
+
+  it("round-trips a secret restore through folder sync", async () => {
+    const a = await tempRoot("sync-secret-restore-a");
+    const b = await tempRoot("sync-secret-restore-b");
+    const bundle = await tempRoot("sync-secret-restore-bundle");
+    const versions = createVersionedTextStore(a, { createId: createIdFactory("text-") });
+    const secrets = createSecretFileStore(a, { createId: createIdFactory("secret-") });
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "RESTORE=old\n",
+        metadata: { origin: "local-file" },
+      });
+      const updated = await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "RESTORE=new\n",
+        metadata: { origin: "local-file" },
+      });
+      await secrets.restoreSecretFileToBeforeMoment({
+        workspaceId: WORKSPACE_ID,
+        momentId: updated.moment?.id ?? "",
+        metadata: { origin: "restore" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected protected key");
+    await installWorkspaceDataKey(b, key);
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: ".env",
+        }),
+      ).resolves.toEqual({ present: true, text: "RESTORE=old\n" });
+    } finally {
+      await imported.close();
+    }
+  });
+
+  it("replicates secret tips and fork bases through secret.version.fork", async () => {
+    const a = await tempRoot("sync-secret-fork-a");
+    const b = await tempRoot("sync-secret-fork-b");
+    const bundle = await tempRoot("sync-secret-fork-bundle");
+    const versions = createVersionedTextStore(a, { createId: createIdFactory("text-") });
+    const secrets = createSecretFileStore(a, { createId: createIdFactory("secret-") });
+    let versionId = "";
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "FORKED=1\n",
+        metadata: { origin: "local-file" },
+      });
+      versionId = (
+        await versions.createNamedVersion({
+          workspaceId: WORKSPACE_ID,
+          name: "Staging",
+          fromVersionId: "main",
+        })
+      ).id;
+      await secrets.forkVersion({
+        workspaceId: WORKSPACE_ID,
+        fromVersionId: "main",
+        toVersionId: versionId,
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    expect(replicationRows(a).map((row) => row.op_kind)).toContain("secret.version.fork");
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected protected key");
+    await installWorkspaceDataKey(b, key);
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+
+    const imported = createSecretFileStore(b);
+    try {
+      expect(await imported.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId })).toEqual([
+        expect.objectContaining({ path: ".env", byteLength: Buffer.byteLength("FORKED=1\n") }),
+      ]);
+      await expect(
+        imported.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId,
+          path: ".env",
+        }),
+      ).resolves.toEqual({ present: true, text: "FORKED=1\n" });
+      expect(secretCipherRows(b, versionId)).toEqual(secretCipherRows(a, versionId));
+      expect(secretForkBaseRows(b, versionId)).toEqual(secretForkBaseRows(a, versionId));
+    } finally {
+      await imported.close();
+    }
+  });
+
+  it("rejects malformed replicated secret byteLength without poisoning secret rows", async () => {
+    const a = await tempRoot("sync-secret-invalid-a");
+    const b = await tempRoot("sync-secret-invalid-b");
+    const bundle = await tempRoot("sync-secret-invalid-bundle");
+    const versions = createVersionedTextStore(a);
+    const secrets = createSecretFileStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "BAD_LENGTH=1\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    const opFile = join(bundle, "ops", (await readdir(join(bundle, "ops")))[0]!);
+    const ops = (await readFile(opFile, "utf8"))
+      .split(/\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const put = ops.find((op) => op.opKind === "secret.file.put");
+    if (!put || !put.payload || typeof put.payload !== "object") throw new Error("expected put op");
+    (put.payload as Record<string, unknown>).byteLength = "x";
+    await writeFile(opFile, `${ops.map((op) => JSON.stringify(op)).join("\n")}\n`, "utf8");
+
+    await expect(
+      importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" }),
+      ).resolves.toEqual([]);
+      await imported.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "prod.env",
+        text: "OTHER=1\n",
+        metadata: { origin: "local-file" },
+      });
+      await expect(
+        imported.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "prod.env",
+        }),
+      ).resolves.toEqual({ present: true, text: "OTHER=1\n" });
+    } finally {
+      await imported.close();
     }
   });
 
@@ -1996,6 +2463,7 @@ describe("sync folder replication", () => {
     const nowA = { value: 10_000 };
     const nowB = { value: 20_000 };
     const paths = ["docs/fuzz-0.md", "docs/fuzz-1.md", "docs/fuzz-2.md", "docs/fuzz-3.md"];
+    const secretPaths = [".env", "prod.env"];
     const setup = createVersionedTextStore(a, {
       nowMs: () => {
         nowA.value += 10;
@@ -2022,6 +2490,24 @@ describe("sync folder replication", () => {
           metadata: { origin: "api" },
         });
       }
+      const setupSecrets = createSecretFileStore(a, {
+        nowMs: () => {
+          nowA.value += 10;
+          return nowA.value;
+        },
+        createId: createIdFactory("fss-"),
+      });
+      try {
+        await setupSecrets.writeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: secretPaths[0]!,
+          text: `seed secret ${seed}\n`,
+          metadata: { origin: "local-file", summary: "fuzz seed secret" },
+        });
+      } finally {
+        await setupSecrets.close();
+      }
       const general = await setupChats.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
       const started = await setupChats.startChannelThread({
         workspaceId: WORKSPACE_ID,
@@ -2036,6 +2522,9 @@ describe("sync folder replication", () => {
       await setup.close();
     }
     await syncBothWays(a, b, "sync-fuzz-seed");
+    const seededKey = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!seededKey) throw new Error("expected seeded secret key");
+    await installWorkspaceDataKey(b, seededKey);
 
     const aStore = createVersionedTextStore(a, {
       nowMs: () => {
@@ -2064,6 +2553,20 @@ describe("sync folder replication", () => {
         return nowB.value;
       },
       createId: createIdFactory("fcb-"),
+    });
+    const aSecrets = createSecretFileStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("fsa-"),
+    });
+    const bSecrets = createSecretFileStore(b, {
+      nowMs: () => {
+        nowB.value += 10;
+        return nowB.value;
+      },
+      createId: createIdFactory("fsb-"),
     });
 
     // Binary snapshots read back with text "" — identity for them is the
@@ -2122,10 +2625,46 @@ describe("sync folder replication", () => {
       replicationRows(root)
         .map((row) => `${row.origin_id}:${row.origin_seq}`)
         .sort();
-    type FuzzPlan = { kind: "binary" | "chat" | "delete" | "rename" | "write"; path: string };
+    const secretCipherDigest = (root: string) => {
+      const db = rawDb(root);
+      try {
+        return db
+          .prepare(
+            `SELECT path, iv_base64, auth_tag_base64, ciphertext_base64
+             FROM secret_files
+             WHERE workspace_id = ? AND version_id = 'main'
+             ORDER BY path`,
+          )
+          .all(WORKSPACE_ID)
+          .map(
+            (row) =>
+              `${row.path}\0${row.iv_base64}\0${row.auth_tag_base64}\0${row.ciphertext_base64}`,
+          );
+      } finally {
+        db.close();
+      }
+    };
+    const secretPlainDigest = async (secrets: typeof aSecrets) => {
+      const rows = await secrets.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" });
+      const out: string[] = [];
+      for (const file of rows.sort((left, right) => left.path.localeCompare(right.path))) {
+        const materialized = await secrets.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: file.path,
+        });
+        out.push(`${file.path}\0${materialized.present ? materialized.text : "<absent>"}`);
+      }
+      return out;
+    };
+    type FuzzPlan = {
+      kind: "binary" | "chat" | "delete" | "rename" | "secret-write" | "write";
+      path: string;
+    };
     const applyBatch = async (
       store: typeof aStore,
       chats: typeof aChats,
+      secrets: typeof aSecrets,
       side: "a" | "b",
       iteration: number,
       plans: FuzzPlan[],
@@ -2139,6 +2678,25 @@ describe("sync folder replication", () => {
             author: { kind: "agent", displayName: side === "a" ? "Agent A" : "Agent B" },
             body: `chat ${side} ${iteration}.${opIndex} seed ${seed}`,
           });
+          continue;
+        }
+        if (plan.kind === "secret-write") {
+          if ((iteration + opIndex) % 5 === 0) {
+            await secrets.deleteSecretFile({
+              workspaceId: WORKSPACE_ID,
+              versionId: "main",
+              path: plan.path,
+              metadata: { origin: "local-file", summary: `fuzz ${side} secret delete` },
+            });
+          } else {
+            await secrets.writeSecretFile({
+              workspaceId: WORKSPACE_ID,
+              versionId: "main",
+              path: plan.path,
+              text: `secret ${side} ${iteration}.${opIndex} seed ${seed}\n`,
+              metadata: { origin: "local-file", summary: `fuzz ${side} secret write` },
+            });
+          }
           continue;
         }
         const files = await fileMap(store);
@@ -2202,6 +2760,12 @@ describe("sync folder replication", () => {
         const batchSize = 2 + Math.floor(random() * 4);
         const plans: FuzzPlan[] = Array.from({ length: batchSize }, (_, opIndex) => {
           if (opIndex > 0 && random() < 0.15) return { kind: "chat", path: collisionPath };
+          if (opIndex > 0 && random() < 0.18) {
+            return {
+              kind: "secret-write",
+              path: secretPaths[Math.floor(random() * secretPaths.length)]!,
+            };
+          }
           const roll = random();
           return {
             kind:
@@ -2216,8 +2780,8 @@ describe("sync folder replication", () => {
           };
         });
         try {
-          await applyBatch(aStore, aChats, "a", index, plans);
-          await applyBatch(bStore, bChats, "b", index, plans);
+          await applyBatch(aStore, aChats, aSecrets, "a", index, plans);
+          await applyBatch(bStore, bChats, bSecrets, "b", index, plans);
           // version-create divergence corpus: each side occasionally forks a
           // named version from main while the other side keeps editing main —
           // the replicated fork must converge on the ORIGIN's fork-point
@@ -2295,7 +2859,11 @@ describe("sync folder replication", () => {
           throw error;
         }
       }
+      expect(secretCipherDigest(b)).toEqual(secretCipherDigest(a));
+      await expect(secretPlainDigest(bSecrets)).resolves.toEqual(await secretPlainDigest(aSecrets));
     } finally {
+      await bSecrets.close();
+      await aSecrets.close();
       await bChats.close();
       await aChats.close();
       await bStore.close();

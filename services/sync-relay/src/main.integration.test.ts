@@ -12,8 +12,14 @@ import {
   createLinkedChatStore,
   createSecretFileStore,
   createVersionedTextStore,
+  downloadKeyEnvelope,
+  installWorkspaceDataKey,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  readWorkspaceDataKeyForEnrollment,
+  unwrapWorkspaceDataKey,
+  uploadKeyEnvelope,
+  wrapWorkspaceDataKey,
   type SyncReplicationEnvelope,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -606,7 +612,7 @@ describe("sync relay main process", () => {
     }
   }, 30_000);
 
-  it("does not send or store plaintext secret writes over the relay transport", async (context) => {
+  it("sends and stores secret ciphertext over the relay transport without plaintext or raw key", async (context) => {
     const relayRoot = await tempRoot("relay-secret");
     const dbPath = join(relayRoot, "relay.sqlite");
     let baseUrl: string;
@@ -634,7 +640,13 @@ describe("sync relay main process", () => {
     const root = await tempRoot("secret-a");
     const marker = "DOHC_SECRET_MARKER_0PB";
     const store = createVersionedTextStore(root);
-    const secrets = createSecretFileStore(root, { createId: () => "secret-moment-1" });
+    let secretMoment = 0;
+    const secrets = createSecretFileStore(root, {
+      createId: () => {
+        secretMoment += 1;
+        return `secret-moment-${secretMoment}`;
+      },
+    });
     try {
       await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
       await secrets.writeSecretFile({
@@ -644,10 +656,19 @@ describe("sync relay main process", () => {
         text: `TOKEN=${marker}\n`,
         metadata: { origin: "local-file", summary: "secret" },
       });
+      await secrets.deleteSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        metadata: { origin: "local-file", summary: "secret delete" },
+      });
     } finally {
       await secrets.close();
       await store.close();
     }
+    const keyFile = await readFile(join(root, ".dohc/engine/secret.key"), "utf8");
+    const keyBase64 = keyFile.trim().slice("dohc-secret-key-v1:".length);
+    const rawKey = Buffer.from(keyBase64, "base64");
     await pushWorkspaceToRelay({ rootDir: root, workspaceId: WORKSPACE_ID, relay });
     // The relay runs WAL mode: fresh writes live in relay.sqlite-wal until a
     // checkpoint, so an absence assertion over the main file alone could
@@ -661,11 +682,141 @@ describe("sync relay main process", () => {
       ),
     );
     expect(relayBytes.includes(Buffer.from("workspace.init"))).toBe(true);
+    expect(relayBytes.includes(Buffer.from("secret.file.put"))).toBe(true);
+    expect(relayBytes.includes(Buffer.from("secret.file.delete"))).toBe(true);
+    // 0P-D intentionally replicates secret ciphertext and path metadata so
+    // peers can reconstruct the same AAD. The relay may store `.env`, but
+    // never the plaintext secret or the workspace data key.
+    expect(relayBytes.includes(Buffer.from(".env"))).toBe(true);
     expect(relayBytes.includes(Buffer.from(marker))).toBe(false);
-    expect(relayBytes.includes(Buffer.from(".env"))).toBe(false);
+    expect(relayBytes.includes(Buffer.from(keyBase64))).toBe(false);
+    expect(relayBytes.includes(rawKey)).toBe(false);
+    const capturedBytes = Buffer.concat(bodies);
+    expect(capturedBytes.includes(Buffer.from("workspace.init"))).toBe(true);
+    expect(capturedBytes.includes(Buffer.from("secret.file.put"))).toBe(true);
     for (const body of bodies) {
       expect(body.includes(Buffer.from(marker))).toBe(false);
-      expect(body.includes(Buffer.from(".env"))).toBe(false);
+      expect(body.includes(Buffer.from(keyBase64))).toBe(false);
+      expect(body.includes(rawKey)).toBe(false);
+    }
+  });
+
+  it("round-trips a protected file between two machines after passphrase unlock", async (context) => {
+    const relayRoot = await tempRoot("relay-secret-roundtrip");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const relay = relayConnection(baseUrl);
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay });
+    const a = await tempRoot("secret-roundtrip-a");
+    const b = await tempRoot("secret-roundtrip-b");
+    const plaintext = "TOKEN=relay-roundtrip-secret\n";
+    const versions = createVersionedTextStore(a);
+    const secrets = createSecretFileStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: plaintext,
+        metadata: { origin: "local-file", summary: "secret" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected enrollment key");
+    const { envelopeJson } = await wrapWorkspaceDataKey({
+      dataKey: key,
+      passphrase: "sync passphrase",
+      workspaceId: WORKSPACE_ID,
+    });
+    await uploadKeyEnvelope({ workspaceId: WORKSPACE_ID, relay, envelopeJson });
+    await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
+
+    const downloaded = await downloadKeyEnvelope({ workspaceId: WORKSPACE_ID, relay });
+    const unwrapped = await unwrapWorkspaceDataKey({
+      envelopeJson: downloaded,
+      passphrase: "sync passphrase",
+      workspaceId: WORKSPACE_ID,
+    });
+    await installWorkspaceDataKey(b, unwrapped);
+    const pulled = await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
+    expect(pulled.fetched).toBeGreaterThanOrEqual(2);
+    expect(pulled.applied).toBeGreaterThanOrEqual(2);
+    expect(pulled.fastForwardedPaths).toEqual([]);
+    await pulled.commitFetchCursor();
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: ".env",
+        }),
+      ).resolves.toEqual({ present: true, text: plaintext });
+    } finally {
+      await imported.close();
+    }
+  });
+
+  it("syncs protected rows on a no-key machine but materialization fails closed", async (context) => {
+    const relayRoot = await tempRoot("relay-secret-no-key");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const relay = relayConnection(baseUrl);
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay });
+    const a = await tempRoot("secret-no-key-a");
+    const b = await tempRoot("secret-no-key-b");
+    const versions = createVersionedTextStore(a);
+    const secrets = createSecretFileStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "TOKEN=no-key-secret\n",
+        metadata: { origin: "local-file", summary: "secret" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
+    const pulled = await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
+    await pulled.commitFetchCursor();
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" }),
+      ).resolves.toEqual([expect.objectContaining({ path: ".env" })]);
+      await expect(
+        imported.materializeSecretFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: ".env",
+        }),
+      ).rejects.toMatchObject({ code: "key-corrupt" });
+    } finally {
+      await imported.close();
     }
   });
 

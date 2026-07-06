@@ -1,10 +1,12 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync } from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type {
   ActorNeutralWriteMetadata,
+  SyncApplyResult,
+  SyncReplicationEnvelope,
   SecretFileCompareEntry,
   SecretFileDeleteOutcome,
   SecretFileMaterialization,
@@ -15,6 +17,7 @@ import type {
   SecretFileStoreErrorCode,
   SecretFileStoreOptions,
   SecretFileWriteOutcome,
+  SecretVersionForkPayload,
   VersionId,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
@@ -25,6 +28,14 @@ import {
   initializeOrValidateEngineSchema,
 } from "./engineDbSchema";
 import { classifyEngineFilePath } from "./enginePathFloor";
+import {
+  ackReplicationPeer,
+  appliedApplyResult,
+  journalLocalReplicationOp,
+  journalReplicationOp,
+  readReplicationAckedSeq,
+  skippedApplyResult,
+} from "./syncReplication";
 import { VERSIONED_TEXT_STORE_RELATIVE_PATH } from "./versionedTextStore";
 
 // Secret-backed files (PR 08): the dedicated driver for secret-classified
@@ -72,8 +83,10 @@ export const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const SECRET_KEY_FILE_PREFIX = "dohc-secret-key-v1:";
 const SECRET_KEY_BYTES = 32;
 const SECRET_IV_BYTES = 12;
+const SECRET_AUTH_TAG_BYTES = 16;
 const SECRET_AAD_PREFIX = "dohc-secret-v1";
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
+const LOWER_SHA256_HEX = /^[0-9a-f]{64}$/u;
 
 export type {
   SecretFileCompareEntry,
@@ -247,6 +260,85 @@ async function loadSecretDataKey(
   }
 }
 
+function protectedRowsExist(txDb: SqliteDb, workspaceId: WorkspaceId): boolean {
+  return (
+    txDb
+      .prepare("SELECT 1 FROM secret_moments WHERE workspace_id = ? LIMIT 1")
+      .get(workspaceId) !== undefined ||
+    txDb
+      .prepare("SELECT 1 FROM secret_files WHERE workspace_id = ? LIMIT 1")
+      .get(workspaceId) !== undefined
+  );
+}
+
+export async function readWorkspaceDataKeyForEnrollment(
+  rootDir: string,
+  workspaceIdInput: string,
+): Promise<Buffer | null> {
+  const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+  const txDb = openDatabase(rootDir);
+  try {
+    if (!protectedRowsExist(txDb, workspaceId)) return null;
+  } finally {
+    txDb.close();
+  }
+  return loadSecretDataKey(rootDir, { createIfMissing: false });
+}
+
+export type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
+
+export async function readWorkspaceSecretState(
+  rootDir: string,
+  workspaceIdInput: string,
+): Promise<WorkspaceSecretState> {
+  const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+  const txDb = openDatabase(rootDir);
+  try {
+    if (!protectedRowsExist(txDb, workspaceId)) return "none";
+  } finally {
+    txDb.close();
+  }
+  return existsSync(keyFilePath(rootDir)) ? "protected-key-present" : "protected-key-missing";
+}
+
+export async function installWorkspaceDataKey(rootDir: string, keyInput: Uint8Array): Promise<void> {
+  const key = Buffer.from(keyInput);
+  if (key.length !== SECRET_KEY_BYTES) {
+    throw new SecretFileStoreError("key-corrupt", "Workspace secret key has an invalid length.");
+  }
+  const path = keyFilePath(rootDir);
+  try {
+    const existing = parseKeyFile(await readFile(path, "utf8"));
+    await chmod(path, 0o600).catch(() => undefined);
+    if (existing.equals(key)) return;
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "A different workspace secret key already exists locally; refusing to overwrite protected state.",
+    );
+  } catch (error) {
+    if (error instanceof SecretFileStoreError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new SecretFileStoreError(
+        "key-corrupt",
+        "The workspace secret key file could not be read; refusing to install a replacement.",
+      );
+    }
+  }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
+  try {
+    await writeFile(path, payload, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      return installWorkspaceDataKey(rootDir, key);
+    }
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be installed.",
+    );
+  }
+}
+
 // --- crypto ------------------------------------------------------------------
 
 interface SecretCipherText {
@@ -254,6 +346,10 @@ interface SecretCipherText {
   authTagBase64: string;
   ciphertextBase64: string;
   byteLength: number;
+}
+
+function sha256Bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function secretAad(workspaceId: WorkspaceId, path: string): Buffer {
@@ -382,6 +478,81 @@ function normalizeMetadata(metadata: ActorNeutralWriteMetadata): ActorNeutralWri
   };
 }
 
+function invalidReplicationPayload(): SecretFileStoreError {
+  return new SecretFileStoreError("invalid-input", "Secret replication payload is invalid.");
+}
+
+function normalizeBase64Field(value: unknown, expectedLength: number): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/u.test(value)) {
+    throw invalidReplicationPayload();
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.length !== expectedLength || bytes.toString("base64") !== value) {
+    throw invalidReplicationPayload();
+  }
+  return value;
+}
+
+function normalizeCiphertextSha256(value: unknown): string {
+  if (typeof value !== "string" || !LOWER_SHA256_HEX.test(value)) {
+    throw invalidReplicationPayload();
+  }
+  return value;
+}
+
+function normalizeSecretByteLength(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > MAX_SECRET_FILE_BYTES
+  ) {
+    throw invalidReplicationPayload();
+  }
+  return value;
+}
+
+function normalizeRemoteUpdatedAtMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw invalidReplicationPayload();
+  }
+  return value;
+}
+
+function normalizeLatestMomentId(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw invalidReplicationPayload();
+  }
+  return value;
+}
+
+function normalizeSecretForkPayload(payload: unknown): SecretVersionForkPayload {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw invalidReplicationPayload();
+  }
+  const input = payload as Record<string, unknown>;
+  if (!Array.isArray(input.rows)) throw invalidReplicationPayload();
+  return {
+    toVersionId: normalizeLatestMomentId(input.toVersionId),
+    fromVersionId: normalizeLatestMomentId(input.fromVersionId),
+    rows: input.rows.map((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) {
+        throw invalidReplicationPayload();
+      }
+      const entry = row as Record<string, unknown>;
+      return {
+        path: normalizeSecretPath(entry.path as string),
+        ivBase64: normalizeBase64Field(entry.ivBase64, SECRET_IV_BYTES),
+        authTagBase64: normalizeBase64Field(entry.authTagBase64, SECRET_AUTH_TAG_BYTES),
+        ciphertextSha256: normalizeCiphertextSha256(entry.ciphertextSha256),
+        byteLength: normalizeSecretByteLength(entry.byteLength),
+        updatedAtMs: normalizeRemoteUpdatedAtMs(entry.updatedAtMs),
+        latestMomentId: normalizeLatestMomentId(entry.latestMomentId),
+      };
+    }),
+  };
+}
+
 function requireVersionRow(db: SqliteDb, workspaceId: WorkspaceId, versionId: string): VersionId {
   if (typeof versionId !== "string" || !versionId.trim()) {
     throw new SecretFileStoreError("invalid-version", "Version id is required.");
@@ -459,6 +630,122 @@ function sealedFromMomentRow(row: Record<string, unknown>): SecretCipherText | n
     ciphertextBase64: stringValue(row.after_ciphertext_base64),
     byteLength: numberValue(row.after_byte_length),
   };
+}
+
+type SecretMomentRank = [number, number, string, string, string];
+
+function momentRank(recordedAtMs: number, after: SecretCipherText | null): SecretMomentRank {
+  return [
+    recordedAtMs,
+    after ? 1 : 0,
+    after?.ciphertextBase64 ?? "",
+    after?.ivBase64 ?? "",
+    after?.authTagBase64 ?? "",
+  ];
+}
+
+function compareMomentRank(left: SecretMomentRank, right: SecretMomentRank): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!;
+    const b = right[index]!;
+    // String elements MUST compare by raw code units (`<`/`>`), never
+    // localeCompare: the rank has to be identical on every machine
+    // regardless of locale, and it has to agree with the SQLite BINARY
+    // collation used by remoteShouldUpdateTip's ORDER BY. Base64 is ASCII,
+    // where code-unit order and byte order coincide.
+    const compared =
+      typeof a === "number" && typeof b === "number" ? a - b : a < b ? -1 : a > b ? 1 : 0;
+    if (compared < 0) return -1;
+    if (compared > 0) return 1;
+  }
+  return 0;
+}
+
+function importedReplicationLogExists(txDb: SqliteDb, input: SyncReplicationEnvelope): boolean {
+  return (
+    txDb
+      .prepare(
+        `SELECT 1 FROM replication_log
+         WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
+      )
+      .get(input.workspaceId, input.originId, input.originSeq) !== undefined
+  );
+}
+
+function journalImportedReplicationOp(txDb: SqliteDb, input: SyncReplicationEnvelope): void {
+  journalReplicationOp(txDb, {
+    workspaceId: input.workspaceId,
+    originId: input.originId,
+    originSeq: input.originSeq,
+    opKind: input.opKind,
+    payload: input.payload,
+    recordedAtMs: input.recordedAtMs,
+  });
+}
+
+function persistSecretCiphertextBlob(txDb: SqliteDb, sealed: SecretCipherText): string {
+  const bytes = Buffer.from(sealed.ciphertextBase64, "base64");
+  const sha = sha256Bytes(bytes);
+  txDb
+    .prepare("INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)")
+    .run(sha, bytes.byteLength, bytes);
+  txDb
+    .prepare("INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, '')")
+    .run(sha, bytes.byteLength);
+  return sha;
+}
+
+function ciphertextBlobBySha(txDb: SqliteDb, sha: string): Buffer {
+  const row = txDb.prepare("SELECT content FROM binary_blobs WHERE sha256 = ?").get(sha);
+  const content = row?.content;
+  const bytes = Buffer.isBuffer(content)
+    ? content
+    : content instanceof Uint8Array
+      ? Buffer.from(content)
+      : null;
+  if (!bytes || sha256Bytes(bytes) !== sha) throw corruptStore();
+  return bytes;
+}
+
+function journalSecretFileMoment(
+  txDb: SqliteDb,
+  input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+    after: SecretCipherText | null;
+    recordedAtMs: number;
+  },
+): void {
+  if (input.after) {
+    const ciphertextSha256 = persistSecretCiphertextBlob(txDb, input.after);
+    journalLocalReplicationOp(txDb, {
+      workspaceId: input.workspaceId,
+      opKind: "secret.file.put",
+      payload: {
+        versionId: input.versionId,
+        path: input.path,
+        metadata: input.metadata,
+        ivBase64: input.after.ivBase64,
+        authTagBase64: input.after.authTagBase64,
+        ciphertextSha256,
+        byteLength: input.after.byteLength,
+      },
+      recordedAtMs: input.recordedAtMs,
+    });
+    return;
+  }
+  journalLocalReplicationOp(txDb, {
+    workspaceId: input.workspaceId,
+    opKind: "secret.file.delete",
+    payload: {
+      versionId: input.versionId,
+      path: input.path,
+      metadata: input.metadata,
+    },
+    recordedAtMs: input.recordedAtMs,
+  });
 }
 
 function defaultCreateId(kind: "moment"): string {
@@ -554,14 +841,7 @@ export function createSecretFileStore(
   // rows sealed under a lost key would silently orphan them — the missing-key
   // case must fail closed instead.
   function hasProtectedRows(txDb: SqliteDb, workspaceId: WorkspaceId): boolean {
-    return (
-      txDb
-        .prepare("SELECT 1 FROM secret_moments WHERE workspace_id = ? LIMIT 1")
-        .get(workspaceId) !== undefined ||
-      txDb
-        .prepare("SELECT 1 FROM secret_files WHERE workspace_id = ? LIMIT 1")
-        .get(workspaceId) !== undefined
-    );
+    return protectedRowsExist(txDb, workspaceId);
   }
 
   function nextMomentOrder(txDb: SqliteDb, workspaceId: WorkspaceId): number {
@@ -582,10 +862,12 @@ export function createSecretFileStore(
       operation: "write" | "delete";
       metadata: ActorNeutralWriteMetadata;
       after: SecretCipherText | null;
+      recordedAtMs?: number;
+      updateTip?: boolean;
     },
   ): SecretFileMoment {
     const momentId = createId("moment");
-    const recordedAtMs = nowMs();
+    const recordedAtMs = input.recordedAtMs ?? nowMs();
     const momentOrder = nextMomentOrder(txDb, input.workspaceId);
     txDb
       .prepare(
@@ -613,7 +895,13 @@ export function createSecretFileStore(
         input.after?.ciphertextBase64 ?? null,
         input.after?.byteLength ?? null,
       );
-    if (input.after) {
+    const updateTip = input.updateTip ?? true;
+    // Local engine writes are authoritative for the local materialized tip
+    // regardless of rank. That means a machine whose clock is behind an
+    // already-imported remote moment can display a lower-ranked local tip
+    // until its next replicated/imported change. This is accepted for alpha
+    // as clock-skew weirdness, and must remain documented as a residual risk.
+    if (input.after && updateTip) {
       txDb
         .prepare(
           `INSERT INTO secret_files (
@@ -639,7 +927,7 @@ export function createSecretFileStore(
           recordedAtMs,
           momentId,
         );
-    } else {
+    } else if (updateTip) {
       txDb
         .prepare(
           "DELETE FROM secret_files WHERE workspace_id = ? AND version_id = ? AND path = ?",
@@ -659,6 +947,39 @@ export function createSecretFileStore(
     };
   }
 
+  function remoteShouldUpdateTip(
+    txDb: SqliteDb,
+    workspaceId: WorkspaceId,
+    versionId: VersionId,
+    path: string,
+    recordedAtMs: number,
+    after: SecretCipherText | null,
+  ): boolean {
+    const latest = txDb
+      .prepare(
+        `SELECT recorded_at_ms, after_present, after_iv_base64, after_auth_tag_base64,
+           after_ciphertext_base64, after_byte_length
+         FROM secret_moments
+         WHERE workspace_id = ? AND version_id = ? AND path = ?
+         ORDER BY recorded_at_ms DESC, after_present DESC,
+           COALESCE(after_ciphertext_base64, '') DESC,
+           COALESCE(after_iv_base64, '') DESC,
+           COALESCE(after_auth_tag_base64, '') DESC
+         LIMIT 1`,
+      )
+      .get(workspaceId, versionId, path);
+    if (latest === undefined) return true;
+    // Imported tips use a deterministic content rank instead of machine-local
+    // moment_order. On exact timestamp ties a write beats a delete
+    // (after_present 1 > 0) on both machines; two same-time writes are won by
+    // the lexicographically larger ciphertext on both machines. Equal rank is
+    // byte-identical sealed content, so >= is idempotent-safe.
+    return compareMomentRank(
+      momentRank(recordedAtMs, after),
+      momentRank(numberValue(latest.recorded_at_ms), sealedFromMomentRow(latest)),
+    ) >= 0;
+  }
+
   // Internal-only plaintext comparison; the decrypted value never leaves this
   // closure. A decrypt failure fails closed (loud), never "assume different".
   function decryptTip(
@@ -672,6 +993,169 @@ export function createSecretFileStore(
   }
 
   return {
+    applyReplicationOp(input): Promise<SyncApplyResult> {
+      return serialize(async (txDb) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        if (
+          input.workspaceId !== workspaceId ||
+          typeof input.originId !== "string" ||
+          !input.originId ||
+          !Number.isInteger(input.originSeq) ||
+          input.originSeq < 0 ||
+          typeof input.recordedAtMs !== "number" ||
+          !Number.isFinite(input.recordedAtMs)
+        ) {
+          throw new SecretFileStoreError("invalid-input", "Replication envelope is invalid.");
+        }
+        const ackedSeq = readReplicationAckedSeq(txDb, workspaceId, input.originId);
+        if (input.originSeq <= ackedSeq) return skippedApplyResult();
+        if (importedReplicationLogExists(txDb, input)) {
+          ackReplicationPeer(txDb, workspaceId, input.originId, input.originSeq);
+          return skippedApplyResult();
+        }
+        if (input.originSeq !== ackedSeq + 1) {
+          throw new SecretFileStoreError(
+            "state-corrupt",
+            `Replication origin ${input.originId} has a gap before sequence ${input.originSeq}.`,
+          );
+        }
+
+        switch (input.opKind) {
+          case "secret.file.put": {
+            const payload = input.payload;
+            const versionId = requireVersionRow(txDb, workspaceId, payload.versionId);
+            const path = normalizeSecretPath(payload.path);
+            const metadata = normalizeMetadata(payload.metadata);
+            const ivBase64 = normalizeBase64Field(payload.ivBase64, SECRET_IV_BYTES);
+            const authTagBase64 = normalizeBase64Field(
+              payload.authTagBase64,
+              SECRET_AUTH_TAG_BYTES,
+            );
+            const ciphertextSha256 = normalizeCiphertextSha256(payload.ciphertextSha256);
+            const byteLength = normalizeSecretByteLength(payload.byteLength);
+            const ciphertext = ciphertextBlobBySha(txDb, ciphertextSha256);
+            const after = {
+              ivBase64,
+              authTagBase64,
+              ciphertextBase64: ciphertext.toString("base64"),
+              byteLength,
+            };
+            insertMoment(txDb, {
+              workspaceId,
+              versionId,
+              path,
+              operation: "write",
+              metadata,
+              after,
+              recordedAtMs: input.recordedAtMs,
+              updateTip: remoteShouldUpdateTip(
+                txDb,
+                workspaceId,
+                versionId,
+                path,
+                input.recordedAtMs,
+                after,
+              ),
+            });
+            break;
+          }
+          case "secret.file.delete": {
+            const payload = input.payload;
+            const versionId = requireVersionRow(txDb, workspaceId, payload.versionId);
+            const path = normalizeSecretPath(payload.path);
+            const metadata = normalizeMetadata(payload.metadata);
+            insertMoment(txDb, {
+              workspaceId,
+              versionId,
+              path,
+              operation: "delete",
+              metadata,
+              after: null,
+              recordedAtMs: input.recordedAtMs,
+              updateTip: remoteShouldUpdateTip(
+                txDb,
+                workspaceId,
+                versionId,
+                path,
+                input.recordedAtMs,
+                null,
+              ),
+            });
+            break;
+          }
+          case "secret.version.fork": {
+            const payload = normalizeSecretForkPayload(input.payload);
+            const fromVersionId = requireVersionRow(txDb, workspaceId, payload.fromVersionId);
+            const toVersionId = requireVersionRow(txDb, workspaceId, payload.toVersionId);
+            if (fromVersionId === toVersionId) {
+              throw new SecretFileStoreError(
+                "invalid-version",
+                "Fork source and destination versions must differ.",
+              );
+            }
+            txDb
+              .prepare(
+                "DELETE FROM secret_files WHERE workspace_id = ? AND version_id = ?",
+              )
+              .run(workspaceId, toVersionId);
+            txDb
+              .prepare(
+                "DELETE FROM secret_fork_bases WHERE workspace_id = ? AND version_id = ?",
+              )
+              .run(workspaceId, toVersionId);
+            for (const row of payload.rows) {
+              const ciphertextBase64 = ciphertextBlobBySha(txDb, row.ciphertextSha256).toString(
+                "base64",
+              );
+              txDb
+                .prepare(
+                  `INSERT INTO secret_files (
+                    workspace_id, version_id, path, iv_base64, auth_tag_base64,
+                    ciphertext_base64, byte_length, updated_at_ms, latest_moment_id
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                )
+                .run(
+                  workspaceId,
+                  toVersionId,
+                  row.path,
+                  row.ivBase64,
+                  row.authTagBase64,
+                  ciphertextBase64,
+                  row.byteLength,
+                  row.updatedAtMs,
+                  row.latestMomentId,
+                );
+              txDb
+                .prepare(
+                  `INSERT INTO secret_fork_bases (
+                    workspace_id, version_id, path, iv_base64, auth_tag_base64,
+                    ciphertext_base64, byte_length
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                )
+                .run(
+                  workspaceId,
+                  toVersionId,
+                  row.path,
+                  row.ivBase64,
+                  row.authTagBase64,
+                  ciphertextBase64,
+                  row.byteLength,
+                );
+            }
+            break;
+          }
+          default:
+            throw new SecretFileStoreError(
+              "invalid-input",
+              `Secret store cannot apply replication op ${input.opKind}.`,
+            );
+        }
+        journalImportedReplicationOp(txDb, input);
+        ackReplicationPeer(txDb, workspaceId, input.originId, input.originSeq);
+        return appliedApplyResult();
+      });
+    },
+
     writeSecretFile(input) {
       return serialize(async (txDb) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
@@ -699,6 +1183,21 @@ export function createSecretFileStore(
           metadata,
           after: sealed,
         });
+        const ciphertextSha256 = persistSecretCiphertextBlob(txDb, sealed);
+        journalLocalReplicationOp(txDb, {
+          workspaceId,
+          opKind: "secret.file.put",
+          payload: {
+            versionId,
+            path,
+            metadata,
+            ivBase64: sealed.ivBase64,
+            authTagBase64: sealed.authTagBase64,
+            ciphertextSha256,
+            byteLength: sealed.byteLength,
+          },
+          recordedAtMs: moment.recordedAtMs,
+        });
         return { changed: true, moment };
       });
     },
@@ -718,6 +1217,12 @@ export function createSecretFileStore(
           operation: "delete",
           metadata,
           after: null,
+        });
+        journalLocalReplicationOp(txDb, {
+          workspaceId,
+          opKind: "secret.file.delete",
+          payload: { versionId, path, metadata },
+          recordedAtMs: moment.recordedAtMs,
         });
         return { moment };
       });
@@ -830,6 +1335,38 @@ export function createSecretFileStore(
             FROM secret_files WHERE workspace_id = ? AND version_id = ?`,
           )
           .run(toVersionId, workspaceId, fromVersionId);
+        const rows = txDb
+          .prepare(
+            `SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length,
+               updated_at_ms, latest_moment_id
+             FROM secret_files
+             WHERE workspace_id = ? AND version_id = ?
+             ORDER BY path`,
+          )
+          .all(workspaceId, toVersionId)
+          .map((row) => {
+            const sealed = sealedFromRow(row);
+            return {
+              path: stringValue(row.path),
+              ivBase64: sealed.ivBase64,
+              authTagBase64: sealed.authTagBase64,
+              ciphertextSha256: persistSecretCiphertextBlob(txDb, sealed),
+              byteLength: sealed.byteLength,
+              updatedAtMs: numberValue(row.updated_at_ms),
+              latestMomentId: stringValue(row.latest_moment_id),
+            };
+          });
+        if (rows.length === 0) {
+          // Empty secret forks are a no-op for replicas; skip journaling to
+          // avoid replication noise for versions without protected files.
+          return;
+        }
+        journalLocalReplicationOp(txDb, {
+          workspaceId,
+          opKind: "secret.version.fork",
+          payload: { toVersionId, fromVersionId, rows },
+          recordedAtMs: nowMs(),
+        });
       });
     },
 
@@ -919,6 +1456,14 @@ export function createSecretFileStore(
             metadata,
             after: source,
           });
+          journalSecretFileMoment(txDb, {
+            workspaceId,
+            versionId: targetVersionId,
+            path,
+            metadata,
+            after: source,
+            recordedAtMs: moment.recordedAtMs,
+          });
           return { changed: true, moment };
         }
         const moment = insertMoment(txDb, {
@@ -928,6 +1473,14 @@ export function createSecretFileStore(
           operation: "delete",
           metadata,
           after: null,
+        });
+        journalSecretFileMoment(txDb, {
+          workspaceId,
+          versionId: targetVersionId,
+          path,
+          metadata,
+          after: null,
+          recordedAtMs: moment.recordedAtMs,
         });
         return { changed: true, moment };
       });
@@ -982,6 +1535,14 @@ export function createSecretFileStore(
             metadata,
             after: null,
           });
+          journalSecretFileMoment(txDb, {
+            workspaceId,
+            versionId: moment.versionId,
+            path: moment.path,
+            metadata,
+            after: null,
+            recordedAtMs: recorded.recordedAtMs,
+          });
           return {
             restored: "deleted" as const,
             restoredMomentId: recorded.id,
@@ -1008,6 +1569,14 @@ export function createSecretFileStore(
           operation: "write",
           metadata,
           after: targetSealed,
+        });
+        journalSecretFileMoment(txDb, {
+          workspaceId,
+          versionId: moment.versionId,
+          path: moment.path,
+          metadata,
+          after: targetSealed,
+          recordedAtMs: recorded.recordedAtMs,
         });
         return {
           restored: "text" as const,

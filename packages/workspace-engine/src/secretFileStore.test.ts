@@ -1103,6 +1103,33 @@ describe("no plaintext accessor except materializeSecretFile", () => {
               }),
             );
             break;
+          case "applyReplicationOp": {
+            const db = rawDb();
+            try {
+              const row = db
+                .prepare(
+                  `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+                   FROM replication_log
+                   WHERE workspace_id = ?
+                   ORDER BY origin_seq
+                   LIMIT 1`,
+                )
+                .get(WORKSPACE_ID);
+              outputs.push(
+                await secrets.applyReplicationOp({
+                  workspaceId: String(row?.workspace_id),
+                  originId: String(row?.origin_id),
+                  originSeq: Number(row?.origin_seq),
+                  opKind: String(row?.op_kind) as never,
+                  payload: JSON.parse(String(row?.payload_json)) as never,
+                  recordedAtMs: Number(row?.recorded_at_ms),
+                }),
+              );
+            } finally {
+              db.close();
+            }
+            break;
+          }
           case "restoreSecretFileToBeforeMoment": {
             const moments = await secrets.listSecretMoments({ workspaceId: WORKSPACE_ID });
             outputs.push(

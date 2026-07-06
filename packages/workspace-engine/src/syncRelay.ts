@@ -102,6 +102,13 @@ export class RelayBlobMissingError extends Error {
   }
 }
 
+export class RelayKeyEnvelopeMissingError extends Error {
+  constructor(message = "Relay is missing the workspace key envelope.") {
+    super(message);
+    this.name = "RelayKeyEnvelopeMissingError";
+  }
+}
+
 interface RelayLogPostResult {
   ok: boolean;
   accepted: number;
@@ -687,4 +694,45 @@ export async function claimRelayWorkspace(input: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ workspaceId: input.workspaceId }),
   });
+}
+
+export async function uploadKeyEnvelope(input: {
+  workspaceId: WorkspaceId;
+  relay: SyncRelayConnection;
+  envelopeJson: string;
+}): Promise<void> {
+  const response = await requestRelay(
+    input.relay,
+    `/sync/${encodeURIComponent(input.workspaceId)}/keys`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: input.envelopeJson,
+    },
+  );
+  if (!response.ok) throw new Error(`Relay key envelope upload failed (${response.status})`);
+}
+
+export async function downloadKeyEnvelope(input: {
+  workspaceId: WorkspaceId;
+  relay: SyncRelayConnection;
+}): Promise<string> {
+  const response = await requestRelay(
+    input.relay,
+    `/sync/${encodeURIComponent(input.workspaceId)}/keys`,
+    {},
+    {
+      mapNotFound: async (notFoundResponse) => {
+        const body = (await notFoundResponse.json().catch(() => null)) as {
+          code?: unknown;
+        } | null;
+        if (body?.code === "key_envelope_not_found") {
+          return new RelayKeyEnvelopeMissingError();
+        }
+        return new RelayWorkspaceUnavailableError();
+      },
+    },
+  );
+  if (!response.ok) throw new Error(`Relay key envelope download failed (${response.status})`);
+  return response.text();
 }

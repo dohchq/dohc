@@ -1041,11 +1041,15 @@ export const CloudStatusResult = z.object({
   relayUrl: z.string().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
+  workspaceSecretState: z
+    .enum(["none", "protected-key-present", "protected-key-missing"])
+    .optional(),
 });
 export type CloudStatusResult = z.infer<typeof CloudStatusResult>;
 
 export const CloudEnableSyncPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  passphrase: z.string().optional(),
 });
 export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 

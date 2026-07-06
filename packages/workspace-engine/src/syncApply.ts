@@ -8,6 +8,7 @@ import {
   type EngineSqliteDb,
 } from "./engineDbSchema";
 import { createLinkedChatStore } from "./linkedChatStore";
+import { createSecretFileStore } from "./secretFileStore";
 import {
   MAX_VERSIONED_BINARY_FILE_BYTES,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
@@ -133,6 +134,12 @@ export function collectBlobHashesFromOp(op: SyncReplicationEnvelope): OpBlobRefs
         snapshot.blobSha256,
         (snapshot.contentKind ?? "text") === "binary" ? "binary" : "text",
       );
+    }
+  } else if (op.opKind === "secret.file.put") {
+    push(op.payload.ciphertextSha256, "binary");
+  } else if (op.opKind === "secret.version.fork") {
+    for (const row of op.payload.rows) {
+      push(row.ciphertextSha256, "binary");
     }
   }
   return refs;
@@ -319,6 +326,7 @@ export async function applySyncQueues(
 
   const versions = createVersionedTextStore(input.rootDir);
   const chats = createLinkedChatStore(input.rootDir);
+  const secrets = createSecretFileStore(input.rootDir);
   try {
     let applied = 0;
     let skipped = 0;
@@ -333,6 +341,10 @@ export async function applySyncQueues(
         op.opKind === "chat.thread.create" ||
         op.opKind === "chat.message.append"
           ? await chats.applyReplicationOp(op)
+          : op.opKind === "secret.file.put" ||
+              op.opKind === "secret.file.delete" ||
+              op.opKind === "secret.version.fork"
+            ? await secrets.applyReplicationOp(op)
           : await versions.applyReplicationOp(op);
       if (result.status === "skipped") {
         skipped += 1;
@@ -352,6 +364,7 @@ export async function applySyncQueues(
       skippedOps,
     };
   } finally {
+    await secrets.close();
     await chats.close();
     await versions.close();
   }

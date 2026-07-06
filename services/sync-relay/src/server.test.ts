@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-api/auth/session";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import {
+  MAX_BLOB_BYTES,
+  MAX_KEY_ENVELOPE_BYTES,
+  createSyncRelayHandler,
+  type SyncRelayHandler,
+} from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 let roots: string[] = [];
@@ -89,6 +94,8 @@ describe("sync relay handler", () => {
       request(null, `/sync/workspace-a/blobs/${blobSha}`, { method: "PUT", body: "blob" }),
       request(null, `/sync/workspace-a/blobs/${blobSha}`, { method: "GET" }),
       request(null, "/sync/workspace-a/blobs/have", jsonBody({ sha256s: [blobSha] })),
+      request(null, "/sync/workspace-a/keys", { method: "GET" }),
+      request(null, "/sync/workspace-a/keys", { method: "PUT", body: "{}" }),
       request(null, "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })),
       request(null, "/sync/workspace-a/log?since=0", { method: "GET" }),
     ];
@@ -117,6 +124,8 @@ describe("sync relay handler", () => {
       (ws: string) => request("intruder", `/sync/${ws}/blobs/${blobSha}`, { method: "PUT", body: bytes }),
       (ws: string) => request("intruder", `/sync/${ws}/blobs/${blobSha}`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/blobs/have`, jsonBody({ sha256s: [blobSha] })),
+      (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "GET" }),
+      (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "PUT", body: "{}" }),
       (ws: string) => request("intruder", `/sync/${ws}/log`, jsonBody({ originId: "origin-b", ops: [op(0)] })),
       (ws: string) => request("intruder", `/sync/${ws}/log?since=0`, { method: "GET" }),
     ];
@@ -284,6 +293,47 @@ describe("sync relay handler", () => {
     const absentBody = await absentWorkspace.text();
     expect(await intruder.text()).toBe(absentBody);
     expect(absentBody).not.toContain("blob_not_found");
+  });
+
+  it("stores one opaque key envelope per owned workspace with size and JSON validation", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const missing = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
+    expect(missing.status).toBe(404);
+    expect(await json(missing)).toMatchObject({ code: "key_envelope_not_found" });
+
+    const envelope = JSON.stringify({
+      format: "dohc-key-envelope-v1",
+      saltBase64: "AA==",
+      scryptN: 131072,
+      scryptR: 8,
+      scryptP: 1,
+      ivBase64: "AA==",
+      authTagBase64: "AA==",
+      ciphertextBase64: "AA==",
+    });
+    const put = await h(
+      request("a", "/sync/workspace-a/keys", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: envelope,
+      }),
+    );
+    expect(put.status).toBe(200);
+    await expect((await h(request("a", "/sync/workspace-a/keys", { method: "GET" }))).text()).resolves.toBe(
+      envelope,
+    );
+
+    const invalid = await h(request("a", "/sync/workspace-a/keys", { method: "PUT", body: "[]" }));
+    expect(invalid.status).toBe(400);
+    const oversized = await h(
+      request("a", "/sync/workspace-a/keys", {
+        method: "PUT",
+        body: JSON.stringify({ value: "x".repeat(MAX_KEY_ENVELOPE_BYTES) }),
+      }),
+    );
+    expect(oversized.status).toBe(413);
   });
 
   // Gate finding: unclassified errors (auth DB hiccup, unexpected SQLite

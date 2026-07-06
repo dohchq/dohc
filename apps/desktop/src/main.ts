@@ -205,10 +205,19 @@ import {
   createLinkedChatStore,
   createVersionedTextStore,
   claimRelayWorkspace,
+  downloadKeyEnvelope,
+  installWorkspaceDataKey,
   probeRelayWorkspace,
+  readWorkspaceDataKeyForEnrollment,
+  readWorkspaceSecretState,
+  RelayKeyEnvelopeMissingError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   searchWorkspaceEngine,
+  SecretKeyEnvelopeError,
+  unwrapWorkspaceDataKey,
+  uploadKeyEnvelope,
+  wrapWorkspaceDataKey,
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
@@ -1774,10 +1783,21 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = CloudStatusPayload.parse(payload ?? {});
     const status = await cloudLogin().status();
+    const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
     return CloudStatusResult.parse({
       ...status,
       ...(input.workspaceId
-        ? { workspaceSynced: !!findWorkspace(input.workspaceId)?.remote }
+        ? {
+            workspaceSynced: !!workspace?.remote,
+            ...(workspace
+              ? {
+                  workspaceSecretState: await readWorkspaceSecretState(
+                    workspace.rootPath,
+                    workspace.workspaceId,
+                  ),
+                }
+              : {}),
+          }
         : {}),
     });
   });
@@ -1836,6 +1856,68 @@ function registerIpcHandlers(): void {
           throw new Error("This workspace id is already claimed by another account");
         }
         throw error;
+      }
+      const dataKey = await readWorkspaceDataKeyForEnrollment(
+        workspace.rootPath,
+        workspace.workspaceId,
+      );
+      if (dataKey) {
+        if (!input.passphrase) {
+          throw new Error("Passphrase required to protect synced secrets.");
+        }
+        try {
+          const { envelopeJson } = await wrapWorkspaceDataKey({
+            dataKey,
+            passphrase: input.passphrase,
+            workspaceId: workspace.workspaceId,
+          });
+          await uploadKeyEnvelope({
+            workspaceId: workspace.workspaceId,
+            relay: {
+              baseUrl: credentials.relayUrl,
+              token: credentials.token,
+            },
+            envelopeJson,
+          });
+        } finally {
+          dataKey.fill(0);
+        }
+      } else {
+        let envelopeJson: string | null = null;
+        try {
+          envelopeJson = await downloadKeyEnvelope({
+            workspaceId: workspace.workspaceId,
+            relay: {
+              baseUrl: credentials.relayUrl,
+              token: credentials.token,
+            },
+          });
+        } catch (error) {
+          if (!(error instanceof RelayKeyEnvelopeMissingError)) throw error;
+        }
+        if (envelopeJson) {
+          if (!input.passphrase) {
+            throw new Error("Passphrase required to unlock synced secrets.");
+          }
+          let unwrapped: Buffer;
+          try {
+            unwrapped = await unwrapWorkspaceDataKey({
+              envelopeJson,
+              passphrase: input.passphrase,
+              workspaceId: workspace.workspaceId,
+            });
+          } catch (error) {
+            if (error instanceof SecretKeyEnvelopeError) {
+              throw new Error("Passphrase could not unlock synced secrets.");
+            }
+            throw error;
+          }
+          try {
+            await installWorkspaceDataKey(workspace.rootPath, unwrapped);
+          } finally {
+            unwrapped.fill(0);
+          }
+        }
       }
     }
 

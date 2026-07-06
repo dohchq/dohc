@@ -47,6 +47,12 @@ export interface SyncRelayStorage {
   }): PutBlobResult;
   getBlob(workspaceId: string, sha256: string): Uint8Array | null;
   missingBlobs(workspaceId: string, sha256s: string[]): string[];
+  putKeyEnvelope(input: {
+    workspaceId: string;
+    envelopeJson: string;
+    updatedAtMs: number;
+  }): void;
+  getKeyEnvelope(workspaceId: string): string | null;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -120,6 +126,15 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         byte_length INTEGER NOT NULL,
         content BLOB NOT NULL,
         PRIMARY KEY (workspace_id, sha256),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS sync_relay_key_envelopes (
+        workspace_id TEXT PRIMARY KEY,
+        envelope_json TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
         FOREIGN KEY (workspace_id)
           REFERENCES sync_relay_workspaces(workspace_id)
           ON DELETE CASCADE
@@ -240,6 +255,29 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       if (stmt.get(workspaceId, sha256)) found.add(sha256);
     }
     return sha256s.filter((sha256) => !found.has(sha256));
+  }
+
+  putKeyEnvelope(input: {
+    workspaceId: string;
+    envelopeJson: string;
+    updatedAtMs: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO sync_relay_key_envelopes (workspace_id, envelope_json, updated_at_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+           envelope_json = excluded.envelope_json,
+           updated_at_ms = excluded.updated_at_ms`,
+      )
+      .run(input.workspaceId, input.envelopeJson, Math.trunc(input.updatedAtMs));
+  }
+
+  getKeyEnvelope(workspaceId: string): string | null {
+    const row = this.db
+      .prepare("SELECT envelope_json FROM sync_relay_key_envelopes WHERE workspace_id = ?")
+      .get(workspaceId);
+    return typeof row?.envelope_json === "string" ? row.envelope_json : null;
   }
 
   appendLogBatch(input: {
