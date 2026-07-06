@@ -216,6 +216,9 @@ export type SyncReplicationOpKind =
   | "version.rename"
   | "conflict.open"
   | "conflict.resolve"
+  | "secret.file.put"
+  | "secret.file.delete"
+  | "secret.version.fork"
   | "chat.channel.create"
   | "chat.thread.create"
   // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
@@ -306,6 +309,41 @@ export interface ConflictResolvePayload {
   incomingLatestMomentId?: VersionedTextMomentId;
 }
 
+export interface SecretFilePutPayload {
+  versionId: VersionId;
+  path: string;
+  metadata: ActorNeutralWriteMetadata;
+  ivBase64: string;
+  authTagBase64: string;
+  // sha256 of the raw ciphertext bytes. Plaintext and workspace data keys
+  // must never ride replication payloads.
+  ciphertextSha256: string;
+  byteLength: number;
+}
+
+export interface SecretFileDeletePayload {
+  versionId: VersionId;
+  path: string;
+  metadata: ActorNeutralWriteMetadata;
+}
+
+export interface SecretVersionForkPayload {
+  toVersionId: VersionId;
+  fromVersionId: VersionId;
+  rows: Array<{
+    path: string;
+    ivBase64: string;
+    authTagBase64: string;
+    ciphertextSha256: string;
+    byteLength: number;
+    updatedAtMs: number;
+    // Provenance string copied verbatim from the origin's secret_files row.
+    // Secret moment ids are machine-local, so this may not resolve through
+    // getSecretMoment on replicas; secret_files intentionally has no FK here.
+    latestMomentId: string;
+  }>;
+}
+
 export interface ChatChannelCreatePayload {
   // Origin-local channel id; NOT a cross-machine identity (peers mint their
   // own local ids). Cross-machine identity is wireId below.
@@ -370,6 +408,9 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"version.rename", unknown>
   | SyncReplicationEnvelopeOf<"conflict.open", VersionedTextConflictRecord>
   | SyncReplicationEnvelopeOf<"conflict.resolve", ConflictResolvePayload>
+  | SyncReplicationEnvelopeOf<"secret.file.put", SecretFilePutPayload>
+  | SyncReplicationEnvelopeOf<"secret.file.delete", SecretFileDeletePayload>
+  | SyncReplicationEnvelopeOf<"secret.version.fork", SecretVersionForkPayload>
   | SyncReplicationEnvelopeOf<"chat.channel.create", ChatChannelCreatePayload>
   | SyncReplicationEnvelopeOf<"chat.thread.create", ChatThreadCreatePayload>
   | SyncReplicationEnvelopeOf<"chat.thread.update", unknown>
@@ -1161,6 +1202,7 @@ export type SecretFileMaterialization =
  * materializeSecretFile.
  */
 export interface SecretFileStore {
+  applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   writeSecretFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;

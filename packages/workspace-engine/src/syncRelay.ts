@@ -102,6 +102,13 @@ export class RelayBlobMissingError extends Error {
   }
 }
 
+export class RelayKeyEnvelopeMissingError extends Error {
+  constructor(message = "Relay is missing the workspace key envelope.") {
+    super(message);
+    this.name = "RelayKeyEnvelopeMissingError";
+  }
+}
+
 interface RelayLogPostResult {
   ok: boolean;
   accepted: number;
@@ -687,4 +694,86 @@ export async function claimRelayWorkspace(input: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ workspaceId: input.workspaceId }),
   });
+}
+
+// The relay's PUT /keys is create-only on first write and compare-and-swap
+// (If-Match: sha256 of the current envelope) thereafter, so a stale client can
+// never silently clobber a newer wrapped key. This uploader is only reached
+// when the local machine HOLDS the workspace data key (the enroll/re-wrap
+// path), so replacing an existing envelope with a fresh wrap of that key is a
+// deliberate, legitimate write: on conflict it reads the current fingerprint
+// and retries the CAS a bounded number of times, then fails loudly. Replaced
+// envelopes are retained server-side in an audit history.
+export async function uploadKeyEnvelope(input: {
+  workspaceId: WorkspaceId;
+  relay: SyncRelayConnection;
+  envelopeJson: string;
+}): Promise<void> {
+  const path = `/sync/${encodeURIComponent(input.workspaceId)}/keys`;
+  let ifMatch: string | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (ifMatch !== null) headers["if-match"] = `"${ifMatch}"`;
+    const response = await requestRelay(input.relay, path, {
+      method: "PUT",
+      headers,
+      body: input.envelopeJson,
+    });
+    if (response.ok) return;
+    if (response.status !== 409) {
+      throw new Error(`Relay key envelope upload failed (${response.status})`);
+    }
+    // Conflict: an envelope already exists (or was replaced under us). Read
+    // its current fingerprint and retry as an explicit replacement.
+    let current: Response;
+    try {
+      current = await requestRelay(input.relay, path, {});
+    } catch (error) {
+      if (error instanceof RelayKeyEnvelopeMissingError || error instanceof RelayWorkspaceUnavailableError) {
+        // Envelope vanished between the PUT and the GET; retry create-only.
+        ifMatch = null;
+        continue;
+      }
+      throw error;
+    }
+    if (!current.ok) {
+      throw new Error(`Relay key envelope upload failed (${current.status})`);
+    }
+    await current.arrayBuffer().catch(() => undefined);
+    const etag = current.headers.get("etag");
+    const fingerprint = etag?.trim().replace(/^"(.*)"$/u, "$1") ?? null;
+    if (!fingerprint || !/^[a-f0-9]{64}$/u.test(fingerprint)) {
+      throw new RelayConflictError(
+        "Relay key envelope already exists but did not expose a fingerprint to replace it.",
+      );
+    }
+    ifMatch = fingerprint;
+  }
+  throw new RelayConflictError(
+    "Relay key envelope kept changing concurrently; upload did not complete.",
+  );
+}
+
+export async function downloadKeyEnvelope(input: {
+  workspaceId: WorkspaceId;
+  relay: SyncRelayConnection;
+}): Promise<string> {
+  const response = await requestRelay(
+    input.relay,
+    `/sync/${encodeURIComponent(input.workspaceId)}/keys`,
+    {},
+    {
+      mapNotFound: async (notFoundResponse) => {
+        const body = (await notFoundResponse.json().catch(() => null)) as {
+          code?: unknown;
+        } | null;
+        if (body?.code === "key_envelope_not_found") {
+          return new RelayKeyEnvelopeMissingError();
+        }
+        return new RelayWorkspaceUnavailableError();
+      },
+    },
+  );
+  if (!response.ok) throw new Error(`Relay key envelope download failed (${response.status})`);
+  return response.text();
 }

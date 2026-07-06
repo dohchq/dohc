@@ -204,4 +204,86 @@ describe("CloudLogin", () => {
 
     expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
   });
+
+  it("prompts for a passphrase when synced secrets need protection", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: false,
+    });
+    bridgeMock.cloudEnableSync
+      .mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."))
+      .mockResolvedValueOnce(undefined);
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+
+    const input = await screen.findByTestId("cloud-sync-passphrase");
+    expect(screen.getByTestId("cloud-sync-error").textContent).toContain("passphrase");
+    expect((screen.getByTestId("cloud-enable-sync") as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: "shared passphrase" } });
+    fireEvent.click(screen.getByTestId("cloud-enable-sync"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
+        workspaceId: "ws-1",
+        passphrase: "shared passphrase",
+      }),
+    );
+    await screen.findByTestId("cloud-workspace-synced");
+  });
+
+  it("protects an already-synced workspace with a passphrase when the local key is present", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+      workspaceSecretState: "protected-key-present",
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-protect-secrets"));
+
+    const input = await screen.findByTestId("cloud-sync-passphrase");
+    expect((screen.getByTestId("cloud-protect-secrets") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.change(input, { target: { value: "shared passphrase" } });
+    fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
+        workspaceId: "ws-1",
+        passphrase: "shared passphrase",
+      }),
+    );
+  });
+
+  it("unlocks protected files later when a synced workspace is missing its local key", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+      workspaceSecretState: "protected-key-missing",
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-unlock-secrets"));
+
+    const input = await screen.findByTestId("cloud-sync-passphrase");
+    expect((screen.getByTestId("cloud-unlock-secrets") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.change(input, { target: { value: "shared passphrase" } });
+    fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
+        workspaceId: "ws-1",
+        passphrase: "shared passphrase",
+      }),
+    );
+    await waitFor(() => expect(screen.getByTestId("cloud-protect-secrets")).toBeTruthy());
+  });
 });

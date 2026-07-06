@@ -3,6 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
 
+type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
+type PassphrasePurpose = "enable" | "protect" | "unlock";
+
 type Phase =
   | { kind: "loading" }
   | { kind: "disconnected" }
@@ -26,6 +29,11 @@ export function CloudLogin(props: {
   const [workspaceSynced, setWorkspaceSynced] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [needsPassphrase, setNeedsPassphrase] = useState(false);
+  const [passphrasePurpose, setPassphrasePurpose] = useState<PassphrasePurpose>("enable");
+  const [passphrase, setPassphrase] = useState("");
+  const [workspaceSecretState, setWorkspaceSecretState] =
+    useState<WorkspaceSecretState>("none");
   const [serverUrl, setServerUrl] = useState("");
   const [relayUrl, setRelayUrl] = useState("");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -46,11 +54,16 @@ export function CloudLogin(props: {
     setWorkspaceSynced(false);
     setSyncBusy(false);
     setSyncError(null);
+    setNeedsPassphrase(false);
+    setPassphrasePurpose("enable");
+    setPassphrase("");
+    setWorkspaceSecretState("none");
     void bridge()
       .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
       .then((status) => {
         if (session !== sessionRef.current) return;
         setWorkspaceSynced(status.workspaceSynced ?? false);
+        setWorkspaceSecretState(status.workspaceSecretState ?? "none");
         if (status.serverUrl) setServerUrl(status.serverUrl);
         if (status.relayUrl) setRelayUrl(status.relayUrl);
         setPhase(
@@ -74,15 +87,47 @@ export function CloudLogin(props: {
     setSyncBusy(true);
     setSyncError(null);
     try {
-      await bridge().cloudEnableSync({ workspaceId: props.workspaceId });
-      if (session === sessionRef.current) setWorkspaceSynced(true);
+      await bridge().cloudEnableSync({
+        workspaceId: props.workspaceId,
+        ...(needsPassphrase ? { passphrase } : {}),
+      });
+      if (session === sessionRef.current) {
+        setWorkspaceSynced(true);
+        if (passphrasePurpose === "unlock") {
+          setWorkspaceSecretState("protected-key-present");
+        }
+        setNeedsPassphrase(false);
+        setPassphrase("");
+      }
     } catch (cause) {
       if (session !== sessionRef.current) return;
       const message = cause instanceof Error ? cause.message : String(cause);
-      setSyncError(/already claimed/i.test(message) ? message : "Couldn't enable sync.");
+      if (/passphrase/i.test(message)) {
+        setNeedsPassphrase(true);
+        setPassphrasePurpose(/unlock/i.test(message) ? "unlock" : "protect");
+        setSyncError(
+          /could not/i.test(message)
+            ? "That passphrase couldn't unlock synced secrets."
+            : "Enter a passphrase to protect synced secrets.",
+        );
+      } else {
+        setSyncError(/already claimed/i.test(message) ? message : "Couldn't enable sync.");
+      }
     } finally {
       if (session === sessionRef.current) setSyncBusy(false);
     }
+  }
+
+  function startSecretPassphrase(purpose: PassphrasePurpose) {
+    if (syncBusy) return;
+    if (needsPassphrase && passphrasePurpose === purpose) {
+      void enableSync();
+      return;
+    }
+    setPassphrasePurpose(purpose);
+    setNeedsPassphrase(true);
+    setPassphrase("");
+    setSyncError(null);
   }
 
   function pollUntilDone(session: number) {
@@ -307,6 +352,42 @@ export function CloudLogin(props: {
                     </div>
                   </div>
                 ) : null}
+                {workspaceSecretState === "protected-key-present" ? (
+                  <button
+                    type="button"
+                    data-testid="cloud-protect-secrets"
+                    disabled={
+                      syncBusy ||
+                      (needsPassphrase &&
+                        passphrasePurpose === "protect" &&
+                        passphrase.length === 0)
+                    }
+                    onClick={() => startSecretPassphrase("protect")}
+                    className="mt-3 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+                  >
+                    {syncBusy && passphrasePurpose === "protect"
+                      ? "Protecting…"
+                      : "Protect sync with a passphrase"}
+                  </button>
+                ) : null}
+                {workspaceSecretState === "protected-key-missing" ? (
+                  <button
+                    type="button"
+                    data-testid="cloud-unlock-secrets"
+                    disabled={
+                      syncBusy ||
+                      (needsPassphrase &&
+                        passphrasePurpose === "unlock" &&
+                        passphrase.length === 0)
+                    }
+                    onClick={() => startSecretPassphrase("unlock")}
+                    className="mt-3 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+                  >
+                    {syncBusy && passphrasePurpose === "unlock"
+                      ? "Unlocking…"
+                      : "Unlock protected files"}
+                  </button>
+                ) : null}
                 {props.onManageWorkspace ? (
                   <button
                     type="button"
@@ -323,19 +404,31 @@ export function CloudLogin(props: {
                 <button
                   type="button"
                   data-testid="cloud-enable-sync"
-                  disabled={syncBusy}
+                  disabled={syncBusy || (needsPassphrase && passphrase.length === 0)}
                   onClick={() => void enableSync()}
                   className="mt-3 rounded bg-accent px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50"
                 >
                   {syncBusy ? "Enabling sync…" : "Sync this workspace"}
                 </button>
-                {syncError ? (
-                  <p data-testid="cloud-sync-error" className="mb-0 mt-2 text-xs text-danger">
-                    {syncError}
-                  </p>
-                ) : null}
               </>
             )
+          ) : null}
+          {needsPassphrase ? (
+            <label className="mt-3 block text-[11px] font-medium text-subtle">
+              Passphrase
+              <input
+                data-testid="cloud-sync-passphrase"
+                value={passphrase}
+                type="password"
+                onChange={(event) => setPassphrase(event.currentTarget.value)}
+                className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+              />
+            </label>
+          ) : null}
+          {syncError ? (
+            <p data-testid="cloud-sync-error" className="mb-0 mt-2 text-xs text-danger">
+              {syncError}
+            </p>
           ) : null}
           <button
             type="button"

@@ -35,13 +35,16 @@ export {
 export {
   RelayBlobMissingError,
   RelayConflictError,
+  RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   claimRelayWorkspace,
+  downloadKeyEnvelope,
   probeRelayWorkspace,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  uploadKeyEnvelope,
 } from "./syncRelay";
 export type {
   ProbeRelayWorkspaceResult,
@@ -145,7 +148,20 @@ export {
   SECRET_KEY_RELATIVE_PATH,
   SecretFileStoreError,
   createSecretFileStore,
+  installWorkspaceDataKey,
+  readWorkspaceDataKeyForEnrollment,
+  readWorkspaceSecretState,
+  type WorkspaceSecretState,
 } from "./secretFileStore";
+export {
+  SECRET_KEY_ENVELOPE_FORMAT,
+  SECRET_KEY_ENVELOPE_SCRYPT_N,
+  SECRET_KEY_ENVELOPE_SCRYPT_P,
+  SECRET_KEY_ENVELOPE_SCRYPT_R,
+  SecretKeyEnvelopeError,
+  unwrapWorkspaceDataKey,
+  wrapWorkspaceDataKey,
+} from "./secretKeyEnvelope";
 export type {
   SecretFileCompareEntry,
   SecretFileDeleteOutcome,

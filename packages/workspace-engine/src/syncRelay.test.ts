@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   MAX_VERSIONED_BINARY_FILE_BYTES,
   RelayBlobMissingError,
+  RelayConflictError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
@@ -16,6 +17,7 @@ import {
   createVersionedTextStore,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  uploadKeyEnvelope,
   type SyncReplicationEnvelope,
 } from ".";
 import { openEngineDb } from "./syncApply";
@@ -62,6 +64,11 @@ class FakeRelay {
   readonly blobs = new Map<string, Uint8Array>();
   readonly log: Array<SyncReplicationEnvelope & { relaySeq: number }> = [];
   readonly owners = new Map<string, string>();
+  readonly keyEnvelopes = new Map<string, string>();
+  // Simulates a concurrent writer: after each keys GET serves the current
+  // fingerprint, the stored envelope changes so the follow-up CAS is stale.
+  rotateKeyEnvelopeAfterGet = false;
+  keyPutCount = 0;
   nextRelaySeq = 1;
   corruptBlobGets = false;
   failAuth = false;
@@ -136,6 +143,44 @@ class FakeRelay {
       }
       const body = this.corruptBlobGets ? Buffer.from("corrupt") : Buffer.from(bytes);
       return new Response(body);
+    }
+
+    if (parts[2] === "keys" && request.method === "GET") {
+      const envelope = this.keyEnvelopes.get(workspaceId);
+      if (envelope === undefined) {
+        return Response.json(
+          { ok: false, error: "key envelope not found", code: "key_envelope_not_found" },
+          { status: 404 },
+        );
+      }
+      if (this.rotateKeyEnvelopeAfterGet) {
+        this.keyEnvelopes.set(workspaceId, JSON.stringify({ rotated: sha256(envelope) }));
+      }
+      return new Response(envelope, {
+        status: 200,
+        headers: { "content-type": "application/json", etag: `"${sha256(envelope)}"` },
+      });
+    }
+
+    if (parts[2] === "keys" && request.method === "PUT") {
+      // Mirrors the real relay's create-only / CAS semantics (server.ts +
+      // storage.putKeyEnvelope): no If-Match creates, byte-identical re-PUT
+      // is idempotent, anything else must name the current envelope's sha.
+      this.keyPutCount += 1;
+      const body = await request.text();
+      const ifMatch =
+        request.headers.get("if-match")?.trim().replace(/^"(.*)"$/u, "$1") ?? null;
+      const current = this.keyEnvelopes.get(workspaceId) ?? null;
+      if (current !== body) {
+        if (current === null && ifMatch !== null) {
+          return Response.json({ ok: false, error: "conflict" }, { status: 409 });
+        }
+        if (current !== null && ifMatch !== sha256(current)) {
+          return Response.json({ ok: false, error: "conflict" }, { status: 409 });
+        }
+        this.keyEnvelopes.set(workspaceId, body);
+      }
+      return Response.json({ ok: true, workspaceId, sha256: sha256(body) });
     }
 
     if (parts[2] === "log" && request.method === "GET") {
@@ -712,5 +757,47 @@ describe("sync relay client", () => {
       pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
     ).resolves.toMatchObject({ fetched: 2 });
     expect(probes).toBeGreaterThan(0);
+  });
+
+  // Gate fix (0P-D): PUT /keys is create-only then CAS. The uploader (only
+  // reached by a machine that holds the data key) creates on first enroll,
+  // retries an idempotent re-PUT for free, and replaces an existing envelope
+  // via an explicit If-Match fingerprint instead of clobbering it.
+  it("uploads a key envelope create-only, then replaces an existing one via CAS", async () => {
+    const relay = new FakeRelay();
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await uploadKeyEnvelope({
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+      envelopeJson: '{"wrap":1}',
+    });
+    expect(relay.keyEnvelopes.get(WORKSPACE_ID)).toBe('{"wrap":1}');
+    expect(relay.keyPutCount).toBe(1);
+
+    // Re-wrap (e.g. passphrase change / re-enroll): first PUT 409s, the
+    // client reads the current fingerprint and lands one CAS replace.
+    await uploadKeyEnvelope({
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+      envelopeJson: '{"wrap":2}',
+    });
+    expect(relay.keyEnvelopes.get(WORKSPACE_ID)).toBe('{"wrap":2}');
+    expect(relay.keyPutCount).toBe(3);
+  });
+
+  it("fails loudly when the relay key envelope keeps changing under the CAS retry", async () => {
+    const relay = new FakeRelay();
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    relay.keyEnvelopes.set(WORKSPACE_ID, '{"wrap":"someone-else"}');
+    relay.rotateKeyEnvelopeAfterGet = true;
+    await expect(
+      uploadKeyEnvelope({
+        workspaceId: WORKSPACE_ID,
+        relay: relay.connection(),
+        envelopeJson: '{"wrap":"mine"}',
+      }),
+    ).rejects.toBeInstanceOf(RelayConflictError);
+    // The loser never clobbered the concurrently-written envelope.
+    expect(relay.keyEnvelopes.get(WORKSPACE_ID)).not.toBe('{"wrap":"mine"}');
   });
 });

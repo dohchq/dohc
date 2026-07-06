@@ -17401,3 +17401,292 @@ git diff --check
 - 0P-D consumes: the join flow is where new-machine passphrase
   enrollment will mount (join succeeds; secret materialization stays
   pending until the passphrase step).
+
+## PR 0P-D - Encrypted Secret Replication
+
+Status: complete; driver-verified unsandboxed; committed on lane branch, not pushed
+Branch: codex/think-bigger-0pd-secret-sync
+Worktree: /home/ice/dev/dohc-0pd-secret-sync
+Implementation workstream: Codex round 1 for architecture and tests; planned
+round 2 fixed driver review findings F0-F8.
+PR Link: (pending)
+Date started: 2026-07-07
+Date completed: 2026-07-07
+
+### Scope
+
+- [x] Secret file writes/deletes now journal as `secret.file.put` and
+  `secret.file.delete` replication ops, sharing the existing
+  `replication_log` / `replication_peers` sequencing contract with moments
+  and chats.
+- [x] Secret ciphertext is content-addressed by sha256 of the raw ciphertext
+  bytes and stored in the existing `binary_blobs` plus zero-text `blobs`
+  anchor row shape, so bundle export/import and relay blob hydration remain
+  unchanged.
+- [x] Secret sync apply dispatches through `createSecretFileStore().applyReplicationOp`
+  after normal binary blob hydration. Remote secret moments use the same
+  `insertMoment` helper as local writes and update tips by deterministic
+  content rank: `(recorded_at_ms, after_present,
+  after_ciphertext_base64 ?? "", after_iv_base64 ?? "",
+  after_auth_tag_base64 ?? "")`, descending. This removes the former
+  same-timestamp divergent-write swap bug; on ties writes beat deletes on
+  every machine, and write/write ties choose the lexicographically larger
+  ciphertext on every machine.
+- [x] Secret version forks now journal `secret.version.fork` with
+  `{ toVersionId, fromVersionId, rows: [{ path, ivBase64, authTagBase64,
+  ciphertextSha256, byteLength, updatedAtMs, latestMomentId }] }`. The
+  payload pins the origin's fork-point encrypted tips and fork bases; the
+  importer delete-then-inserts `secret_files` and `secret_fork_bases`
+  without minting moments.
+- [x] Secret merge/restore paths now persist copied ciphertext blobs and
+  journal `secret.file.put` / `secret.file.delete`, so restored or merged
+  secret tips replicate like normal writes.
+- [x] Remote secret payloads fail closed before insertion: IV/tag strict
+  base64 round-trip with exact GCM lengths, lowercase sha256 hex,
+  integer bounded byte lengths, finite fork timestamps, and non-empty fork
+  provenance strings.
+- [x] Added passphrase-wrapped workspace-key envelopes:
+  `dohc-key-envelope-v1`, AES-256-GCM over the 32-byte workspace data key,
+  AAD-bound to `format + "\0" + workspaceId`, KEK derived with async Node
+  `scrypt` (`N=2^17`, `r=8`, `p=1`, maxmem 256 MiB).
+- [x] Relay stores one opaque envelope per workspace at `PUT/GET
+  /sync/:ws/keys`, owner-only like blobs, with a 16 KiB cap and distinct
+  `key_envelope_not_found` 404.
+- [x] Desktop enable-sync has a minimal passphrase step: existing protected
+  rows wrap/upload the local key; a joining machine with an existing relay
+  envelope prompts, unwraps locally, and installs the key before sync starts.
+- [x] Desktop Cloud status now includes local-only `workspaceSecretState`
+  (`none`, `protected-key-present`, `protected-key-missing`) so an
+  already-synced workspace can later protect sync with a passphrase or
+  unlock protected files using the existing `cloudEnableSync` IPC path.
+
+### Files Changed
+
+- Contracts: `packages/workspace-contracts/src/engine.ts`.
+- Engine: `packages/workspace-engine/src/secretFileStore.ts`,
+  `secretKeyEnvelope.ts`, `syncApply.ts`, `syncRelay.ts`,
+  `syncReplication.ts`, `index.ts`.
+- Relay: `services/sync-relay/src/storage.ts`, `server.ts`.
+- Desktop: `apps/desktop/src/main.ts`,
+  `apps/desktop/src/ipc/bridgeContract.ts`,
+  `apps/desktop/src/renderer/CloudLogin.tsx`.
+- Tests: `packages/workspace-engine/src/secretKeyEnvelope.test.ts`,
+  `secretFileStore.test.ts`, `syncFolder.test.ts`,
+  `services/sync-relay/src/server.test.ts`,
+  `services/sync-relay/src/main.integration.test.ts`,
+  `apps/desktop/src/renderer/CloudLogin.test.tsx`.
+- Docs: this execution log entry.
+
+### Tests Added Or Updated
+
+- Boundary change: the former secret-exclusion tests in
+  `syncFolder.test.ts` and `main.integration.test.ts` now assert
+  ciphertext inclusion (`secret.file.put` / delete where exercised) while
+  strengthening plaintext marker and raw/base64 workspace-key absence over
+  bundle, relay DB/WAL/SHM, and HTTP body bytes. `.env` path presence is
+  explicitly allowed and documented per the design's Secrets section.
+- Envelope crypto: round trip, wrong passphrase generic failure with no key
+  file mutation, tampered ciphertext/authTag/salt generic failure, and
+  workspace-AAD splice rejection.
+- Secret replicated path: bundle payload splice across paths fails closed on
+  materialization with `code: "decrypt-failed"`.
+- Secret rank regressions: same-timestamp write/write convergence and
+  same-timestamp delete/write convergence (write wins) across two machines.
+- Secret restore regression: restoring a prior encrypted state on machine A
+  round-trips through folder sync and updates machine B's tip.
+- Secret fork regression: `secret.version.fork` carries encrypted tips and
+  `secret_fork_bases` rows into the replicated named version, byte-exact
+  with the workspace key installed.
+- Secret validation regression: malformed replicated `byteLength` is
+  rejected with `invalid-input` and leaves secret read/write surfaces usable.
+- Relay: key envelope PUT/GET, size cap, JSON-shape sanity, owner isolation,
+  distinct missing-envelope 404.
+- Relay two-machine secret round trip: machine 1 writes a secret and uploads
+  the envelope; machine 2 downloads/unwraps/installs the key, pulls, and
+  materializes byte-exact plaintext. A no-key machine still pulls secret rows
+  but materialization rejects with the existing `key-corrupt` error.
+- Convergence fuzz: added `secret-write` plans and final ciphertext-tip plus
+  decrypted-plaintext digest comparisons across both machines.
+- Desktop: CloudLogin passphrase retry flow plus already-synced protect and
+  later unlock affordances.
+
+### Commands Run
+
+Final driver verification, unsandboxed (loopback available, no skips):
+
+```bash
+pnpm --filter @dohc/workspace-engine test
+# 15 files passed, 362 tests passed (baseline 352 + 10).
+
+pnpm --filter @dohc/sync-relay test
+# 2 files passed, 22 tests passed (baseline 19 + 3), zero skips — the real
+# HTTP integration tests (two-machine secret round trip, no-key machine,
+# ciphertext transport byte-walk) all executed against a live relay.
+
+pnpm --filter @dohc/desktop test
+# 88 files passed, 910 tests passed (baseline 907 + 3). The sandbox-only
+# AgentProcessDrivers/siteRunner failures reported during Codex rounds do
+# not reproduce outside the sandbox.
+
+pnpm --filter @dohc/mcp test
+# 4 files passed, 76 tests passed (baseline held).
+
+pnpm --filter @dohc/workspace-engine exec tsc --noEmit
+# clean
+
+pnpm --filter @dohc/sync-relay exec tsc --noEmit
+# clean
+
+pnpm --filter @dohc/desktop exec tsc --noEmit
+# clean
+
+node scripts/check-think-bigger-doc-links.mjs
+# docs link/anchor check passed for 10 files
+
+git diff --check
+# clean
+```
+
+### Security / Privacy Notes
+
+- Scrypt params: `N=2^17`, `r=8`, `p=1` uses roughly 128 MiB and is meant
+  for a once-per-machine desktop enrollment prompt, not a hot login path.
+  Argon2id remains a possible future upgrade, but async Node scrypt avoids a
+  new dependency and avoids blocking the Electron/main Node event loop.
+- Envelope JSON shape is exactly `{ format, saltBase64, scryptN, scryptR,
+  scryptP, ivBase64, authTagBase64, ciphertextBase64 }`. The relay treats
+  it as opaque JSON and never sees the passphrase, derived KEK, or data key.
+- All unwrap failures collapse to `SecretKeyEnvelopeError` code
+  `unwrap-failed`; wrong passphrase, tampering, bad JSON, and workspace
+  splicing are intentionally not distinguished.
+- JS/V8/OpenSSL cannot guarantee erasure of copied key material. The engine
+  and desktop zero the Buffers they directly own as best effort only.
+- Deliberate boundary change: secret ciphertext and the path may now appear
+  in replication payloads, bundles, relay rows, WAL, and HTTP bodies. The
+  plaintext secret content and raw workspace data key (raw bytes and base64
+  key-file encoding) remain forbidden and are asserted absent.
+- Relay SQLite is WAL-backed and append-only for alpha. Replaced key
+  envelopes may leave old ciphertext ancestors in database/WAL history until
+  SQLite checkpoint/vacuum or future GC.
+- Re-running enable-sync/protect on a machine that has the workspace data
+  key re-uploads the envelope and overwrites the relay's previous envelope.
+  This is latest-wins by design, doubles as the alpha passphrase-change path,
+  and has no envelope history.
+
+### Migration Notes
+
+- Engine schema reuse only: no new engine tables for secret ciphertext.
+  Existing `binary_blobs` / `blobs` carry ciphertext blobs.
+- Relay migration is lazy additive: `sync_relay_key_envelopes` is created on
+  relay open and cascades with workspace deletion.
+- Manual key-file fallback is preserved: `.dohc/engine/secret.key` keeps the
+  `dohc-secret-key-v1:` format and can still be copied between machines.
+
+### Remaining Risk / Follow-Ups
+
+- Local secret writes always take the local tip because the local engine is
+  authoritative for the materialized workspace. A machine whose clock runs
+  behind an already-imported remote moment can therefore hold a lower-ranked
+  tip until its next write/import. The product accepts clock-skew display
+  weirdness for alpha, but this one affects tips and remains a known risk.
+- Cold adoption gap: secrets written before 0P-D landed have no journal
+  entries, so they do not replicate until their next local change or a
+  version fork carries their encrypted tips. Acceptable pre-launch; follow-up
+  migration/repair can backfill if needed.
+- The Codex implementation sandbox denied loopback listen, so its own runs
+  skipped the relay HTTP integration tests. The driver re-ran every suite
+  unsandboxed before commit (counts above): all relay integration tests
+  executed against a live relay with zero skips, and the desktop suite is
+  fully green.
+- Driver gate fix on the round-2 diff: `compareMomentRank` used
+  `localeCompare`, which is locale-dependent and can disagree with the
+  SQLite BINARY collation used by the rank `ORDER BY`; replaced with raw
+  code-unit comparison so the deterministic tie-break is identical on every
+  machine and inside SQL.
+
+### Gate Fix Round (2026-07-07, Claude lane driver)
+
+Rebased onto main 5f755435 (post 0P-C: syncApply/syncRelay/syncReplication
+reshaped, CloudLogin gained the sync-code block). Conflicts in six files were
+all both-sides-additive (imports/exports, CloudLogin JSX blocks, this log);
+no semantic collisions. Post-rebase baselines matched (engine 373, desktop
+944, relay 22, MCP 76) before any fix landed.
+
+Findings fixed tests-first (each guard was then temporarily neutered to
+prove its test fails against the pre-fix behavior — all four poison tests,
+the error-shape test, and the CAS test reproduce the original bugs):
+
+- Codex M1 (secretFileStore): secret ciphertext refs ride the 5 MiB
+  binary-blob transport while secrets cap at 1 MiB plaintext, and the actual
+  blob length was never checked against the declared byteLength. GCM here is
+  length-preserving (tag + IV travel in their own fields), so the honest
+  overhead allowance is exactly zero: `secretCiphertextBlobBySha` now
+  enforces `bytes.byteLength === declared` AND `<= MAX_SECRET_FILE_BYTES`
+  before any moment/tip/fork-base insert. Tests: length-mismatched poison op
+  and a 1 MiB + 1 blob smuggled under the 5 MiB transport cap both reject
+  with invalid-input, secret rows unpoisoned.
+- Codex M2 (secretFileStore): imported secret.version.fork wiped destination
+  rows then trusted payload rows blindly. No-key-safe minimum implemented:
+  every fork row must byte-match the importer's own sealed source tip at the
+  same path for fromVersionId (ciphertext sha + IV + auth tag + length);
+  extra, missing, and duplicate rows reject; verification runs BEFORE the
+  destination wipe and the whole apply is one transaction (no partial wipe).
+  Honest residual: under cross-origin clock skew a legitimate fork can
+  disagree with the importer's converged source tips and be rejected — fails
+  the pull loudly, never corrupts state. Test: poison fork with swapped
+  sealed rows rejected, previously replicated destination rows intact.
+- Codex M3 + CR major (sync-relay PUT /keys): was a plain upsert — any
+  authenticated stale writer could silently clobber the only recovery copy
+  of the wrapped workspace key. Now create-only on first write and CAS
+  thereafter (If-Match: sha256 of the envelope being replaced; byte-identical
+  re-PUT stays idempotent). Replaced envelopes are RETAINED in
+  sync_relay_key_envelope_history (envelope, sha, replacedAtMs, successor
+  sha) — a lockout from a bad replacement stays recoverable server-side. GET
+  exposes the current fingerprint (ETag) + x-key-envelope-updated-at-ms so
+  clients can detect replacement. Engine uploadKeyEnvelope tries create,
+  then reads the fingerprint and CAS-replaces (bounded retries — legitimate
+  for the enroll path, which only runs while holding the data key), failing
+  loudly with RelayConflictError if the envelope keeps moving. Tests:
+  stale CAS 409, one winner in an enroll race, history retained
+  byte-for-byte, client create→CAS replace, client loses a perpetual race
+  loudly without clobbering.
+- Codex L4 (secretKeyEnvelope): raw unwrap causes (SyntaxError text, OpenSSL
+  codes) rode the standard `cause` property, which structured clone carries
+  across IPC. Causes are now a non-enumerable debug-internal property; the
+  public shape (name/message/code/enumerable keys/JSON) is identical across
+  malformed-JSON, base64, GCM, and KDF failures — locked by test.
+- Codex L5 (main.integration): the ciphertext-only byte-walk now captures
+  RESPONSE bodies too (clone().arrayBuffer()), pulls into a second machine
+  through the same capturing transport, and asserts positive controls on
+  both directions before the negative marker/key assertions.
+- CR major (syncApply): `op.payload.rows ?? []` guard in
+  collectBlobHashesFromOp — a rowless fork op now reaches the store's
+  fail-closed payload validation (invalid-input) instead of throwing a raw
+  TypeError at the transport edge. Test locks the honest rejection.
+- CR major (secretKeyEnvelope.test): the "writes no local key file"
+  assertion was tautological (nothing ever targeted that root). Deleted
+  honestly with a scope note; the enrollment-side property is now locked
+  where it lives: installWorkspaceDataKey validates BEFORE touching the
+  filesystem (meaningful ENOENT assertion), re-installs the same key
+  idempotently, and never overwrites a different existing key.
+
+Recorded minors (deliberately NOT fixed this round; listed for the arc
+gate): syncFolder.test restore uses `updated.moment?.id ?? ""` instead of
+asserting the moment id; CloudLogin passphrase UX is driven by regex over
+main-process error strings (wants a structured IPC error code);
+no minimum passphrase length floor in main.ts wrap path;
+secretKeyEnvelope wrapWorkspaceDataKey length-check throws before the
+zeroing finally and wrap errors are not normalized like unwrap;
+secretKeyEnvelope.test manual-fallback test has a dead .catch() setup
+branch; CloudLogin.test lacks the unlock-failure-path regression test;
+syncApply's finally closes the three stores sequentially (a throwing close
+leaks the rest); workspace-contracts secret payloads carry no key id for
+future rotation (intentional single-key MVP deferral, confirm at rotation
+time). The "future-dated log entry" finding resolved itself (dates are
+accurate as of this round); the "second-PUT overwrite regression test"
+finding is superseded by the CAS suite.
+
+Verification (all green, unsandboxed): engine 381 (373 + 8), desktop 944,
+relay 23 (22 + 1, all 8 HTTP integration tests executed live including the
+two-machine passphrase round-trip and the two-direction byte-walk), MCP 76,
+repo-wide typecheck, git diff --check, docs link checker.

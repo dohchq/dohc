@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-api/auth/session";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import {
+  MAX_BLOB_BYTES,
+  MAX_KEY_ENVELOPE_BYTES,
+  createSyncRelayHandler,
+  type SyncRelayHandler,
+} from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 let roots: string[] = [];
@@ -72,6 +77,25 @@ function op(originSeq: number, payload: Record<string, unknown> = { n: originSeq
   return { originSeq, opKind: "opaque.test", payload, recordedAtMs: 1000 + originSeq };
 }
 
+function keyEnvelopeJson(saltBase64: string): string {
+  return JSON.stringify({
+    format: "dohc-key-envelope-v1",
+    saltBase64,
+    scryptN: 131072,
+    scryptR: 8,
+    scryptP: 1,
+    ivBase64: "AA==",
+    authTagBase64: "AA==",
+    ciphertextBase64: "AA==",
+  });
+}
+
+function putKeys(body: string, ifMatch?: string): Request {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (ifMatch !== undefined) headers["if-match"] = `"${ifMatch}"`;
+  return request("a", "/sync/workspace-a/keys", { method: "PUT", headers, body });
+}
+
 describe("sync relay handler", () => {
   it("requires auth before storage access on every route, including blob GET", async () => {
     const throwingStorage = new Proxy(
@@ -89,6 +113,8 @@ describe("sync relay handler", () => {
       request(null, `/sync/workspace-a/blobs/${blobSha}`, { method: "PUT", body: "blob" }),
       request(null, `/sync/workspace-a/blobs/${blobSha}`, { method: "GET" }),
       request(null, "/sync/workspace-a/blobs/have", jsonBody({ sha256s: [blobSha] })),
+      request(null, "/sync/workspace-a/keys", { method: "GET" }),
+      request(null, "/sync/workspace-a/keys", { method: "PUT", body: "{}" }),
       request(null, "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })),
       request(null, "/sync/workspace-a/log?since=0", { method: "GET" }),
     ];
@@ -117,6 +143,8 @@ describe("sync relay handler", () => {
       (ws: string) => request("intruder", `/sync/${ws}/blobs/${blobSha}`, { method: "PUT", body: bytes }),
       (ws: string) => request("intruder", `/sync/${ws}/blobs/${blobSha}`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/blobs/have`, jsonBody({ sha256s: [blobSha] })),
+      (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "GET" }),
+      (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "PUT", body: "{}" }),
       (ws: string) => request("intruder", `/sync/${ws}/log`, jsonBody({ originId: "origin-b", ops: [op(0)] })),
       (ws: string) => request("intruder", `/sync/${ws}/log?since=0`, { method: "GET" }),
     ];
@@ -284,6 +312,99 @@ describe("sync relay handler", () => {
     const absentBody = await absentWorkspace.text();
     expect(await intruder.text()).toBe(absentBody);
     expect(absentBody).not.toContain("blob_not_found");
+  });
+
+  it("stores one opaque key envelope per owned workspace with size and JSON validation", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const missing = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
+    expect(missing.status).toBe(404);
+    expect(await json(missing)).toMatchObject({ code: "key_envelope_not_found" });
+
+    const envelope = keyEnvelopeJson("AA==");
+    const put = await h(
+      request("a", "/sync/workspace-a/keys", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: envelope,
+      }),
+    );
+    expect(put.status).toBe(200);
+    const get = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
+    await expect(get.text()).resolves.toBe(envelope);
+    // The GET exposes the current fingerprint + write time so clients can
+    // detect a replaced envelope.
+    expect(get.headers.get("etag")).toBe(`"${sha256(envelope)}"`);
+    expect(get.headers.get("x-key-envelope-updated-at-ms")).toBe("1234");
+
+    const invalid = await h(request("a", "/sync/workspace-a/keys", { method: "PUT", body: "[]" }));
+    expect(invalid.status).toBe(400);
+    const oversized = await h(
+      request("a", "/sync/workspace-a/keys", {
+        method: "PUT",
+        body: JSON.stringify({ value: "x".repeat(MAX_KEY_ENVELOPE_BYTES) }),
+      }),
+    );
+    expect(oversized.status).toBe(413);
+  });
+
+  // Gate finding (0P-D): the envelope is the only recovery path for the
+  // wrapped workspace key, so PUT /keys is create-only on first write and
+  // compare-and-swap (If-Match: sha256) thereafter, and every replaced
+  // envelope is retained in an audit history.
+  it("makes PUT /keys create-only, then CAS: stale writes 409, one enroll winner, history retained", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const first = keyEnvelopeJson("Zmlyc3Q=");
+    const second = keyEnvelopeJson("c2Vjb25k");
+    const third = keyEnvelopeJson("dGhpcmQ=");
+
+    const create = await h(putKeys(first));
+    expect(create.status).toBe(200);
+    expect(await json(create)).toMatchObject({ ok: true, sha256: sha256(first) });
+
+    // Concurrent-enroll race: a second unconditional PUT with DIFFERENT
+    // content loses — exactly one winner, nothing clobbered.
+    const racingCreate = await h(putKeys(second));
+    expect(racingCreate.status).toBe(409);
+    await expect(
+      (await h(request("a", "/sync/workspace-a/keys", { method: "GET" }))).text(),
+    ).resolves.toBe(first);
+
+    // A byte-identical re-PUT is an idempotent retry, not a replacement.
+    const retry = await h(putKeys(first));
+    expect(retry.status).toBe(200);
+    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual([]);
+
+    // Stale CAS: If-Match naming anything but the current envelope is a 409.
+    const stale = await h(putKeys(second, sha256(third)));
+    expect(stale.status).toBe(409);
+    const malformedIfMatch = await h(putKeys(second, "not-a-sha"));
+    expect(malformedIfMatch.status).toBe(400);
+
+    // Correct CAS replaces, and the GET fingerprint moves with it.
+    const replace = await h(putKeys(second, sha256(first)));
+    expect(replace.status).toBe(200);
+    const afterReplace = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
+    await expect(afterReplace.text()).resolves.toBe(second);
+    expect(afterReplace.headers.get("etag")).toBe(`"${sha256(second)}"`);
+
+    // A now-stale writer (still holding first's fingerprint) is rejected.
+    const lostRace = await h(putKeys(third, sha256(first)));
+    expect(lostRace.status).toBe(409);
+
+    // Lockout stays recoverable server-side: the replaced envelope is
+    // retained byte-for-byte with an audit trail of when and by what.
+    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual([
+      {
+        envelopeJson: first,
+        sha256: sha256(first),
+        replacedAtMs: 1234,
+        replacedBySha256: sha256(second),
+      },
+    ]);
   });
 
   // Gate finding: unclassified errors (auth DB hiccup, unexpected SQLite

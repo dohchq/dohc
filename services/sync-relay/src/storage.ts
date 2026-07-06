@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -32,6 +33,19 @@ export interface PutBlobResult {
   alreadyHad: boolean;
 }
 
+export interface KeyEnvelopeRow {
+  envelopeJson: string;
+  sha256: string;
+  updatedAtMs: number;
+}
+
+export interface KeyEnvelopeHistoryRow {
+  envelopeJson: string;
+  sha256: string;
+  replacedAtMs: number;
+  replacedBySha256: string;
+}
+
 export interface SyncRelayStorage {
   close(): void;
   claimWorkspace(input: {
@@ -47,6 +61,18 @@ export interface SyncRelayStorage {
   }): PutBlobResult;
   getBlob(workspaceId: string, sha256: string): Uint8Array | null;
   missingBlobs(workspaceId: string, sha256s: string[]): string[];
+  // Create-only on first write (expectedSha256 null), compare-and-swap
+  // thereafter: the caller must present the sha256 of the envelope it intends
+  // to replace. Replaced envelopes are RETAINED in an append-only history
+  // table (audit trail + server-side recovery from a bad overwrite).
+  putKeyEnvelope(input: {
+    workspaceId: string;
+    envelopeJson: string;
+    updatedAtMs: number;
+    expectedSha256: string | null;
+  }): { sha256: string };
+  getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
+  getKeyEnvelopeHistory(workspaceId: string): KeyEnvelopeHistoryRow[];
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -124,6 +150,35 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
           REFERENCES sync_relay_workspaces(workspace_id)
           ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS sync_relay_key_envelopes (
+        workspace_id TEXT PRIMARY KEY,
+        envelope_json TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
+      );
+
+      -- Append-only audit trail: every replaced key envelope is retained with
+      -- when it was replaced and by what (sha256 of the successor). The
+      -- envelope is the only recovery path for the wrapped workspace key, so
+      -- an overwrite — even a CAS-correct one — must never destroy the prior
+      -- copy; a lockout caused by a bad replacement stays recoverable
+      -- server-side.
+      CREATE TABLE IF NOT EXISTS sync_relay_key_envelope_history (
+        history_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        envelope_json TEXT NOT NULL,
+        envelope_sha256 TEXT NOT NULL,
+        replaced_at_ms INTEGER NOT NULL,
+        replaced_by_sha256 TEXT NOT NULL,
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_key_envelope_history
+        ON sync_relay_key_envelope_history(workspace_id, history_seq);
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -242,6 +297,115 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sha256s.filter((sha256) => !found.has(sha256));
   }
 
+  putKeyEnvelope(input: {
+    workspaceId: string;
+    envelopeJson: string;
+    updatedAtMs: number;
+    expectedSha256: string | null;
+  }): { sha256: string } {
+    const nextSha256 = sha256HexUtf8(input.envelopeJson);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db
+        .prepare(
+          "SELECT envelope_json FROM sync_relay_key_envelopes WHERE workspace_id = ?",
+        )
+        .get(input.workspaceId);
+      const currentJson =
+        typeof current?.envelope_json === "string" ? current.envelope_json : null;
+      if (currentJson === input.envelopeJson) {
+        // Byte-identical re-PUT: an idempotent retry (e.g. enroll after a
+        // dropped response), not a replacement. No history entry.
+        this.db.exec("COMMIT");
+        return { sha256: nextSha256 };
+      }
+      if (currentJson === null) {
+        if (input.expectedSha256 !== null) {
+          throw new SyncRelayConflictError(
+            "key envelope does not exist; a conditional replace has nothing to match",
+          );
+        }
+        this.db
+          .prepare(
+            `INSERT INTO sync_relay_key_envelopes (workspace_id, envelope_json, updated_at_ms)
+             VALUES (?, ?, ?)`,
+          )
+          .run(input.workspaceId, input.envelopeJson, Math.trunc(input.updatedAtMs));
+        this.db.exec("COMMIT");
+        return { sha256: nextSha256 };
+      }
+      const currentSha256 = sha256HexUtf8(currentJson);
+      if (input.expectedSha256 === null) {
+        throw new SyncRelayConflictError(
+          "key envelope already exists; replacing it requires If-Match with the current sha256",
+        );
+      }
+      if (input.expectedSha256 !== currentSha256) {
+        throw new SyncRelayConflictError(
+          "key envelope was replaced concurrently; refresh and retry with the current sha256",
+        );
+      }
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_key_envelope_history (
+            workspace_id, envelope_json, envelope_sha256, replaced_at_ms, replaced_by_sha256
+          ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.workspaceId,
+          currentJson,
+          currentSha256,
+          Math.trunc(input.updatedAtMs),
+          nextSha256,
+        );
+      this.db
+        .prepare(
+          `UPDATE sync_relay_key_envelopes
+           SET envelope_json = ?, updated_at_ms = ?
+           WHERE workspace_id = ?`,
+        )
+        .run(input.envelopeJson, Math.trunc(input.updatedAtMs), input.workspaceId);
+      this.db.exec("COMMIT");
+      return { sha256: nextSha256 };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null {
+    const row = this.db
+      .prepare(
+        "SELECT envelope_json, updated_at_ms FROM sync_relay_key_envelopes WHERE workspace_id = ?",
+      )
+      .get(workspaceId);
+    if (typeof row?.envelope_json !== "string") return null;
+    return {
+      envelopeJson: row.envelope_json,
+      sha256: sha256HexUtf8(row.envelope_json),
+      updatedAtMs: Number(row.updated_at_ms),
+    };
+  }
+
+  getKeyEnvelopeHistory(workspaceId: string): KeyEnvelopeHistoryRow[] {
+    return this.db
+      .prepare(
+        `SELECT envelope_json, envelope_sha256, replaced_at_ms, replaced_by_sha256
+         FROM sync_relay_key_envelope_history
+         WHERE workspace_id = ?
+         ORDER BY history_seq`,
+      )
+      .all(workspaceId)
+      .map((row) => ({
+        envelopeJson: String(row.envelope_json),
+        sha256: String(row.envelope_sha256),
+        replacedAtMs: Number(row.replaced_at_ms),
+        replacedBySha256: String(row.replaced_by_sha256),
+      }));
+  }
+
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -341,6 +505,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       hasMore: rows.length > input.limit,
     };
   }
+}
+
+function sha256HexUtf8(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
