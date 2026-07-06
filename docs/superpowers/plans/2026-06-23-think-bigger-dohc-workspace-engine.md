@@ -2073,9 +2073,16 @@ rebuild on it later; the legacy cloud stack retires per audit Phase D.
   release hardening (PR 22), Windows suite validation on the user's PC,
   external shares (PR 18) on the rebuilt cloud.
 
-Gates: every lane merges when green after orchestrator review; codex-review
-as an extra perspective at wave gates; CodeRabbit batched once per arc gate;
-checkpoint summary to the user between waves.
+Gates (tightened 2026-07-06 by user direction, superseding the
+sparing-usage-only rule for lane merges): every lane PR passes a three-part
+pre-merge review — (1) orchestrator (fable) review with independent suite and
+E2E re-runs, (2) a CodeRabbit CLI review of the branch diff
+(`coderabbit review --base-commit <merge-base>`) with findings triaged under
+the CodeRabbit-loop rules (security/data-integrity findings fixed, rejections
+documented), and (3) a codex (gpt-5.5) review via the codex-review skill as an
+independent second-model perspective. Merge only after all three pass. The
+batched arc-gate CodeRabbit sweep remains on top. Checkpoint summary to the
+user between waves.
 
 ### PR 01 - Workspace Engine Contracts And Substrate
 
