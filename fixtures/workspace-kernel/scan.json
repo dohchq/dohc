@@ -1,0 +1,31 @@
+{
+  "workspace": {
+    "files": [
+      { "path": "notes/a.md", "text": "# A\n" },
+      { "path": "scripts/run.sh", "text": "#!/bin/sh\ntrue\n" },
+      { "path": ".dohc/history.json", "text": "hidden" },
+      { "path": ".git/config", "text": "hidden" },
+      { "path": "node_modules/pkg/index.js", "text": "hidden" },
+      { "path": "finance/ledger.sqlite-wal", "text": "transient" }
+    ],
+    "symlinks": [
+      { "path": "notes/outside.md", "target": "../outside-secret.md" }
+    ]
+  },
+  "expected": {
+    "files": [
+      {
+        "path": "notes/a.md",
+        "size": 4,
+        "sha256": "aa1237b773c38dbddef583c4868aaea7a44c5237ea7923aecca5513764b42d80",
+        "mediaType": "text/markdown"
+      },
+      {
+        "path": "scripts/run.sh",
+        "size": 15,
+        "sha256": "9ab8fabc8c72bfa0416414631e26bd71b01f9dfae98dcf4656b1e2d78307876a",
+        "mediaType": "text/plain"
+      }
+    ]
+  }
+}

@@ -543,6 +543,35 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       "write:live.md",
     ]);
   });
+
+  it("falls back to the TypeScript scan path when the flagged kernel cannot spawn", async () => {
+    const root = await tempRoot();
+    await write(root, "offline.md", "offline edit\n");
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const previousFlag = process.env.DOHC_KERNEL_SIDECAR;
+    const previousBinary = process.env.DOHC_KERNEL_BINARY_PATH;
+    process.env.DOHC_KERNEL_SIDECAR = "1";
+    process.env.DOHC_KERNEL_BINARY_PATH = join(root, "missing-kernel");
+    try {
+      const engine = capture(root, {
+        onError(context, error) {
+          errors.push({ context, error });
+        },
+      });
+      engine.start();
+      await engine.stop();
+    } finally {
+      if (previousFlag === undefined) delete process.env.DOHC_KERNEL_SIDECAR;
+      else process.env.DOHC_KERNEL_SIDECAR = previousFlag;
+      if (previousBinary === undefined) delete process.env.DOHC_KERNEL_BINARY_PATH;
+      else process.env.DOHC_KERNEL_BINARY_PATH = previousBinary;
+    }
+
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["offline.md", "write"],
+    ]);
+    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+  });
 });
 
 describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
