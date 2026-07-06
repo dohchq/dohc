@@ -109,6 +109,14 @@ same lane. Evidence per item:
 
 ## Recommended retirement sequence
 
+Status (2026-07-07, lane WS-H1): Phases A-C are DONE — the flag defaults
+on, the legacy local recorder and its surfaces are deleted, and
+`mergeMarkdown`/record types stayed in place (no import forced a move;
+`createChangeSetStore` survives for the engine's versionedFileWorkspace,
+MCP's read-only relic reads, and the legacy cloud path). Phase D (the
+cloud stack as a coupled unit) remains open and retires with 0P-B. See
+the WS-H1 entry in the execution log for the deletion inventory.
+
 - **Phase A — free deletions (now, docs-only):** delete/replace the
   Convex-era docs (`docs/security/authz-boundaries.md`,
   `docs/development/v2-phase-plans/phase-1.3-convex-acl-bridge.md`, Convex

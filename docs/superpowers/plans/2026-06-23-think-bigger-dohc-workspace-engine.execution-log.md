@@ -16464,3 +16464,180 @@ conflict keys; desktop 925 passed; mcp 77 passed; repo typecheck clean;
 - 0P-B (thin relay + device auth) consumes the journal/apply machinery
   as-is; legacy packages/workspace-sync and cloudSyncEngine.ts retire
   when 0P-B replaces the desktop loop (audit Phase C/D).
+
+## PR WS-H1 - Engine Default-On + Legacy Retirement Phases A-C
+
+Status: implemented on branch (strictly ordered commit sequence)
+Branch: codex/think-bigger-wsh1-flag-flip
+Worktree: /home/ice/dev/dohc-wsh1-flag-flip
+Implementation workstream, if used: single Claude lane (WS-H1)
+PR Link: (pending)
+Date started: 2026-07-07
+Date completed: 2026-07-07
+
+### Scope
+
+The new engine becomes THE product. Four ordered commits, each green
+before the next:
+
+1. **G2-A pinning tests + gate-list closure** — the three pinning tests
+   from the WS-G2 collab design (solo rich-doc editing with zero
+   Hocuspocus asserted; restore-while-open reconciliation;
+   collab-materialization writes become engine moments), and the 0N-3
+   audit's flag-default-on gate list checked off with per-item evidence.
+2. **Flag default-on** — `experimental.workspaceEngineAlpha` defaults
+   TRUE for all workspaces at open; the setting stays as an explicit
+   opt-OUT escape hatch ("Use the workspace engine (default on)" under
+   Settings → Advanced).
+3. **Retirement Phase A (docs)** — Convex-era docs deleted/replaced;
+   residual comment/config references swept.
+4. **Retirement Phases B/C (code)** — the legacy history recorder and
+   every surface that served it deleted; engine history is the only
+   source; opted-out workspaces get the honest "History is off" notice.
+
+### Cold-Adoption Semantics (documented honestly)
+
+A previously-unflagged workspace (no settings file, or a settings file
+with no `experimental` key — the shape every pre-flip workspace has)
+opens ON THE ENGINE. The single-source default flip lives in
+`workspaceSettings.ts` (the zod group default + `DEFAULT_WORKSPACE_SETTINGS`);
+MCP mirrors the same resolution (`isWorkspaceEngineFlagged`: absent,
+missing, or unreadable settings resolve ON; a planted symlinked settings
+file cannot opt a workspace out; only an explicit
+`workspaceEngineAlpha: false` does). The first flagged open runs the
+existing 0M-3 startup reconciliation pass, which captures the
+workspace's existing tree as the engine's initial state. Legacy
+`.dohc/history` stays on disk as a **read-only relic** — engine history
+starts from adoption and pre-flip records are NOT migrated (User
+Decision 6: replacement, not migration; MCP's read tools can still list
+the relic). E2E: `workspace-engine-capture.spec.ts` "cold adoption"
+(existing files + legacy relic → initial moments; relic byte-identical
+after adoption, no new legacy records).
+
+### Opt-Out Semantics (the honest consequence of retirement)
+
+After Phase C, an explicitly opted-out workspace has NO history recorder
+of any kind — the legacy recorder no longer exists. The app remains
+fully functional (files edit and save, watcher still settles batches for
+UI refresh and cloud-sync queueing) and says so honestly:
+`SyncStatusResult.historyRecordingOff` (set when captureFor resolves to
+no capture), the History rail's "History is off for this workspace"
+placeholder, and a persistent notice-center notice reusing the 0M-7
+capture-failure pattern. E2E: `workspace-engine-history.spec.ts`
+"explicit opt-out: app works, nothing records anywhere, and the app says
+history is off".
+
+### Phase C Deletions (what died) vs Phase D Remainders (what stays and why)
+
+Deleted (~4,100 LOC net, commit f5b4a1f3):
+- `workspaceWatcher.ts` legacy branch: snapshot cache, legacy change-set
+  writes, `batchToChangeSet` usage, ActiveLocalOperation provenance
+  machinery (443 → 160 lines).
+- `workspaceActivity.ts` legacy read stores, `listChangeSets`/
+  `readChangeSet`, `beginLocalOperation`.
+- `historyRestore.ts` + test, and the `listChangeSets`/`readChangeSet`/
+  `restoreHistoryFile`/`undoHistoryFileRestore` IPC surface (main,
+  channels, preload, bridge-contract types).
+- Renderer legacy history: `HistoryView`, `HistoryList`,
+  `HistoryDiffPage`, the `changeSets` state and helpers (~1,100 lines of
+  DesktopWorkspaceShell.tsx). Persisted pre-flip legacy diff tabs render
+  an honest "no longer available" note instead of a broken page.
+- MCP legacy `recordChange` write path (+ `historyWriteStoreFor`, stale
+  recordedAt retry, the durable-writer platform gate in
+  `ensureRecordable`): mutating tools always report
+  `recordedBy: "workspace-engine"`.
+- `packages/workspace-sync` `batchedSync.ts` (`batchToChangeSet`) + its
+  test.
+
+Kept, deliberately (Phase D scope, per the audit's salvage boundary):
+- `packages/workspace-history` in full: `mergeMarkdown` + record types
+  are the audit's salvage subpath (collabSession.ts imports the
+  browser-safe `mergeMarkdown` subpath); `createChangeSetStore` is still
+  imported by the ENGINE's own `versionedFileWorkspace.ts`
+  (recovery/namespace history), MCP's read tools (which now serve the
+  legacy relic read-only), and tests — nothing forced a move/shim, so
+  none was done.
+- `packages/workspace-sync` `cloudSync`/`collaborationPolicy` and
+  desktop `cloudSyncEngine.ts`: the legacy CLOUD path retires with the
+  old stack in Phase D when 0P-B replaces the desktop loop (cloudSync
+  does not consume change sets; it merges file contents).
+- Hocuspocus + workspace-api + workspace-postgres + apps/web: Phase D
+  as a coupled unit (collab stays available for shared cloud workspaces
+  per the G2 design's decouple-and-defer decision).
+
+### Files Changed
+
+Commit eb295327 (G2-A pins + gate closure): collabSession.test.ts,
+e2e/workspace-collab-decoupling.spec.ts (new), 0N-3 audit gate list.
+Commit 5eb49ae9 (default-on): workspaceSettings.ts(+test),
+SettingsDialog.tsx, packages/mcp tools.ts(+tests),
+DesktopWorkspaceShell.test.tsx (opt-out mock),
+e2e/workspace-engine-capture.spec.ts (cold adoption + opt-out),
+e2e workspace-chats/engine-history/versions specs (explicit opt-out).
+Commit 16ffe15c (Phase A docs): docs/security/authz-boundaries.md
+(replaced), docs/development/v2-phase-plans/phase-1.3-convex-acl-bridge.md
+(deleted), backend-modes.md/self-hosting.md/README.md/local-dev.md/
+testing.md/product spec (rewritten), docker-compose.dev.yml,
+docker-compose.self-host.yml, .env.self-host.example (dead
+HOCUSPOCUS_CONVEX_*/VITE_CONVEX_URL plumbing swept).
+Commit f5b4a1f3 (Phases B/C): see deletions above, plus
+NoticeCenter.tsx (history-off notice), bridgeContract.ts
+(historyRecordingOff), scripts/phase0m-agent-engine-qa.ts (imports
+createChangeSetStore from @dohc/workspace-history directly).
+
+### Tests Added Or Updated
+
+- New: 3 collabSession G2-A pinning tests; 2 collab-decoupling E2E; cold
+  adoption E2E; opt-out (no recorder + notice) E2E; historyRecordingOff
+  activity tests; default-on regression tests (absent key → ON, explicit
+  false → OFF, schema/DEFAULT consistency, on-disk pre-experimental file
+  opens flagged, symlink cannot opt out).
+- Flipped meaning deliberately: every "unflagged" spec now seeds the
+  explicit opt-out; MCP tests that pinned legacy recording now pin
+  no-legacy-writes + relic reads; watcher/uiState/settings
+  never-reach-history invariants re-asserted against the engine capture
+  seam instead of the legacy store.
+- Deleted with their subject: legacy history-details/history-page UI
+  tests (DesktopWorkspaceShell.test.tsx), legacy watcher
+  snapshot/restore-provenance tests, MCP stale-timestamp retry +
+  history-write-failure retention tests, batchedSync tests.
+
+### Commands Run
+
+- `pnpm typecheck` — clean, all workspaces.
+- `pnpm --filter @dohc/workspace-engine test` — 339 passed (baseline 339).
+- `pnpm --filter @dohc/desktop test` — 898 passed (baseline 925; the
+  delta is deleted legacy-surface tests minus new coverage, all
+  accounted for above).
+- `pnpm --filter @dohc/mcp test` — 74 passed (baseline 77; 3 tests
+  deleted with the machinery they pinned).
+- Full desktop E2E (`playwright test`, built app) — 31 passed / 0 failed
+  (includes the 3 new specs).
+- `pnpm test` (repo-wide) — all suites pass except one PRE-EXISTING
+  apps/web failure (`backendSwitch.test.tsx` "file.arrayBuffer is not a
+  function"), reproduced identically on main 5df5dca2 before this lane;
+  environment-related, untouched by this lane.
+- `node scripts/check-think-bigger-doc-links.mjs` — passed (10 files).
+- `git diff --check` — clean.
+
+### Security / Privacy Notes
+
+- The default-on resolution is tamper-conscious: a symlinked or
+  oversized settings file is refused and resolves to the DEFAULT (engine
+  on) — a planted file cannot silently opt a workspace out of history.
+  Same rule in the desktop reader and MCP.
+- The retired MCP legacy write path removes a second history writer; the
+  engine capture (via the desktop watcher) is the single recording
+  authority, agent-attributed only from main's server-side run slot.
+
+### Remaining Risk / Follow-Ups
+
+- Phase D (cloud stack retirement/rebuild) is explicitly NOT this lane:
+  workspace-api, Hocuspocus, workspace-postgres, apps/web, desktop
+  cloudSyncEngine, and workspace-history's remaining exports retire
+  together when 0P-B lands.
+- Opted-out workspaces record nothing — accepted, documented, and
+  surfaced in-product. If dogfooding shows users opting out by accident,
+  consider a confirmation dialog on the settings toggle.
+- The pre-existing apps/web backendSwitch test failure should be fixed
+  in a cloud-focused lane (it predates this work).
