@@ -1,5 +1,6 @@
-import { Cloud, ExternalLink, LogOut } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Check, Cloud, Copy, ExternalLink, LogOut } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
 
 type Phase =
@@ -16,8 +17,12 @@ type Phase =
 export function CloudLogin(props: {
   workspaceId?: string;
   onManageWorkspace?: () => void;
+  // Fired when a device-flow login completes inside this panel (the join
+  // surface re-checks its own gate on it).
+  onConnected?: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const [codeCopied, setCodeCopied] = useState(false);
   const [workspaceSynced, setWorkspaceSynced] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -89,6 +94,7 @@ export function CloudLogin(props: {
           if (result.status === "pending") return pollUntilDone(session);
           if (result.status === "complete") {
             setPhase({ kind: "connected", email: result.email ?? "" });
+            props.onConnected?.();
           } else {
             setPhase({
               kind: "failed",
@@ -127,6 +133,30 @@ export function CloudLogin(props: {
           reason: "Couldn't reach the server. Is dohc Cloud (or your self-host) running?",
         });
       }
+    }
+  }
+
+  // The join handle for a synced workspace: one copyable line carrying the
+  // workspace id and its relay. Null when anything needed is missing (an
+  // unsynced workspace, or a session without a relay) — the block simply
+  // doesn't render rather than showing a broken code.
+  const syncCode = useMemo(() => {
+    if (!props.workspaceId || !workspaceSynced || !relayUrl.trim()) return null;
+    try {
+      return buildSyncCode({ workspaceId: props.workspaceId, relayUrl: relayUrl.trim() });
+    } catch {
+      return null;
+    }
+  }, [props.workspaceId, relayUrl, workspaceSynced]);
+
+  async function copySyncCode() {
+    if (!syncCode) return;
+    try {
+      await navigator.clipboard.writeText(syncCode);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    } catch {
+      // Clipboard can be denied; the code stays visible and selectable.
     }
   }
 
@@ -241,6 +271,42 @@ export function CloudLogin(props: {
                 <p data-testid="cloud-workspace-synced" className="mb-0 mt-2 text-xs text-success">
                   This workspace syncs to the cloud — edits flow automatically.
                 </p>
+                {syncCode ? (
+                  <div
+                    data-testid="cloud-sync-code-block"
+                    className="mt-3 rounded border border-line bg-panel-2 p-2.5"
+                  >
+                    <p className="m-0 text-[11px] font-semibold text-ink">
+                      Add this workspace on another machine
+                    </p>
+                    <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
+                      On the other machine, sign in with the same account, choose
+                      “Join a synced workspace”, and paste this code.
+                    </p>
+                    <div className="mt-2 flex items-center gap-2">
+                      <code
+                        data-testid="cloud-sync-code"
+                        className="min-w-0 flex-1 truncate rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink"
+                        title={syncCode}
+                      >
+                        {syncCode}
+                      </code>
+                      <button
+                        type="button"
+                        data-testid="cloud-copy-sync-code"
+                        onClick={() => void copySyncCode()}
+                        className="flex shrink-0 items-center gap-1 rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-ink"
+                      >
+                        {codeCopied ? (
+                          <Check size={11} aria-hidden />
+                        ) : (
+                          <Copy size={11} aria-hidden />
+                        )}
+                        {codeCopied ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
                 {props.onManageWorkspace ? (
                   <button
                     type="button"

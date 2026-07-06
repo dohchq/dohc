@@ -76,6 +76,7 @@ import {
   engineMomentSummary,
 } from "./workbench/EngineHistory";
 import {
+  ConflictReviewDialog,
   VersionComparePage,
   VersionMenu,
 } from "./workbench/WorkspaceVersions";
@@ -1134,6 +1135,10 @@ export function DesktopWorkspaceShell(props: {
       cancelled = true;
     };
   }, [workspaceId]);
+  // Conflict review (0P-C): opened from the notice center's conflict notice.
+  // Lists every open conflict — two machines editing apart, or a merge left
+  // with "Finish later" — with the same side-by-side cards as the merge flow.
+  const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(() => {
     setVersionEpoch((epoch) => epoch + 1);
     void refreshFiles().catch((error) =>
@@ -2293,6 +2298,7 @@ export function DesktopWorkspaceShell(props: {
         onConnectCloud={() => setCloudOpen(true)}
         onOpenAgent={openAgentView}
         onOpenHistory={openHistoryView}
+        onOpenConflicts={() => setConflictReviewOpen(true)}
         onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
@@ -2359,6 +2365,13 @@ export function DesktopWorkspaceShell(props: {
             }}
           />
         </Overlay>
+      ) : null}
+      {conflictReviewOpen ? (
+        <ConflictReviewDialog
+          workspaceId={workspaceId}
+          onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
+          onClose={() => setConflictReviewOpen(false)}
+        />
       ) : null}
       {settingsSection ? (
         <Overlay onClose={closeSettings}>

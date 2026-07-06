@@ -16,6 +16,7 @@ import {
   type IpcMainInvokeEvent,
 } from "electron";
 import { existsSync, statSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
@@ -37,6 +38,8 @@ import {
   DefaultWorkspaceRootResult,
   ApplyDatabaseEditPayload,
   CloudEnableSyncPayload,
+  CloudJoinWorkspacePayload,
+  CloudJoinWorkspaceResult,
   CloudLoginPollResult,
   CloudLoginStartPayload,
   CloudLoginStartResult,
@@ -192,10 +195,13 @@ import {
 } from "./workspaces/cloudDataFragments";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
+import { parseSyncCode, relayUrlsMatch } from "./workspaces/syncCode";
 import {
   createLinkedChatStore,
   createVersionedTextStore,
   claimRelayWorkspace,
+  probeRelayWorkspace,
+  RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   searchWorkspaceEngine,
   type ChannelThreadSummary,
@@ -875,6 +881,22 @@ function mcpRuntimeConfigFor(rootPath: string): {
   };
 }
 
+// Test-only sync timing seams (hermetic E2E: the offline-rejoin spec cannot
+// wait out production backoff). Ignored outside DOHC_DESKTOP_TEST like every
+// other DOHC_TEST_* seam.
+function testSyncTimingOverrides(): {
+  debounceMs?: number;
+  initialBackoffMs?: number;
+} {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return {};
+  const debounce = Number(process.env.DOHC_TEST_SYNC_DEBOUNCE_MS);
+  const backoff = Number(process.env.DOHC_TEST_SYNC_BACKOFF_MS);
+  return {
+    ...(Number.isFinite(debounce) && debounce > 0 ? { debounceMs: debounce } : {}),
+    ...(Number.isFinite(backoff) && backoff > 0 ? { initialBackoffMs: backoff } : {}),
+  };
+}
+
 function engineForWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   capture: WorkspaceEngineCapture | null,
@@ -894,6 +916,10 @@ function engineForWorkspace(
     },
     capture,
     onChange: notifyRenderer,
+    // Post-pass open-conflict truth: pulled peer resolutions and local
+    // resolutions both clear the status-bar/notice conflict state.
+    countOpenConflicts: async () => (await capture.listOpenConflicts()).length,
+    ...testSyncTimingOverrides(),
   });
 }
 
@@ -1810,6 +1836,102 @@ function registerIpcHandlers(): void {
     return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
   });
 
+  // Join a synced workspace on THIS machine (0P-C): sync code from the
+  // machine that already has it + a locally picked empty folder. Everything
+  // is validated BEFORE any local state is created, so a mistyped code can
+  // never mint an empty workspace; the first pull brings files, history,
+  // and chats through the same engine sync path every later pull uses.
+  ipcMain.handle(CHANNELS.cloudJoinWorkspace, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CloudJoinWorkspacePayload.parse(payload);
+    const parsed = parseSyncCode(input.syncCode);
+    if (!parsed) {
+      throw new Error(
+        "That doesn't look like a workspace code. Copy it again from the other machine.",
+      );
+    }
+    const credentials = await cloudLogin().credentials();
+    if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
+      // Security gate, not cosmetics: the session token is only ever sent to
+      // the relay this machine signed in with — never to a URL that arrived
+      // inside a pasted code.
+      throw new Error(
+        "This workspace syncs through a different server than the one you're signed in to. " +
+          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then join again.`,
+      );
+    }
+    setCachedCredentials(credentials);
+    if (findWorkspace(parsed.workspaceId)) {
+      throw new Error("This workspace is already on this machine.");
+    }
+    const rootPath = usableRoot(input.rootPath);
+    const existingEntries = await readdir(rootPath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    if (existingEntries.length > 0) {
+      throw new Error(
+        "Choose an empty folder — the synced workspace's files will be placed inside it.",
+      );
+    }
+
+    // Pre-flight against the relay BEFORE creating anything locally.
+    const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+    try {
+      const probe = await probeRelayWorkspace({ workspaceId: parsed.workspaceId, relay });
+      if (!probe.hasContent) {
+        throw new Error(
+          "That workspace hasn't synced anything yet. Make sure sync is on for it on the other machine, then try again.",
+        );
+      }
+    } catch (error) {
+      if (error instanceof RelayWorkspaceUnavailableError) {
+        throw new Error(
+          "No synced workspace matches that code for your account. Check the code and that you're signed in with the same account.",
+        );
+      }
+      if (error instanceof RelayUnauthorizedError) {
+        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+      }
+      throw error;
+    }
+
+    desktopMarks.mark("workspace-join-start");
+    const created = await createWorkspaceFolder({
+      rootPath,
+      kind: "personal",
+      workspaceId: parsed.workspaceId,
+    });
+    const summary = WorkspaceSummary.parse(created);
+    registerWorkspace(created);
+    refreshNativeWorkspaceSurfaces();
+    // Open first (watcher + engine capture on an empty folder), THEN bind the
+    // remote and enable sync so the first pull materializes files, history,
+    // and chats through the capture chain before this handler resolves.
+    await activity.open(created);
+    setWorkspaceRemote(created.workspaceId, {
+      serverUrl: credentials.serverUrl,
+      remoteWorkspaceId: parsed.workspaceId,
+    });
+    let warning: string | undefined;
+    try {
+      await activity.enableCloud(created);
+    } catch (error) {
+      // The workspace exists and is bound to the relay; sync retries when it
+      // is reopened. Say so instead of failing a join that mostly worked.
+      console.error(`[desktop] first sync after join failed for ${rootPath}:`, error);
+      warning =
+        "The workspace was added, but the first sync didn't finish. It will keep trying — check your connection.";
+    }
+    desktopMarks.measureSince("workspace-join", "workspace-join-start");
+    notifyRenderer();
+    return CloudJoinWorkspaceResult.parse({
+      workspace: summary,
+      ...(warning ? { warning } : {}),
+    });
+  });
+
   ipcMain.handle(CHANNELS.listWorkspaceShares, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceSharesPayload.parse(payload);
@@ -2163,6 +2285,10 @@ function registerIpcHandlers(): void {
             ? ({ kind: "apply-incoming" } as const)
             : ({ kind: "apply-merged", text: input.resolution.text } as const);
       const outcome = await capture.resolveConflict(input.conflictId, resolution);
+      // Push the resolution promptly: "keep mine" changes nothing on disk, so
+      // without this nudge the other machine's mirrored conflict would stay
+      // open until an unrelated edit happened to trigger a sync.
+      activity.queueCloudSync(input.workspaceId);
       notifyRenderer();
       return ResolveWorkspaceVersionConflictResult.parse({
         conflicts: outcome.remaining.map(versionConflictForIpc),

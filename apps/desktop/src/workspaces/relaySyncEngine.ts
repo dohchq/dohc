@@ -12,6 +12,13 @@ export interface CloudSyncEngineOptions {
   relay: SyncRelayConnection;
   capture: WorkspaceEngineCapture;
   onChange: () => void;
+  // The number of conflicts currently OPEN in the engine store. When
+  // provided, each successful pass re-reads it so the snapshot reflects
+  // reality after resolutions (local or replicated from another machine) —
+  // never a monotone accumulator that keeps saying "conflict" after the
+  // user resolved everything. Absent (tests/legacy), conflictsOpened
+  // accumulates as before.
+  countOpenConflicts?: () => Promise<number>;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -24,6 +31,11 @@ export interface CloudSyncSnapshot {
   lastSyncedAtMs: number | null;
   pendingChangeCount: number;
   conflictCount: number;
+  // Conflict resolutions replicated from another machine that matched no
+  // local conflict (neither by id nor by mirrored heads — the file moved on
+  // here before the resolution arrived). Honest minimum for 0P-C: counted
+  // and surfaced so the user knows to review, never silently swallowed.
+  unmatchedRemoteResolves: number;
   authExpired: boolean;
   syncFailing?: boolean;
 }
@@ -46,6 +58,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let lastSyncedAtMs: number | null = null;
   let pendingChangeCount = 0;
   let conflictCount = 0;
+  let unmatchedRemoteResolves = 0;
   let authExpired = false;
   let syncFailing = false;
   let stopped = false;
@@ -114,7 +127,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         relay: options.relay,
       });
     });
-    conflictCount += pullResult.conflictsOpened;
+    unmatchedRemoteResolves += pullResult.pendingConflictResolves;
+    // Prefer the engine's open-conflict truth over accumulation: a pass that
+    // pulled a peer's resolution (or ran after a local one) must DROP the
+    // count, not only ever raise it.
+    conflictCount = options.countOpenConflicts
+      ? await options.countOpenConflicts()
+      : conflictCount + pullResult.conflictsOpened;
     pendingChangeCount = Math.max(0, pendingChangeCount - beforePending);
     lastSyncedAtMs = nowMs();
     consecutiveFailures = 0;
@@ -167,6 +186,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         lastSyncedAtMs,
         pendingChangeCount,
         conflictCount,
+        unmatchedRemoteResolves,
         authExpired,
         ...(syncFailing ? { syncFailing: true } : {}),
       };

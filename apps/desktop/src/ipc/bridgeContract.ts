@@ -402,6 +402,11 @@ export const SyncStatusResult = z.object({
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // Additive (0P-C): conflict resolutions replicated from another machine
+  // that matched no conflict here (the file had moved on locally before the
+  // resolution arrived). Surfaced as a review notice — never silently
+  // swallowed. Optional so older producers/fixtures keep parsing.
+  unmatchedRemoteResolves: z.number().int().nonnegative().optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
@@ -764,6 +769,10 @@ export const WorkspaceVersionConflict = z.object({
   path: PATH_STRING,
   sourceVersionId: VERSION_ID,
   targetVersionId: VERSION_ID,
+  // Additive (0P-C): where the conflict came from — a version merge, or two
+  // machines editing the same file while apart ("sync"). The review UI
+  // labels the sides accordingly ("On this machine" / "On another machine").
+  origin: z.enum(["merge", "sync"]).default("merge"),
   contentKind: z.enum(["text", "binary"]).default("text"),
   // null means "no file on that side" (added on one side, deleted on the
   // other). Raw texts only — the UI renders sides, never conflict markers.
@@ -1039,6 +1048,23 @@ export const CloudEnableSyncPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
 export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
+
+// Join a synced workspace on this machine (0P-C): a sync code copied from
+// the machine that already has the workspace, plus a local folder chosen
+// through the picker (main re-validates the approved-root provenance).
+export const CloudJoinWorkspacePayload = z.object({
+  syncCode: z.string().min(1).max(4096),
+  rootPath: z.string().min(1).max(4096),
+});
+export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload>;
+
+export const CloudJoinWorkspaceResult = z.object({
+  workspace: WorkspaceSummary,
+  // Set when the workspace was added but its first sync did not finish —
+  // the workspace exists locally and sync keeps retrying.
+  warning: z.string().min(1).max(500).optional(),
+});
+export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 
 const EMAIL_STRING = z.string().email().max(320);
 const SHARE_ID = z.string().min(1).max(200);
@@ -1647,6 +1673,9 @@ export interface DohcDesktopBridge {
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
   cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
+  cloudJoinWorkspace(
+    payload: CloudJoinWorkspacePayload,
+  ): Promise<CloudJoinWorkspaceResult>;
   listWorkspaceShares(
     payload: ListWorkspaceSharesPayload,
   ): Promise<ListWorkspaceSharesResult>;

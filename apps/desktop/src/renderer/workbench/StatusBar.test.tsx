@@ -65,6 +65,7 @@ function renderBar(
       onConnectCloud={() => {}}
       onOpenAgent={props.onOpenAgent ?? (() => {})}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
+      onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onOpenSettings={() => {}}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
@@ -174,7 +175,7 @@ describe("sync status surface", () => {
 
 describe("notice center", () => {
   it("collects conflict, agent, and update notices in one popover", async () => {
-    const onOpenHistory = vi.fn();
+    const onOpenConflicts = vi.fn();
     const onOpenAgent = vi.fn();
     renderBar({
       syncStatus: {
@@ -185,7 +186,7 @@ describe("notice center", () => {
       },
       agentActive: true,
       conflictSummaries: ["Both sides changed notes/today.md."],
-      onOpenHistory,
+      onOpenConflicts,
       onOpenAgent,
     });
     pushUpdate?.({
@@ -211,8 +212,10 @@ describe("notice center", () => {
       "Update 1.2.3 is ready",
     );
 
+    // The conflict notice's Review action opens the conflict review dialog
+    // (0P-C), not History.
     await userEvent.click(within(center).getByRole("button", { name: "Review" }));
-    expect(onOpenHistory).toHaveBeenCalledOnce();
+    expect(onOpenConflicts).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("notice-center")).toBeNull();
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -220,6 +223,41 @@ describe("notice center", () => {
       within(screen.getByTestId("notice-center")).getByRole("button", { name: "Open" }),
     );
     expect(onOpenAgent).toHaveBeenCalledOnce();
+  });
+
+  it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
+    renderBar({
+      syncStatus: {
+        state: "conflict",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        conflictCount: 1,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-sync-conflict");
+    expect(notice.textContent).toContain("A file changed on two machines");
+    expect(notice.textContent).toContain(
+      "Both copies are safe. Review the differences to choose what stays.",
+    );
+  });
+
+  it("surfaces an unmatched remote conflict resolution as a review notice (0P-C)", async () => {
+    const onOpenHistory = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        unmatchedRemoteResolves: 1,
+      },
+      onOpenHistory,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-sync-review");
+    expect(notice.textContent).toContain("A choice made on another machine needs a look");
+    await userEvent.click(within(notice).getByRole("button", { name: "Open History" }));
+    expect(onOpenHistory).toHaveBeenCalledOnce();
   });
 
   it("shows all clear when there are no notices", async () => {
@@ -280,6 +318,7 @@ describe("notice center", () => {
         onConnectCloud={() => {}}
         onOpenAgent={() => {}}
         onOpenHistory={() => {}}
+        onOpenConflicts={() => {}}
         onOpenSettings={() => {}}
         onToggleTheme={() => {}}
         onContextMenu={() => {}}

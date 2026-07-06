@@ -205,6 +205,46 @@ describe("relaySyncEngine", () => {
     expect(changes.mock.calls.length).toBeGreaterThan(changesAtFailure);
   });
 
+  it("re-reads open-conflict truth each pass so resolved conflicts clear the snapshot", async () => {
+    const cap = capture();
+    let openConflicts = 0;
+    pullMock
+      .mockImplementationOnce(async () => {
+        openConflicts = 2;
+        return pullResult({ conflictsOpened: 2 });
+      })
+      .mockImplementation(async () => pullResult());
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      remoteWorkspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: cap,
+      onChange: vi.fn(),
+      countOpenConflicts: async () => openConflicts,
+      debounceMs: 100,
+      nowMs: () => 12345,
+    });
+    await sync.start();
+    expect(sync.snapshot().conflictCount).toBe(2);
+
+    // The user resolves both conflicts (locally or via a peer's replicated
+    // resolution); the next pass must DROP the count, not keep accumulating.
+    openConflicts = 0;
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    expect(sync.snapshot().conflictCount).toBe(0);
+  });
+
+  it("counts unmatched remote conflict resolutions instead of swallowing them", async () => {
+    pullMock.mockImplementationOnce(async () =>
+      pullResult({ pendingConflictResolves: 1 }),
+    );
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
+  });
+
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {
     pushMock.mockImplementation(async () => {
       throw new RelayUnauthorizedError();

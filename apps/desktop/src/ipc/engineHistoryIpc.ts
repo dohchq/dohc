@@ -118,6 +118,9 @@ export function versionConflictForIpc(conflict: {
   path: string;
   sourceVersionId: string;
   targetVersionId: string;
+  // Present on engine conflict records; origin "sync" marks a two-machine
+  // divergence (the review UI labels sides as machines, not versions).
+  metadata?: { origin?: string };
   current: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   incoming: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   base: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
@@ -145,6 +148,7 @@ export function versionConflictForIpc(conflict: {
     path: conflict.path,
     sourceVersionId: conflict.sourceVersionId,
     targetVersionId: conflict.targetVersionId,
+    origin: conflict.metadata?.origin === "sync" ? "sync" : "merge",
     contentKind,
     currentText:
       contentKind === "text" && conflict.current.exists ? (conflict.current.text ?? "") : null,

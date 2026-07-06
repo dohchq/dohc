@@ -78,3 +78,39 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     await activity.stopAll();
   });
 });
+
+describe("workspaceActivity cloud sync nudge (0P-C)", () => {
+  it("queueCloudSync reaches the workspace's engine and no-ops everywhere else", async () => {
+    let queued = 0;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {
+        queued += 1;
+      },
+      snapshot: () => ({
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        unmatchedRemoteResolves: 2,
+        authExpired: false,
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    // Before open: silently nothing (a resolve on an unopened workspace
+    // cannot happen, but the method must never throw).
+    activity.queueCloudSync("activity-test");
+    expect(queued).toBe(0);
+
+    await activity.open(workspace());
+    activity.queueCloudSync("activity-test");
+    expect(queued).toBe(1);
+    // The engine snapshot's unmatched remote resolves ride the status.
+    expect(activity.getStatus("activity-test").unmatchedRemoteResolves).toBe(2);
+    await activity.stopAll();
+  });
+});

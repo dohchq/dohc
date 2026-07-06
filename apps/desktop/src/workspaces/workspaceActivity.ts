@@ -106,6 +106,10 @@ export function createWorkspaceActivity(
     return {
       ...status,
       conflictCount,
+      // 0P-C honest minimum for conflict-id asymmetry: a peer's resolution
+      // that matched nothing here is surfaced (notice center), never
+      // silently swallowed.
+      unmatchedRemoteResolves: snap?.unmatchedRemoteResolves ?? 0,
       historyCaptureFailed: w?.captureFailed ?? false,
       historyRecordingOff: w?.historyRecordingOff ?? false,
       syncFailing: snap?.syncFailing ?? false,
@@ -265,6 +269,15 @@ export function createWorkspaceActivity(
     return statusFor(workspaceId);
   }
 
+  // Nudges the (debounced) sync engine outside the watcher path. Resolving a
+  // conflict journals a replication op but may change NOTHING on disk
+  // ("keep mine" keeps the local file byte-identical), so without this the
+  // other machine's mirrored conflict would stay open until some unrelated
+  // edit happened to trigger a push. No-op when the workspace has no engine.
+  function queueCloudSync(workspaceId: string): void {
+    watched.get(workspaceId)?.engine?.queueSync();
+  }
+
   // Sets (or clears) the active agent run for an OPEN workspace. The engine
   // capture reads this slot when a batch settles, so writes made during the
   // run are attributed to the agent. Throws if the workspace isn't open — a
@@ -315,6 +328,7 @@ export function createWorkspaceActivity(
     reconcileCloud,
     stopEngines,
     getStatus,
+    queueCloudSync,
     setAgentRun,
     engineCaptureFor,
     registerExpectedEngineEvents,

@@ -14,6 +14,7 @@ import { bridge } from "../bridge";
 type Notice = {
   id:
     | "sync-conflict"
+    | "sync-review"
     | "cloud-disconnected"
     | "cloud-sync-failing"
     | "history-capture-failed"
@@ -44,6 +45,9 @@ export function NoticeCenter(props: {
   conflictSummaries: string[];
   onOpenHistory: () => void;
   onOpenAgent: () => void;
+  // Opens the conflict review dialog (0P-C): the notice's "Review" action
+  // lands the user directly on the side-by-side choices.
+  onOpenConflicts: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
@@ -140,11 +144,14 @@ export function NoticeCenter(props: {
       next.push({
         id: "sync-conflict",
         tone: "danger",
-        title: conflictCount > 1 ? `${conflictCount} sync conflicts` : "Sync conflict",
+        title:
+          conflictCount > 1
+            ? `${conflictCount} files changed on two machines`
+            : "A file changed on two machines",
         body:
           props.conflictSummaries[0] ??
-          "Both versions were kept. Review history to choose what stays.",
-        action: { label: "Review", onClick: props.onOpenHistory },
+          "Both copies are safe. Review the differences to choose what stays.",
+        action: { label: "Review", onClick: props.onOpenConflicts },
         Icon: AlertTriangle,
       });
     } else if (state === "cloud-disconnected") {
@@ -154,6 +161,21 @@ export function NoticeCenter(props: {
         title: "Cloud disconnected",
         body: "Local work is safe. Reconnect dohc Cloud when you want sync again.",
         Icon: CloudOff,
+      });
+    }
+
+    // 0P-C honest minimum for cross-machine conflict resolution: another
+    // machine resolved a conflict that no longer matches this workspace's
+    // state (the file moved on here first). Nothing was changed silently —
+    // point the user at History for the affected files.
+    if ((props.syncStatus?.unmatchedRemoteResolves ?? 0) > 0) {
+      next.push({
+        id: "sync-review",
+        tone: "warning",
+        title: "A choice made on another machine needs a look",
+        body: "Another machine chose what to keep for a file that has changed here since. Your local copy stays as it is — check History if something looks off.",
+        action: { label: "Open History", onClick: props.onOpenHistory },
+        Icon: AlertTriangle,
       });
     }
 
@@ -229,6 +251,7 @@ export function NoticeCenter(props: {
     props.agentActive,
     props.conflictSummaries,
     props.onOpenAgent,
+    props.onOpenConflicts,
     props.onOpenHistory,
     props.syncStatus,
     installPending,

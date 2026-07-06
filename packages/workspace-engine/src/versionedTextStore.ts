@@ -3881,17 +3881,57 @@ function createVersionedTextStoreWithHooks(
     const localHeadMomentId = localSnapshot?.latestMomentId ?? latest?.momentId ?? null;
     const originSawAbsent =
       payload.beforePresent === "absent" || payload.beforePresent === "null";
-    const canFastForward = originSawAbsent
+    const headFastForward = originSawAbsent
       ? localSnapshot === null && conflictingPathOccupant === null
       : localSnapshot !== null &&
         localSnapshot.latestMomentId === payload.beforeLatestMomentId &&
         conflictingPathOccupant === null;
+    // Content convergence (0P-C): heads that diverged but arrived at the SAME
+    // bytes at the same path are agreement, not conflict — adopt the remote
+    // moment as the new head so both machines converge on one lineage. This
+    // is how a conflict-resolution round trip settles: the resolver's write
+    // op lands on the peer (whose copy already matches) as a fast-forward
+    // instead of a spurious identical-content conflict, and later edits
+    // fast-forward by head again. A both-sides-deleted file converges the
+    // same way.
+    const contentFastForward =
+      !headFastForward &&
+      (payload.operation === "delete"
+        ? localSnapshot === null && conflictingPathOccupant === null
+        : localSnapshot !== null &&
+          conflictingPathOccupant === null &&
+          localSnapshot.path === payload.payloadAfterPath &&
+          ((payload.payloadAfterContentKind ?? "text") === "binary"
+            ? isBinarySnapshot(localSnapshot) &&
+              localSnapshot.sha256 === payload.payloadAfterBlobSha256
+            : !isBinarySnapshot(localSnapshot) &&
+              localSnapshot.text === requireBlobText(db, payload.payloadAfterBlobSha256)));
+    const canFastForward = headFastForward || contentFastForward;
     const moment = momentFromAppendPayload(db, workspaceId, payload);
-    if (canFastForward) {
+    if (contentFastForward && payload.operation === "delete") {
+      // Both sides deleted the file: agreement. The remote delete is kept as
+      // a record-only row (its preimage describes the REMOTE lineage, which
+      // this store's moment chain never materialized) and nothing else
+      // changes — no snapshot exists, no conflict opens.
       db.prepare(
         "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)",
       ).run(workspaceId, payload.objectId, payload.objectCreatedAtMs ?? payload.recordedAtMs);
-      insertMomentRow(db, moment);
+      insertMomentRow(db, moment, { recordOnly: true });
+      return 0;
+    }
+    if (canFastForward) {
+      // A content-convergent adoption (heads diverged, same bytes) keeps the
+      // moment-chain invariant honest by localizing the ROLLBACK preimage to
+      // this store's actual previous state; the wire payload (and therefore
+      // what re-replicates) stays byte-identical via the imported journal.
+      const adoptedMoment =
+        contentFastForward && !headFastForward && localSnapshot
+          ? { ...moment, before: cloneSnapshot(localSnapshot) }
+          : moment;
+      db.prepare(
+        "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)",
+      ).run(workspaceId, payload.objectId, payload.objectCreatedAtMs ?? payload.recordedAtMs);
+      insertMomentRow(db, adoptedMoment);
       if (payload.operation === "delete") {
         db.prepare(
           "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
@@ -4039,6 +4079,72 @@ function createVersionedTextStoreWithHooks(
       }
     }
     return conflictsOpened;
+  }
+
+  // Applies the INCOMING side of a mirrored sync conflict when the peer's
+  // conflict.resolve says the peer kept its own copy (0P-C). Returns false —
+  // touching NOTHING — whenever the row no longer matches live state (the
+  // file moved on locally, a destination is occupied, or a binary blob is
+  // missing); the caller then leaves the conflict open and surfaces the op
+  // for local review instead of clobbering newer local work.
+  function applyMirroredIncomingState(
+    db: SqliteDb,
+    workspaceId: WorkspaceId,
+    conflict: VersionedTextConflictRecord,
+  ): boolean {
+    const live = fileStateFromSnapshot(
+      conflict.path,
+      selectSnapshotByPath(db, workspaceId, conflict.targetVersionId, conflict.path),
+    );
+    if (!fileStatesEqual(live, conflict.current)) return false;
+    if (fileStatesEqual(conflict.current, conflict.incoming)) return true;
+    const metadata: ActorNeutralWriteMetadata = {
+      origin: "sync",
+      summary: "Applied the copy chosen on another machine",
+    };
+    const incoming = conflict.incoming;
+    if (!incoming.exists) {
+      if (conflict.current.exists) {
+        deleteTextFileInDb({
+          db,
+          workspaceId,
+          versionId: conflict.targetVersionId,
+          path: conflict.path,
+          metadata,
+        });
+      }
+      return true;
+    }
+    // Divergent-move resolutions (the incoming side lives at a DIFFERENT
+    // path) stay a local decision: applying here would change a path the
+    // pull's materialization diff never inspects, leaving disk stale. Rare
+    // enough that surfacing the conflict for local review is the honest
+    // move.
+    if (incoming.path !== conflict.path) return false;
+    if (isBinaryState(incoming)) {
+      const sha = incoming.sha256 ?? "";
+      if (!sha || !db.prepare("SELECT 1 FROM binary_blobs WHERE sha256 = ?").get(sha)) {
+        return false;
+      }
+      writeBinaryFileInDb({
+        db,
+        workspaceId,
+        versionId: conflict.targetVersionId,
+        path: conflict.path,
+        bytes: readBinaryBlobFromDb(db, sha),
+        metadata,
+      });
+      return true;
+    }
+    writeTextFileInDb({
+      db,
+      workspaceId,
+      versionId: conflict.targetVersionId,
+      path: conflict.path,
+      text: incoming.text ?? "",
+      metadata,
+    });
+    return true;
   }
 
   return {
@@ -4537,17 +4643,18 @@ function createVersionedTextStoreWithHooks(
               // current/incoming heads swapped. The peer resolving its
               // "incoming" (our content) mirrors to keeping our "current" —
               // choice and resolution flip sides accordingly.
-              const mirror =
+              const mirrorRow =
                 payload.targetVersionId !== undefined
                   ? txDb
                       .prepare(
-                        `SELECT conflict_id FROM conflicts
-                         WHERE workspace_id = ? AND status = 'open'
-                           AND target_version_id = ?
-                           AND current_latest_moment_id IS ?
-                           AND incoming_latest_moment_id IS ?
-                         ORDER BY created_at_ms, conflict_id
-                         LIMIT 1`,
+                        conflictSelectSql(
+                          `WHERE c.workspace_id = ? AND c.status = 'open'
+                             AND c.target_version_id = ?
+                             AND c.current_latest_moment_id IS ?
+                             AND c.incoming_latest_moment_id IS ?
+                           ORDER BY c.created_at_ms, c.conflict_id
+                           LIMIT 1`,
+                        ),
                       )
                       .get(
                         workspaceId,
@@ -4556,6 +4663,7 @@ function createVersionedTextStoreWithHooks(
                         payload.currentLatestMomentId ?? null,
                       )
                   : undefined;
+              const mirror = mirrorRow ? conflictFromRow(mirrorRow) : undefined;
               if (mirror) {
                 const mirroredChosenFrom =
                   payload.chosenFrom === "current"
@@ -4569,20 +4677,36 @@ function createVersionedTextStoreWithHooks(
                     : payload.resolution === "kept-current"
                       ? "applied-incoming"
                       : payload.resolution;
-                txDb
-                  .prepare(
-                    `UPDATE conflicts
-                     SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
-                     WHERE workspace_id = ? AND conflict_id = ?`,
-                  )
-                  .run(
-                    payload.status,
-                    mirroredChosenFrom,
-                    mirroredResolution,
-                    payload.updatedAtMs,
-                    workspaceId,
-                    rowString(mirror, "conflict_id"),
-                  );
+                // The peer KEPT ITS OWN copy ("kept-current" there reads as
+                // "applied-incoming" here): this store must adopt that state,
+                // or the two machines would silently disagree forever with no
+                // open conflict anywhere. Applies through the same in-db
+                // write path a local resolution uses, guarded like
+                // resolveTextConflict's stale-target check — a file that
+                // moved on locally is NEVER clobbered; the conflict stays
+                // open for local review and the op is surfaced instead.
+                const applied =
+                  mirroredResolution === "applied-incoming"
+                    ? applyMirroredIncomingState(txDb, workspaceId, mirror)
+                    : true;
+                if (applied) {
+                  txDb
+                    .prepare(
+                      `UPDATE conflicts
+                       SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
+                       WHERE workspace_id = ? AND conflict_id = ?`,
+                    )
+                    .run(
+                      payload.status,
+                      mirroredChosenFrom,
+                      mirroredResolution,
+                      payload.updatedAtMs,
+                      workspaceId,
+                      mirror.id,
+                    );
+                } else {
+                  pendingConflictResolves = 1;
+                }
               } else {
                 // No local match at all: journal + ack the op (idempotency
                 // and ordering must hold) but surface it — a peer's

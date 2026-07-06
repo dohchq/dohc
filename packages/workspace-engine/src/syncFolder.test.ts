@@ -1509,6 +1509,216 @@ describe("sync folder replication", () => {
     }
   });
 
+  // 0P-C conflict round trip: resolving on one machine must SETTLE both
+  // machines — mirror closed, contents equal, no residual identical-content
+  // conflicts, and the next ordinary edit fast-forwards again.
+  it("apply-incoming resolution round trip converges both machines and reconverges heads", async () => {
+    const a = await tempRoot("sync-rt-a");
+    const b = await tempRoot("sync-rt-b");
+    const seedDir = await tempRoot("sync-rt-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-rt-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await replicate(a, b);
+    await replicate(b, a);
+
+    // A adopts B's copy.
+    await withStore(a, 6000, "ar-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: conflict!.id,
+        resolution: { kind: "apply-incoming" },
+        metadata: { origin: "api" },
+      });
+    });
+    const resolutionImport = await replicate(a, b);
+    // The resolution WRITE lands on B — whose copy already matches — as a
+    // content-convergent fast-forward, never a fresh identical-content
+    // conflict; the conflict.resolve closes B's mirror by swapped heads.
+    expect(resolutionImport.conflictsOpened).toBe(0);
+    expect(resolutionImport.pendingConflictResolves).toBe(0);
+    await withStore(b, 6500, "bc-", async (store) => {
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from B");
+    });
+
+    // Heads reconverged: the NEXT edit on A fast-forwards on B.
+    await withStore(a, 8000, "a3-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "v2", metadata: { origin: "api" } }).then(() => {}),
+    );
+    const postResolve = await replicate(a, b);
+    expect(postResolve.conflictsOpened).toBe(0);
+    await withStore(b, 9000, "bf-", async (store) => {
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("v2");
+    });
+  });
+
+  it("keep-current resolution applies its content consequence on the peer (no silent divergence)", async () => {
+    const a = await tempRoot("sync-kc-a");
+    const b = await tempRoot("sync-kc-b");
+    const seedDir = await tempRoot("sync-kc-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-kc-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await replicate(a, b);
+    await replicate(b, a);
+
+    // A keeps ITS OWN copy. No write op is journaled on A — the mirrored
+    // resolve must carry the content consequence to B by itself.
+    await withStore(a, 6000, "ar-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: conflict!.id,
+        resolution: { kind: "keep-current" },
+        metadata: { origin: "api" },
+      });
+    });
+    const resolutionImport = await replicate(a, b);
+    expect(resolutionImport.pendingConflictResolves).toBe(0);
+    await withStore(b, 6500, "bc-", async (store) => {
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      // B adopted the copy A chose — no silent forever-divergence.
+      expect(text?.text).toBe("from A");
+      const [resolved] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "resolved" });
+      expect(resolved).toMatchObject({ status: "resolved", resolution: "applied-incoming" });
+    });
+    // B's adoption write replicates back: A converges heads with no conflict.
+    const backImport = await replicate(b, a);
+    expect(backImport.conflictsOpened).toBe(0);
+    await withStore(a, 7000, "af-", async (store) => {
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from A");
+    });
+  });
+
+  it("a peer's resolution never clobbers a file that moved on locally — it surfaces for review", async () => {
+    const a = await tempRoot("sync-mv-a");
+    const b = await tempRoot("sync-mv-b");
+    const seedDir = await tempRoot("sync-mv-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-mv-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await replicate(a, b);
+    await replicate(b, a);
+
+    // B keeps editing AFTER the mirror conflict opened: its heads move on.
+    await withStore(b, 5000, "b2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B, newer", metadata: { origin: "api" } }).then(() => {}),
+    );
+    // A resolves keep-current ("from A"). B's mirror row heads no longer
+    // match its live snapshot — applying would clobber the newer local edit.
+    await withStore(a, 6000, "ar-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: conflict!.id,
+        resolution: { kind: "keep-current" },
+        metadata: { origin: "api" },
+      });
+    });
+    const resolutionImport = await replicate(a, b);
+    expect(resolutionImport.pendingConflictResolves).toBe(1);
+    await withStore(b, 7000, "bc-", async (store) => {
+      const open = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      // The conflict stays OPEN for local review; the newer local edit is
+      // untouched.
+      expect(open).toHaveLength(1);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from B, newer");
+    });
+  });
+
   it("replicates binary content_kind through version.create forks byte-exactly", async () => {
     const a = await tempRoot("sync-m1-a");
     const b = await tempRoot("sync-m1-b");

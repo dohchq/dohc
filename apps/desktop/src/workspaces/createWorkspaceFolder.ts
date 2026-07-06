@@ -77,6 +77,12 @@ function assertSharedWithMeFolder(existing: Stats): void {
 export async function createWorkspaceFolder(input: {
   rootPath: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
+  // Join flow (0P-C): a fresh folder adopting a SYNCED workspace's identity
+  // gets the sync id instead of a random one, so the local engine store and
+  // the relay bucket agree from the first pull. Ignored when the folder is
+  // already a dohc workspace (an existing manifest's identity always wins —
+  // silently rebinding it would sever history and sync).
+  workspaceId?: string;
 }): Promise<CreatedWorkspace> {
   const folderCheck = validateAttachedFolder(input.rootPath);
   if (!folderCheck.ok) {
@@ -125,7 +131,7 @@ export async function createWorkspaceFolder(input: {
   }
 
   const manifest = createWorkspaceManifest({
-    workspaceId: randomUUID(),
+    workspaceId: input.workspaceId ?? randomUUID(),
     kind: input.kind,
   });
 

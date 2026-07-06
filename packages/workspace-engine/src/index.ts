@@ -39,10 +39,12 @@ export {
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   claimRelayWorkspace,
+  probeRelayWorkspace,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
 } from "./syncRelay";
 export type {
+  ProbeRelayWorkspaceResult,
   PullWorkspaceFromRelayResult,
   PushWorkspaceToRelayResult,
   RelayMaterializedPath,

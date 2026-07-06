@@ -17098,3 +17098,306 @@ pnpm typecheck                              # clean repo-wide
 git diff --check                            # clean
 node scripts/check-think-bigger-doc-links.mjs
 ```
+
+## PR 0P-C - Offline Rejoin And Conflict E2E (Sync As A Product Flow)
+
+Status: implemented and locally validated on branch; not pushed
+Branch: codex/think-bigger-0pc-rejoin
+Worktree: /home/ice/dev/dohc-0pc-rejoin (main 59c9455c, post 0P-B)
+Implementation workstream: Claude lane (direct implementation,
+tests-first; the two engine data-safety gaps below were found by
+empirical probes before any UI work and fixed with failing-repro tests)
+PR Link: (pending)
+Date started: 2026-07-07
+Date completed: 2026-07-07
+
+### Scope
+
+A — Join flow (the product face of bootstrap-from-relay):
+
+- [x] Sync code: `dohc-sync:<workspaceId>:<relayUrl>` — one copyable,
+  human-readable line (deliberately not base64: users can see what they
+  paste; support can read it off a screenshot). ONE parser/builder
+  module (`apps/desktop/src/workspaces/syncCode.ts`) shared by main and
+  renderer; workspace-id charset pinned to the IPC contract's
+  WORKSPACE_ID.
+- [x] Machine 1 surface: the cloud panel's synced state gains "Add this
+  workspace on another machine" — the code + a Copy button
+  (CloudLogin.tsx; testids cloud-sync-code / cloud-copy-sync-code).
+  Omitted entirely when the session has no relay.
+- [x] Machine 2 surface: first-run gains "Join a synced workspace from
+  another machine" -> JoinSyncedWorkspace.tsx: sign-in gate (embeds the
+  normal CloudLogin with an onConnected re-check; per the lane's honest
+  minimum, join REQUIRES being signed in and says so), paste code, pick
+  an empty folder, join. Errors are product-voiced; a first-sync
+  failure after the workspace was created returns a WARNING (workspace
+  added, sync keeps retrying) with an explicit "Open workspace" instead
+  of vanishing the message.
+- [x] Main-process handler (`cloudJoinWorkspace` IPC): parse code ->
+  require session -> RELAY-URL SECURITY GATE (the token is only ever
+  sent to the relay the user signed in with; a pasted code naming a
+  different relay is refused with guidance — never a token leak to an
+  attacker-controlled URL) -> approved-root + empty-folder checks ->
+  `probeRelayWorkspace` pre-flight (new engine helper: first log page
+  only; absent/foreign -> "no workspace matches that code", owned-but-
+  empty -> "hasn't synced anything yet"; NOTHING local is created on
+  any refusal, so a mistyped code can never mint an empty workspace) ->
+  createWorkspaceFolder with the sync id (new optional workspaceId
+  input; an existing manifest's identity always wins) -> register ->
+  open (watcher+capture) -> setWorkspaceRemote -> enableCloud (awaits
+  the full first pull through the capture chain, materializing files/
+  history/chats before the handler resolves).
+
+B — Offline rejoin UX:
+
+- [x] Conflict notice re-voiced in two-machine language: title "A file
+  changed on two machines" / "N files changed on two machines", body
+  "Both copies are safe. Review the differences to choose what stays.",
+  action Review -> the NEW ConflictReviewDialog (the notice previously
+  pointed at History, where nothing could be resolved).
+- [x] ConflictReviewDialog (WorkspaceVersions.tsx): standalone review
+  of every OPEN conflict — sync divergences AND merges left with
+  "Finish later" — reusing the exact ConflictResolver cards. Sync-
+  origin conflicts label sides "On this machine" / "On your other
+  machine" with keep-buttons to match (never version names, never sync
+  jargon); the wire conflict record gains `origin: "merge" | "sync"`
+  (from the engine record's metadata.origin).
+- [x] Conflict state tells the truth over time: relaySyncEngine gains
+  `countOpenConflicts` (engine open-conflict count re-read after every
+  pass) instead of a monotone accumulator — resolving locally or
+  pulling a peer's resolution CLEARS the status-bar/notice state.
+  Resolving also nudges `queueCloudSync` (new workspaceActivity method,
+  called by the resolve IPC) so a "keep mine" resolution — which
+  changes nothing on disk and therefore never wakes the watcher —
+  still pushes its conflict.resolve op promptly.
+
+C — Conflict round trip (id-asymmetry honest minimum + two REAL engine
+gaps found by probing and fixed):
+
+- [x] GAP 1 (identical-content re-conflict): the resolver's apply-
+  incoming WRITE landed on the peer — whose copy already matched —
+  as a fresh head-divergent conflict between two identical texts, so
+  machine 2 was told "a file changed on two machines" about bytes that
+  are equal, forever (heads never reconverged; every later edit
+  conflicted again). Fix: content-convergent fast-forward in
+  applyRemoteMomentAppend — heads diverged but same bytes at the same
+  path is AGREEMENT: adopt the remote moment as the new head (rollback
+  preimage localized to this store's actual previous state so the
+  moment-chain hydration invariant stays honest; the imported journal
+  ships the wire payload byte-identical). Both-sides-deleted converges
+  as a record-only row. Repro (failed pre-fix): apply-incoming round
+  trip left B one open conflict with current.text === incoming.text.
+- [x] GAP 2 (silent divergence on keep-current, data safety): a
+  keep-current resolution journals NO write op, and the mirrored
+  conflict.resolve only flipped the peer's row — machine 1 kept "from
+  A", machine 2 kept "from B", zero open conflicts anywhere, forever.
+  Fix: applyMirroredIncomingState — when the mirrored resolution means
+  "the peer kept ITS copy", apply that content here through the same
+  in-db write path a local resolution uses, guarded by the same
+  stale-target check as resolveTextConflict: if the file moved on
+  locally (heads no longer match the row), a destination is occupied,
+  a divergent-move destination is involved, or a binary blob is
+  missing, NOTHING is touched — the conflict stays open for local
+  review and the op is surfaced via pendingConflictResolves. The
+  adoption write journals locally, so it replicates back and machine 1
+  converges heads via GAP 1's rule. conflict.resolve paths now ride
+  the pull's materialization diff (candidateMaterializationPaths), so
+  the adopted copy reaches the peer's DISK, not just its engine.
+- [x] pendingConflictResolves surfaced in the product: accumulated as
+  `unmatchedRemoteResolves` on the sync snapshot -> SyncStatusResult ->
+  a calm notice ("A choice made on another machine needs a look",
+  action Open History). Engine tests pin all three behaviors:
+  apply-incoming round trip converges + reconverges heads; keep-current
+  applies its content consequence on the peer; a moved-on file is
+  never clobbered (surfaces for review, newer local edit intact).
+
+D — Search/FTS after sync (verified, one scale bug fixed):
+
+- [x] Verified by reading + E2E: applyRemoteMomentAppend maintains
+  engine_search_files_fts on fast-forward writes/deletes, and
+  linkedChatStore.applyReplicationOp maintains thread-header/message
+  FTS rows on replicated chat ops — the relay path reuses the same
+  applyReplicationOp the 0P-A import path proved. The join E2E asserts
+  pulled FILE content and a pulled CHAT MESSAGE are findable through
+  the engine search view, and the chat hit opens the Chats rail.
+- [x] SCALE BUG (would have broken every real join push-back and any
+  enable-sync on a workspace with >500 ops of history): the relay caps
+  log appends at MAX_OPS_PER_REQUEST=500 and pushWorkspaceToRelay sent
+  the ENTIRE backlog in one request -> 400 on every retry, forever.
+  Fix: chunked contiguous appends (client cap 500) with the pushed
+  cursor committed after EVERY accepted chunk (interruption resumes,
+  never replays). Test: 511-op push lands as multiple batches through
+  a cap-enforcing fake relay and a fresh store bootstraps all of it.
+
+E — E2E (`apps/desktop/e2e/workspace-sync-rejoin.spec.ts`): one REAL
+Electron app + the REAL sync-relay child process (SYNC_RELAY_TEST_AUTH
+seam, SQLite on the spec's tmpfs dir) + a HEADLESS second machine (an
+engine store in the test process driven through the same public
+push/pull API the desktop uses) — the serial single-display harness
+cannot run two Electron instances (0P-B's E2E note).
+
+- [x] Spec 1 (offline rejoin + conflict round trip): app syncs a file;
+  headless machine bootstraps it; relay STOPPED (SIGTERM on our own
+  child; restarted later on the SAME port with the same db); both
+  machines edit the same file offline; rejoin -> status flips to
+  conflict -> notice ("changed on two machines") -> Review -> dialog
+  shows both sides in machine language -> keep the other machine's
+  copy -> app disk file becomes the chosen copy -> headless machine
+  pulls: mirror CLOSED, content = chosen copy, zero open conflicts ->
+  app status leaves conflict state. Test-only timing seams
+  (DOHC_TEST_SYNC_DEBOUNCE_MS/BACKOFF_MS, honored only under
+  DOHC_DESKTOP_TEST) keep the spec inside the harness budget.
+- [x] Spec 2 (join): headless machine seeds files + 2-moment history +
+  a linked chat, pushes; app starts with a FRESH home (signed-in via a
+  seeded plain-token credential file) -> first-run -> Join -> paste
+  code -> pick folder (DOHC_TEST_PICK_PATH) -> workspace opens with
+  the sync identity, files on disk byte-exact, full history in the
+  rail, and both file content and the chat message searchable.
+- [x] Regressions re-run green: workspace-versions (9 incl. merge
+  conflict panel), workspace-chats, workspace-engine-search.
+
+F — Perf (honest numbers, AMD Ryzen 9 7950X, WSL2, node v25.2.1):
+
+- 1,000-file bootstrap through the real relay
+  (services/sync-relay/scripts/bench-bootstrap.mjs): push 1,001 ops
+  5.3s; fresh-store bootstrap pull (fetch+apply, 1,000 files) 6.3s;
+  quiescent pull 25ms.
+- PRODUCT join-to-interactive-shell (Spec 2 with
+  DOHC_E2E_JOIN_FILES=1000): 9.1s for 1,002 files + chat — the join
+  deliberately opens the shell only after full hydration (simplest
+  correct thing; files/history/chats are all present at first paint).
+  The design's "interactive shell before full hydration" option is
+  recorded as a follow-up if real workspaces outgrow this; small joins
+  are ~300ms.
+
+### UI copy inventory (all new user-facing strings)
+
+- First-run: "Join a synced workspace from another machine".
+- Join panel: "Join a synced workspace" / "The workspace you're joining
+  belongs to your dohc Cloud account — sign in first, then paste the
+  code from your other machine." / "Workspace code" / "Where it should
+  live on this machine" / "Choose an empty folder" / "Join workspace" /
+  "Bringing your workspace over…" / "Downloading files, history, and
+  chats. This can take a moment for larger workspaces."
+- Join errors: "That doesn't look like a workspace code. Copy it again
+  from the other machine." / "Sign in to dohc Cloud first." / "This
+  workspace syncs through a different server than the one you're signed
+  in to. Reconnect dohc Cloud with the sync relay URL <url>, then join
+  again." / "This workspace is already on this machine." / "Choose an
+  empty folder — the synced workspace's files will be placed inside
+  it." / "No synced workspace matches that code for your account.
+  Check the code and that you're signed in with the same account." /
+  "That workspace hasn't synced anything yet. Make sure sync is on for
+  it on the other machine, then try again." / "Your dohc Cloud session
+  expired. Sign in again, then retry." / warning: "The workspace was
+  added, but the first sync didn't finish. It will keep trying — check
+  your connection."
+- Cloud panel: "Add this workspace on another machine" / "On the other
+  machine, sign in with the same account, choose 'Join a synced
+  workspace', and paste this code." / Copy / Copied.
+- Notices: "A file changed on two machines" / "N files changed on two
+  machines" / "Both copies are safe. Review the differences to choose
+  what stays." / Review; "A choice made on another machine needs a
+  look" / "Another machine chose what to keep for a file that has
+  changed here since. Your local copy stays as it is — check History
+  if something looks off." / Open History.
+- Review dialog: "Decide what to keep" / "One file has two copies." /
+  "N files have two copies." / "Choose what stays — nothing is lost
+  either way, and History keeps both." / sync sides "On this machine" /
+  "On your other machine" / "Keep this machine's copy" / "Keep the
+  other machine's copy" / "This machine doesn't have this file." /
+  "Your other machine removed this file." / "Looking for conflicting
+  files…" / "Nothing needs your attention here." / "All set — every
+  conflict is resolved." / Finish later / Done.
+- Engine moment summary for mirrored adoption: "Applied the copy chosen
+  on another machine".
+- No "origin", "cursor", "ops", "relay" (except the existing settings
+  field "Sync relay URL" from 0P-B), no git terms anywhere.
+
+### Files Changed
+
+Engine: packages/workspace-engine/src/{versionedTextStore.ts
+(content-convergent fast-forward, applyMirroredIncomingState, mirror
+apply in conflict.resolve), syncRelay.ts (probeRelayWorkspace, chunked
+push, conflict.resolve materialization paths), syncFolder.test.ts (3
+round-trip tests), syncRelay.test.ts (probe + chunking tests),
+index.ts}.
+Desktop main: apps/desktop/src/{main.ts (cloudJoinWorkspace handler,
+countOpenConflicts wiring, queueCloudSync on resolve, test timing
+seams), ipc/{channels.ts, bridgeContract.ts (CloudJoinWorkspace*,
+SyncStatusResult.unmatchedRemoteResolves, WorkspaceVersionConflict.
+origin), engineHistoryIpc.ts}, preload.ts,
+workspaces/{syncCode.ts+test (new), createWorkspaceFolder.ts+test
+(workspaceId adoption), relaySyncEngine.ts+test, workspaceActivity.ts
++test}}.
+Renderer: {JoinSyncedWorkspace.tsx+test (new), DesktopFirstRun.tsx+test,
+CloudLogin.tsx+test, DesktopWorkspaceShell.tsx,
+workbench/{WorkspaceVersions.tsx (ConflictReviewDialog + side labels),
+NoticeCenter.tsx, StatusBar.tsx+test}}.
+E2E: apps/desktop/e2e/{workspace-sync-rejoin.spec.ts (new),
+helpers/syncRelay.ts (new), helpers/workspace.ts (registry remote +
+credential seeding)}.
+Bench: services/sync-relay/scripts/bench-bootstrap.mjs (new).
+
+### Commands Run (final state, all green)
+
+```bash
+pnpm --filter @dohc/workspace-engine test   # 360 passed (352 baseline + 8)
+pnpm --filter @dohc/desktop test            # 928 passed (907 baseline + 21)
+pnpm --filter @dohc/sync-relay test         # 19 passed
+pnpm --filter @dohc/mcp test                # 76 passed
+pnpm typecheck                              # clean repo-wide
+pnpm --filter @dohc/desktop build
+cd apps/desktop && pnpm exec playwright test              # full desktop e2e suite
+node --import tsx/esm scripts/bench-bootstrap.mjs 1000    # (services/sync-relay)
+DOHC_E2E_JOIN_FILES=1000 pnpm exec playwright test e2e/workspace-sync-rejoin.spec.ts -g "join flow"
+node scripts/check-think-bigger-doc-links.mjs
+git diff --check
+```
+
+### Security / Privacy Notes
+
+- The pasted sync code is untrusted input: its relay URL is only ever
+  COMPARED (trailing-slash-insensitive) against the session's relay —
+  the bearer token is never sent to a URL that arrived in a code.
+- Join validates everything (code shape, session, folder provenance via
+  the approved-root machinery, emptiness, relay pre-flight) before any
+  local state exists; refusals are stateless.
+- The mirrored-resolution apply is fail-closed toward LOCAL data: any
+  mismatch with live state leaves local bytes untouched and the
+  conflict open (pendingConflictResolves surfaced), never a clobber.
+- E2E credential seeding uses the documented plain-token fallback
+  format in a hermetic DOHC_TEST_HOME; the relay child runs with the
+  dev/test-only auth seam and SIGTERM-by-pid teardown (no pattern
+  kills; fixtures on /tmp per the WSL rules).
+
+### Remaining Risk / Follow-Ups (0P-D, PR 18, arc gate)
+
+- Join entry points beyond first-run: a machine that already has
+  workspaces has no join surface yet (the cloud overlay could host the
+  same JoinSyncedWorkspace panel; component is reusable as-is).
+- Join blocks on full hydration (9.1s @ 1,002 files). If real
+  workspaces outgrow this, split bootstrap: open the shell after the
+  first page and background the tail like startup reconciliation.
+- Merged resolutions (apply-merged) intentionally surface on the peer
+  as a reviewable conflict (the merged write lands head-divergent with
+  new content; the mirror row closes). Coalescing/auto-adopting merged
+  content is future work, carried from 0P-A's conflict-coalescing item.
+- Divergent-MOVE resolutions are refused by the mirror apply (kept
+  open for local review) because the pull's materialization diff never
+  inspects the destination path — lift together with rename-aware
+  materialization if divergent moves turn out to be common.
+- N>2 machines applying overlapping subsets in different orders can
+  transiently hold different HEADS with identical content; the
+  content-convergence rule reconverges them on the next exchange, and
+  same-order replicas (the relay's deterministic interleave) are
+  unaffected. Property coverage for 3-machine topologies is arc-gate
+  material.
+- `unmatchedRemoteResolves` is session-scoped (resets on app restart);
+  the underlying conflict rows persist, so nothing is lost — but the
+  notice does not resurrect after relaunch.
+- Origin-reset recovery for RelayOriginDivergedError remains open
+  (carried from 0P-B; error-only today).
+- 0P-D consumes: the join flow is where new-machine passphrase
+  enrollment will mount (join succeeds; secret materialization stays
+  pending until the passphrase step).

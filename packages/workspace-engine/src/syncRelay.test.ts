@@ -8,8 +8,10 @@ import {
   RelayBlobMissingError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
+  RelayWorkspaceUnavailableError,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   claimRelayWorkspace,
+  probeRelayWorkspace,
   createLinkedChatStore,
   createVersionedTextStore,
   pullWorkspaceFromRelay,
@@ -171,6 +173,11 @@ class FakeRelay {
           recordedAtMs: number;
         }>;
       };
+      // Mirrors the real relay's MAX_OPS_PER_REQUEST cap: an oversized
+      // append is a 400, so the client MUST chunk.
+      if (body.ops.length > 500) {
+        return Response.json({ ok: false, error: "too many ops" }, { status: 400 });
+      }
       const currentMax = Math.max(
         -1,
         ...this.log
@@ -375,6 +382,83 @@ describe("sync relay client", () => {
       pushed: 1,
     });
     expect(relay.log).toHaveLength(3);
+  });
+
+  it("chunks a large first push within the relay's per-request op cap (join/enable-sync scale)", async () => {
+    const relay = new FakeRelay();
+    const a = await tempRoot("chunk-a");
+    const b = await tempRoot("chunk-b");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    const store = createVersionedTextStore(a, { nowMs: () => 1000 });
+    try {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      for (let index = 0; index < 510; index += 1) {
+        await store.writeTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: `docs/f-${index}.md`,
+          text: `file ${index}\n`,
+          metadata: { origin: "api" },
+        });
+      }
+    } finally {
+      await store.close();
+    }
+
+    // 511 ops (workspace.init + 510 writes) > the 500-op request cap: the
+    // push must land as multiple contiguous batches, not one failing 400.
+    const pushedResult = await pushWorkspaceToRelay({
+      rootDir: a,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    expect(pushedResult.pushed).toBe(511);
+    expect(relay.logPostCount).toBeGreaterThanOrEqual(2);
+    expect(relay.log).toHaveLength(511);
+
+    // A fresh machine bootstraps the whole thing.
+    const pulled = await pullWorkspaceFromRelay({
+      rootDir: b,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    await pulled.commitFetchCursor();
+    expect(pulled.applied).toBe(511);
+    expect(await readText(b, "docs/f-42.md")).toBe("file 42\n");
+  });
+
+  it("probes a synced workspace without creating local state", async () => {
+    const relay = new FakeRelay();
+    const a = await tempRoot("probe-a");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(a);
+    await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    await expect(
+      probeRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() }),
+    ).resolves.toEqual({ hasContent: true });
+  });
+
+  it("probe reports an owned-but-empty workspace as having no content", async () => {
+    const relay = new FakeRelay();
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await expect(
+      probeRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() }),
+    ).resolves.toEqual({ hasContent: false });
+  });
+
+  it("probe maps an absent/foreign workspace to the typed unavailable error", async () => {
+    const relay = new FakeRelay();
+    await expect(
+      probeRelayWorkspace({ workspaceId: "workspace-never-claimed", relay: relay.connection() }),
+    ).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+  });
+
+  it("probe maps a dead session to the typed unauthorized error", async () => {
+    const relay = new FakeRelay();
+    await expect(
+      probeRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection("bad") }),
+    ).rejects.toBeInstanceOf(RelayUnauthorizedError);
   });
 
   it("throws a typed unauthorized error on 401", async () => {
