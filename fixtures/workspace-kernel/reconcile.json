@@ -1,0 +1,50 @@
+{
+  "workspace": {
+    "files": [
+      { "path": "same.md", "text": "same\n" },
+      { "path": "changed.md", "text": "after\n" },
+      { "path": "added.md", "text": "new\n" }
+    ]
+  },
+  "request": {
+    "manifest": [
+      {
+        "path": "same.md",
+        "size": 5,
+        "sha256": "a6328afc76e9db71da297ebff4b0d3e7a7eb3b01d917c05a6573fef121b6ecb6",
+        "mtime": 1
+      },
+      {
+        "path": "changed.md",
+        "size": 7,
+        "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb",
+        "mtime": 1
+      },
+      {
+        "path": "removed.md",
+        "size": 4,
+        "sha256": "7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c",
+        "mtime": 1
+      }
+    ]
+  },
+  "expected": {
+    "changed": [
+      {
+        "path": "changed.md",
+        "size": 6,
+        "sha256": "7b9a72466d3960eb2aacccfc848939453490db0678bd4725def3f789b891c919",
+        "mediaType": "text/markdown"
+      }
+    ],
+    "added": [
+      {
+        "path": "added.md",
+        "size": 4,
+        "sha256": "7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c",
+        "mediaType": "text/markdown"
+      }
+    ],
+    "removed": ["removed.md"]
+  }
+}

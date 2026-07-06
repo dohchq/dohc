@@ -58,6 +58,7 @@
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
+    "@dohc/workspace-kernel-client": "workspace:*",
     "@dohc/workspace-history": "workspace:*",
     "@dohc/workspace-sync": "workspace:*",
     "@fontsource-variable/inter": "^5.2.8",

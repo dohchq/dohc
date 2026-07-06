@@ -15005,3 +15005,267 @@ table row was updated to say exactly that).
 - The parser's whole-file rejection + onError surfacing is the template
   for future `.dohc` policy files (the allowlist can grow without new
   partial-application hazards).
+
+## PR WS-I - Rust Workspace Kernel Sidecar
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-wsi-rust-kernel
+Worktree: /home/ice/dev/dohc-wsi-rust-kernel
+Implementation workstream, if used: codex CLI (gpt-5.5) drove the bulk
+implementation over two `codex exec` rounds per the codex-implementation
+skill; a Claude lane (fable-5) scoped both prompts, reviewed the Rust
+dispatch path line-by-line for the bridge-auth ordering, reverted an
+unnecessary bench.mjs edit, hand-simplified a broken win32 fake-kernel
+branch in the client tests, and ran every verification command itself.
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] Promote the P0R spike to `crates/workspace-kernel`: a long-lived
+      sidecar speaking JSON-RPC 2.0 over stdio with newline-delimited
+      framing (one JSON object per line — deliberately the same convention
+      as the agent bridge in apps/desktop/src/agents/JsonRpcTransport.ts;
+      documented in the crate's module doc-comment). Methods:
+      kernel.handshake (protocolVersion 1 + capability list), kernel.scan
+      (root -> sorted relative path/size/sha256/mediaType list honoring the
+      shared ignore rules: .dohc/.git/node_modules segments case-insensitive
+      with trailing dot/space normalization, .dohc-write-* prefixes, symlink
+      skip, sqlite -wal/-shm/-journal sidecar skip — same semantics as the
+      spike and packages/workspace-fs scan), kernel.hashChanged (root +
+      candidate paths -> per-path sha256/size with per-path error statuses:
+      missing/ignored/symlink/unsafe — one bad path never fails the call),
+      kernel.reconcile (root + {path,sha256,size,mtime} manifest ->
+      changed/added/removed with fresh hashes; mtime is informational input
+      only, hashes are the source of truth), kernel.cancel (in-flight
+      cancellation via a per-request AtomicBool registry; cancelled work
+      returns error -32002). Every response carries structured
+      `timingMs.total`. Streaming progress events were skipped (not cheap
+      enough to justify this lane).
+- [x] Bridge auth (plan non-negotiable): the parent generates a 32-byte
+      CSPRNG token and passes it via the DOHC_KERNEL_TOKEN ENVIRONMENT
+      variable at spawn (never argv); the kernel exits at startup without
+      it. Every request must echo the token in a top-level `token` field.
+      `dispatch_raw` calls `authenticate_request` FIRST — before the cancel
+      registry, before the method match — and the per-method handlers only
+      accept the `AuthenticatedRequest` type, which is constructible only
+      by a successful token check, so filesystem work is structurally
+      unreachable without auth. Missing/empty/wrong tokens are rejected
+      with -32001 and a message that never echoes the expected token.
+      Client-supplied actor/workspace/version identity fields are not
+      schema fields anywhere; handlers read only root/paths/manifest/
+      requestId, so forged identity metadata is ignored rather than
+      trusted — identity/scope come only from the bound channel plus the
+      root the server passes per request after binding.
+- [x] Negative tests both proving directions: missing/empty/wrong token
+      rejected with the AUTH error (root deliberately nonexistent so a
+      filesystem error would betray ordering); forged
+      actorId/workspaceId/versionId fields produce byte-identical results
+      to the clean request.
+- [x] TS client `packages/workspace-kernel-client`: spawn/supervise with
+      exponential backoff (initialBackoffMs * 2^(failures-1), capped at
+      maxBackoffMs) and a maxRestarts cap surfacing KernelUnavailableError;
+      restartFailures resets after a successful response so long-lived
+      clients never exhaust their budget from ancient crashes; clean
+      shutdown = reject pending, SIGTERM, SIGKILL after killGraceMs
+      (mirrors JsonRpcTransport.dispose). Typed per-method calls, per-call
+      timeout (local rejection + best-effort kernel.cancel), AbortSignal
+      cancellation, typed error hierarchy (KernelClientError /
+      KernelJsonRpcError / KernelUnavailableError / KernelTimeoutError /
+      KernelProtocolError).
+- [x] Shared contract fixtures in `fixtures/workspace-kernel/` (scan,
+      hashChanged, reconcile) consumed by BOTH `cargo test` and the client
+      vitest suite against the real binary — the wire contract cannot
+      drift without both sides failing.
+- [x] Desktop integration, dev-flag only: when DOHC_KERNEL_SIDECAR=1 the
+      startup reconciliation scan in workspaceEngineCapture's
+      reconcileDiskIntoVersion routes through the kernel client (release
+      binary, debug fallback, DOHC_KERNEL_BINARY_PATH override), failing
+      OPEN to the existing scanWorkspaceFiles TS path on any kernel error
+      and logging via the existing onError hook. Scan-only slice: the
+      per-path text-read/classify pipeline stays in TS because engine
+      ownership decisions (readDiskTextState) are TS policy. Flag unset =
+      byte-identical default path. Packaging explicitly out of scope.
+- [x] Benchmarks: scripts/workspace-kernel-spike/bench-kernel.mjs compares
+      the REAL scanWorkspaceFiles (via tsx, in-process-measured, same
+      methodology as the recorded P0R baseline) and a real-scanner
+      reconcile equivalent (new scripts/workspace-kernel-spike/
+      ts-reconcile.ts) against the kernel's scan/reconcile (measured via
+      response timingMs.total) on deterministic 1,000 and 10,000-file
+      fixtures.
+
+### Files Changed
+
+- crates/workspace-kernel/{Cargo.toml,Cargo.lock,src/main.rs} (new)
+- fixtures/workspace-kernel/{scan,hashChanged,reconcile}.json (new)
+- packages/workspace-kernel-client/{package.json,tsconfig.json,src/index.ts,src/index.test.ts} (new)
+- scripts/workspace-kernel-spike/bench-kernel.mjs (new)
+- scripts/workspace-kernel-spike/ts-reconcile.ts (new)
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts (dev-flag scan seam)
+- apps/desktop/src/workspaces/workspaceEngineCapture.test.ts (fallback test)
+- apps/desktop/package.json, pnpm-lock.yaml (workspace dep)
+
+### Tests Added Or Updated
+
+- Rust (9): framing round-trip; missing/empty/wrong token rejected before
+  filesystem work; forged identity params ignored after auth; scan skips
+  ignored segments/sidecars/symlinks (symlink parity with the TS scanner's
+  lstat rule); hashChanged per-path errors; reconcile changed/added/removed;
+  three shared-fixture contract tests.
+- TS client (8, against the real binary built in a beforeAll cargo build):
+  handshake; three shared-fixture contract tests; typed spawn-failure error;
+  restart-after-crash plus maxRestarts:0 limit (deterministic fake kernels);
+  per-call timeout (never-replying fake); AbortSignal cancel of a real scan
+  plus unknown-cancel-id returns cancelled:false.
+- Desktop (1 new): flagged workspace with a missing kernel binary falls back
+  to the TS scan path, reconciliation still lands, onError records the
+  "kernel scan fallback" context.
+
+### Commands Run
+
+```bash
+cargo fmt --manifest-path crates/workspace-kernel/Cargo.toml --check       # clean
+cargo clippy --manifest-path crates/workspace-kernel/Cargo.toml --all-targets -- -D warnings  # clean
+cargo test --manifest-path crates/workspace-kernel/Cargo.toml              # 9 passed
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml        # 3 passed (unmodified)
+pnpm --filter @dohc/workspace-kernel-client test                           # 8 passed
+pnpm --filter @dohc/workspace-kernel-client typecheck                      # clean
+pnpm --filter @dohc/workspace-fs test                                      # 40 passed
+pnpm --filter @dohc/workspace-engine test                                  # 214 passed
+pnpm --filter @dohc/desktop test                                           # 874 passed (873 baseline + 1 new)
+pnpm --filter @dohc/desktop typecheck                                      # clean
+node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3  # works unmodified
+node scripts/workspace-kernel-spike/bench-kernel.mjs --files 1000,10000 --iterations 3
+git diff --check                                                            # clean
+node scripts/check-think-bigger-doc-links.mjs
+```
+
+### E2E / Visual / Manual QA
+
+- No UI surface changed; the dev flag is main-process only. The flagged
+  fallback path is unit-tested; the kernel-served path is exercised by the
+  client suite against the real binary.
+
+### Local Agent CLI QA
+
+#### Pre-Edit Checks
+
+- Root `AGENTS.md` reviewed: yes
+- `apps/app/AGENTS.md` reviewed when working in `apps/app`: n/a (untouched)
+- `apps/web/AGENTS.md` reviewed when working in `apps/web`: n/a (untouched)
+- `apps/app/convex/_generated/ai/guidelines.md` reviewed when touching Convex: n/a (untouched)
+- Other required instructions reviewed: P0R spike plan (Decision section),
+  mega plan "Runtime And Language Strategy" bridge-auth requirements,
+  skills/codex-implementation/SKILL.md
+
+- `DOHC_TEST_AGENT_CLI`: n/a for this lane (no agent-CLI surface touched)
+- Local agent result: n/a
+- Alternative local-agent result, if available: n/a
+- Transcript/artifact path: codex run artifacts in the session scratchpad
+  (prompt.md/prompt2.md, report.md/report2.md, codex-stdout logs)
+- Secret redaction notes: the kernel never logs or echoes the session
+  token; auth failures return a fixed message.
+
+### CodeRabbit
+
+- Status: not yet run (pre-PR)
+- Findings: -
+- Fixes: -
+- Overrides: -
+- Override approval reference: -
+
+### Unresolved Findings
+
+- None known.
+
+### Live Blockers And Overrides
+
+- Current unresolved blockers: none
+- Pending non-blocker overrides: none
+- Approved override references: none
+
+### Subagent Reviews
+
+- Architecture: Claude lane review of transport choice (newline JSON-RPC,
+  matching the existing agent bridge) and of the desktop seam (scan-only,
+  fail-open to TS).
+- Security: Claude line-by-line review of the auth ordering in
+  dispatch_raw/authenticate_request/handle_authenticated_request (the
+  AuthenticatedRequest type gate) and of the negative tests; verified the
+  token travels via env only and never appears in errors or logs.
+- QA: full suite matrix above run by the Claude lane, not trusted from
+  codex reports (codex's sandbox blocked tsx, so all benchmark and vitest
+  evidence was regenerated outside it).
+- Accessibility: n/a (no UI).
+- Other: -
+
+### Security / Privacy Notes
+
+- The stdio bridge enforces the plan's channel binding: token from the
+  spawning parent via environment, checked before any filesystem work;
+  requests carrying forged actor/workspace/version identity fields behave
+  identically to clean requests (identity is never read from the client).
+- kernel.hashChanged refuses absolute, traversal (..), and symlink paths
+  per candidate; scan/reconcile canonicalize the root and never follow
+  symlinks (lstat-parity with the TS scanner so foreign content cannot be
+  hashed into results).
+- Intermediate directory symlinks under a root are followed by direct
+  candidate hashing the same way the TS readDiskTextState leaf rule works
+  today; the kernel runs with user privileges on a server-supplied root,
+  so no privilege boundary is crossed. Recorded as parity, not a new
+  surface.
+
+### Performance Notes
+
+- Budget areas touched: startup reconciliation scan (dev-flag only).
+- Baseline profile: scripts/workspace-kernel-spike/bench-kernel.mjs,
+  deterministic fixture (1,024-byte files, 50 dirs), 3 iterations,
+  AMD Ryzen 9 7950X, WSL2 Linux 6.18, Node v25.2.1, cargo 1.82 release
+  binary; TS side measured in-process via tsx (same methodology as the
+  recorded P0R baseline), kernel side via response timingMs.total.
+- Baseline commit/fixture: this branch (13a4137b), generated fixture.
+- Metrics (avg over 3, ms):
+
+  | Operation | Files | TypeScript | Kernel | Speedup |
+  | --- | ---: | ---: | ---: | ---: |
+  | scan | 1,000 | 343.40 | 7.89 | ~43x |
+  | scan | 10,000 | 3,267.69 | 78.38 | ~42x |
+  | reconcile | 1,000 | 341.61 | 8.96 | ~38x |
+  | reconcile | 10,000 | 3,269.90 | 89.62 | ~36x |
+
+- Unmodified spike bench cross-check (1,000 files): Rust 7.75ms avg vs TS
+  346.42ms avg — consistent with the recorded P0R numbers.
+- Cold/warm distinction: warm-ish local smoke numbers, not release budgets.
+- Budget pass/fail: no budget regression; default TS path untouched.
+- Regression risk: none on the default path (flag off).
+- Follow-up required: packaging story before the flag can default on.
+
+### Migration Notes
+
+- None. New crate/package/fixtures; no schema or data changes. The dev
+  flag defaults off and the unflagged path is unchanged.
+
+### Remaining Risk
+
+- Packaging: the desktop integration assumes a locally built binary
+  (crates/workspace-kernel/target/{release,debug}); bundling per-OS
+  binaries into desktop builds is a future lane. The code fails open to
+  TS when the binary is absent.
+- Portability: supervision fake-kernel tests are POSIX-shell only;
+  Windows client behavior is untested (packaging out of scope). The
+  kernel itself is portable Rust (walkdir/sha2), same as the spike.
+- Cargo 1.82 pin: tempfile is pinned =3.10.1 (edition2024 transitive
+  constraint), same as the spike; revisit when the toolchain moves.
+- The client is spawned per reconcile pass in the desktop seam (simple,
+  dev-flag); a shared long-lived client per workspace is the obvious next
+  step if the flag graduates.
+
+### Follow-Up / Deletion Conditions
+
+- Promote kernel.reconcile (not just scan) into the capture path once the
+  engine-ownership classification contract is shared with the kernel.
+- Package the binary per-OS and default the flag on when packaging + CI
+  are boring (P0R adoption criteria).
+- Retire crates/workspace-kernel-spike once the sidecar fully supersedes
+  it and the recorded benchmarks are re-provenanced against the kernel.

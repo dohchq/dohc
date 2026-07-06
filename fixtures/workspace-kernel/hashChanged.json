@@ -1,0 +1,39 @@
+{
+  "workspace": {
+    "files": [
+      { "path": "notes/a.md", "text": "# A\n" },
+      { "path": ".dohc/hidden.md", "text": "hidden" }
+    ],
+    "symlinks": [
+      { "path": "notes/outside.md", "target": "../outside-secret.md" }
+    ]
+  },
+  "request": {
+    "paths": ["notes/a.md", "missing.md", ".dohc/hidden.md", "notes/outside.md"]
+  },
+  "expected": {
+    "files": [
+      {
+        "path": "notes/a.md",
+        "status": "ok",
+        "size": 4,
+        "sha256": "aa1237b773c38dbddef583c4868aaea7a44c5237ea7923aecca5513764b42d80"
+      },
+      {
+        "path": "missing.md",
+        "status": "error",
+        "error": "missing"
+      },
+      {
+        "path": ".dohc/hidden.md",
+        "status": "error",
+        "error": "ignored"
+      },
+      {
+        "path": "notes/outside.md",
+        "status": "error",
+        "error": "symlink"
+      }
+    ]
+  }
+}

@@ -1,0 +1,264 @@
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  KernelClientError,
+  KernelTimeoutError,
+  KernelUnavailableError,
+  WorkspaceKernelClient,
+  defaultWorkspaceKernelDebugBinaryPath,
+  repoRootFromPackage,
+  type KernelManifestEntry,
+} from ".";
+
+interface FixtureFile {
+  path: string;
+  text: string;
+}
+
+interface FixtureSymlink {
+  path: string;
+  target: string;
+}
+
+interface ContractFixture {
+  workspace: {
+    files: FixtureFile[];
+    symlinks?: FixtureSymlink[];
+  };
+  request?: {
+    paths?: string[];
+    manifest?: KernelManifestEntry[];
+  };
+  expected: Record<string, unknown>;
+}
+
+const repoRoot = repoRootFromPackage();
+const manifestPath = join(repoRoot, "crates/workspace-kernel/Cargo.toml");
+const binaryPath = defaultWorkspaceKernelDebugBinaryPath(repoRoot);
+const fixtureDir = join(repoRoot, "fixtures/workspace-kernel");
+const roots: string[] = [];
+
+beforeAll(() => {
+  const result = spawnSync(
+    "cargo",
+    ["build", "--offline", "--manifest-path", manifestPath],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(`cargo build failed\n${result.stdout}\n${result.stderr}`);
+  }
+});
+
+afterAll(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("WorkspaceKernelClient", () => {
+  it("handshakes with the kernel over newline-delimited JSON-RPC", async () => {
+    const client = new WorkspaceKernelClient({ binaryPath, timeoutMs: 5000 });
+    try {
+      await expect(client.handshake()).resolves.toMatchObject({
+        protocolVersion: 1,
+        capabilities: expect.arrayContaining(["kernel.scan", "kernel.reconcile"]),
+      });
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("matches the shared scan contract fixture", async () => {
+    const fixture = await readFixture("scan.json");
+    const root = await writeFixtureWorkspace(fixture);
+    const client = new WorkspaceKernelClient({ binaryPath, timeoutMs: 5000 });
+    try {
+      const result = await client.scan(root);
+      expect(result.files).toEqual(fixture.expected.files);
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("matches the shared hashChanged contract fixture", async () => {
+    const fixture = await readFixture("hashChanged.json");
+    const root = await writeFixtureWorkspace(fixture);
+    const paths = fixture.request?.paths ?? [];
+    const client = new WorkspaceKernelClient({ binaryPath, timeoutMs: 5000 });
+    try {
+      const result = await client.hashChanged(root, paths);
+      expect(result.files).toEqual(fixture.expected.files);
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("matches the shared reconcile contract fixture", async () => {
+    const fixture = await readFixture("reconcile.json");
+    const root = await writeFixtureWorkspace(fixture);
+    const manifest = fixture.request?.manifest ?? [];
+    const client = new WorkspaceKernelClient({ binaryPath, timeoutMs: 5000 });
+    try {
+      const result = await client.reconcile(root, manifest);
+      expect(result).toEqual(fixture.expected);
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("surfaces a typed unavailable error when the binary cannot spawn", async () => {
+    const client = new WorkspaceKernelClient({
+      binaryPath: join(repoRoot, "crates/workspace-kernel/target/debug/missing-kernel"),
+      timeoutMs: 100,
+      maxRestarts: 0,
+    });
+    await expect(client.handshake()).rejects.toBeInstanceOf(KernelUnavailableError);
+    await client.dispose();
+  });
+
+  it("restarts after a kernel crash and enforces the restart limit", async () => {
+    const crashOnSecondRequest = await writeFakeKernel(`
+requests=0
+while IFS= read -r line; do
+  requests=$((requests + 1))
+  if [ "$requests" -eq 2 ]; then
+    exit 1
+  fi
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\\([0-9][0-9]*\\).*/\\1/p')
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["kernel.handshake"]},"timingMs":{"total":0.1}}\\n' "$id"
+done
+`);
+    let exitCount = 0;
+    const waiters: Array<() => void> = [];
+    const waitForExitCount = (count: number) =>
+      new Promise<void>((resolve, reject) => {
+        if (exitCount >= count) {
+          resolve();
+          return;
+        }
+        const timeout = setTimeout(() => {
+          reject(new Error(`kernel did not exit ${count} time(s)`));
+        }, 500);
+        waiters.push(() => {
+          if (exitCount >= count) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+    });
+    const client = new WorkspaceKernelClient({
+      binaryPath: crashOnSecondRequest,
+      timeoutMs: 500,
+      initialBackoffMs: 1,
+      maxBackoffMs: 5,
+      onExit: () => {
+        exitCount += 1;
+        for (const waiter of waiters.splice(0)) waiter();
+      },
+    });
+    try {
+      await expect(client.handshake()).resolves.toMatchObject({ protocolVersion: 1 });
+      await expect(client.handshake()).rejects.toBeInstanceOf(KernelUnavailableError);
+      await waitForExitCount(1);
+      await expect(client.handshake()).resolves.toMatchObject({ protocolVersion: 1 });
+      expect(exitCount).toBeGreaterThanOrEqual(1);
+    } finally {
+      await client.dispose();
+    }
+
+    const exitsOnRequest = await writeFakeKernel(`
+IFS= read -r _line
+exit 1
+`);
+    const limited = new WorkspaceKernelClient({
+      binaryPath: exitsOnRequest,
+      timeoutMs: 500,
+      maxRestarts: 0,
+    });
+    try {
+      await expect(limited.handshake()).rejects.toBeInstanceOf(KernelUnavailableError);
+    } finally {
+      await limited.dispose();
+    }
+  });
+
+  it("times out a call when the kernel never replies", async () => {
+    const neverReplies = await writeFakeKernel(`
+while true; do
+  sleep 1
+done
+`);
+    const client = new WorkspaceKernelClient({ binaryPath: neverReplies, timeoutMs: 200 });
+    try {
+      await expect(client.handshake()).rejects.toBeInstanceOf(KernelTimeoutError);
+    } finally {
+      await client.dispose();
+    }
+  });
+
+  it("aborts an in-flight real-kernel scan and reports unknown cancel ids", async () => {
+    const root = await writeFixtureWorkspace({
+      workspace: { files: [{ path: "note.txt", text: "hello" }] },
+      expected: {},
+    });
+    const client = new WorkspaceKernelClient({ binaryPath, timeoutMs: 5000 });
+    const controller = new AbortController();
+    try {
+      const scan = client.scan(root, { signal: controller.signal });
+      controller.abort();
+      await expect(scan).rejects.toBeInstanceOf(KernelClientError);
+      await expect(scan).rejects.toThrow("aborted");
+      await expect(client.cancel("unknown-request")).resolves.toEqual({ cancelled: false });
+    } finally {
+      await client.dispose();
+    }
+  });
+});
+
+async function readFixture(name: string): Promise<ContractFixture> {
+  return JSON.parse(await readFile(join(fixtureDir, name), "utf8")) as ContractFixture;
+}
+
+async function writeFixtureWorkspace(fixture: ContractFixture): Promise<string> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-kernel-client-"));
+  roots.push(root);
+  for (const file of fixture.workspace.files) {
+    await write(root, file.path, file.text);
+  }
+  for (const link of fixture.workspace.symlinks ?? []) {
+    const absolute = join(root, link.path);
+    await mkdir(dirname(absolute), { recursive: true });
+    await symlink(link.target, absolute).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPERM" && error.code !== "EEXIST") throw error;
+    });
+  }
+  return root;
+}
+
+async function write(root: string, path: string, text: string): Promise<void> {
+  const absolute = join(root, path);
+  await mkdir(dirname(absolute), { recursive: true });
+  await writeFile(absolute, text);
+}
+
+// Deterministic misbehaving kernels for supervision tests (crash, silence).
+// POSIX shell only: the repo's dev/CI environments for this suite are
+// Linux/macOS, and faking a stdio JSON-RPC peer in cmd.exe is not worth the
+// complexity. Windows packaging is out of scope for this lane.
+async function writeFakeKernel(source: string): Promise<string> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-fake-kernel-"));
+  roots.push(root);
+  const path = join(root, "fake-kernel");
+  await writeFile(path, `#!/usr/bin/env bash\n${source.trim()}\n`);
+  await chmod(path, 0o755);
+  return path;
+}
+
+function nativeTmpdir(): string {
+  return process.platform === "win32" ? tmpdir() : "/tmp";
+}

@@ -14,7 +14,13 @@ import {
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import { isTextMediaType, mediaTypeForPath, scanWorkspaceFiles } from "@dohc/workspace-fs";
+import {
+  WorkspaceKernelClient,
+  defaultWorkspaceKernelBinaryPath,
+  defaultWorkspaceKernelDebugBinaryPath,
+} from "@dohc/workspace-kernel-client";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import {
@@ -287,6 +293,8 @@ type DiskTextState =
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
   | { kind: "unreadable" };
 
+type ReconcileScanFile = { path: string };
+
 async function readDiskTextState(rootPath: string, path: string): Promise<DiskTextState> {
   const absolute = join(rootPath, path);
   try {
@@ -433,6 +441,32 @@ export function createWorkspaceEngineCapture(
   let store: VersionedTextStore | null = options.store ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
+
+  async function scanWorkspaceFilesForReconcile(): Promise<ReconcileScanFile[]> {
+    if (process.env.DOHC_KERNEL_SIDECAR !== "1") {
+      return scanWorkspaceFiles(rootPath);
+    }
+    const configured = process.env.DOHC_KERNEL_BINARY_PATH;
+    const releasePath = defaultWorkspaceKernelBinaryPath();
+    const debugPath = defaultWorkspaceKernelDebugBinaryPath();
+    const binaryPath =
+      configured ??
+      (existsSync(releasePath) ? releasePath : existsSync(debugPath) ? debugPath : releasePath);
+    const client = new WorkspaceKernelClient({
+      binaryPath,
+      timeoutMs: 30_000,
+      maxRestarts: 1,
+    });
+    try {
+      const result = await client.scan(rootPath);
+      return result.files;
+    } catch (error) {
+      onError("kernel scan fallback", error);
+      return scanWorkspaceFiles(rootPath);
+    } finally {
+      await client.dispose().catch(() => undefined);
+    }
+  }
 
   // THE serialization point: batch capture, reconciliation, and version
   // operations all run here, strictly in order. A failed background task logs
@@ -632,9 +666,9 @@ export function createWorkspaceEngineCapture(
     // Callers that must pin the disk listing to the START of their task
     // (before other per-task reads run) pass the scan in; everyone else
     // lets this function scan.
-    scannedFiles?: Awaited<ReturnType<typeof scanWorkspaceFiles>>,
+    scannedFiles?: readonly ReconcileScanFile[],
   ): Promise<void> {
-    const scanned = scannedFiles ?? (await scanWorkspaceFiles(rootPath));
+    const scanned = scannedFiles ?? (await scanWorkspaceFilesForReconcile());
     const diskPaths = new Set<string>();
     for (const file of scanned) {
       if (!policyTracksPath(file.path, policy)) {
@@ -687,7 +721,8 @@ export function createWorkspaceEngineCapture(
     // Scan BEFORE the policy read: the pass reconciles the files present
     // when the task began; edits landing while this task's own per-task
     // reads run belong to the next serialized batch, not to this pass.
-    const scanned = await scanWorkspaceFiles(rootPath);
+    // Routed through the kernel-aware scan, which falls back to the TS path.
+    const scanned = await scanWorkspaceFilesForReconcile();
     const policy = await readPolicyForTask();
     await reconcileDiskIntoVersion(engine, versionId, policy, metadata, scanned);
   }
