@@ -689,6 +689,104 @@ export const SendChatMessageResult = z.object({
 });
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
+// Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
+// channels, plus per-thread monotonic read cursors. Same gate as the file
+// rail — every handler rejects for unflagged workspaces.
+const CHAT_CHANNEL_ID = z.string().min(1).max(200);
+export const CHAT_CHANNEL_NAME_MAX = 80;
+
+export const ChatChannelRecord = z.object({
+  id: CHAT_CHANNEL_ID,
+  name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  kind: z.enum(["channel", "dm"]),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+  threadCount: z.number().int().min(0),
+  unreadCount: z.number().int().min(0),
+});
+export type ChatChannelRecord = z.infer<typeof ChatChannelRecord>;
+
+export const ChannelThreadRecord = ChatThreadRecord.extend({
+  channelId: CHAT_CHANNEL_ID,
+  messageCount: z.number().int().min(0),
+  lastReadSequence: z.number().int().min(0),
+  unreadCount: z.number().int().min(0),
+});
+export type ChannelThreadRecord = z.infer<typeof ChannelThreadRecord>;
+
+// A file-linked Chat as the Chats view lists it: the CURRENT path when the
+// engine can resolve the stable object id, else the captured hint.
+export const FileChatThreadRecord = ChatThreadRecord.extend({
+  path: PATH_STRING.nullable(),
+});
+export type FileChatThreadRecord = z.infer<typeof FileChatThreadRecord>;
+
+export const ListChatChannelsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
+
+export const ListChatChannelsResult = z.object({
+  channels: z.array(ChatChannelRecord),
+  // The "Files" grouping: file-linked Chats listed read-only beside the
+  // channels (they live in the file rail; the Chats view cross-links).
+  fileThreads: z.array(FileChatThreadRecord),
+});
+export type ListChatChannelsResult = z.infer<typeof ListChatChannelsResult>;
+
+export const CreateChatChannelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+});
+export type CreateChatChannelPayload = z.infer<typeof CreateChatChannelPayload>;
+
+export const CreateChatChannelResult = z.object({
+  channel: ChatChannelRecord,
+});
+export type CreateChatChannelResult = z.infer<typeof CreateChatChannelResult>;
+
+export const ListChannelThreadsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  channelId: CHAT_CHANNEL_ID,
+});
+export type ListChannelThreadsPayload = z.infer<typeof ListChannelThreadsPayload>;
+
+export const ListChannelThreadsResult = z.object({
+  threads: z.array(ChannelThreadRecord),
+});
+export type ListChannelThreadsResult = z.infer<typeof ListChannelThreadsResult>;
+
+// The fast composer: body only, NO title. Untitled threads display their
+// first-message snippet (the anti-forum rule) — main never asks for a title.
+export const StartChannelThreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  channelId: CHAT_CHANNEL_ID,
+  body: CHAT_BODY,
+});
+export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;
+
+export const StartChannelThreadResult = z.object({
+  thread: ChannelThreadRecord,
+  message: ChatMessageRecord,
+});
+export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
+
+export const MarkChatThreadReadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+  // Monotonic: the store clamps to the thread's message count and never
+  // moves the cursor backwards; the revision is server-owned.
+  upToSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+export type MarkChatThreadReadPayload = z.infer<typeof MarkChatThreadReadPayload>;
+
+export const MarkChatThreadReadResult = z.object({
+  lastReadSequence: z.number().int().min(0),
+  revision: z.number().int().min(0),
+});
+export type MarkChatThreadReadResult = z.infer<typeof MarkChatThreadReadResult>;
+
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
@@ -1709,6 +1807,22 @@ export interface DohcDesktopBridge {
     payload: ListChatMessagesPayload,
   ): Promise<ListChatMessagesResult>;
   sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
+  // Chats channels (PR 12/13, WS-E) — same flag gate as the file rail.
+  listChatChannels(
+    payload: ListChatChannelsPayload,
+  ): Promise<ListChatChannelsResult>;
+  createChatChannel(
+    payload: CreateChatChannelPayload,
+  ): Promise<CreateChatChannelResult>;
+  listChannelThreads(
+    payload: ListChannelThreadsPayload,
+  ): Promise<ListChannelThreadsResult>;
+  startChannelThread(
+    payload: StartChannelThreadPayload,
+  ): Promise<StartChannelThreadResult>;
+  markChatThreadRead(
+    payload: MarkChatThreadReadPayload,
+  ): Promise<MarkChatThreadReadResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;

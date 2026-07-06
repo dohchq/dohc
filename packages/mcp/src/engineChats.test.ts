@@ -10,10 +10,12 @@ import {
   deleteWorkspacePath,
   isSqliteBusyError,
   isWorkspaceEngineFlagged,
+  listChannels,
   listChanges,
   listFileChats,
   readChat,
   replyToChat,
+  startChannelChat,
   writeWorkspaceFile,
   type ToolContext,
 } from "./tools";
@@ -292,6 +294,141 @@ describe("linked chat tools", () => {
   });
 });
 
+describe("channel tools (PR 12/13 slice)", () => {
+  it("refuse when the workspace engine flag is absent or off", async () => {
+    await withWorkspace(async (ctx) => {
+      const expected = { ok: false, reason: expect.stringContaining("not enabled") };
+      expect(await listChannels(ctx)).toMatchObject(expected);
+      expect(
+        await startChannelChat(ctx, { channel: "general", body: "hello" }),
+      ).toMatchObject(expected);
+
+      await seedEngineFlag(ctx, false);
+      expect(await listChannels(ctx)).toMatchObject(expected);
+      expect(
+        await startChannelChat(ctx, { channel: "general", body: "hello" }),
+      ).toMatchObject(expected);
+    });
+  });
+
+  it("lists channels (auto-creating general) and starts a chat as the agent", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-channels");
+
+      // First chat use: general appears without any prior setup.
+      const listed = await listChannels(ctx);
+      expect(listed).toMatchObject({
+        ok: true,
+        channels: [
+          { name: "general", slug: "general", kind: "channel", threadCount: 0 },
+        ],
+      });
+
+      // Channel accepted as a #slug; no title required — the chat displays
+      // its first-message snippet.
+      const started = await startChannelChat(ctx, {
+        channel: "#general",
+        body: "Heads up: the import finished.\nDetails inside.",
+      });
+      expect(started).toMatchObject({
+        ok: true,
+        channel: { slug: "general" },
+        thread: { title: "Heads up: the import finished." },
+        message: {
+          authorKind: "agent",
+          authorDisplayName: "You",
+          body: "Heads up: the import finished.\nDetails inside.",
+        },
+      });
+      if (!started.ok) throw new Error("unreachable");
+
+      // The reply tool works against channel threads too, same authorship.
+      const reply = await replyToChat(ctx, {
+        threadId: started.thread.id,
+        body: "Logs are attached.",
+      });
+      expect(reply).toMatchObject({
+        ok: true,
+        message: { authorKind: "agent", threadId: started.thread.id },
+      });
+
+      // And the thread (with both agent messages) reads back.
+      const read = await readChat(ctx, { threadId: started.thread.id });
+      expect(read).toMatchObject({
+        ok: true,
+        messages: [
+          { body: "Heads up: the import finished.\nDetails inside." },
+          { body: "Logs are attached." },
+        ],
+      });
+
+      // The channel listing now carries the thread with its snippet title.
+      const relisted = await listChannels(ctx);
+      expect(relisted).toMatchObject({
+        ok: true,
+        channels: [
+          {
+            slug: "general",
+            threadCount: 1,
+            threads: [
+              { title: "Heads up: the import finished.", messageCount: 2 },
+            ],
+          },
+        ],
+      });
+    });
+  });
+
+  it("resolves a channel by its display NAME when it differs from the slug", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-channels");
+      // "Client ACME" slugifies to "client-acme": the display name and the
+      // slug are different strings, unlike the general/#general case that
+      // masks a missing name match.
+      const chats = createLinkedChatStore(ctx.root);
+      const created = await chats.createChannel({
+        workspaceId: "ws-channels",
+        name: "Client ACME",
+      });
+      await chats.close();
+      expect(created.slug).toBe("client-acme");
+
+      const byName = await startChannelChat(ctx, {
+        channel: "Client ACME",
+        body: "Kickoff notes for the ACME engagement.",
+      });
+      expect(byName).toMatchObject({
+        ok: true,
+        channel: { id: created.id, name: "Client ACME", slug: "client-acme" },
+        thread: { title: "Kickoff notes for the ACME engagement." },
+      });
+
+      // The documented id and #slug forms keep working beside the name.
+      expect(
+        await startChannelChat(ctx, { channel: created.id, body: "By id." }),
+      ).toMatchObject({ ok: true, channel: { id: created.id } });
+      expect(
+        await startChannelChat(ctx, { channel: "#client-acme", body: "By slug." }),
+      ).toMatchObject({ ok: true, channel: { id: created.id } });
+    });
+  });
+
+  it("reports an unknown channel as a refusal, not a crash", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-channels");
+      expect(
+        await startChannelChat(ctx, { channel: "no-such-channel", body: "hello" }),
+      ).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("channel not found"),
+      });
+    });
+  });
+});
+
 describe("isSqliteBusyError", () => {
   it("classifies busy/locked errors, including nested causes", () => {
     expect(isSqliteBusyError(new Error("database is locked"))).toBe(true);
@@ -331,6 +468,11 @@ describe("chat tool registration", () => {
         expect(byName.get("dohc_reply_to_chat")?.inputSchema).toMatchObject({
           type: "object",
           required: ["threadId", "body"],
+        });
+        expect(byName.has("dohc_list_channels")).toBe(true);
+        expect(byName.get("dohc_start_channel_chat")?.inputSchema).toMatchObject({
+          type: "object",
+          required: ["channel", "body"],
         });
       } finally {
         await client.close();

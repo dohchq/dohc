@@ -1,44 +1,28 @@
-import { ArrowLeft, MessageSquare, Send } from "lucide-react";
+import { ArrowLeft, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessageRecord, ChatThreadRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import {
+  ChatComposer,
+  ChatMessageList,
+  chatAuthorLabel,
+  formatChatTime,
+  ipcErrorMessage,
+} from "./chatMessages";
 
 // Linked Chats side rail (PR 0M-5, workspace-engine alpha). Per-file Chats
 // stored in the engine and linked to the file's STABLE object id, so a chat
 // follows its file through renames. Product vocabulary: these are Chats.
-//
-// Authorship display rule (plan non-negotiable): agent-authored messages
-// render as "<User Name>'s agent"; human messages show the author's name.
-export function chatAuthorLabel(
-  author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
-): string {
-  return author.authorKind === "agent"
-    ? `${author.authorDisplayName}'s agent`
-    : author.authorDisplayName;
-}
+// Message rendering + composer are the SHARED chatMessages pieces (PR 13)
+// so this rail and the workspace Chats view can never drift.
 
-function ipcErrorMessage(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : "";
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-  return message.trim().length > 0 ? message.trim() : fallback;
-}
+// Re-exported: EngineHistory (and its tests) import the authorship rule from
+// here since PR 0N-1.
+export { chatAuthorLabel };
 
 function basename(path: string): string {
   const index = path.lastIndexOf("/");
   return index >= 0 ? path.slice(index + 1) : path;
-}
-
-function formatChatTime(createdAtMs: number): { label: string; iso: string } {
-  const createdAt = new Date(createdAtMs);
-  return {
-    label: createdAt.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }),
-    iso: createdAt.toISOString(),
-  };
 }
 
 type ThreadsState =
@@ -234,85 +218,23 @@ export function LinkedChatsPanel(props: {
             {activeThread.title}
           </span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-          {messagesLoading ? (
-            <p className="m-0 text-center text-[11px] text-subtle">Loading...</p>
-          ) : messages.length === 0 ? (
-            <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-              No messages yet{filePath ? ` about ${basename(filePath)}` : ""}.
-            </p>
-          ) : (
-            <ul className="m-0 flex list-none flex-col gap-2 p-0">
-              {messages.map((message) => {
-                const time = formatChatTime(message.createdAtMs);
-                return (
-                  <li key={message.id} data-testid="linked-chat-message">
-                    <span className="flex items-baseline gap-1.5">
-                      <span
-                        data-testid="linked-chat-message-author"
-                        data-author-kind={message.authorKind}
-                        className="shrink-0 text-[11px] font-semibold text-ink"
-                      >
-                        {chatAuthorLabel(message)}
-                      </span>
-                      <time
-                        dateTime={time.iso}
-                        title={time.iso}
-                        className="shrink-0 text-[10px] text-subtle"
-                      >
-                        {time.label}
-                      </time>
-                    </span>
-                    <p
-                      data-testid="linked-chat-message-body"
-                      className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
-                    >
-                      {message.body}
-                    </p>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-        <form
-          className="flex shrink-0 items-end gap-1.5 border-t border-line p-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void sendMessage();
-          }}
-        >
-          <label className="sr-only" htmlFor="linked-chat-composer">
-            Message
-          </label>
-          <textarea
-            id="linked-chat-composer"
-            data-testid="linked-chat-composer"
-            value={composer}
-            disabled={sending}
-            rows={2}
-            placeholder="Write a message…"
-            onChange={(event) => setComposer(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void sendMessage();
-              }
-            }}
-            className="min-w-0 flex-1 resize-none rounded border border-line bg-bg px-2 py-1.5 text-[12px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
-          />
-          <button
-            type="submit"
-            data-testid="linked-chat-send"
-            aria-label="Send message"
-            title="Send message"
-            disabled={sending || composer.trim().length === 0}
-            className="grid size-8 shrink-0 cursor-pointer place-items-center rounded bg-ink text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Send size={13} aria-hidden />
-          </button>
-        </form>
+        <ChatMessageList
+          testIdPrefix="linked-chat"
+          messages={messages}
+          loading={messagesLoading}
+          emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
+          endRef={messagesEndRef}
+        />
+        <ChatComposer
+          testIdPrefix="linked-chat"
+          composerId="linked-chat-composer"
+          value={composer}
+          sending={sending}
+          placeholder="Write a message…"
+          sendLabel="Send message"
+          onChange={setComposer}
+          onSend={() => void sendMessage()}
+        />
       </div>
     );
   }

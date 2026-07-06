@@ -25,7 +25,7 @@ function nextNow() {
 }
 
 function createIdFactory() {
-  const counters = { conflict: 0, message: 0, moment: 0, object: 0, thread: 0, version: 0 };
+  const counters = { channel: 0, conflict: 0, message: 0, moment: 0, object: 0, thread: 0, version: 0 };
   return (kind: keyof typeof counters) => {
     counters[kind] += 1;
     return `${kind}-${counters[kind]}`;

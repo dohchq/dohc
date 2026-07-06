@@ -85,17 +85,26 @@ async function main(): Promise<void> {
     });
     try {
       const searchMain = await searchVersions.ensureMainVersion({ workspaceId });
+      let firstObjectId: string | null = null;
       for (let index = 0; index < SEARCH_FILE_COUNT; index += 1) {
-        await searchVersions.writeTextFile({
+        const written = await searchVersions.writeTextFile({
           workspaceId,
           versionId: searchMain.id,
           path: `search/file-${String(index).padStart(5, "0")}.md`,
           text: `# Search ${index}\n\ncommon body ${index} ${index === 9876 ? "rare-needle" : ""}\n`,
           metadata,
         });
+        if (index === 0) firstObjectId = written.object.id;
         if (index % 500 === 0) await yieldToVitest();
       }
-      const thread = await searchChats.createThread({ workspaceId, title: "Bench thread" });
+      if (!firstObjectId) throw new Error("bench seeded no files");
+      // Threads always have exactly one owner; the bench thread rides on the
+      // first seeded file like every real file-linked chat.
+      const thread = await searchChats.createThread({
+        workspaceId,
+        title: "Bench thread",
+        linkedFile: { objectId: firstObjectId, pathHint: "search/file-00000.md" },
+      });
       for (let index = 0; index < SEARCH_MESSAGE_COUNT; index += 1) {
         await searchChats.sendMessage({
           workspaceId,

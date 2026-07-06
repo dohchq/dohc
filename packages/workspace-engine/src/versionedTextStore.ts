@@ -3077,6 +3077,18 @@ function createVersionedTextStoreWithHooks(
           workspaceId,
           versionId,
           nowMs: readNowMs(),
+          // The rebuild validates chat thread ownership with the same
+          // fail-closed posture as every other persisted-row read here.
+          corrupt: (cause?: unknown) => {
+            const error = new VersionedTextStoreError(
+              "state-corrupt",
+              "Versioned text store is corrupt.",
+            );
+            if (cause !== undefined) {
+              (error as Error & { cause?: unknown }).cause = cause;
+            }
+            return error;
+          },
         });
       });
     },

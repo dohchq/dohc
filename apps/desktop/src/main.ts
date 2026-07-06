@@ -108,6 +108,16 @@ import {
   ListChatMessagesResult,
   SendChatMessagePayload,
   SendChatMessageResult,
+  ListChatChannelsPayload,
+  ListChatChannelsResult,
+  CreateChatChannelPayload,
+  CreateChatChannelResult,
+  ListChannelThreadsPayload,
+  ListChannelThreadsResult,
+  StartChannelThreadPayload,
+  StartChannelThreadResult,
+  MarkChatThreadReadPayload,
+  MarkChatThreadReadResult,
   EngineMomentRecord,
   EngineMomentDetailRecord,
   ChatThreadRecord,
@@ -194,6 +204,8 @@ import {
   createLinkedChatStore,
   createVersionedTextStore,
   searchWorkspaceEngine,
+  type ChannelThreadSummary,
+  type ChatChannelSummary,
   type ChatMessage,
   type ChatThread,
   type LinkedChatStore,
@@ -2411,6 +2423,159 @@ function registerIpcHandlers(): void {
       body: input.body,
     });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
+  });
+
+  // --- Chats channels (PR 12/13, WS-E) -------------------------------------
+  // Workspace-wide Chats organized in channels, same gate as the file rail.
+  // Unread counts and read cursors are store-derived; the renderer never
+  // supplies identity or read-state revisions of its own.
+
+  function chatChannelForIpc(channel: ChatChannelSummary) {
+    return {
+      id: channel.id,
+      name: channel.name,
+      slug: channel.slug,
+      kind: channel.kind,
+      createdAtMs: channel.createdAtMs,
+      updatedAtMs: channel.updatedAtMs,
+      threadCount: channel.threadCount,
+      unreadCount: channel.unreadCount,
+    };
+  }
+
+  function channelThreadForIpc(summary: ChannelThreadSummary) {
+    return {
+      ...chatThreadForIpc(summary.thread),
+      channelId: summary.thread.channelId ?? "",
+      messageCount: summary.messageCount,
+      lastReadSequence: summary.lastReadSequence,
+      unreadCount: summary.unreadCount,
+    };
+  }
+
+  ipcMain.handle(CHANNELS.listChatChannels, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatChannelsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const store = linkedChatStoreFor(workspace);
+    // First chat use auto-creates the workspace's default channel.
+    await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
+    const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
+    // The "Files" grouping: file-linked Chats with their CURRENT path (the
+    // stable object id resolved through the active version), falling back to
+    // the captured hint when the engine no longer owns the file.
+    const threads = await store.listThreads({ workspaceId: workspace.workspaceId });
+    const fileThreads = threads.filter((thread) => thread.linkedFile);
+    let pathByObjectId = new Map<string, string>();
+    if (fileThreads.length > 0) {
+      try {
+        const texts = engineSearchStoreFor(workspace);
+        const active = await texts.getActiveVersion({
+          workspaceId: workspace.workspaceId,
+        });
+        if (active) {
+          const files = await texts.listTextFiles({
+            workspaceId: workspace.workspaceId,
+            versionId: active.id,
+          });
+          pathByObjectId = new Map(files.map((file) => [file.objectId, file.path]));
+        }
+      } catch {
+        // Path resolution is display-only; the hint fallback keeps the
+        // listing honest enough.
+      }
+    }
+    return ListChatChannelsResult.parse({
+      channels: channels.map(chatChannelForIpc),
+      fileThreads: fileThreads.map((thread) => ({
+        ...chatThreadForIpc(thread),
+        path:
+          (thread.linkedFile
+            ? pathByObjectId.get(thread.linkedFile.objectId) ??
+              thread.linkedFile.pathHint
+            : undefined) ?? null,
+      })),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.createChatChannel, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateChatChannelPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const channel = await linkedChatStoreFor(workspace).createChannel({
+      workspaceId: workspace.workspaceId,
+      name: input.name,
+      kind: "channel",
+    });
+    return CreateChatChannelResult.parse({
+      channel: chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.listChannelThreads, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChannelThreadsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const threads = await linkedChatStoreFor(workspace).listChannelThreads({
+      workspaceId: workspace.workspaceId,
+      channelId: input.channelId,
+    });
+    return ListChannelThreadsResult.parse({
+      threads: threads.map(channelThreadForIpc),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.startChannelThread, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StartChannelThreadPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    // No title, ever, on this path: the thread displays its first-message
+    // snippet. Author is main-derived like every renderer send.
+    const started = await linkedChatStoreFor(workspace).startChannelThread({
+      workspaceId: workspace.workspaceId,
+      channelId: input.channelId,
+      author: { kind: "human", displayName: localUserDisplayName() },
+      body: input.body,
+    });
+    return StartChannelThreadResult.parse({
+      thread: channelThreadForIpc({
+        thread: started.thread,
+        messageCount: 1,
+        lastReadSequence: 1,
+        unreadCount: 0,
+      }),
+      message: chatMessageForIpc(started.message),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.markChatThreadRead, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = MarkChatThreadReadPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const state = await linkedChatStoreFor(workspace).markThreadRead({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+      upToSequence: input.upToSequence,
+    });
+    return MarkChatThreadReadResult.parse({
+      lastReadSequence: state.lastReadSequence,
+      revision: state.revision,
+    });
   });
 
   ipcMain.handle(CHANNELS.listChangeSets, async (event, payload) => {

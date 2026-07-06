@@ -4,6 +4,7 @@ import {
   Files,
   Globe2,
   History,
+  MessagesSquare,
   Search,
   Settings,
   Workflow,
@@ -19,6 +20,7 @@ import { VIEW_IDS, type ViewId } from "./workbenchState";
 const ICONS: Record<ViewId, typeof Files> = {
   explorer: Files,
   search: Search,
+  chats: MessagesSquare,
   graph: Workflow,
   sites: Globe2,
   agent: Bot,
@@ -28,6 +30,7 @@ const ICONS: Record<ViewId, typeof Files> = {
 const LABELS: Record<ViewId, string> = {
   explorer: "Explorer",
   search: "Search",
+  chats: "Chats",
   graph: "Graph",
   sites: "Sites",
   agent: "Agent",
@@ -99,6 +102,9 @@ export function ActivityBar(props: {
   agentActive: boolean;
   // Content-search results count (Phase E5.0); undefined = no badge.
   searchResultCount?: number;
+  // Chats (PR 13) exists only for workspace-engine-flagged workspaces; the
+  // rail hides the entry entirely when the flag is off.
+  chatsEnabled?: boolean;
   onSelectView: (view: ViewId) => void;
   onOpenCloud: () => void;
   onOpenSettings: () => void;
@@ -109,7 +115,7 @@ export function ActivityBar(props: {
       data-testid="activity-bar"
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2"
     >
-      {VIEW_IDS.map((view) => (
+      {VIEW_IDS.filter((view) => view !== "chats" || props.chatsEnabled).map((view) => (
         <RailButton
           key={view}
           testId={`activity-${view}`}

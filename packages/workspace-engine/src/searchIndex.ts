@@ -15,6 +15,7 @@ import {
   type VisibilityPolicyRule,
 } from "./effectivePolicy";
 import type { EngineSqliteDb } from "./engineDbSchema";
+import { threadDisplayTitle } from "./chatThreadTitle";
 
 const POLICY_FILE_MAX_BYTES = 64 * 1024;
 const THREAD_HEADER_MESSAGE_ID = "__thread__";
@@ -149,6 +150,29 @@ function chatIndexText(input: {
   return parts.join("\n");
 }
 
+// The validated thread-search row: SQL columns -> the exact { threadId,
+// title } pair the FTS header row is built from. ONE derivation shared by
+// the rebuild below and (via threadDisplayTitle) the chat store's write-time
+// indexing, so a rebuild reproduces byte-identical header rows — including
+// snippet-derived titles for untitled threads. Ownership is validated with
+// the chat store's fail-closed posture: both owners, neither owner, or a
+// channel owner that no longer exists is corrupt state, never a search row.
+export function validatedThreadSearchRow(
+  row: Record<string, unknown>,
+  corrupt: (cause?: unknown) => Error,
+): { threadId: string; title: string } {
+  const threadId = String(row.thread_id ?? "");
+  const title = typeof row.title === "string" ? row.title : null;
+  if (!threadId || title === null) throw corrupt();
+  const linkedObjectId = row.linked_object_id ?? null;
+  const channelId = row.channel_id ?? null;
+  if (linkedObjectId !== null && channelId !== null) throw corrupt();
+  if (linkedObjectId === null && channelId === null) throw corrupt();
+  if (channelId !== null && Number(row.channel_owner_exists) !== 1) throw corrupt();
+  const firstBody = typeof row.first_body === "string" ? row.first_body : undefined;
+  return { threadId, title: threadDisplayTitle(title, firstBody) };
+}
+
 export function upsertThreadHeaderSearchIndex(input: {
   db: EngineSqliteDb;
   workspaceId: WorkspaceId;
@@ -202,6 +226,7 @@ export function ensureSearchIndexForVersion(input: {
   workspaceId: WorkspaceId;
   versionId: VersionId;
   nowMs: number;
+  corrupt: (cause?: unknown) => Error;
 }): void {
   if (
     tableHasRows(
@@ -265,17 +290,24 @@ export function ensureSearchIndexForVersion(input: {
   );
   for (const row of input.db
     .prepare(
-      `SELECT thread_id, title
-       FROM chat_threads
-       WHERE workspace_id = ?
-       ORDER BY created_at_ms, thread_id`,
+      `SELECT t.thread_id, t.title, t.linked_object_id, t.channel_id,
+              (SELECT m.body FROM chat_messages m
+               WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id
+               ORDER BY m.message_order LIMIT 1) AS first_body,
+              EXISTS(SELECT 1 FROM chat_channels c
+               WHERE c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id)
+                AS channel_owner_exists
+       FROM chat_threads t
+       WHERE t.workspace_id = ?
+       ORDER BY t.created_at_ms, t.thread_id`,
     )
     .all(input.workspaceId)) {
+    const header = validatedThreadSearchRow(row, input.corrupt);
     insertChat.run(
       input.workspaceId,
-      String(row.thread_id),
+      header.threadId,
       THREAD_HEADER_MESSAGE_ID,
-      chatIndexText({ title: String(row.title) }),
+      chatIndexText({ title: header.title }),
     );
   }
   for (const row of input.db

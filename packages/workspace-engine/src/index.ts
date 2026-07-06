@@ -1,9 +1,14 @@
 export {
+  GENERAL_CHANNEL_NAME,
   LINKED_CHAT_PROJECTION_KIND,
   LINKED_CHAT_STORE_RELATIVE_PATH,
   LinkedChatStoreError,
+  THREAD_SNIPPET_TITLE_MAX_CHARS,
+  UNTITLED_THREAD_FALLBACK_TITLE,
+  channelSlugForName,
   createLinkedChatStore,
   linkedChatProjectionPath,
+  threadSnippetTitle,
 } from "./linkedChatStore";
 export {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
@@ -69,11 +74,17 @@ export type {
   FileWorkspacePlatformMode,
 } from "./versionedFileWorkspace";
 export type {
+  ChannelThreadSummary,
   ChatActor,
+  ChatChannel,
+  ChatChannelId,
+  ChatChannelKind,
+  ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
   ChatThread,
   ChatThreadId,
+  ChatThreadReadState,
   LinkedChatFileRef,
   LinkedChatProjection,
   LinkedChatProjectionFileAccess,

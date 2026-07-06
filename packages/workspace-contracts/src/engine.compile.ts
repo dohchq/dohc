@@ -1,11 +1,17 @@
 import type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  ChannelThreadSummary,
   ChatActor,
+  ChatChannel,
+  ChatChannelId,
+  ChatChannelKind,
+  ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
   ChatThread,
   ChatThreadId,
+  ChatThreadReadState,
   EngineFilePathClassification,
   FileObjectRecord,
   FileWorkspaceCapabilityReport,
@@ -290,6 +296,49 @@ export const engineContractCompileCheck = (() => {
     const chatSend: ChatSend | null = null;
     const chatOptions: LinkedChatStoreOptions = {};
 
+    // Channels + read cursors (PR 12, WS-E).
+    const channelId: ChatChannelId = "channel";
+    const channelKind: ChatChannelKind = "dm";
+    const channel: ChatChannel = {
+      id: channelId,
+      workspaceId,
+      name: "general",
+      slug: "general",
+      kind: "channel",
+      createdAtMs: 5,
+      updatedAtMs: 5,
+    };
+    const channelSummary: ChatChannelSummary = {
+      ...channel,
+      threadCount: 1,
+      unreadCount: 0,
+    };
+    const channelThread: ChatThread = {
+      id: threadId,
+      workspaceId,
+      title: "Snippet of the first message",
+      createdAtMs: 5,
+      updatedAtMs: 5,
+      channelId,
+    };
+    const readState: ChatThreadReadState = {
+      workspaceId,
+      threadId,
+      lastReadSequence: 1,
+      revision: 1,
+      updatedAtMs: 6,
+    };
+    const channelThreadSummary: ChannelThreadSummary = {
+      thread: channelThread,
+      messageCount: 2,
+      lastReadSequence: 1,
+      unreadCount: 1,
+    };
+    type ChannelStart = LinkedChatStore["startChannelThread"];
+    const channelStart: ChannelStart | null = null;
+    type MarkRead = LinkedChatStore["markThreadRead"];
+    const markRead: MarkRead | null = null;
+
     const surface: SearchSurface = "file";
     const visibility: SearchVisibility = { searchable: true, projectionFileAccess: access };
     const searchPolicy: WorkspaceSearchPolicy = {
@@ -355,6 +404,12 @@ export const engineContractCompileCheck = (() => {
     void projection;
     void chatSend;
     void chatOptions;
+    void channelKind;
+    void channelSummary;
+    void readState;
+    void channelThreadSummary;
+    void channelStart;
+    void markRead;
     void searchPolicy;
     void searchResult;
     void searchOptions;
