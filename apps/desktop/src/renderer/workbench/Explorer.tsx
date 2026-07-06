@@ -41,6 +41,7 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isSiteTabPath,
+  isVersionCompareTabPath,
   isVirtualTabPath,
   parseHistoryDiffTabPath,
   parseSiteTabPath,
@@ -138,7 +139,7 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   return <FileText size={13} aria-hidden className="shrink-0" />;
 }
 
-function editorTitle(path: string): string {
+export function editorTitle(path: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isHistoryDiffTabPath(path)) {
@@ -146,6 +147,7 @@ function editorTitle(path: string): string {
     return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
   }
   if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
+  if (isVersionCompareTabPath(path)) return "Compare with Main";
   return leafOf(path);
 }
 
