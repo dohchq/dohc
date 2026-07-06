@@ -20,6 +20,8 @@ import type {
   LinkedChatStore,
   LinkedChatStoreErrorCode,
   LinkedChatStoreOptions,
+  SyncApplyResult,
+  SyncReplicationEnvelope,
 } from "@dohc/workspace-contracts/engine";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
@@ -42,6 +44,16 @@ import {
   threadDisplayTitle,
   threadSnippetTitle,
 } from "./chatThreadTitle";
+import {
+  ackReplicationPeer,
+  appliedApplyResult,
+  journalLocalReplicationOp,
+  readReplicationAckedSeq,
+  skippedApplyResult,
+  type ChatChannelCreatePayload,
+  type ChatMessageAppendPayload,
+  type ChatThreadCreatePayload,
+} from "./syncReplication";
 
 export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
@@ -64,9 +76,16 @@ export type {
   LinkedChatStore,
   LinkedChatStoreErrorCode,
   LinkedChatStoreOptions,
+  SyncApplyResult,
+  SyncReplicationEnvelope,
 } from "@dohc/workspace-contracts/engine";
 
 export const GENERAL_CHANNEL_NAME = "general";
+// Cross-machine identity for the AUTO-CREATED general channel: every store
+// mints general independently, so a deterministic well-known wire id is what
+// lets those rows converge as ONE channel. Every other channel's wire id is
+// its creator's local channel id (globally unique uuid).
+export const GENERAL_CHANNEL_WIRE_ID = "channel_wire_general_v1";
 // Display-title derivation lives in chatThreadTitle.ts (a leaf shared with
 // the search index rebuild); re-exported here so store consumers keep one
 // import surface.
@@ -474,6 +493,71 @@ function requireWorkspaceChannel(
   );
 }
 
+// Remote-wire-id -> local-channel-id map (lazy additive, 0P-A gate fix). The
+// wire id is the ONLY cross-machine channel identity; the slug stays a lookup
+// alias. Locally created channels record their own mapping at creation so an
+// importer's lookup covers both local and imported rows.
+function recordChannelWireId(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  wireId: string,
+  channelId: ChatChannelId,
+): void {
+  db.prepare(
+    "INSERT OR IGNORE INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) VALUES (?, ?, ?)",
+  ).run(workspaceId, wireId, channelId);
+}
+
+function channelIdForWireId(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  wireId: string,
+): ChatChannelId | undefined {
+  const row = db
+    .prepare(
+      `SELECT m.channel_id
+       FROM chat_channel_wire_ids m
+       JOIN chat_channels c
+         ON c.workspace_id = m.workspace_id
+        AND c.channel_id = m.channel_id
+       WHERE m.workspace_id = ? AND m.wire_id = ?`,
+    )
+    .get(workspaceId, wireId);
+  return row ? stringValue(row.channel_id) : undefined;
+}
+
+function wireIdForChannelId(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  channelId: ChatChannelId,
+): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT wire_id FROM chat_channel_wire_ids
+       WHERE workspace_id = ? AND channel_id = ?
+       ORDER BY wire_id LIMIT 1`,
+    )
+    .get(workspaceId, channelId);
+  return row ? stringValue(row.wire_id) : undefined;
+}
+
+// Same slug + DIFFERENT wire id means two distinct channels: the importer
+// keeps its local slug and gives the incoming channel a numbered variant,
+// mirroring how name collisions are settled elsewhere in the engine.
+function nextFreeChannelSlug(db: SqliteDb, workspaceId: WorkspaceId, slug: string): string {
+  const taken = (candidate: string) =>
+    Boolean(
+      db
+        .prepare("SELECT 1 FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+        .get(workspaceId, candidate),
+    );
+  if (!taken(slug)) return slug;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${slug}-${suffix}`;
+    if (!taken(candidate)) return candidate;
+  }
+}
+
 function messageCountForThread(
   db: SqliteDb,
   workspaceId: WorkspaceId,
@@ -686,6 +770,43 @@ export function createLinkedChatStore(
       .map(messageFromRow);
   }
 
+  function nextMessageOrder(db: SqliteDb, workspaceId: WorkspaceId, threadId: ChatThreadId): number {
+    const row = db
+      .prepare(
+        `SELECT COALESCE(MAX(message_order), -1) + 1 AS next_order
+         FROM chat_messages
+         WHERE workspace_id = ? AND thread_id = ?`,
+      )
+      .get(workspaceId, threadId);
+    return Number(row?.next_order ?? 0);
+  }
+
+  function importedReplicationLogExists(db: SqliteDb, input: SyncReplicationEnvelope): boolean {
+    return Boolean(
+      db
+        .prepare(
+          `SELECT 1 FROM replication_log
+           WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
+        )
+        .get(input.workspaceId, input.originId, input.originSeq),
+    );
+  }
+
+  function journalImportedReplicationOp(db: SqliteDb, input: SyncReplicationEnvelope): void {
+    db.prepare(
+      `INSERT OR IGNORE INTO replication_log (
+        workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.workspaceId,
+      input.originId,
+      input.originSeq,
+      input.opKind,
+      JSON.stringify(input.payload),
+      input.recordedAtMs,
+    );
+  }
+
   return {
     createThread(input) {
       return serialize(async (db) => {
@@ -747,6 +868,19 @@ export function createLinkedChatStore(
           threadId: id,
           title,
         });
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.thread.create",
+          payload: {
+            threadId: id,
+            title,
+            createdAtMs: recordedAtMs,
+            ...(linkedObjectId ? { linkedObjectId } : {}),
+            ...(linkedPathHint ? { linkedPathHint } : {}),
+            ...(linkedObjectId ? { linkedAtMs: recordedAtMs } : {}),
+          } satisfies ChatThreadCreatePayload,
+          recordedAtMs,
+        });
         return cloneJson(thread);
       });
     },
@@ -787,6 +921,21 @@ export function createLinkedChatStore(
             workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         ).run(workspaceId, channel.id, name, slug, kind, recordedAtMs, recordedAtMs);
+        // A locally created channel's wire identity is its own id.
+        recordChannelWireId(db, workspaceId, channel.id, channel.id);
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.channel.create",
+          payload: {
+            channelId: channel.id,
+            name,
+            slug,
+            kind,
+            createdAtMs: recordedAtMs,
+            wireId: channel.id,
+          } satisfies ChatChannelCreatePayload,
+          recordedAtMs,
+        });
         return cloneJson(channel);
       });
     },
@@ -800,7 +949,17 @@ export function createLinkedChatStore(
         const existing = db
           .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
           .get(workspaceId, slug);
-        if (existing) return cloneJson(channelFromRow(existing));
+        if (existing) {
+          // Backfill the well-known wire mapping for generals created before
+          // wire ids shipped so imported generals still converge onto them.
+          recordChannelWireId(
+            db,
+            workspaceId,
+            GENERAL_CHANNEL_WIRE_ID,
+            stringValue(existing.channel_id),
+          );
+          return cloneJson(channelFromRow(existing));
+        }
         const recordedAtMs = nowMs();
         const channel: ChatChannel = {
           id: createId("channel"),
@@ -816,6 +975,22 @@ export function createLinkedChatStore(
             workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         ).run(workspaceId, channel.id, channel.name, slug, channel.kind, recordedAtMs, recordedAtMs);
+        // Every store auto-creates general independently; the deterministic
+        // well-known wire id is what makes those rows ONE channel under sync.
+        recordChannelWireId(db, workspaceId, GENERAL_CHANNEL_WIRE_ID, channel.id);
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.channel.create",
+          payload: {
+            channelId: channel.id,
+            name: channel.name,
+            slug,
+            kind: channel.kind,
+            createdAtMs: recordedAtMs,
+            wireId: GENERAL_CHANNEL_WIRE_ID,
+          } satisfies ChatChannelCreatePayload,
+          recordedAtMs,
+        });
         return cloneJson(channel);
       });
     },
@@ -934,6 +1109,32 @@ export function createLinkedChatStore(
           messageId: message.id,
           author,
           body,
+        });
+        const channelWireId = wireIdForChannelId(db, workspaceId, channel.id);
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.thread.create",
+          payload: {
+            threadId,
+            title,
+            createdAtMs: recordedAtMs,
+            channelSlug: channel.slug,
+            ...(channelWireId !== undefined ? { channelWireId } : {}),
+          } satisfies ChatThreadCreatePayload,
+          recordedAtMs,
+        });
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.message.append",
+          payload: {
+            messageId: message.id,
+            threadId,
+            authorKind: author.kind,
+            authorDisplayName: author.displayName,
+            body,
+            createdAtMs: recordedAtMs,
+          } satisfies ChatMessageAppendPayload,
+          recordedAtMs,
         });
         const thread: ChatThread = {
           id: threadId,
@@ -1091,6 +1292,19 @@ export function createLinkedChatStore(
           author: message.author,
           body: message.body,
         });
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.message.append",
+          payload: {
+            messageId: message.id,
+            threadId: thread.id,
+            authorKind: message.author.kind,
+            authorDisplayName: message.author.displayName,
+            body: message.body,
+            createdAtMs: message.createdAtMs,
+          } satisfies ChatMessageAppendPayload,
+          recordedAtMs: message.createdAtMs,
+        });
         return cloneJson(message);
       });
     },
@@ -1102,6 +1316,219 @@ export function createLinkedChatStore(
           const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
           return listMessagesForThread(db, workspaceId, thread.id).map(cloneJson);
         });
+      });
+    },
+
+    applyReplicationOp(input): Promise<SyncApplyResult> {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        if (
+          typeof input.originId !== "string" ||
+          !input.originId ||
+          !Number.isInteger(input.originSeq) ||
+          input.originSeq < 0 ||
+          typeof input.recordedAtMs !== "number" ||
+          !Number.isFinite(input.recordedAtMs)
+        ) {
+          throw new LinkedChatStoreError("state-corrupt", "Replication envelope is invalid.");
+        }
+        const ackedSeq = readReplicationAckedSeq(db, workspaceId, input.originId);
+        if (input.originSeq <= ackedSeq) return skippedApplyResult();
+        if (importedReplicationLogExists(db, input)) {
+          ackReplicationPeer(db, workspaceId, input.originId, input.originSeq);
+          return skippedApplyResult();
+        }
+        if (input.originSeq !== ackedSeq + 1) {
+          throw new LinkedChatStoreError(
+            "state-corrupt",
+            `Replication origin ${input.originId} has a gap before sequence ${input.originSeq}.`,
+          );
+        }
+        if (input.opKind === "chat.channel.create") {
+          const payload = input.payload;
+          // Wire id is the cross-machine channel identity; slug is only a
+          // lookup alias. Same wire id = same channel (idempotent no-op);
+          // same slug + different wire id = distinct channel whose LOCAL slug
+          // gets a numbered variant. Pre-wire-id payloads fall back to slug
+          // identity (the 0P-A initial wire truth).
+          if (typeof payload.wireId === "string" && payload.wireId.length > 0) {
+            if (!channelIdForWireId(db, workspaceId, payload.wireId)) {
+              const channelId = createId("channel");
+              db.prepare(
+                `INSERT INTO chat_channels (
+                  workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              ).run(
+                workspaceId,
+                channelId,
+                payload.name,
+                nextFreeChannelSlug(db, workspaceId, payload.slug),
+                payload.kind,
+                payload.createdAtMs,
+                payload.createdAtMs,
+              );
+              recordChannelWireId(db, workspaceId, payload.wireId, channelId);
+            }
+          } else if (
+            !db
+              .prepare("SELECT 1 FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+              .get(workspaceId, payload.slug)
+          ) {
+            db.prepare(
+              `INSERT INTO chat_channels (
+                workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            ).run(
+              workspaceId,
+              createId("channel"),
+              payload.name,
+              payload.slug,
+              payload.kind,
+              payload.createdAtMs,
+              payload.createdAtMs,
+            );
+          }
+        } else if (input.opKind === "chat.thread.create") {
+          const payload = input.payload;
+          if (
+            !db
+              .prepare("SELECT 1 FROM chat_threads WHERE workspace_id = ? AND thread_id = ?")
+              .get(workspaceId, payload.threadId)
+          ) {
+            const hasLinkedOwner = typeof payload.linkedObjectId === "string";
+            const hasChannelOwner =
+              typeof payload.channelSlug === "string" || typeof payload.channelWireId === "string";
+            if (hasLinkedOwner === hasChannelOwner) throw corruptStore();
+            let channelId: string | null = null;
+            if (hasChannelOwner) {
+              // Prefer the wire-id map (true identity), fall back to the slug
+              // alias, and only then create a placeholder channel — a thread
+              // op can arrive before its channel op only across origins.
+              const mappedChannelId =
+                typeof payload.channelWireId === "string"
+                  ? channelIdForWireId(db, workspaceId, payload.channelWireId)
+                  : undefined;
+              // The slug alias only resolves identity for pre-wire-id
+              // payloads: a wire-id-carrying thread must never bind to a
+              // same-slug channel with a DIFFERENT wire identity.
+              const existingChannel =
+                payload.channelWireId === undefined && typeof payload.channelSlug === "string"
+                  ? db
+                      .prepare(
+                        "SELECT channel_id FROM chat_channels WHERE workspace_id = ? AND slug = ?",
+                      )
+                      .get(workspaceId, payload.channelSlug)
+                  : undefined;
+              if (mappedChannelId !== undefined) {
+                channelId = mappedChannelId;
+              } else if (existingChannel) {
+                channelId = stringValue(existingChannel.channel_id);
+              } else {
+                const placeholderSlug =
+                  typeof payload.channelSlug === "string" && payload.channelSlug.length > 0
+                    ? payload.channelSlug
+                    : (payload.channelWireId as string);
+                channelId = createId("channel");
+                db.prepare(
+                  `INSERT INTO chat_channels (
+                    workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+                  ) VALUES (?, ?, ?, ?, 'channel', ?, ?)`,
+                ).run(
+                  workspaceId,
+                  channelId,
+                  placeholderSlug,
+                  nextFreeChannelSlug(db, workspaceId, placeholderSlug),
+                  input.recordedAtMs,
+                  input.recordedAtMs,
+                );
+                if (typeof payload.channelWireId === "string") {
+                  recordChannelWireId(db, workspaceId, payload.channelWireId, channelId);
+                }
+              }
+            }
+            db.prepare(
+              `INSERT INTO chat_threads (
+                workspace_id, thread_id, title, created_at_ms, updated_at_ms,
+                linked_object_id, linked_path_hint, linked_at_ms, channel_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).run(
+              workspaceId,
+              payload.threadId,
+              payload.title,
+              payload.createdAtMs,
+              payload.createdAtMs,
+              hasLinkedOwner ? payload.linkedObjectId : null,
+              payload.linkedPathHint ?? null,
+              hasLinkedOwner ? (payload.linkedAtMs ?? null) : null,
+              channelId,
+            );
+            upsertThreadHeaderSearchIndex({
+              db,
+              workspaceId,
+              threadId: payload.threadId,
+              title: payload.title,
+            });
+          }
+        } else if (input.opKind === "chat.message.append") {
+          const payload = input.payload;
+          requireWorkspaceThread(db, workspaceId, payload.threadId);
+          if (
+            !db
+              .prepare("SELECT 1 FROM chat_messages WHERE workspace_id = ? AND message_id = ?")
+              .get(workspaceId, payload.messageId)
+          ) {
+            const messageOrder = nextMessageOrder(db, workspaceId, payload.threadId);
+            db.prepare(
+              `INSERT INTO chat_messages (
+                workspace_id, thread_id, message_order, message_id, author_kind,
+                author_display_name, body, created_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).run(
+              workspaceId,
+              payload.threadId,
+              messageOrder,
+              payload.messageId,
+              payload.authorKind,
+              payload.authorDisplayName,
+              payload.body,
+              payload.createdAtMs,
+            );
+            db.prepare(
+              "UPDATE chat_threads SET updated_at_ms = ? WHERE workspace_id = ? AND thread_id = ?",
+            ).run(payload.createdAtMs, workspaceId, payload.threadId);
+            // An untitled channel thread's searchable header is its snippet
+            // title. Locally startChannelThread derives it with the first
+            // message body in the same transaction; on import that body only
+            // arrives with this op, one op after the thread row.
+            const storedTitle = db
+              .prepare("SELECT title FROM chat_threads WHERE workspace_id = ? AND thread_id = ?")
+              .get(workspaceId, payload.threadId);
+            if (messageOrder === 0 && stringValue(storedTitle?.title ?? "") === "") {
+              upsertThreadHeaderSearchIndex({
+                db,
+                workspaceId,
+                threadId: payload.threadId,
+                title: threadDisplayTitle("", payload.body),
+              });
+            }
+            upsertChatMessageSearchIndex({
+              db,
+              workspaceId,
+              threadId: payload.threadId,
+              messageId: payload.messageId,
+              author: { kind: payload.authorKind, displayName: payload.authorDisplayName },
+              body: payload.body,
+            });
+          }
+        } else {
+          throw new LinkedChatStoreError(
+            "state-corrupt",
+            `Chat store cannot apply replication op ${input.opKind}.`,
+          );
+        }
+        journalImportedReplicationOp(db, input);
+        ackReplicationPeer(db, workspaceId, input.originId, input.originSeq);
+        return appliedApplyResult();
       });
     },
 

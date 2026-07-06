@@ -125,6 +125,34 @@ const SECRET_TABLES_DDL = `
     ON secret_moments(workspace_id, version_id, path, moment_order)
 `;
 
+// Sync replication metadata is a lazy additive upgrade (0P-A): existing
+// engine.db files gain origin identity, local op journal, and per-peer
+// high-water marks on open without a schema-version bump. NOT in
+// REQUIRED_ENGINE_TABLES because older readers ignore these tables.
+export const SYNC_REPLICATION_DDL = `
+  CREATE TABLE IF NOT EXISTS sync_identity (
+    workspace_id TEXT PRIMARY KEY,
+    origin_id TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS replication_log (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    op_kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    recorded_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq)
+  );
+  CREATE INDEX IF NOT EXISTS idx_replication_log_order
+    ON replication_log(workspace_id, recorded_at_ms, origin_id, origin_seq);
+  CREATE TABLE IF NOT EXISTS replication_peers (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    acked_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id)
+  )
+`;
+
 // Search index tables are lazy additive (WS-D): existing engine.db files gain
 // them on open without a schema-version bump. The FTS tables store only
 // currently searchable text; write-time policy hooks delete rows for secret,
@@ -178,6 +206,12 @@ const CHAT_CHANNEL_TABLES_DDL = `
     revision INTEGER NOT NULL,
     updated_at_ms REAL NOT NULL,
     PRIMARY KEY (workspace_id, thread_id)
+  );
+  CREATE TABLE IF NOT EXISTS chat_channel_wire_ids (
+    workspace_id TEXT NOT NULL,
+    wire_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, wire_id)
   )
 `;
 
@@ -272,6 +306,28 @@ function ensureBinaryContentKindColumns(
   ensureNullableColumn(db, "conflicts", "incoming_content_kind", "TEXT DEFAULT 'text'", corrupt);
 }
 
+// moments.sync_record_only is a lazy additive sync upgrade (0P-A round 2):
+// nullable/0 means the moment was applied to the materialized file state; 1
+// means the row is a persistent divergence history record and must not count
+// as the local head. Older readers select named columns and ignore it; older
+// writers leave it NULL, which correctly means "applied".
+function ensureMomentsSyncRecordOnlyColumn(
+  db: EngineSqliteDb,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  const hasRecordOnlyColumn = () =>
+    db
+      .prepare("PRAGMA table_info(moments)")
+      .all()
+      .some((row) => String(row.name) === "sync_record_only");
+  if (hasRecordOnlyColumn()) return;
+  try {
+    db.exec("ALTER TABLE moments ADD COLUMN sync_record_only INTEGER");
+  } catch (error) {
+    if (!hasRecordOnlyColumn()) throw corrupt(error);
+  }
+}
+
 function listUserTables(db: EngineSqliteDb): string[] {
   return db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
@@ -297,9 +353,18 @@ export function initializeOrValidateEngineSchema(
   db.exec(ACTIVE_VERSIONS_DDL);
   db.exec(BINARY_BLOBS_DDL);
   db.exec(SECRET_TABLES_DDL);
+  db.exec(SYNC_REPLICATION_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
+  ensureMomentsSyncRecordOnlyColumn(db, corrupt);
+  // versions.sync_materialized (lazy additive, 0P-A gate fix): 1 marks a
+  // version whose fork state was materialized from a replicated
+  // version.create payload rather than local snapshot lineage. Hydration
+  // validation exempts such versions from fork-point lineage inference (their
+  // seeded snapshot heads may reference record-only peer history). NULL/0 —
+  // the older-writer truth — means locally created.
+  ensureNullableColumn(db, "versions", "sync_materialized", "INTEGER", corrupt);
   ensureChatThreadsChannelColumn(db, corrupt);
   ensureBinaryContentKindColumns(db, corrupt);
 }
@@ -445,6 +510,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         before_metadata_summary TEXT,
         before_metadata_correlation_id TEXT,
         author_json TEXT,
+        sync_record_only INTEGER,
         PRIMARY KEY (workspace_id, moment_id),
         UNIQUE (workspace_id, moment_order),
         FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
@@ -530,6 +596,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       ${ACTIVE_VERSIONS_DDL};
       ${SECRET_TABLES_DDL};
       ${CHAT_CHANNEL_TABLES_DDL};
+      ${SYNC_REPLICATION_DDL};
       CREATE INDEX IF NOT EXISTS idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX IF NOT EXISTS idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
       CREATE INDEX IF NOT EXISTS idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);

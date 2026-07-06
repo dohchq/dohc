@@ -16206,3 +16206,261 @@ Date completed: 2026-07-06
   flag-default-on gate item once merged; WS-H (flag flip) may treat the
   gate as satisfied for in-cap binaries with the oversized limitation
   documented.
+
+## PR 0P-A - Sync Over A Folder (Log Export/Import, No Server)
+
+Status: implemented and locally validated on branch; not pushed
+Branch: codex/think-bigger-0pa-sync-folder
+Worktree: /home/ice/dev/dohc-0pa-sync-folder
+Implementation workstream, if used: codex CLI (gpt-5.5) rounds 1-2 via the
+codex-implementation skill; round 3 (WS-G1 binary integration, rebases,
+line-level review, fixes) done directly by the Claude lane driver
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] `sync_identity` (per-store originId), `replication_log` (journal,
+  PK `(workspace_id, origin_id, origin_seq)`), `replication_peers`
+  (per-origin high-water marks) as lazy-additive tables, no schema bump.
+- [x] Same-transaction journaling of every reachable replicated op:
+  workspace.init, moment.append (text write/rename/delete AND WS-G1
+  binary writes), version.create, conflict.open, conflict.resolve,
+  chat.channel.create, chat.thread.create (file-linked and channel),
+  chat.message.append. `version.rename`/`chat.thread.update` typed but
+  unreachable (no product API exists yet).
+- [x] `exportSyncBundle`/`importSyncBundle` over a plain folder:
+  per-origin JSONL op logs, content-addressed text blobs (`blobs/`) and
+  binary blobs (`blobs-bin/`), manifest; blobs hydrate before any op.
+- [x] Import per the 0P design: per-origin FIFO with contiguous-seq
+  fail-closed gap check, high-water idempotency, k-way merge interleave
+  by `(recordedAtMs, originId, originSeq)`, materialized-state
+  before-head checks, fast-forward through the same transactional write
+  paths (FTS maintained in-transaction), divergence to P0D-shaped
+  conflict rows with `origin: "sync"`.
+- [x] `moment_order`/`message_order`/channel ids never replicate; fresh
+  local allocation on import. Channel wire identity is a stable wire id
+  (`ChatChannelCreatePayload.wireId`, gate fix round) with the slug kept
+  as a lookup alias only; independently auto-created general channels
+  converge via the well-known `GENERAL_CHANNEL_WIRE_ID` constant.
+- [x] Dev-only `scripts/engine-sync-folder.ts` export helper. No desktop
+  UI, no IPC, no server.
+
+### Files Changed
+
+- packages/workspace-engine/src/engineDbSchema.ts (sync tables DDL,
+  `moments.sync_record_only` lazy column)
+- packages/workspace-engine/src/syncReplication.ts (new: origin id, seq,
+  journal/ack helpers, payload types incl. binary content kinds)
+- packages/workspace-engine/src/syncFolder.ts (new: bundle export/import,
+  k-way merge, text+binary blob shipping/hydration)
+- packages/workspace-engine/src/versionedTextStore.ts (journal hooks in
+  write/delete/rename/binary-write/version-create/conflict paths;
+  applyReplicationOp; applyRemoteMomentAppend with record-only
+  divergence rows; hydration validation via record-only set)
+- packages/workspace-engine/src/linkedChatStore.ts (journal hooks in
+  createThread/createChannel/ensureGeneralChannel/startChannelThread/
+  sendMessage; chat applyReplicationOp; imported snippet-title indexing)
+- packages/workspace-contracts/src/engine.ts (SyncReplicationOpKind,
+  SyncReplicationEnvelope, SyncApplyResult, applyReplicationOp on both
+  store interfaces)
+- packages/workspace-engine/src/index.ts (sync API exports)
+- packages/workspace-engine/src/syncFolder.test.ts (new, 14 tests)
+- scripts/engine-sync-folder.ts (new dev helper)
+
+### Tests Added Or Updated
+
+- Journal rows for every reachable op kind beside their mutations.
+- Export/import round trip into a fresh store (files, named version,
+  chat thread/messages); idempotent re-import (zero new rows);
+  transitive A→B→C re-export preserving original `(originId, originSeq)`.
+- Divergence: mirrored P0D conflict rows on BOTH machines (both import
+  directions), importer live file untouched, base/current/incoming
+  cross-checked.
+- Bug regressions: record-only divergence rows stay valid after conflict
+  resolution and store reopen; no fast-forward clobber over a live file
+  while a sync conflict is open; delete-then-recreate syncs; origin seq
+  gaps fail closed (tampered bundle).
+- WS-E chats: general-channel thread round trip with unread cursors
+  untouched on import; independently-created "general" channels converge
+  by slug with both threads; markThreadRead journals nothing.
+- Local-state exclusion: active_versions/read-state/FTS provably absent
+  from bundles and journal (adversarial bundle-bytes walk, as WS-C/WS-D
+  did for secrets).
+- Secret exclusion: secret store writes never journal; raw bundle byte
+  walk contains no secret marker or `.env` path.
+- FTS after import: imported file text and chat messages searchable on
+  the importer.
+- WS-G1 binary: byte-exact binary round trip via `blobs-bin/`, binary
+  absent from importer FTS, binary same-path divergence opens a conflict
+  with distinct shas and the incoming bytes restorable locally.
+- Convergence fuzz: seeded PRNG (seed 0x0f0a2026 logged on failure), 30
+  iterations, random 2-5-op batches applied to BOTH stores independently
+  (writes/edits/binary writes/deletes/renames/recreates with 72%
+  collision bias plus chat messages), sync both ways to quiescence, then
+  assert non-conflicted file equality (sha-keyed for binary), mirrored
+  open-conflict multisets with current/incoming cross-checks, identical
+  chat digests, identical `(origin, seq)` journal multisets.
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/workspace-engine test        # 330 passed (baseline 316)
+pnpm --filter @dohc/workspace-engine typecheck   # clean
+pnpm --filter @dohc/workspace-contracts typecheck # clean
+pnpm --filter @dohc/desktop typecheck            # clean
+pnpm --filter @dohc/desktop test                 # 925 passed (baseline 925)
+pnpm --filter @dohc/mcp test                     # 77 passed
+node scripts/check-think-bigger-doc-links.mjs    # passed (10 files)
+git diff --check                                 # clean
+```
+
+### E2E / Visual / Manual QA
+
+- Package-level lane by design: no desktop UI/IPC surface this milestone
+  (0P-B mounts the sync loop; 0P-C is the product E2E). Manual two-folder
+  sync is exercisable via scripts/engine-sync-folder.ts.
+
+### Local Agent CLI QA
+
+- Not applicable: no agent-facing surface changed; capture writes journal
+  automatically because versionedFileWorkspace routes through
+  versionedTextStore.writeTextFile.
+
+### CodeRabbit
+
+- Status: deferred to PR creation (lane not yet pushed).
+
+### Unresolved Findings
+
+- None blocking. See Remaining Risk for 0P-B handoff items.
+
+### Subagent Reviews
+
+- Claude lane driver performed a line-by-line review of the before-head
+  check, divergence conflict construction, hydration validation, and the
+  k-way merge; found and drove fixes for three round-1 bugs (below).
+
+### Security / Privacy Notes
+
+- Secret store paths never journal: the secret store shares no write
+  helper with the text store, and the adversarial bundle byte-walk test
+  pins that no ciphertext, iv, or secret path reaches a bundle.
+- Bundles contain only class-1 canonical state; FTS tables,
+  active_versions, and chat read cursors are asserted absent.
+- Import validates envelopes, fails closed on origin-sequence gaps and
+  missing blob hashes (tamper/corruption evidence rather than partial
+  apply).
+
+### Performance Notes
+
+- Machine: AMD Ryzen 9 7950X, WSL2, node v25.2.1.
+- Full engine suite 32.8s (baseline shape unchanged); the 30-iteration
+  concurrent-batch fuzz runs inside the suite in ~15s, under the 60s cap.
+- Journal write is one INSERT per mutation inside the existing
+  transaction; no separate fsync path.
+
+### Migration Notes
+
+- All schema changes are lazy-additive (three new tables plus
+  `moments.sync_record_only` nullable column via the author_json
+  pattern); existing engine.db files upgrade silently on open, no
+  ENGINE_SCHEMA_VERSION bump, older readers unaffected.
+
+### Remaining Risk / Follow-Ups (0P-B handoff)
+
+- Divergence records one conflict per divergent remote op; a long remote
+  chain on a conflicted object accumulates conflicts. Coalescing is a
+  deliberate 0P-B follow-up (comment pinned at the insert site).
+- Sync-divergence conflict ids remain per-side, but the gate fix round
+  added mirrored resolve-matching: a peer's conflict.resolve first
+  matches by id, then falls back to the mirrored open conflict by
+  (targetVersionId, swapped current/incoming heads) with the choice and
+  resolution flipped; a resolve that matches nothing is journaled +
+  acked but surfaced as `pendingConflictResolves` in the import result.
+  Truly symmetric conflict ids remain 0P-B.
+- rollbackTextFileMutation deletes a moment but keeps its journal row
+  (journal stays append-only, seqs stay contiguous). If the row was
+  exported before rollback, peers keep the moment and later local writes
+  degrade to a divergence conflict on rejoin — never corruption, never
+  silent loss. Compensating op design belongs to 0P-B. Sync record-only
+  rows themselves are rollback-inert (gate fix round): they cannot be
+  rolled back and never gate another moment's rollback eligibility.
+- LWW channel renames (no rename API exists yet) build on the wire-id
+  identity shipped in the gate fix round.
+- exportSyncBundle is stateless (`sinceCursor` optional); incremental
+  cursor persistence is left to the 0P-B sync loop. A partial
+  (`sinceCursor`) bundle whose version.create forkSnapshots reference
+  moments/blobs outside the bundle fails closed on the importer unless
+  the importer already holds them.
+
+### Gate Fix Round (2026-07-07, Claude lane driver)
+
+Pre-push review gate: codex line-review + CodeRabbit findings, all fixed
+tests-first (each critical got a failing repro before its fix), amended
+into the lane commit.
+
+- C1 (critical, data loss): sync record-only rows leaked into public
+  surfaces unmarked and rollbackTextFileMutation ACCEPTED them —
+  importing a peer's divergent moment then rolling it back rewrote or
+  deleted the LOCAL live snapshot from a state this store never
+  materialized. Fixed: rollback fails closed (invalid-input) on
+  record-only moments; the is-latest / predecessor / dependent queries
+  all filter `sync_record_only = 0`; listMoments/getMoment mark the rows
+  with `syncRecordOnly: true` (visible but inert — mark, don't hide).
+- C2 (critical, state corruption): version.create replay copied the
+  IMPORTER's current snapshots, silently absorbing local edits into the
+  origin's fork (repro also tripped hydration state-corrupt). Fixed:
+  createNamedVersion ships the fork-point state in the payload
+  (`VersionCreatePayload.forkSnapshots`, lazy additive) and importers
+  materialize the fork strictly from it (rows marked via the new
+  `versions.sync_materialized` lazy column; hydration validation exempts
+  only cross-fork-boundary lineage inference for them). Local
+  createNamedVersion fork-point selection also gained materialized-head
+  semantics (`sync_record_only = 0`).
+- M1: replicated version.create snapshot copies dropped `content_kind`,
+  so replicated binary forks read back as empty text. The payload path
+  carries contentKind; the legacy fallback SQL copies content_kind.
+- M2: rename-vs-rename with an occupied destination now models
+  destination occupancy explicitly: the diverged object's conflict keeps
+  both side paths, the occupant gets its own path-occupancy conflict,
+  and apply-incoming performs the MOVE to incoming.path — failing closed
+  (target-path-exists) while the destination is occupied by another
+  object instead of silently writing at the local path.
+- M3: imported conflict.resolve no longer silently drops when the peer's
+  mirror row has a different id (see Remaining Risk bullet above).
+- M4: exportSyncBundle clears ops/, blobs/, blobs-bin/ before writing;
+  importSyncBundle reads ONLY manifest-listed origins and verifies each
+  ops file against its manifest entry (per-line origin id, count,
+  minSeq, maxSeq) plus a safe-origin-id filename guard.
+- M5: blob hydration verifies content: every bundle blob (text and
+  binary) must hash to its filename, and an INSERT OR IGNORE that skips
+  an existing row verifies the existing content matches (binary anchor
+  rows upgrade like putBlob); tampered files and poisoned pre-existing
+  rows fail closed as state-corrupt, inside one hydration transaction.
+- M6: channel wire identity (see Scope bullet): same wireId = same
+  channel; same slug + different wireId = distinct channel with a
+  suffixed local slug; general converges via the well-known constant.
+- M7 + typed payloads: `SyncApplyResult` is a status-discriminated union
+  (`applied`/`skipped`, optional `pendingConflictResolves`), and
+  `SyncReplicationEnvelope` is a per-opKind discriminated payload union
+  (payload types moved to workspace-contracts; stores narrow instead of
+  casting).
+- Trivia: applyReplicationOp contract docs on both store interfaces,
+  shell-escaped copy/paste command in scripts/engine-sync-folder.ts,
+  load-bearing FTS assertion (no optional chaining), UTF-8-fatal
+  walkTextFiles test helper.
+
+Validation: engine 339 passed (330 baseline + 9 gate-fix tests including
+the four critical/major repros); convergence fuzz seed 0x0f0a2026, 30
+iterations, corpus extended with per-side named-version forks
+(byte-identical fork convergence asserted) and symmetric sorted-path
+conflict keys; desktop 925 passed; mcp 77 passed; repo typecheck clean;
+`git diff --check` clean; doc-links checker passed.
+
+### Follow-Up / Deletion Conditions
+
+- 0P-B (thin relay + device auth) consumes the journal/apply machinery
+  as-is; legacy packages/workspace-sync and cloudSyncEngine.ts retire
+  when 0P-B replaces the desktop loop (audit Phase C/D).

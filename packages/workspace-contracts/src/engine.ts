@@ -208,6 +208,190 @@ export type VersionedTextConflictResolveResult =
       delete?: VersionedTextDeleteResult;
     };
 
+export type SyncReplicationOpKind =
+  | "workspace.init"
+  | "moment.append"
+  | "version.create"
+  // No version rename API exists yet; included so 0P-B/0P-C typings stay stable.
+  | "version.rename"
+  | "conflict.open"
+  | "conflict.resolve"
+  | "chat.channel.create"
+  | "chat.thread.create"
+  // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
+  | "chat.thread.update"
+  | "chat.message.append";
+
+// Wire encoding of "did the origin see a prior state for this object": absent
+// (no before at all), null (origin recorded an explicit no-file preimage), or
+// present (the before* fields below carry the origin's preimage snapshot).
+export type SyncMomentBeforePresence = "absent" | "null" | "present";
+
+export interface MomentAppendPayload {
+  momentId: VersionedTextMomentId;
+  versionId: VersionId;
+  objectId: WorkspaceObjectId;
+  objectCreatedAtMs?: number;
+  path: string;
+  recordedAtMs: number;
+  operation: "write" | "rename" | "delete";
+  payloadBeforeBlobSha256: string | null;
+  payloadBeforePath: string | null;
+  payloadAfterBlobSha256: string;
+  payloadAfterPath: string;
+  // Content kinds are absent for text (the pre-WS-G1 wire truth); "binary"
+  // shas point into binary_blobs and their bytes ship in the bundle's
+  // blobs-bin/ directory. Byte lengths ride along so importers can persist
+  // snapshot rows without re-measuring blob content.
+  payloadBeforeContentKind?: VersionedFileContentKind;
+  payloadBeforeByteLength?: number;
+  payloadAfterContentKind?: VersionedFileContentKind;
+  payloadAfterByteLength?: number;
+  metadata: ActorNeutralWriteMetadata;
+  author?: MomentAuthor;
+  beforePresent: SyncMomentBeforePresence;
+  beforeObjectId?: WorkspaceObjectId;
+  beforeVersionId?: VersionId;
+  beforePath?: string;
+  beforeBlobSha256?: string;
+  beforeContentKind?: VersionedFileContentKind;
+  beforeByteLength?: number;
+  beforeUpdatedAtMs?: number;
+  beforeLatestMomentId?: VersionedTextMomentId;
+  beforeMetadata?: ActorNeutralWriteMetadata;
+}
+
+// One snapshot row of the origin's source version AS OF the fork moment. The
+// version.create payload ships these so importers materialize the fork from
+// the ORIGIN's fork-point state instead of their own current snapshots (which
+// may contain unrelated local edits the origin never saw).
+export interface VersionCreateForkSnapshot {
+  objectId: WorkspaceObjectId;
+  objectCreatedAtMs?: number;
+  path: string;
+  contentKind?: VersionedFileContentKind;
+  blobSha256: string;
+  byteLength?: number;
+  updatedAtMs: number;
+  latestMomentId: VersionedTextMomentId;
+  metadata: ActorNeutralWriteMetadata;
+}
+
+export interface VersionCreatePayload {
+  versionId: VersionId;
+  name: string;
+  kind: VersionKind;
+  forkVersionId?: VersionId;
+  forkMomentId?: VersionedTextMomentId;
+  createdAtMs: number;
+  // Lazy additive (0P-A gate fix): absent only in payloads journaled before
+  // fork-state shipping; importers then fall back to copying their local
+  // source-version snapshots (the legacy, divergence-prone behavior).
+  forkSnapshots?: VersionCreateForkSnapshot[];
+}
+
+export interface ConflictResolvePayload {
+  conflictId: VersionedTextConflictId;
+  status: "resolved";
+  chosenFrom: VersionedTextConflictChoice;
+  resolution: VersionedTextConflictResolution;
+  updatedAtMs: number;
+  // Lazy additive matching context (0P-A gate fix): sync divergence conflicts
+  // get independent local ids per peer, so importers that cannot match
+  // conflictId fall back to the mirrored (targetVersionId, current/incoming
+  // head) pair. Absent in payloads journaled before the context shipped.
+  targetVersionId?: VersionId;
+  path?: string;
+  currentLatestMomentId?: VersionedTextMomentId;
+  incomingLatestMomentId?: VersionedTextMomentId;
+}
+
+export interface ChatChannelCreatePayload {
+  // Origin-local channel id; NOT a cross-machine identity (peers mint their
+  // own local ids). Cross-machine identity is wireId below.
+  channelId: string;
+  name: string;
+  slug: string;
+  kind: ChatChannelKind;
+  createdAtMs: number;
+  // Stable cross-machine channel identity (0P-A gate fix). Same wireId means
+  // same channel; same slug with a DIFFERENT wireId stays a distinct channel
+  // (the importer suffixes its local slug). The auto-created "general"
+  // channel uses a well-known constant wireId so independently-created
+  // generals converge. Absent only in payloads journaled before wire ids
+  // shipped; importers then fall back to slug identity.
+  wireId?: string;
+}
+
+export interface ChatThreadCreatePayload {
+  threadId: ChatThreadId;
+  title: string;
+  createdAtMs: number;
+  linkedObjectId?: WorkspaceObjectId;
+  linkedPathHint?: string;
+  linkedAtMs?: number;
+  channelSlug?: string;
+  // Preferred channel routing (0P-A gate fix): resolves through the importer's
+  // wire-id map before the slug alias. Absent in pre-wire-id payloads.
+  channelWireId?: string;
+}
+
+export interface ChatMessageAppendPayload {
+  messageId: ChatMessageId;
+  threadId: ChatThreadId;
+  authorKind: ChatActor["kind"];
+  authorDisplayName: string;
+  body: string;
+  createdAtMs: number;
+}
+
+export interface SyncReplicationEnvelopeOf<
+  Kind extends SyncReplicationOpKind,
+  Payload,
+> {
+  workspaceId: WorkspaceId;
+  originId: string;
+  originSeq: number;
+  opKind: Kind;
+  payload: Payload;
+  recordedAtMs: number;
+}
+
+/**
+ * One replicated op, discriminated on opKind so the payload shape is checked
+ * at compile time (a typo/mismatch between opKind and payload cannot build).
+ * The reserved kinds (version.rename, chat.thread.update) keep an unknown
+ * payload until their APIs exist; stores must reject them on apply.
+ */
+export type SyncReplicationEnvelope =
+  | SyncReplicationEnvelopeOf<"workspace.init", Record<string, never>>
+  | SyncReplicationEnvelopeOf<"moment.append", MomentAppendPayload>
+  | SyncReplicationEnvelopeOf<"version.create", VersionCreatePayload>
+  | SyncReplicationEnvelopeOf<"version.rename", unknown>
+  | SyncReplicationEnvelopeOf<"conflict.open", VersionedTextConflictRecord>
+  | SyncReplicationEnvelopeOf<"conflict.resolve", ConflictResolvePayload>
+  | SyncReplicationEnvelopeOf<"chat.channel.create", ChatChannelCreatePayload>
+  | SyncReplicationEnvelopeOf<"chat.thread.create", ChatThreadCreatePayload>
+  | SyncReplicationEnvelopeOf<"chat.thread.update", unknown>
+  | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>;
+
+/**
+ * Outcome of applying one replicated op. A single status discriminant keeps
+ * illegal states unrepresentable: a skipped op can never report opened
+ * conflicts, and callers branch on one field instead of two booleans.
+ */
+export type SyncApplyResult =
+  | {
+      status: "applied";
+      conflictsOpened: number;
+      // conflict.resolve ops that matched no local conflict (neither by id nor
+      // by mirrored heads). Journaled and acked — the op is preserved for a
+      // future reconciliation pass — but surfaced so import results never
+      // silently swallow a peer's resolution.
+      pendingConflictResolves?: number;
+    }
+  | { status: "skipped"; conflictsOpened: 0 };
+
 export interface VersionedTextMoment {
   id: VersionedTextMomentId;
   workspaceId: WorkspaceId;
@@ -221,6 +405,11 @@ export interface VersionedTextMoment {
   // Present only when a dohc-tracked agent run authored this moment.
   author?: MomentAuthor;
   before?: TextFileSnapshot | null;
+  // Present (true) only for sync divergence record-only rows: history that a
+  // peer recorded but that never touched this store's materialized file
+  // state. Visible on the timeline, inert everywhere else — record-only
+  // moments are never a head, never a fork point, and cannot be rolled back.
+  syncRecordOnly?: boolean;
 }
 
 // Timeline row (PR 0M-5 history flip): everything the history list needs
@@ -240,6 +429,9 @@ export interface VersionedTextMomentSummary {
   // Present only when a dohc-tracked agent run authored this moment.
   author?: MomentAuthor;
   momentOrder: number;
+  // Present (true) only for sync divergence record-only rows — see
+  // VersionedTextMoment.syncRecordOnly.
+  syncRecordOnly?: boolean;
 }
 
 export interface VersionedTextMomentPage {
@@ -413,6 +605,8 @@ export interface VersionedTextStore {
     author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextDeleteResult>;
+  // Fails closed (invalid-input) on sync record-only moments: divergent peer
+  // history never rewrites the local materialized snapshot.
   rollbackTextFileMutation(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -439,6 +633,19 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     momentId: VersionedTextMomentId;
   }): Promise<VersionedTextMoment | null>;
+  // THE peer-op entry point (0P-A). Behavior both stores must agree on:
+  // - Idempotent on duplicates: originSeq at or below the origin's acked
+  //   high-water mark, or already present in replication_log, applies nothing
+  //   and returns status "skipped".
+  // - Fails closed (state-corrupt) on per-origin sequence gaps: originSeq must
+  //   be exactly ackedSeq + 1; nothing is applied or acked on a gap.
+  // - Divergence never clobbers: a moment whose before-head does not match the
+  //   local materialized head lands as a record-only history row plus an open
+  //   sync conflict (counted in conflictsOpened); the local live file is
+  //   untouched.
+  // - The op journals into replication_log and advances the origin's acked
+  //   seq in the SAME transaction as its state mutation.
+  applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   // Releases the underlying database handle after in-flight writes drain.
   // Callers that own a store (workspace teardown, app quit) must close it so
   // SQLite handles/WAL locks never outlive the workspace session.
@@ -764,6 +971,12 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  // Same replication contract as VersionedTextStore.applyReplicationOp:
+  // idempotent skip on duplicate originSeq, fail-closed on per-origin gaps,
+  // journal + ack in the same transaction as the mutation. Chat ops never
+  // open conflicts: channel identity converges by wire id (slug is only a
+  // lookup alias), threads/messages are create-only by stable id.
+  applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   getThreadProjection(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
