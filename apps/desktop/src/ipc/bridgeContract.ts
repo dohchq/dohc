@@ -553,6 +553,9 @@ export const EngineMomentRecord = z.object({
   // Workspace-global recording order: the pagination cursor and a monotonic
   // refresh key. Real moments always have a nonnegative order.
   momentOrder: z.number().int().nonnegative(),
+  // Secret-backed file moment (PR 08): metadata-only by construction — the
+  // row renders with a lock and its diff page shows "Contents are protected".
+  protected: z.boolean().optional(),
 });
 export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
@@ -583,7 +586,9 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
   momentOrder: true,
 }).extend({
   // null before-text = the moment created the file; delete moments carry the
-  // removed content as beforeText and null afterText.
+  // removed content as beforeText and null afterText. PROTECTED moments are
+  // metadata-only: both sides are always null and the page renders
+  // "Contents are protected" instead of a diff.
   beforeText: MOMENT_TEXT.nullable(),
   afterText: MOMENT_TEXT.nullable(),
 });
@@ -742,6 +747,9 @@ export const WorkspaceVersionFileChange = z.object({
   currentText: VERSION_TEXT.optional(),
   // The compared version's side; absent when the file only exists in Main.
   incomingText: VERSION_TEXT.optional(),
+  // Secret-backed file (PR 08): the compare view renders "Protected file
+  // changed" — both text sides are always absent when this is set.
+  protected: z.boolean().optional(),
 });
 export type WorkspaceVersionFileChange = z.infer<typeof WorkspaceVersionFileChange>;
 

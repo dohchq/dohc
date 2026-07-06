@@ -87,6 +87,25 @@ export {
   searchWorkspaceEngine,
 } from "./workspaceSearch";
 export {
+  MAX_SECRET_FILE_BYTES,
+  SECRET_FILE_STORE_RELATIVE_PATH,
+  SECRET_KEY_RELATIVE_PATH,
+  SecretFileStoreError,
+  createSecretFileStore,
+} from "./secretFileStore";
+export type {
+  SecretFileCompareEntry,
+  SecretFileDeleteOutcome,
+  SecretFileMaterialization,
+  SecretFileMoment,
+  SecretFileRestoreOutcome,
+  SecretFileStat,
+  SecretFileStore,
+  SecretFileStoreErrorCode,
+  SecretFileStoreOptions,
+  SecretFileWriteOutcome,
+} from "./secretFileStore";
+export {
   parseFilesPolicy,
   parseVisibilityPolicy,
   policyGlobMatches,

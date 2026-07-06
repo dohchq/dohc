@@ -1,5 +1,5 @@
 import { parse as parseToml } from "smol-toml";
-import { classifyEngineFilePath } from "./workspaceSearch";
+import { classifyEngineFilePath } from "./enginePathFloor";
 
 export interface FilesPolicyRule {
   path: string;

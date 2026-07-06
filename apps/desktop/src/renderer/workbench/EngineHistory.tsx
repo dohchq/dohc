@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, FileText, RotateCcw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
@@ -177,7 +177,16 @@ function MomentRow(props: {
       }`}
     >
       <span className="flex min-w-0 items-start gap-2">
-        {moment.origin === "restore" ? (
+        {moment.protected ? (
+          // Secret-backed file moment (PR 08): the lock is the affordance —
+          // the row is metadata-only and its page shows no contents.
+          <Lock
+            size={12}
+            aria-hidden
+            data-testid="engine-moment-lock"
+            className="mt-0.5 shrink-0 text-subtle"
+          />
+        ) : moment.origin === "restore" ? (
           <RotateCcw size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
         ) : (
           <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />

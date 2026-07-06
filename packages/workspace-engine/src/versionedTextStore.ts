@@ -45,6 +45,7 @@ import {
   initializeOrValidateEngineSchema,
   type EngineIntegrityCheckMode,
 } from "./engineDbSchema";
+import { classifyEngineFilePath } from "./enginePathFloor";
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
@@ -1514,6 +1515,24 @@ function normalizeWritePath(path: string): string {
     );
   }
   return result.normalized;
+}
+
+// PR 08 secret floor, enforced at the store door: this store persists
+// PLAINTEXT snapshots/moments, so a secret-classified path (the
+// classifyEngineFilePath floor — .dohc policy can never unmark it) must be
+// rejected by every mutating entry point that could introduce a new path.
+// Read/compare/merge paths need no gate: a secret path can never gain a row,
+// so they honestly report absence. Secret-backed files are versioned by the
+// dedicated encrypted secret file store instead.
+function normalizePlaintextStorablePath(path: string): string {
+  const normalized = normalizeWritePath(path);
+  if (classifyEngineFilePath(normalized).kind === "secret") {
+    throw new VersionedTextStoreError(
+      "invalid-path",
+      `Secret-classified path ${JSON.stringify(normalized)} cannot be stored as plaintext; secret-backed files go through the secret file store.`,
+    );
+  }
+  return normalized;
 }
 
 function normalizeWriteText(text: string): string {
@@ -3319,7 +3338,7 @@ function createVersionedTextStoreWithHooks(
         assertInputEnvelope(input);
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const versionId = normalizeVersionId(input.versionId);
-        const path = normalizeWritePath(input.path);
+        const path = normalizePlaintextStorablePath(input.path);
         const text = normalizeWriteText(input.text);
         const metadata = normalizeWriteMetadata(input.metadata);
         const author = normalizeMomentAuthor(input.author);
@@ -3605,7 +3624,10 @@ function createVersionedTextStoreWithHooks(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const versionId = normalizeVersionId(input.versionId);
         const fromPath = normalizeWritePath(input.fromPath);
-        const toPath = normalizeWritePath(input.toPath);
+        // A rename can introduce a NEW path, so the destination gets the same
+        // secret-floor gate as writeTextFile (renaming notes.md -> .env must
+        // not smuggle plaintext under a secret path).
+        const toPath = normalizePlaintextStorablePath(input.toPath);
         if (fromPath === toPath) {
           throw new VersionedTextStoreError(
             "invalid-path",

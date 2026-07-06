@@ -159,13 +159,19 @@ describe("Phase 0 proof arc", () => {
       author: { kind: "agent", displayName: "Ice's agent" },
       body: "The alpha chat context stays beside the plan.",
     });
-    await versions.writeTextFile({
-      workspaceId,
-      versionId: main.id,
-      path: ".env",
-      text: "ALPHA_SECRET=do-not-index\n",
-      metadata: { origin: "local-file", summary: "throwaway secret" },
-    });
+    // PR 08 hardened "no .env leakage": the text store now refuses to hold a
+    // secret path as plaintext at all — the strongest possible version of the
+    // Phase 0 gate (secret content is versioned encrypted by the secret file
+    // store instead; see secretFileStore.test.ts).
+    await expect(
+      versions.writeTextFile({
+        workspaceId,
+        versionId: main.id,
+        path: ".env",
+        text: "ALPHA_SECRET=do-not-index\n",
+        metadata: { origin: "local-file", summary: "throwaway secret" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid-path" });
 
     const search = await searchWorkspaceEngine({
       workspaceId,

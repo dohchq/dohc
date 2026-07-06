@@ -195,9 +195,12 @@ import {
   type ChatMessage,
   type ChatThread,
   type LinkedChatStore,
-  type VersionedTextMoment,
   type VersionedTextMomentSummary,
 } from "@dohc/workspace-engine";
+import type {
+  WorkspaceEngineMomentDetail,
+  WorkspaceEngineMomentSummary,
+} from "./workspaces/workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
 import { createAgentIntegration } from "./agents/AgentIntegration";
@@ -2178,7 +2181,7 @@ function registerIpcHandlers(): void {
 
   function engineMomentBaseForIpc(
     moment: Pick<
-      VersionedTextMomentSummary,
+      WorkspaceEngineMomentSummary,
       "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "author"
     >,
   ) {
@@ -2201,16 +2204,31 @@ function registerIpcHandlers(): void {
     };
   }
 
-  function engineMomentForIpc(moment: VersionedTextMomentSummary): EngineMomentRecord {
+  function engineMomentForIpc(moment: WorkspaceEngineMomentSummary): EngineMomentRecord {
     return {
       ...engineMomentBaseForIpc(moment),
       momentOrder: moment.momentOrder,
+      // Only stamped for PROTECTED (secret-backed) moments so ordinary rows
+      // stay byte-identical to the pre-PR-08 shape.
+      ...(moment.protected ? { protected: true } : {}),
     };
   }
 
   function engineMomentDetailForIpc(
-    moment: VersionedTextMoment,
+    detail: WorkspaceEngineMomentDetail,
   ): EngineMomentDetailRecord {
+    if (detail.protected) {
+      // Protected moments are metadata-only: no payload exists anywhere, so
+      // both text sides are null and the renderer shows "Contents are
+      // protected" in place of a diff.
+      return {
+        ...engineMomentBaseForIpc(detail.moment),
+        protected: true,
+        beforeText: null,
+        afterText: null,
+      };
+    }
+    const moment = detail.moment;
     return {
       ...engineMomentBaseForIpc(moment),
       beforeText: moment.payload.before?.text ?? null,

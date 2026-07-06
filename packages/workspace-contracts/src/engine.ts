@@ -664,6 +664,178 @@ export interface VersionFileChange {
   currentText?: string;
   // Source-side text (the compared version); absent when the file was deleted.
   incomingText?: string;
+  // True for secret-backed files (PR 08): the change is reported
+  // metadata-only — protected contents never ride a comparison, so
+  // currentText/incomingText are always absent when this is set.
+  protected?: boolean;
+}
+
+// --- Secret-backed files (PR 08) -------------------------------------------
+//
+// Secret-classified paths (the classifyEngineFilePath floor — policy can
+// never unmark them) are versioned by a dedicated driver that stores ONLY
+// AES-256-GCM ciphertext in engine.db. Moments are metadata-only: they have
+// no plaintext field at all, by construction. The single plaintext exit is
+// materializeSecretFile, used exclusively by dohc's own disk materialization
+// flows (version switch/merge/restore) — the file was already plaintext on
+// disk, so that is the same trust boundary.
+//
+// Honest boundary: once plaintext is materialized into the workspace folder,
+// ordinary OS-level file access applies. dohc does not claim per-process
+// enforcement for arbitrary local processes after materialization; the
+// encryption's job is keeping secrets out of dohc's durable, derived, and
+// replicated surfaces (history, search, export, sync, chats, logs).
+
+export type SecretFileStoreErrorCode =
+  | "decrypt-failed"
+  | "invalid-input"
+  | "invalid-metadata"
+  | "invalid-path"
+  | "invalid-text"
+  | "invalid-version"
+  | "invalid-workspace"
+  | "key-corrupt"
+  | "moment-not-found"
+  | "not-secret-path"
+  | "state-corrupt";
+
+// Metadata-only description of one secret file's tip: no content, no digest
+// of the plaintext, nothing derived from the secret bytes except length.
+export interface SecretFileStat {
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  path: string;
+  byteLength: number;
+  updatedAtMs: number;
+  latestMomentId: string;
+}
+
+// Metadata-only history moment for a secret file. There is deliberately no
+// payload/text field on this type — "Updated .env", never the contents.
+export interface SecretFileMoment {
+  id: string;
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  path: string;
+  recordedAtMs: number;
+  operation: "write" | "delete";
+  metadata: ActorNeutralWriteMetadata;
+  momentOrder: number;
+  protected: true;
+}
+
+export interface SecretFileCompareEntry {
+  path: string;
+  // Relative to the target (for example Main): "added" = only the source has
+  // it, "deleted" = only the target has it, "modified" = both differ.
+  status: VersionFileChangeStatus;
+}
+
+export interface SecretFileWriteOutcome {
+  // False when the write matched the current tip exactly (no new moment).
+  changed: boolean;
+  moment?: SecretFileMoment;
+}
+
+export interface SecretFileDeleteOutcome {
+  // Null when the path was not tracked (delete of nothing is a no-op).
+  moment: SecretFileMoment | null;
+}
+
+export interface SecretFileRestoreOutcome {
+  restored: "text" | "deleted";
+  restoredMomentId: string;
+  path: string;
+}
+
+export type SecretFileMaterialization =
+  | { present: false }
+  | { present: true; text: string };
+
+/**
+ * Internal server-side storage primitive for secret-backed files.
+ *
+ * Every read surface except materializeSecretFile is metadata-only. Callers
+ * must derive workspace identity and authorization before invoking this API;
+ * agent-facing surfaces (MCP tools, projections, exports) must never expose
+ * materializeSecretFile.
+ */
+export interface SecretFileStore {
+  writeSecretFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    text: string;
+    metadata: ActorNeutralWriteMetadata;
+  }): Promise<SecretFileWriteOutcome>;
+  deleteSecretFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+  }): Promise<SecretFileDeleteOutcome>;
+  listSecretFiles(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+  }): Promise<SecretFileStat[]>;
+  // Newest first (descending momentOrder). The secret timeline is expected
+  // to stay short; callers merge it into paged text timelines by time range.
+  listSecretMoments(input: {
+    workspaceId: WorkspaceId;
+    versionId?: VersionId;
+  }): Promise<SecretFileMoment[]>;
+  getSecretMoment(input: {
+    workspaceId: WorkspaceId;
+    momentId: string;
+  }): Promise<SecretFileMoment | null>;
+  // Copies the source version's secret tips into a freshly created version
+  // (and records them as the new version's fork base for merges).
+  forkVersion(input: {
+    workspaceId: WorkspaceId;
+    fromVersionId: VersionId;
+    toVersionId: VersionId;
+  }): Promise<void>;
+  // Metadata-only comparison of two versions' secret files (statuses are
+  // relative to the target).
+  compareSecretFileVersions(input: {
+    workspaceId: WorkspaceId;
+    targetVersionId: VersionId;
+    sourceVersionId: VersionId;
+  }): Promise<SecretFileCompareEntry[]>;
+  // Whole-file merge of one secret path from source into target. Secrets
+  // never produce conflict records (conflict records carry side texts, which
+  // protected contents must never ride): when the source changed relative to
+  // its fork base, the source side wins and the target's previous state stays
+  // one moment back in the target's protected history.
+  applySecretFileFromVersion(input: {
+    workspaceId: WorkspaceId;
+    targetVersionId: VersionId;
+    sourceVersionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+  }): Promise<SecretFileWriteOutcome>;
+  // Returns the file to its state BEFORE the given moment by copying the
+  // prior ciphertext forward as a new moment (history is never rewritten,
+  // plaintext is never produced).
+  restoreSecretFileToBeforeMoment(input: {
+    workspaceId: WorkspaceId;
+    momentId: string;
+    metadata: ActorNeutralWriteMetadata;
+  }): Promise<SecretFileRestoreOutcome>;
+  // THE single authorized plaintext accessor. Only dohc's own disk
+  // materialization flows (version switch/merge/restore) may call this.
+  materializeSecretFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+  }): Promise<SecretFileMaterialization>;
+  // Releases the underlying database handle after in-flight writes drain.
+  close(): Promise<void>;
+}
+
+export interface SecretFileStoreOptions {
+  nowMs?: () => number;
+  createId?: (kind: "moment") => string;
 }
 
 type EngineChangeSetKind =

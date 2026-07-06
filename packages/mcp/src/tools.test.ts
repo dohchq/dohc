@@ -838,6 +838,56 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("denies reading secret-backed file contents with a clear reason (PR 08 default deny)", async () => {
+    await withWorkspace(async (ctx) => {
+      const marker = "MCP_SECRET_MARKER_42";
+      await writeFile(join(ctx.root, ".env"), `API_KEY=${marker}\n`);
+      await mkdir(join(ctx.root, "config"), { recursive: true });
+      await writeFile(join(ctx.root, "config", "prod.env"), `PROD=${marker}\n`);
+
+      for (const path of [".env", "config/prod.env", "secrets%2eenv"]) {
+        const denied = await readWorkspaceFile(ctx, { path });
+        expect(denied).toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("protected"),
+        });
+        expect(JSON.stringify(denied)).not.toContain(marker);
+      }
+
+      // Ordinary files still read fine (the denial is floor-scoped).
+      await writeFile(join(ctx.root, "environment.md"), "notes about env\n");
+      await expect(readWorkspaceFile(ctx, { path: "environment.md" })).resolves.toMatchObject({
+        ok: true,
+      });
+    });
+  });
+
+  it("never searches secret-backed files and reports the skip honestly", async () => {
+    await withWorkspace(async (ctx) => {
+      const marker = "MCP_SEARCH_SECRET_99";
+      await writeFile(join(ctx.root, ".env"), `TOKEN=${marker}\n`);
+      await writeFile(join(ctx.root, "readme.md"), `The word ${marker} in a normal file\n`);
+
+      const result = await searchWorkspaceFiles(ctx, { query: marker });
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      // Only the ordinary file matches; the secret path never surfaces a
+      // match or preview.
+      expect(result.matches.map((match) => match.path)).toEqual(["readme.md"]);
+      expect(result.skipped).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: ".env", reason: expect.stringContaining("protected") }),
+        ]),
+      );
+      // Even a path-mode search for the file name itself stays silent.
+      const byName = await searchWorkspaceFiles(ctx, { query: ".env", mode: "path" });
+      expect(byName).toMatchObject({ ok: true });
+      if (byName.ok) {
+        expect(byName.matches.map((match) => match.path)).not.toContain(".env");
+      }
+    });
+  });
+
   it("lists and reads MCP-recorded change sets for collaboration-aware agents", async () => {
     await withWorkspace(async (ctx) => {
       const write = await writeWorkspaceFile(ctx, {
