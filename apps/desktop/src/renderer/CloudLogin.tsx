@@ -21,6 +21,8 @@ export function CloudLogin(props: {
   const [workspaceSynced, setWorkspaceSynced] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [serverUrl, setServerUrl] = useState("");
+  const [relayUrl, setRelayUrl] = useState("");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRef = useRef(0);
 
@@ -44,6 +46,8 @@ export function CloudLogin(props: {
       .then((status) => {
         if (session !== sessionRef.current) return;
         setWorkspaceSynced(status.workspaceSynced ?? false);
+        if (status.serverUrl) setServerUrl(status.serverUrl);
+        if (status.relayUrl) setRelayUrl(status.relayUrl);
         setPhase(
           status.connected
             ? { kind: "connected", email: status.email ?? "" }
@@ -109,7 +113,10 @@ export function CloudLogin(props: {
     clearPollTimer();
     setPhase({ kind: "loading" });
     try {
-      const started = await bridge().cloudLoginStart({});
+      const started = await bridge().cloudLoginStart({
+        ...(serverUrl.trim() ? { serverUrl: serverUrl.trim() } : {}),
+        ...(relayUrl.trim() ? { relayUrl: relayUrl.trim() } : {}),
+      });
       if (session !== sessionRef.current) return;
       setPhase({ kind: "code", ...started });
       pollUntilDone(session);
@@ -162,6 +169,26 @@ export function CloudLogin(props: {
               {phase.reason}
             </p>
           ) : null}
+          <label className="mt-3 block text-[11px] font-medium text-subtle">
+            Cloud server URL
+            <input
+              data-testid="cloud-server-url"
+              value={serverUrl}
+              onChange={(event) => setServerUrl(event.currentTarget.value)}
+              placeholder="http://localhost:1786"
+              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+            />
+          </label>
+          <label className="mt-2 block text-[11px] font-medium text-subtle">
+            Sync relay URL
+            <input
+              data-testid="cloud-relay-url"
+              value={relayUrl}
+              onChange={(event) => setRelayUrl(event.currentTarget.value)}
+              placeholder="http://localhost:1788"
+              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+            />
+          </label>
           <button
             type="button"
             data-testid="cloud-connect-start"

@@ -32,6 +32,21 @@ export {
   journalReplicationOp,
   nextOriginSeq,
 } from "./syncReplication";
+export {
+  RelayConflictError,
+  RelayUnauthorizedError,
+  RelayWorkspaceUnavailableError,
+  claimRelayWorkspace,
+  pullWorkspaceFromRelay,
+  pushWorkspaceToRelay,
+} from "./syncRelay";
+export type {
+  PullWorkspaceFromRelayResult,
+  PushWorkspaceToRelayResult,
+  RelayMaterializedPath,
+  SyncRelayConnection,
+  SyncRelayInput,
+} from "./syncRelay";
 export type {
   SyncApplyResult,
   SyncReplicationEnvelope,

@@ -150,6 +150,16 @@ export const SYNC_REPLICATION_DDL = `
     origin_id TEXT NOT NULL,
     acked_seq INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, origin_id)
+  );
+  CREATE TABLE IF NOT EXISTS sync_relay_cursors (
+    workspace_id TEXT PRIMARY KEY,
+    relay_fetch_cursor INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sync_relay_push_state (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    pushed_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id)
   )
 `;
 

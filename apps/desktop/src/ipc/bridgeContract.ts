@@ -399,6 +399,9 @@ export const SyncStatusResult = z.object({
   // recorder no longer exists. Drives the persistent "History is off"
   // notice. Optional so older producers/fixtures keep parsing.
   historyRecordingOff: z.boolean().optional(),
+  // Additive (0P-B relay sync): true after repeated non-auth sync failures.
+  // Local changes remain safe and the engine keeps retrying with backoff.
+  syncFailing: z.boolean().optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
@@ -1001,6 +1004,7 @@ export type OpenExternalUrlPayload = z.infer<typeof OpenExternalUrlPayload>;
 
 export const CloudLoginStartPayload = z.object({
   serverUrl: z.string().url().max(2048).optional(),
+  relayUrl: z.string().url().max(2048).optional(),
 });
 export type CloudLoginStartPayload = z.infer<typeof CloudLoginStartPayload>;
 
@@ -1025,6 +1029,7 @@ export const CloudStatusResult = z.object({
   connected: z.boolean(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
+  relayUrl: z.string().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
 });

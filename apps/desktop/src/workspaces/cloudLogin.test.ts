@@ -92,6 +92,31 @@ describe("cloud device-flow login", () => {
     });
   });
 
+  it("persists an explicitly supplied relay URL with the approved session", async () => {
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({ body: { user: { email: "ice@dohc.test" } } }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+    await login.start("http://cloud.test/", "http://relay.test/");
+    await login.poll();
+    expect(store.saved).toMatchObject({
+      serverUrl: "http://cloud.test",
+      relayUrl: "http://relay.test",
+      token: "session-token-xyz",
+    });
+    await expect(login.status()).resolves.toMatchObject({
+      connected: true,
+      relayUrl: "http://relay.test",
+    });
+  });
+
   it("poll() maps denial and expiry, and a finished device code cannot be re-polled", async () => {
     const denied = createCloudLogin({
       store: memoryStore(),

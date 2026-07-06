@@ -15,6 +15,7 @@ type Notice = {
   id:
     | "sync-conflict"
     | "cloud-disconnected"
+    | "cloud-sync-failing"
     | "history-capture-failed"
     | "history-recording-off"
     | "agent-active"
@@ -181,6 +182,16 @@ export function NoticeCenter(props: {
         tone: "warning",
         title: "History is off for this workspace",
         body: "The workspace engine is turned off in Settings, so changes are not being recorded. Your files still save normally.",
+        Icon: AlertTriangle,
+      });
+    }
+
+    if (props.syncStatus?.syncFailing) {
+      next.push({
+        id: "cloud-sync-failing",
+        tone: "warning",
+        title: "Cloud sync is failing",
+        body: "Cloud sync is failing for this workspace. Changes stay safe locally and sync will keep retrying.",
         Icon: AlertTriangle,
       });
     }

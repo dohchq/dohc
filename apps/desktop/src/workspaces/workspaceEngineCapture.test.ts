@@ -607,6 +607,85 @@ describe("workspaceEngineCapture expected engine events", () => {
   });
 });
 
+describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
+  it("materializes pull-fast-forwarded paths to disk and suppresses the watcher echo", async () => {
+    const root = await tempRoot();
+    const engine = capture(root);
+    // Simulate the post-pull state: the engine store holds remote content the
+    // folder does not have yet (pull applies ops to the store; runRelaySync
+    // owns getting them onto disk).
+    const store = createVersionedTextStore(root);
+    await store.ensureMainVersion({ workspaceId: "engine-capture-test" });
+    await store.writeTextFile({
+      workspaceId: "engine-capture-test",
+      versionId: "main",
+      path: "notes/remote.md",
+      text: "remote machine wrote this\n",
+      metadata: { origin: "sync", summary: "remote write" },
+    });
+    await store.close();
+    const momentsBefore = readEngineMoments(root).length;
+
+    const result = await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [
+        { path: "notes/remote.md", operation: "write" as const, contentKind: "text" as const },
+      ],
+    }));
+    expect(result.fastForwardedPaths).toHaveLength(1);
+    expect(await readFile(join(root, "notes/remote.md"), "utf8")).toBe(
+      "remote machine wrote this\n",
+    );
+
+    // The watcher observes the sync write; the expected-event registration
+    // must swallow it — materializing remote state is not a new local moment.
+    engine.captureBatch([{ path: "notes/remote.md", operation: "update" }]);
+    await engine.flush();
+    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+
+    // A later REAL user edit on the same path is still captured.
+    await write(root, "notes/remote.md", "user follow-up\n");
+    engine.captureBatch([{ path: "notes/remote.md", operation: "update" }]);
+    await engine.stop();
+    const moments = readEngineMoments(root);
+    expect(moments).toHaveLength(momentsBefore + 1);
+    expect(moments[moments.length - 1].text).toBe("user follow-up\n");
+  });
+
+  it("materializes a remote delete and reports no disk work when nothing fast-forwarded", async () => {
+    const root = await tempRoot();
+    const engine = capture(root);
+    await write(root, "doomed.md", "here today\n");
+    engine.captureBatch([{ path: "doomed.md", operation: "update" }]);
+    await engine.flush();
+
+    // Remote deleted the file; pull already applied the delete to the store.
+    const store = createVersionedTextStore(root);
+    await store.deleteTextFile({
+      workspaceId: "engine-capture-test",
+      versionId: "main",
+      path: "doomed.md",
+      metadata: { origin: "sync", summary: "remote delete" },
+    });
+    await store.close();
+    const momentsBefore = readEngineMoments(root).length;
+
+    await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [
+        { path: "doomed.md", operation: "delete" as const, contentKind: "text" as const },
+      ],
+    }));
+    expect(existsSync(join(root, "doomed.md"))).toBe(false);
+    engine.captureBatch([{ path: "doomed.md", operation: "delete" }]);
+    await engine.flush();
+    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+
+    // A quiescent pass (no fast-forwarded paths) touches nothing.
+    await engine.runRelaySync(async () => ({ fastForwardedPaths: [] }));
+    await engine.stop();
+    expect(readEngineMoments(root)).toHaveLength(momentsBefore);
+  });
+});
+
 describe("workspaceEngineCapture startup reconciliation", () => {
   it("captures closed-period edits and deletions, idempotently", async () => {
     const root = await tempRoot();
