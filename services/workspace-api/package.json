@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/server.ts"
+    ".": "./src/server.ts",
+    "./auth/betterAuth": "./src/auth/betterAuth.ts",
+    "./auth/session": "./src/auth/session.ts"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
