@@ -315,6 +315,29 @@ describe("parseSearchResultsEvent (preload boundary)", () => {
     expect(parsed).not.toHaveProperty("injected");
   });
 
+  it("accepts optional engine result fields", () => {
+    const engineEntry = {
+      ...entry,
+      surface: "chat",
+      threadId: "thread-1",
+      objectId: "object-1",
+      title: "Planning chat",
+    };
+    expect(
+      parseSearchResultsEvent({
+        searchId: "s-engine",
+        entries: [engineEntry],
+        done: true,
+        limitHit: false,
+      }),
+    ).toEqual({
+      searchId: "s-engine",
+      entries: [engineEntry],
+      done: true,
+      limitHit: false,
+    });
+  });
+
   it("accepts an empty done batch (the final flush)", () => {
     expect(
       parseSearchResultsEvent({ searchId: "s2", entries: [], done: true, limitHit: true }),
@@ -360,6 +383,12 @@ describe("parseSearchResultsEvent (preload boundary)", () => {
         ...batch,
         entries: [{ ...entry, preview: "x".repeat(251), matchStart: 0, matchEnd: 1 }],
       }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, surface: "agent" }] }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, threadId: "" }] }),
     ).toBeNull();
   });
 

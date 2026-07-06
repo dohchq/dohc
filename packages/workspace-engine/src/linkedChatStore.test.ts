@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -398,29 +398,35 @@ describe("linked chat store hardening (CodeRabbit arc gate)", () => {
 
     const { spawn } = requireModule("node:child_process") as typeof import("node:child_process");
     const dbPath = join(root, LINKED_CHAT_STORE_RELATIVE_PATH);
+    const markerPath = join(root, "chat-lock-held.marker");
     const holdScript = `
+      const { writeFileSync } = require("node:fs");
       const { DatabaseSync } = require("node:sqlite");
       const db = new DatabaseSync(process.argv[1]);
       db.exec("BEGIN IMMEDIATE");
-      process.stdout.write("locked\\n");
+      writeFileSync(process.argv[2], "locked\\n");
       setTimeout(() => {
         db.exec("COMMIT");
         db.close();
-      }, 400);
+      }, 1000);
     `;
-    const holder = spawn(process.execPath, ["-e", holdScript, dbPath], {
-      stdio: ["ignore", "pipe", "inherit"],
+    const holder = spawn(process.execPath, ["-e", holdScript, dbPath, markerPath], {
+      stdio: ["ignore", "ignore", "inherit"],
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        holder.stdout.on("data", (chunk: Buffer) => {
-          if (chunk.toString("utf8").includes("locked")) resolve();
-        });
-        holder.on("exit", (code) =>
-          reject(new Error(`lock holder exited early (${code})`)),
-        );
-        holder.on("error", reject);
-      });
+      const startedAt = Date.now();
+      for (;;) {
+        try {
+          await stat(markerPath);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          if (Date.now() - startedAt > 2000) {
+            throw new Error("Timed out waiting for lock holder.");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
       // The other process holds the write lock right now; this send must
       // block on busy_timeout and land once the holder commits.
       const message = await chats.sendMessage({

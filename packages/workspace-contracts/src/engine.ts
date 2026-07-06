@@ -280,6 +280,30 @@ export interface VersionedTextDeleteResult {
  * authorization boundary.
  */
 export interface VersionedTextStore {
+  // Internal indexed-search seam (lazy additive in engine.db). Implementations
+  // that do not have an engine search index may omit these and callers must
+  // fall back to linear search.
+  ensureSearchIndex?(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+  }): Promise<void>;
+  querySearchIndex?(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    query: string;
+    limit: number;
+  }): Promise<
+    | Array<
+        | {
+            surface: "file";
+            path: string;
+            objectId: WorkspaceObjectId;
+            text: string;
+          }
+        | { surface: "chat"; threadId: ChatThreadId }
+      >
+    | null
+  >;
   ensureMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord>;
   getMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord | null>;
   // Engine-owned "which version does the workspace folder show right now".

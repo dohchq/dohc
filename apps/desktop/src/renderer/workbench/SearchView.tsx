@@ -2,6 +2,7 @@ import {
   CaseSensitive,
   ChevronDown,
   ChevronRight,
+  MessageSquare,
   Regex,
   SearchX,
   SlidersHorizontal,
@@ -76,11 +77,13 @@ const FileGroup = memo(function FileGroup(props: {
   selectedEntryIndex: number;
   onToggle: (path: string) => void;
   onShowAll: (path: string) => void;
-  onOpen: (path: string, line: number, column: number) => void;
+  onOpen: (path: string, line: number, column: number, entry: SearchResultsEventEntry) => void;
 }) {
   const { group } = props;
   const visible = groupVisibleEntries(group, props.showAll);
   const hidden = group.entries.length - visible.length;
+  const chatEntry = group.entries.find((entry) => entry.surface === "chat");
+  const groupTitle = chatEntry?.title ?? basenameOf(group.path);
   return (
     <li data-testid="search-result-group" data-path={group.path}>
       <button
@@ -97,8 +100,14 @@ const FileGroup = memo(function FileGroup(props: {
         ) : (
           <ChevronDown size={12} aria-hidden className="shrink-0 text-subtle" />
         )}
-        <span className="truncate font-medium">{basenameOf(group.path)}</span>
-        {dirnameOf(group.path) ? (
+        {chatEntry ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded bg-line px-1.5 text-[10px] font-semibold uppercase leading-4 text-muted">
+            <MessageSquare size={10} aria-hidden />
+            Chat
+          </span>
+        ) : null}
+        <span className="truncate font-medium">{groupTitle}</span>
+        {!chatEntry && dirnameOf(group.path) ? (
           <span className="truncate text-[11px] text-subtle">{dirnameOf(group.path)}</span>
         ) : null}
         <span
@@ -118,7 +127,7 @@ const FileGroup = memo(function FileGroup(props: {
                 data-path={group.path}
                 data-line={entry.line}
                 data-selected={index === props.selectedEntryIndex || undefined}
-                onClick={() => props.onOpen(group.path, entry.line, entry.column)}
+                onClick={() => props.onOpen(group.path, entry.line, entry.column, entry)}
                 // py-[4px] around the leading-5 preview = a 28px line box,
                 // matching the h-7 workbench row pitch.
                 className={`block w-full rounded py-[4px] pl-6 pr-2 text-left ${
@@ -181,7 +190,12 @@ function ToggleButton(props: {
 
 export function SearchView(props: {
   search: WorkspaceSearchApi;
-  onOpenResult: (path: string, line: number, column: number) => void;
+  onOpenResult: (
+    path: string,
+    line: number,
+    column: number,
+    entry?: SearchResultsEventEntry,
+  ) => void;
 }) {
   const { model } = props.search;
   const [query, setQuery] = useState("");
@@ -327,6 +341,7 @@ export function SearchView(props: {
           selectedFlat.path,
           selectedFlat.entry.line,
           selectedFlat.entry.column,
+          selectedFlat.entry,
         );
       } else {
         issueNow(currentOptions());

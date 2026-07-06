@@ -46,6 +46,12 @@ import {
   type EngineIntegrityCheckMode,
 } from "./engineDbSchema";
 import { classifyEngineFilePath } from "./enginePathFloor";
+import {
+  deleteFileSearchIndex,
+  ensureSearchIndexForVersion,
+  querySearchIndex,
+  upsertFileSearchIndex,
+} from "./searchIndex";
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
@@ -2947,6 +2953,12 @@ function createVersionedTextStoreWithHooks(
          ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET object_id = excluded.object_id`,
       )
       .run(input.workspaceId, input.versionId, input.path, object.id);
+    upsertFileSearchIndex({
+      db: input.db,
+      rootDir,
+      workspaceId: input.workspaceId,
+      snapshot,
+    });
 
     return {
       object: cloneFileObject(object),
@@ -3008,6 +3020,12 @@ function createVersionedTextStoreWithHooks(
     input.db
       .prepare("DELETE FROM snapshots WHERE workspace_id = ? AND version_id = ? AND object_id = ?")
       .run(input.workspaceId, input.versionId, before.objectId);
+    deleteFileSearchIndex({
+      db: input.db,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId: before.objectId,
+    });
 
     return { object, before: cloneSnapshot(before), moment: cloneMoment(moment) };
   }
@@ -3046,6 +3064,48 @@ function createVersionedTextStoreWithHooks(
   }
 
   return {
+    ensureSearchIndex(input: { workspaceId: WorkspaceId; versionId: VersionId }) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const txDb = db();
+        requireWorkspaceVersionRow(txDb, workspaceId, versionId);
+        ensureSearchIndexForVersion({
+          db: txDb,
+          rootDir,
+          workspaceId,
+          versionId,
+          nowMs: readNowMs(),
+        });
+      });
+    },
+
+    querySearchIndex(input: {
+      workspaceId: WorkspaceId;
+      versionId: VersionId;
+      query: string;
+      limit: number;
+    }) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const limit = Math.max(0, Math.floor(input.limit));
+        if (limit <= 0) return [];
+        const txDb = db();
+        requireWorkspaceVersionRow(txDb, workspaceId, versionId);
+        return querySearchIndex({
+          db: txDb,
+          rootDir,
+          workspaceId,
+          versionId,
+          query: input.query,
+          limit,
+        });
+      });
+    },
+
     ensureMainVersion(input) {
       return serialize(async () => {
         assertInputEnvelope(input);
@@ -3693,6 +3753,18 @@ function createVersionedTextStoreWithHooks(
           )
           .run(workspaceId, versionId, toPath, before.objectId);
         insertOrReplaceSnapshot(txDb, "snapshots", workspaceId, versionId, after);
+        deleteFileSearchIndex({
+          db: txDb,
+          workspaceId,
+          versionId,
+          objectId: before.objectId,
+        });
+        upsertFileSearchIndex({
+          db: txDb,
+          rootDir,
+          workspaceId,
+          snapshot: after,
+        });
         await persistBarrier();
         return {
           object: cloneFileObject(object),
@@ -3862,6 +3934,16 @@ function createVersionedTextStoreWithHooks(
         txDb
           .prepare("DELETE FROM snapshots WHERE workspace_id = ? AND version_id = ? AND object_id = ?")
           .run(workspaceId, versionId, moment.objectId);
+        // Keep the search index in the same transaction as the rollback:
+        // without this, rolled-back text stays searchable (and a rolled-back
+        // delete leaves restored text unfindable) because
+        // engine_search_index_state marks the version populated.
+        deleteFileSearchIndex({
+          db: txDb,
+          workspaceId,
+          versionId,
+          objectId: moment.objectId,
+        });
 
         if (before) {
           txDb
@@ -3872,6 +3954,12 @@ function createVersionedTextStoreWithHooks(
             )
             .run(workspaceId, versionId, before.path, before.objectId);
           insertOrReplaceSnapshot(txDb, "snapshots", workspaceId, versionId, before);
+          upsertFileSearchIndex({
+            db: txDb,
+            rootDir,
+            workspaceId,
+            snapshot: before,
+          });
         }
 
         const remainingReferences = txDb

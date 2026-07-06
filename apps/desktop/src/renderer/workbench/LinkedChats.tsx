@@ -53,6 +53,12 @@ type ThreadsState =
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
+  initialThread?: ChatThreadRecord | null;
+  // Fired once when initialThread is consumed so the parent can clear the
+  // state it minted for this open. Without that clear, every remount of this
+  // panel (History <-> Chats toggle) resets consumedInitialThread and
+  // re-opens the stale thread.
+  onInitialThreadConsumed?: () => void;
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
@@ -131,6 +137,21 @@ export function LinkedChatsPanel(props: {
     [props, workspaceId],
   );
 
+  // A search-result chat open is consumed ONCE by object identity: the Shell
+  // mints a fresh record per click, so clicking the same result again still
+  // re-opens, while re-renders (openThread's identity changes every render
+  // because it closes over props) and back-navigation inside the panel never
+  // re-trigger it — without the guard this effect would loop setMessages([])
+  // on every render and trap the user inside the thread.
+  const consumedInitialThread = useRef<ChatThreadRecord | null>(null);
+  useEffect(() => {
+    if (!props.initialThread) return;
+    if (consumedInitialThread.current === props.initialThread) return;
+    consumedInitialThread.current = props.initialThread;
+    void openThread(props.initialThread);
+    props.onInitialThreadConsumed?.();
+  }, [openThread, props.initialThread, props.onInitialThreadConsumed]);
+
   const createChat = useCallback(
     async (title: string) => {
       if (!filePath) return;
@@ -188,43 +209,6 @@ export function LinkedChatsPanel(props: {
     }
   }, [activeThread, composer, props, sending, workspaceId]);
 
-  if (!filePath) {
-    return (
-      <div
-        data-testid="linked-chats-empty"
-        className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-      >
-        <span className="text-xs text-muted">No file open</span>
-        <span className="text-[11px] text-subtle">
-          Open a file to see its Chats.
-        </span>
-      </div>
-    );
-  }
-
-  if (threadsState.status === "loading") {
-    return (
-      <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-        Loading Chats...
-      </div>
-    );
-  }
-
-  if (threadsState.status === "unavailable") {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-xs text-danger">{threadsState.message}</span>
-        <button
-          type="button"
-          onClick={() => void refreshThreads()}
-          className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-
   if (activeThread) {
     return (
       <div data-testid="linked-chat-thread" className="flex min-h-0 flex-1 flex-col">
@@ -255,7 +239,7 @@ export function LinkedChatsPanel(props: {
             <p className="m-0 text-center text-[11px] text-subtle">Loading...</p>
           ) : messages.length === 0 ? (
             <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-              No messages yet. Say something about {basename(filePath)}.
+              No messages yet{filePath ? ` about ${basename(filePath)}` : ""}.
             </p>
           ) : (
             <ul className="m-0 flex list-none flex-col gap-2 p-0">
@@ -329,6 +313,43 @@ export function LinkedChatsPanel(props: {
             <Send size={13} aria-hidden />
           </button>
         </form>
+      </div>
+    );
+  }
+
+  if (!filePath) {
+    return (
+      <div
+        data-testid="linked-chats-empty"
+        className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+      >
+        <span className="text-xs text-muted">No file open</span>
+        <span className="text-[11px] text-subtle">
+          Open a file to see its Chats.
+        </span>
+      </div>
+    );
+  }
+
+  if (threadsState.status === "loading") {
+    return (
+      <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
+        Loading Chats...
+      </div>
+    );
+  }
+
+  if (threadsState.status === "unavailable") {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
+        <span className="text-xs text-danger">{threadsState.message}</span>
+        <button
+          type="button"
+          onClick={() => void refreshThreads()}
+          className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+        >
+          Try again
+        </button>
       </div>
     );
   }

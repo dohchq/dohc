@@ -226,6 +226,10 @@ export interface SearchResultsEventEntry {
   preview: string;
   matchStart: number;
   matchEnd: number;
+  surface?: "file" | "chat";
+  threadId?: string;
+  objectId?: string;
+  title?: string;
 }
 
 export interface SearchResultsEvent {
@@ -310,7 +314,24 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
     ) {
       return null;
     }
-    safeEntries.push({ path, line, column, preview, matchStart, matchEnd });
+    const surface = entry.surface;
+    if (surface !== undefined && surface !== "file" && surface !== "chat") return null;
+    const threadId = optionalBoundedString(entry.threadId, 200);
+    const objectId = optionalBoundedString(entry.objectId, 200);
+    const title = optionalBoundedString(entry.title, 500);
+    if (threadId === null || objectId === null || title === null) return null;
+    safeEntries.push({
+      path,
+      line,
+      column,
+      preview,
+      matchStart,
+      matchEnd,
+      ...(surface !== undefined ? { surface } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
+      ...(objectId !== undefined ? { objectId } : {}),
+      ...(title !== undefined ? { title } : {}),
+    });
   }
   return { searchId, entries: safeEntries, done, limitHit };
 }
