@@ -27,13 +27,9 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  ChangeSetDetailRecord,
-  ChangeSetFileRecord,
-  ChangeSetRecord,
   ChatThreadRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
-  FileChangeSnapshot,
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
@@ -100,7 +96,6 @@ import {
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
-  historyDiffTabPath,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -211,52 +206,6 @@ function uniqueUntitledTextPath(
   return `Untitled ${Date.now()}.txt`;
 }
 
-type HistoryAuthorFilter = "all" | ChangeSetRecord["author"]["kind"];
-
-function fileOperationLabel(
-  file: Pick<ChangeSetFileRecord, "operation"> &
-    Partial<Pick<ChangeSetFileRecord, "before" | "after">>,
-): string {
-  if (file.operation === "delete") return "Deleted";
-  if (file.operation === "rename") return "Renamed";
-  if (!file.before && file.after) return "Created";
-  return "Changed";
-}
-
-function historyLineStatsText(stats: ChangeSetRecord["lineStats"]): string | null {
-  if (!stats) return null;
-  const parts: string[] = [];
-  if (stats.added > 0 || stats.removed > 0 || stats.changedFileCount > 0) {
-    parts.push(`+${stats.added} -${stats.removed}`);
-  }
-  if (stats.unavailableFileCount > 0) {
-    parts.push(`${stats.unavailableFileCount} not diffed`);
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
-}
-
-function snapshotUnavailable(snapshot: FileChangeSnapshot | null | undefined): string | null {
-  const reason = snapshot?.unavailableReason;
-  if (!reason) return null;
-  if (reason === "binary") return "Binary or structured file";
-  if (reason === "too-large") return "Text snapshot is too large for inline history";
-  if (reason === "missing") return "File was missing";
-  return "Snapshot unavailable";
-}
-
-function snapshotIsMissing(snapshot: FileChangeSnapshot | null | undefined) {
-  return snapshot === null || snapshot?.unavailableReason === "missing";
-}
-
-function historyFileCanRestore(file: ChangeSetFileRecord) {
-  if (file.operation === "rename") return false;
-  const beforeText = typeof file.before?.text === "string";
-  const afterText = typeof file.after?.text === "string";
-  if (beforeText && afterText) return true;
-  if (beforeText && snapshotIsMissing(file.after)) return true;
-  return snapshotIsMissing(file.before) && afterText;
-}
-
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
   if (
@@ -284,562 +233,6 @@ type ActiveUndoHandler = {
   run: () => Promise<void>;
   acceptsEvent: (event: KeyboardEvent) => boolean;
 };
-
-function historyAuthorLabel(author: ChangeSetRecord["author"]): string {
-  switch (author.kind) {
-    case "agent":
-      return `${author.agentId} for ${author.onBehalfOf}`;
-    case "local":
-      return author.label;
-    case "user":
-      return author.userId;
-    default: {
-      const exhaustive: never = author;
-      const kind =
-        typeof exhaustive === "object" && exhaustive && "kind" in exhaustive
-          ? String((exhaustive as { kind?: unknown }).kind)
-          : null;
-      return kind ? `Unknown author (${kind})` : "Unknown author";
-    }
-  }
-}
-
-function historyKindLabel(kind: ChangeSetRecord["kind"]): string {
-  if (kind === "agent-run") return "Agent run";
-  if (kind === "site-build") return "Site build";
-  if (kind === "user-edit") return "User edit";
-  return kind[0].toUpperCase() + kind.slice(1);
-}
-
-function historyBoundaryLabel(
-  boundary: NonNullable<ChangeSetRecord["boundaryCrossingPreview"]>[number],
-): string {
-  if (boundary === "public-share") return "Public share";
-  if (boundary === "external-export") return "External export";
-  if (boundary === "permission-change") return "Permission change";
-  if (boundary === "bulk-delete") return "Bulk delete";
-  if (boundary === "site-publish") return "Site publish";
-  if (boundary === "private-to-shared") return "Private to shared";
-  if (boundary === "unmergeable-overwrite") return "Overwrite conflict";
-  return boundary;
-}
-
-function historyBoundaryLabels(
-  boundaries: ChangeSetRecord["boundaryCrossingPreview"] | undefined,
-): string[] {
-  return boundaries?.map(historyBoundaryLabel) ?? [];
-}
-
-function historySearchText(change: ChangeSetRecord): string {
-  return [
-    change.humanSummary,
-    change.summary,
-    historyAuthorLabel(change.author),
-    historyKindLabel(change.kind),
-    ...(change.filePreview?.map((file) => file.path) ?? []),
-    ...historyBoundaryLabels(change.boundaryCrossingPreview),
-    change.reviewRequired ? "needs review review required boundary" : "",
-  ]
-    .join("\n")
-    .toLowerCase();
-}
-
-function formatHistoryRecordedAt(recordedAtMs: number): {
-  label: string;
-  iso: string;
-} {
-  const recordedAt = new Date(recordedAtMs);
-  return {
-    label: recordedAt.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }),
-    iso: recordedAt.toISOString(),
-  };
-}
-
-function historyDayKey(recordedAtMs: number): string {
-  const recordedAt = new Date(recordedAtMs);
-  const month = String(recordedAt.getMonth() + 1).padStart(2, "0");
-  const day = String(recordedAt.getDate()).padStart(2, "0");
-  return `${recordedAt.getFullYear()}-${month}-${day}`;
-}
-
-function formatHistoryDay(recordedAtMs: number): {
-  label: string;
-  dateTime: string;
-} {
-  const recordedAt = new Date(recordedAtMs);
-  return {
-    label: recordedAt.toLocaleDateString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    }),
-    dateTime: historyDayKey(recordedAtMs),
-  };
-}
-
-function HistoryLineStats({
-  stats,
-}: {
-  stats: NonNullable<ChangeSetRecord["lineStats"]>;
-}) {
-  const hasKnownLines =
-    stats.added > 0 || stats.removed > 0 || stats.changedFileCount > 0;
-  return (
-    <span data-testid="history-line-stats" className="font-mono">
-      {hasKnownLines ? (
-        <>
-          <span data-testid="history-line-stats-added" className="text-success">
-            +{stats.added}
-          </span>
-          {" "}
-          <span data-testid="history-line-stats-removed" className="text-danger">
-            -{stats.removed}
-          </span>
-        </>
-      ) : null}
-      {stats.unavailableFileCount > 0 ? (
-        <>
-          {hasKnownLines ? <span className="text-subtle"> · </span> : null}
-          <span className="text-subtle">
-            {stats.unavailableFileCount} not diffed
-          </span>
-        </>
-      ) : null}
-    </span>
-  );
-}
-
-function HistoryDiffPage({
-  workspaceId,
-  tabPath,
-  onBeforeRestore,
-  onOpenFile,
-  registerActiveUndo,
-  onRestored,
-}: {
-  workspaceId: string;
-  tabPath: string;
-  onBeforeRestore: () => Promise<void>;
-  onOpenFile: (path: string) => void;
-  registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
-  onRestored: () => void;
-}) {
-  const parsed = useMemo(() => parseHistoryDiffTabPath(tabPath), [tabPath]);
-  const [state, setState] = useState<
-    | { status: "loading" }
-    | { status: "ready"; changeSet: ChangeSetDetailRecord | null }
-    | { status: "error" }
-  >({ status: "loading" });
-  const [restoreState, setRestoreState] = useState<
-    | { status: "idle" }
-    | { status: "restoring" }
-    | { status: "undoing" }
-    | { status: "restored"; restored: "text" | "deleted"; message: string }
-    | { status: "error"; message: string }
-  >({ status: "idle" });
-  const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
-  const [restoreCanUndo, setRestoreCanUndo] = useState(false);
-  const pageRef = useRef<HTMLElement | null>(null);
-  const restoreOperationInFlight = useRef(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!parsed) {
-      setState({ status: "error" });
-      return;
-    }
-    setState({ status: "loading" });
-    void bridge()
-      .readChangeSet({ workspaceId, changeSetId: parsed.changeSetId })
-      .then((result) => {
-        if (!cancelled) {
-          setState({ status: "ready", changeSet: result.changeSet });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setState({ status: "error" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [parsed, workspaceId]);
-  useEffect(() => {
-    setRestoreState({ status: "idle" });
-    setConfirmRestoreOpen(false);
-    setRestoreCanUndo(false);
-  }, [tabPath]);
-
-  const file =
-    state.status === "ready"
-      ? state.changeSet?.files.find((entry) => entry.path === parsed?.filePath) ?? null
-      : null;
-  const canRestore = file ? historyFileCanRestore(file) : false;
-  const restoreBusy =
-    restoreState.status === "restoring" || restoreState.status === "undoing";
-  const undoRestore = useCallback(async () => {
-    if (
-      !parsed ||
-      !file ||
-      !restoreCanUndo ||
-      restoreBusy ||
-      restoreOperationInFlight.current
-    ) {
-      return;
-    }
-    restoreOperationInFlight.current = true;
-    setRestoreState({ status: "undoing" });
-    try {
-      await onBeforeRestore();
-      const result = await bridge().undoHistoryFileRestore({
-        workspaceId,
-        changeSetId: parsed.changeSetId,
-        relativePath: file.path,
-      });
-      setRestoreState({
-        status: "restored",
-        restored: result.restored,
-        message:
-          result.restored === "deleted"
-            ? "Undid the restore by moving the file to trash."
-            : "Undid the restore.",
-      });
-      setRestoreCanUndo(false);
-      onRestored();
-    } catch (error) {
-      setRestoreState({
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Could not undo this restore.",
-      });
-    } finally {
-      restoreOperationInFlight.current = false;
-    }
-  }, [
-    file,
-    onBeforeRestore,
-    onRestored,
-    parsed,
-    restoreBusy,
-    restoreCanUndo,
-    workspaceId,
-  ]);
-
-  useEffect(() => {
-    if (!restoreCanUndo || restoreBusy) {
-      registerActiveUndo(null);
-      return;
-    }
-
-    registerActiveUndo({
-      run: undoRestore,
-      acceptsEvent: (event) => {
-        if (isEditableShortcutTarget(event.target)) return false;
-        const page = pageRef.current;
-        const target = event.target instanceof Element ? event.target : null;
-        const active =
-          document.activeElement instanceof Element ? document.activeElement : null;
-        const focusOwner = target ?? active;
-        if (
-          page &&
-          focusOwner &&
-          focusOwner !== document.body &&
-          focusOwner !== document.documentElement &&
-          !page.contains(focusOwner)
-        ) {
-          return false;
-        }
-
-        return !hasBlockingModal();
-      },
-    });
-
-    return () => registerActiveUndo(null);
-  }, [registerActiveUndo, restoreBusy, restoreCanUndo, undoRestore]);
-
-  if (!parsed || state.status === "error") {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-danger">
-        Could not load this history diff.
-      </div>
-    );
-  }
-  if (state.status === "loading") {
-    return <PanelLoading label="history diff" />;
-  }
-  if (!state.changeSet || !file) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
-        This changed file is no longer in the history record.
-      </div>
-    );
-  }
-
-  const before = file.before?.text;
-  const after = file.after?.text;
-  const counts = changedLineCounts(before, after);
-  const restoreProvenance =
-    state.changeSet.provenance?.source === "history-restore"
-      ? state.changeSet.provenance
-      : null;
-  const restoreAction =
-    restoreProvenance?.restoreDirection === "restore" ? "undo-restore" : "restore";
-  const restoreActionLabel =
-    restoreAction === "undo-restore" ? "Undo restore" : "Restore";
-  const unavailable =
-    before === undefined && after === undefined
-      ? snapshotUnavailable(file.before) ?? snapshotUnavailable(file.after)
-      : null;
-  const canOpenFile =
-    restoreState.status === "restored" && restoreState.restored === "deleted"
-      ? false
-      : file.operation !== "delete" ||
-        (restoreState.status === "restored" && restoreState.restored === "text");
-  const restoreDetail =
-    restoreAction === "undo-restore"
-      ? "The live file will be returned to the version before this restore."
-      : typeof file.before?.text === "string" && snapshotIsMissing(file.after)
-        ? "The missing file will be recreated from this snapshot."
-        : snapshotIsMissing(file.before) && typeof file.after?.text === "string"
-          ? "The current created file will be moved to trash if it still matches this diff."
-          : "The live file will be returned to the version before this history item.";
-  const diffLines: UnifiedDiffLine[] = unavailable
-    ? [
-        {
-          kind: "note",
-          text: unavailable,
-          oldLineNumber: null,
-          newLineNumber: null,
-        },
-      ]
-    : buildUnifiedDiffLines(before, after, 800);
-  const restoreFile = async () => {
-    if (!parsed || !canRestore || restoreBusy || restoreOperationInFlight.current) {
-      return;
-    }
-    restoreOperationInFlight.current = true;
-    setConfirmRestoreOpen(false);
-    setRestoreState({ status: "restoring" });
-    setRestoreCanUndo(false);
-    try {
-      await onBeforeRestore();
-      const result = await bridge().restoreHistoryFile({
-        workspaceId,
-        changeSetId: parsed.changeSetId,
-        relativePath: file.path,
-      });
-      const message =
-        restoreAction === "undo-restore"
-          ? result.restored === "deleted"
-            ? "Undid the restore by moving the file to trash. This was recorded in history."
-            : "Undid the restore. This was recorded in history."
-          : result.restored === "deleted"
-            ? "Moved the created file to trash. Undo restore is available here."
-            : "Restored the previous snapshot. Undo restore is available here.";
-      setRestoreState({
-        status: "restored",
-        restored: result.restored,
-        message,
-      });
-      setRestoreCanUndo(true);
-      onRestored();
-    } catch (error) {
-      setRestoreState({
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Could not restore this history snapshot.",
-      });
-    } finally {
-      restoreOperationInFlight.current = false;
-    }
-  };
-
-  return (
-    <section
-      ref={pageRef}
-      data-testid="history-diff-page"
-      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
-    >
-      <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
-            History diff
-          </span>
-          <h2
-            id="history-diff-title"
-            className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink"
-          >
-            {canOpenFile ? (
-              <button
-                type="button"
-                data-testid="history-diff-title-open-file"
-                onClick={() => onOpenFile(file.path)}
-                className="max-w-full cursor-pointer truncate rounded text-left hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                title={`Open ${file.path}`}
-              >
-                {file.path}
-              </button>
-            ) : (
-              file.path
-            )}
-          </h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-            <span>{fileOperationLabel(file)}</span>
-            {counts ? (
-              <span className="font-mono" data-testid="history-diff-counts">
-                +{counts.added} -{counts.removed}
-              </span>
-            ) : null}
-            {file.mediaType ? <span>{file.mediaType}</span> : null}
-          </div>
-          <p className="mb-0 mt-1 truncate text-[11px] text-subtle">
-            {state.changeSet.humanSummary}
-          </p>
-          {restoreState.status === "restored" || restoreState.status === "error" ? (
-            <p
-              data-testid="history-diff-restore-status"
-              className={`mb-0 mt-1 text-[11px] ${
-                restoreState.status === "error" ? "text-danger" : "text-success"
-              }`}
-            >
-              {restoreState.message}
-            </p>
-          ) : null}
-        </div>
-        <button
-          type="button"
-          data-testid="history-diff-restore-file"
-          onClick={() => setConfirmRestoreOpen(true)}
-          disabled={!canRestore || restoreBusy || restoreCanUndo}
-          title={
-            restoreCanUndo
-              ? "This history action has already been applied"
-              : canRestore
-                ? restoreAction === "undo-restore"
-                  ? "Undo this restore by returning the file to its prior state"
-                  : "Restore this file to its state before this change"
-                : "Only small text history snapshots can be restored safely"
-          }
-          className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Undo2 size={12} aria-hidden />
-          {restoreState.status === "restoring"
-            ? restoreAction === "undo-restore"
-              ? "Undoing..."
-              : "Restoring..."
-            : `${restoreActionLabel}...`}
-        </button>
-        {restoreCanUndo ? (
-          <button
-            type="button"
-            data-testid="history-diff-undo-restore"
-            onClick={() => void undoRestore()}
-            disabled={restoreBusy}
-            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Undo2 size={12} aria-hidden />
-            {restoreState.status === "undoing" ? "Undoing..." : "Undo restore"}
-          </button>
-        ) : null}
-        {canOpenFile ? (
-          <button
-            type="button"
-            data-testid="history-diff-open-file"
-            onClick={() => onOpenFile(file.path)}
-            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-          >
-            <ExternalLink size={12} aria-hidden />
-            Open file
-          </button>
-        ) : null}
-      </header>
-      <div className="min-h-0 overflow-auto overflow-x-hidden p-4">
-        <section className="overflow-hidden rounded border border-line bg-bg shadow-sm">
-          <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
-            <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
-            {canOpenFile ? (
-              <button
-                type="button"
-                data-testid="history-diff-file-title-open-file"
-                onClick={() => onOpenFile(file.path)}
-                className="min-w-0 flex-1 cursor-pointer truncate rounded text-left font-mono text-[12px] text-ink hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                title={`Open ${file.path}`}
-              >
-                {file.path}
-              </button>
-            ) : (
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
-                {file.path}
-              </span>
-            )}
-            {counts ? (
-              <span className="shrink-0 font-mono text-[11px] text-subtle">
-                +{counts.added} -{counts.removed}
-              </span>
-            ) : null}
-          </div>
-          <UnifiedDiffLines lines={diffLines} testId="history-diff-lines" />
-        </section>
-      </div>
-      {confirmRestoreOpen ? (
-        <Overlay onClose={() => setConfirmRestoreOpen(false)}>
-          <div
-            data-testid="history-diff-restore-confirm"
-            className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="history-diff-restore-confirm-title"
-          >
-            <h3
-              id="history-diff-restore-confirm-title"
-              className="m-0 text-sm font-semibold text-ink"
-            >
-              {restoreAction === "undo-restore"
-                ? "Undo this restore?"
-                : "Restore previous snapshot?"}
-            </h3>
-            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              This only changes this one file and records a new history entry.
-              dohc will stop if the live file no longer matches this diff.
-            </p>
-            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              <span className="font-mono text-ink">{file.path}</span>
-              <br />
-              {restoreDetail}
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                data-testid="history-diff-cancel-restore"
-                onClick={() => setConfirmRestoreOpen(false)}
-                className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="history-diff-confirm-restore"
-                onClick={() => void restoreFile()}
-                className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
-              >
-                {restoreAction === "undo-restore" ? "Undo restore" : "Restore snapshot"}
-              </button>
-            </div>
-          </div>
-        </Overlay>
-      ) : null}
-    </section>
-  );
-}
 
 // Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
 // before/after through the shared unified-diff rendering, with engine-routed
@@ -1260,276 +653,6 @@ function EngineMomentDiffPage({
   );
 }
 
-// The timeline body, shared by the right history rail and the side panel's
-// History view (both render the same root-owned changeSets — never a second
-// subscription). The pinned history-timeline testid stays on the RAIL only.
-function HistoryList({
-  changeSets,
-  onOpenDiff,
-  emptyLabel = "No changes yet",
-  emptyDescription = "Edits — yours or your agent's — show up here as a timeline you can review.",
-}: {
-  changeSets: ChangeSetRecord[];
-  onOpenDiff: (changeSetId: string, filePath: string) => void;
-  emptyLabel?: string;
-  emptyDescription?: string;
-}) {
-  if (changeSets.length === 0) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-        <span className="text-xs text-muted">{emptyLabel}</span>
-        <span className="text-[11px] text-subtle">{emptyDescription}</span>
-      </div>
-    );
-  }
-  return (
-    <>
-      <ul
-        data-testid="history-list"
-        className="m-0 min-h-0 flex-1 list-none overflow-y-auto overflow-x-hidden p-0"
-      >
-        {changeSets.map((change, index) => {
-          const recordedAt = formatHistoryRecordedAt(change.recordedAtMs);
-          const day = formatHistoryDay(change.recordedAtMs);
-          const lineStatsLabel = historyLineStatsText(change.lineStats);
-          const boundaryLabels = historyBoundaryLabels(change.boundaryCrossingPreview);
-          const primaryFile = change.filePreview?.[0] ?? null;
-          const previousDayKey =
-            index > 0 ? historyDayKey(changeSets[index - 1].recordedAtMs) : null;
-          const showDayHeading = previousDayKey !== day.dateTime;
-          const itemContent = (
-            <span className="flex min-w-0 items-start gap-2">
-              {(() => {
-                switch (change.author.kind) {
-                  case "agent":
-                    return <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
-                  case "local":
-                    return (
-                      <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-                    );
-                  case "user":
-                    return <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
-                  default: {
-                    const exhaustive: never = change.author;
-                    const kind =
-                      typeof exhaustive === "object" && exhaustive && "kind" in exhaustive
-                        ? String((exhaustive as { kind?: unknown }).kind)
-                        : "unknown";
-                    return (
-                      <CircleHelp
-                        size={12}
-                        aria-label={`Unknown author kind: ${kind}`}
-                        className="mt-0.5 shrink-0 text-subtle"
-                      />
-                    );
-                  }
-                }
-              })()}
-              <span className="min-w-0 flex-1">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
-                    {change.humanSummary}
-                  </span>
-                  {change.reviewRequired ? (
-                    <span
-                      data-testid="history-review-badge"
-                      className="shrink-0 rounded border border-danger/30 px-1.5 py-0.5 text-[10px] font-medium text-danger"
-                      title={
-                        boundaryLabels.length > 0
-                          ? boundaryLabels.join(", ")
-                          : `${change.boundaryCrossingCount ?? 1} review boundary${
-                              (change.boundaryCrossingCount ?? 1) === 1
-                                ? ""
-                                : "ies"
-                            }`
-                      }
-                    >
-                      Needs review
-                    </span>
-                  ) : null}
-                </span>
-                <span className="block text-[10px] text-subtle">
-                  {historyAuthorLabel(change.author)}
-                  {" · "}
-                  <time
-                    data-testid="history-recorded-at"
-                    dateTime={recordedAt.iso}
-                    title={recordedAt.iso}
-                  >
-                    {recordedAt.label}
-                  </time>
-                  {" · "}
-                  {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
-                  {lineStatsLabel && change.lineStats ? (
-                    <>
-                      {" · "}
-                      <HistoryLineStats stats={change.lineStats} />
-                    </>
-                  ) : null}
-                </span>
-              </span>
-            </span>
-          );
-          return (
-            <Fragment key={change.id}>
-              {showDayHeading ? (
-                <li className="sticky top-0 z-[1] border-b border-line bg-panel-2 px-3 py-1">
-                  <time
-                    data-testid="history-day-heading"
-                    dateTime={day.dateTime}
-                    className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
-                  >
-                    {day.label}
-                  </time>
-                </li>
-              ) : null}
-              <li
-                data-testid="change-set"
-                className="border-b border-line"
-              >
-                {primaryFile ? (
-                  <button
-                    type="button"
-                    data-testid="history-change-open"
-                    title={`Open diff for ${primaryFile.path}`}
-                    aria-label={`Open diff for ${primaryFile.path}`}
-                    onClick={() => onOpenDiff(change.id, primaryFile.path)}
-                    className="block w-full px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
-                  >
-                    {itemContent}
-                  </button>
-                ) : (
-                  <div className="px-3 py-2">{itemContent}</div>
-                )}
-              </li>
-            </Fragment>
-          );
-        })}
-      </ul>
-    </>
-  );
-}
-
-function HistoryView(props: {
-  changeSets: ChangeSetRecord[];
-  onOpenDiff: (changeSetId: string, filePath: string) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [reviewOnly, setReviewOnly] = useState(false);
-  const [authorFilter, setAuthorFilter] = useState<HistoryAuthorFilter>("all");
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredChangeSets = useMemo(
-    () =>
-      props.changeSets.filter((change) => {
-        if (reviewOnly && !change.reviewRequired) return false;
-        if (authorFilter !== "all" && change.author.kind !== authorFilter) {
-          return false;
-        }
-        if (!normalizedQuery) return true;
-        return historySearchText(change).includes(normalizedQuery);
-      }),
-    [authorFilter, normalizedQuery, props.changeSets, reviewOnly],
-  );
-  const filterActive =
-    normalizedQuery.length > 0 || reviewOnly || authorFilter !== "all";
-  return (
-    <>
-      {props.changeSets.length > 0 ? (
-        <>
-          <div
-            data-testid="history-filter-bar"
-            className="shrink-0 border-b border-line bg-panel-2 px-2 py-2"
-          >
-            <label className="flex h-7 min-w-0 items-center gap-1.5 rounded border border-line bg-bg px-2 text-[11px] text-muted">
-              <Search size={12} aria-hidden className="shrink-0 text-subtle" />
-              <input
-                type="search"
-                data-testid="history-search-input"
-                aria-label="Search history"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search history"
-                className="min-w-0 flex-1 bg-transparent text-[12px] text-ink outline-none placeholder:text-subtle"
-              />
-              {query.length > 0 ? (
-                <button
-                  type="button"
-                  data-testid="history-search-clear"
-                  aria-label="Clear history search"
-                  title="Clear history search"
-                  onClick={() => setQuery("")}
-                  className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  <X size={12} aria-hidden />
-                </button>
-              ) : null}
-            </label>
-            <div
-              data-testid="history-author-filter"
-              className="mt-1.5 grid grid-cols-4 rounded border border-line bg-bg p-0.5"
-            >
-              {(
-                [
-                  ["all", "All"],
-                  ["user", "People"],
-                  ["agent", "Agents"],
-                  ["local", "Local"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  data-testid={`history-author-filter-${value}`}
-                  aria-pressed={authorFilter === value}
-                  onClick={() => setAuthorFilter(value)}
-                  className={`h-6 rounded text-[10px] ${
-                    authorFilter === value
-                      ? "bg-ink text-bg"
-                      : "text-muted hover:bg-line/50 hover:text-ink"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="mt-1.5 flex min-w-0 items-center justify-between gap-2">
-              <button
-                type="button"
-                data-testid="history-review-filter"
-                aria-pressed={reviewOnly}
-                onClick={() => setReviewOnly((current) => !current)}
-                className={`h-6 rounded border px-2 text-[11px] ${
-                  reviewOnly
-                    ? "border-danger/40 bg-danger/10 text-danger"
-                    : "border-line text-muted hover:bg-line/50 hover:text-ink"
-                }`}
-              >
-                Needs review
-              </button>
-              <span
-                data-testid="history-filter-count"
-                className="shrink-0 text-[10px] text-subtle"
-              >
-                {filteredChangeSets.length}/{props.changeSets.length}
-              </span>
-            </div>
-          </div>
-        </>
-      ) : null}
-      <HistoryList
-        changeSets={filteredChangeSets}
-        onOpenDiff={props.onOpenDiff}
-        emptyLabel={filterActive ? "No matching changes" : undefined}
-        emptyDescription={
-          filterActive
-            ? "Adjust the search or review filter to see more history."
-            : undefined
-        }
-      />
-    </>
-  );
-}
-
 function HistoryRail(props: {
   width: number;
   onWidthChange: (width: number) => void;
@@ -1653,7 +776,6 @@ export function DesktopWorkspaceShell(props: {
 }) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
-  const [changeSets, setChangeSets] = useState<ChangeSetRecord[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
@@ -1755,12 +877,10 @@ export function DesktopWorkspaceShell(props: {
   const graphRefreshKey = useMemo(
     () =>
       [
-        changeSets[0]?.id ?? "none",
-        String(changeSets.length),
         String(files.length),
         files.map((file) => file.path).join("\0"),
       ].join("\0"),
-    [changeSets, files],
+    [files],
   );
   const activeDocumentPath = isVirtualTabPath(wb.activeTab) ? null : wb.activeTab;
   const activeSiteRoot = parseSiteTabPath(wb.activeTab);
@@ -1935,12 +1055,12 @@ export function DesktopWorkspaceShell(props: {
       setTryState(trySession.state);
       return;
     }
-    const [history, status, agent] = await Promise.all([
-      bridge().listChangeSets({ workspaceId }),
+    // Opted-out workspace (retirement Phase C): no history source exists —
+    // only status and agent state refresh.
+    const [status, agent] = await Promise.all([
       bridge().getSyncStatus({ workspaceId }),
       bridge().getAgentRunStatus({ workspaceId }),
     ]);
-    setChangeSets(history.changeSets);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
   }, [engineEnabled, workspaceId]);
@@ -2080,20 +1200,6 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
-  const openHistoryDiffTab = useCallback(
-    (changeSetId: string, filePath: string) => {
-      void flushActiveDraft()
-        .then(() => {
-          mutateWb((state) =>
-            openTab(state, historyDiffTabPath(changeSetId, filePath)),
-          );
-        })
-        .catch((error) => {
-          reportShellError("Could not save the active draft before opening history.", error);
-        });
-    },
-    [flushActiveDraft, mutateWb, reportShellError],
-  );
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -2664,9 +1770,11 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
-  // ONE history timeline element per source, rendered by the side panel's
-  // History view, the history tab, and the right rail — the engine page state
-  // is root-owned exactly like changeSets (never a second subscription).
+  // ONE history timeline element, rendered by the side panel's History view,
+  // the history tab, and the right rail — the engine page state is
+  // root-owned (never a second subscription). An opted-out workspace has NO
+  // history source (retirement Phase C removed the legacy recorder), so the
+  // timeline honestly says history is off instead of showing an empty list.
   const historyTimeline = engineEnabled ? (
     <EngineHistoryView
       moments={engineHistory?.moments ?? []}
@@ -2676,14 +1784,24 @@ export function DesktopWorkspaceShell(props: {
       onOpenMoment={openMomentDiffTab}
     />
   ) : (
-    <HistoryView changeSets={changeSets} onOpenDiff={openHistoryDiffTab} />
+    <div
+      data-testid="history-off-placeholder"
+      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+    >
+      <span className="text-xs text-muted">History is off for this workspace</span>
+      <span className="text-[11px] text-subtle">
+        The workspace engine is turned off in Settings → Advanced, so changes
+        are not being recorded. Turn it on and reopen the workspace to record
+        history again.
+      </span>
+    </div>
   );
-  // Open-file refresh: history growth re-reads the active file. Engine
-  // workspaces use the monotonic latest moment order; legacy uses the
-  // change-set count (both only ever increase within a session).
+  // Open-file refresh: history growth re-reads the active file (the counter
+  // only ever increases within a session). Opted-out workspaces have no
+  // history growth to react to.
   const historyRefreshCounter = engineEnabled
     ? (engineHistory ? engineHistory.latestMomentOrder + 1 : 0)
-    : changeSets.length;
+    : 0;
   const graphKey = engineEnabled
     ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
     : graphRefreshKey;
@@ -3003,14 +2121,16 @@ export function DesktopWorkspaceShell(props: {
                 onRestored={refreshAfterHistoryRestore}
               />
             ) : isHistoryDiffTabPath(wb.activeTab) ? (
-              <HistoryDiffPage
-                workspaceId={workspaceId}
-                tabPath={wb.activeTab ?? ""}
-                onBeforeRestore={flushActiveDraft}
-                onOpenFile={openFile}
-                registerActiveUndo={registerActiveUndo}
-                onRestored={refreshAfterHistoryRestore}
-              />
+              // A persisted pre-flip tab (legacy change-set diff). The legacy
+              // history store is retired; the tab stays closeable but renders
+              // an honest note instead of a broken page.
+              <div
+                data-testid="legacy-history-diff-gone"
+                className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
+              >
+                This history diff came from the retired legacy history and is
+                no longer available. Current history lives in the History rail.
+              </div>
             ) : isVersionCompareTabPath(wb.activeTab) ? (
               <VersionComparePage
                 // Remount per version AND per state change so the diff always

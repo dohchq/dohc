@@ -2,14 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  addBoundaryCrossing,
-  addFileChanges,
-  createChangeSet,
-} from "@dohc/workspace-core";
-import { createChangeSetStore } from "./workspaceWatcher";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+
+// Retirement Phase C (WS-H1): the legacy change-set read surface
+// (listChangeSets/readChangeSet) is gone from this layer — engine moments
+// are the only history. These tests cover what remains: the capture hooks
+// and the honest no-recorder status for opted-out workspaces.
 
 let root: string;
 
@@ -30,149 +29,9 @@ function workspace(): CreatedWorkspace {
   };
 }
 
-describe("workspaceActivity history", () => {
-  it("reads one detailed change set with file snapshots for history expansion", async () => {
-    const store = createChangeSetStore(root);
-    await store.record(
-      addFileChanges(
-        createChangeSet({
-          kind: "user-edit",
-          author: { kind: "user", userId: "ice" },
-          summary: "Edited today",
-        }),
-        [
-          {
-            path: "notes/today.md",
-            operation: "write",
-            mediaType: "text/markdown",
-            before: { text: "# Today\nBefore\n", truncated: false },
-            after: { text: "# Today\nAfter\n", truncated: false },
-          },
-        ],
-      ),
-      { id: "change-detail", recordedAtMs: 1000 },
-    );
-
-    const activity = createWorkspaceActivity(() => {});
-    const result = await activity.readChangeSet(workspace(), "change-detail");
-
-    expect(result.changeSet?.humanSummary).toBe("You edited notes/today.md");
-    expect(result.changeSet?.files[0]).toMatchObject({
-      path: "notes/today.md",
-      before: { text: "# Today\nBefore\n" },
-      after: { text: "# Today\nAfter\n" },
-    });
-  });
-
-  it("lists lightweight review metadata for scan-friendly history rows", async () => {
-    const store = createChangeSetStore(root);
-    await store.record(
-      addBoundaryCrossing(
-        addFileChanges(
-          createChangeSet({
-            kind: "sync",
-            author: { kind: "user", userId: "ice" },
-            summary: "Shared data",
-          }),
-          [
-            {
-              path: "notes/shared.md",
-              operation: "write",
-              before: { text: "old\nsame\n", truncated: false },
-              after: { text: "new\nsame\nmore\n", truncated: false },
-            },
-            {
-              path: "notes/brief.md",
-              operation: "write",
-              after: { text: "created\n", truncated: false },
-            },
-            {
-              path: "data/old.csv",
-              operation: "delete",
-              before: { text: "gone\n", truncated: false },
-              after: { unavailableReason: "missing" },
-            },
-            { path: "docs/renamed.md", operation: "rename" },
-            { path: "docs/extra.md", operation: "write" },
-          ],
-        ),
-        "private-to-shared",
-      ),
-      { id: "review-needed", recordedAtMs: 1000 },
-    );
-
-    const activity = createWorkspaceActivity(() => {});
-    const [record] = await activity.listChangeSets(workspace());
-
-    expect(record.reviewRequired).toBe(true);
-    expect(record.boundaryCrossingCount).toBe(1);
-    expect(record.boundaryCrossingPreview).toEqual(["private-to-shared"]);
-    expect(record.fileCount).toBe(5);
-    expect(record.filePreview).toEqual([
-      { path: "notes/shared.md", operation: "write" },
-      { path: "notes/brief.md", operation: "write" },
-      { path: "data/old.csv", operation: "delete" },
-      { path: "docs/renamed.md", operation: "rename" },
-    ]);
-    expect(record.lineStats).toEqual({
-      added: 3,
-      removed: 2,
-      changedFileCount: 3,
-      unavailableFileCount: 2,
-    });
-  });
-
-  it("merges durable and ephemeral history when durable recording is unsupported", async () => {
-    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-    try {
-      Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
-      const durable = createChangeSetStore(root);
-      await durable.record(
-        addFileChanges(
-          createChangeSet({
-            kind: "user-edit",
-            author: { kind: "user", userId: "ice" },
-            summary: "Durable edit",
-          }),
-          [{ path: "notes/durable.md", operation: "write" }],
-        ),
-        { id: "durable-record", recordedAtMs: 1000 },
-      );
-
-      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
-      const ephemeral = createChangeSetStore(root, { ephemeralIfUnsupported: true });
-      await ephemeral.record(
-        addFileChanges(
-          createChangeSet({
-            kind: "user-edit",
-            author: { kind: "user", userId: "ice" },
-            summary: "Ephemeral edit",
-          }),
-          [{ path: "notes/ephemeral.md", operation: "write" }],
-        ),
-        { id: "ephemeral-record", recordedAtMs: 1001 },
-      );
-      const activity = createWorkspaceActivity(() => {});
-
-      await expect(activity.listChangeSets(workspace())).resolves.toMatchObject([
-        { id: "ephemeral-record" },
-        { id: "durable-record" },
-      ]);
-      await expect(activity.readChangeSet(workspace(), "durable-record")).resolves.toMatchObject({
-        changeSet: { id: "durable-record" },
-      });
-      await expect(activity.readChangeSet(workspace(), "ephemeral-record")).resolves.toMatchObject({
-        changeSet: { id: "ephemeral-record" },
-      });
-    } finally {
-      if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
-    }
-  });
-});
-
-// PR 0N-1: the capture hooks expose the workspace's LIVE agent-run slot (the
-// same slot the legacy recorder read), so the engine capture can stamp
-// settled batches with agent authorship while a dohc-tracked run is active.
+// PR 0N-1: the capture hooks expose the workspace's LIVE agent-run slot so
+// the engine capture can stamp settled batches with agent authorship while a
+// dohc-tracked run is active.
 describe("workspaceActivity capture hooks", () => {
   it("wires the live agent-run slot into captureFor's hooks", async () => {
     let liveSlot: (() => unknown) | null = null;
@@ -191,6 +50,31 @@ describe("workspaceActivity capture hooks", () => {
     expect(liveSlot!()).toEqual(run);
     activity.setAgentRun("activity-test", null);
     expect(liveSlot!()).toBeNull();
+    await activity.stopAll();
+  });
+});
+
+describe("workspaceActivity history-off status (retirement Phase C)", () => {
+  it("reports historyRecordingOff when captureFor yields no capture (engine opt-out)", async () => {
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => null,
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingOff).toBe(true);
+    expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
+    // No capture also means no versions surface.
+    expect(activity.engineCaptureFor("activity-test")).toBeNull();
+    await activity.stopAll();
+  });
+
+  it("does not raise the history-off status before open or without a captureFor gate", async () => {
+    const activity = createWorkspaceActivity(() => {});
+    // Unknown/unopened workspace: status is derivable but never claims
+    // history is off (nothing is known yet).
+    expect(activity.getStatus("activity-test").historyRecordingOff).toBe(false);
+    const status = await activity.open(workspace());
+    // No captureFor option at all (test/legacy wiring): stays false.
+    expect(status.historyRecordingOff).toBe(false);
     await activity.stopAll();
   });
 });

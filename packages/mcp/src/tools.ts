@@ -83,12 +83,6 @@ export interface ToolContext {
   sdkDependencyRange?: string;
 }
 
-function historyWriteStoreFor(ctx: ToolContext) {
-  // Mutating tools require the durable writer; ensureRecordable fails closed
-  // before visible disk changes on unsupported platforms.
-  return createChangeSetStore(ctx.root);
-}
-
 function mergeHistoryRecords(
   records: HistoryRecord[],
   order: "newest-first" | "oldest-first",
@@ -319,58 +313,15 @@ export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolea
   }
 }
 
-// The history reference a mutating tool reports. Flagged workspaces have no
-// legacy change set — the desktop watcher captures MCP's physical write into
-// engine moments (agent-attributed when a dohc-tracked run is active; an MCP
-// run WITHOUT a dohc-tracked run context, e.g. an external MCP client, yields
-// actor-neutral engine capture — honest per the actor-neutral principle).
-function recordedChangeFields(record: HistoryRecord | null) {
-  return record
-    ? { changeSetId: record.id, recordedAtMs: record.recordedAtMs }
-    : { recordedBy: "workspace-engine" as const };
-}
-
-async function recordChange(
-  ctx: ToolContext,
-  input: {
-    files: FileChange[];
-    summary: string;
-    kind?: ChangeSetKind;
-    provenance?: ChangeProvenance;
-  },
-): Promise<HistoryRecord | null> {
-  // Flagged workspaces: no direct legacy .dohc/history record (it was already
-  // invisible to the flagged UI per 0M-5, and the double-record hazard ends
-  // here) — the engine capture is the ONE history for the physical write.
-  if (await isWorkspaceEngineFlagged(ctx)) return null;
-  await safeMetadataDir(ctx);
-  const store = historyWriteStoreFor(ctx);
-  const set = addFileChanges(
-    createChangeSet({
-      kind: input.kind ?? "agent-run",
-      author: MCP_AUTHOR,
-      summary: input.summary,
-      provenance: input.provenance ?? { source: input.kind === "import" ? "import" : "agent-run" },
-    }),
-    input.files,
-  );
-  const id = randomUUID();
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const recordedAtMs = Math.max(
-      Date.now(),
-      (await store.maxRecordedAtMs()) + 1,
-      (historyRecordedAtMsByRoot.get(ctx.root) ?? 0) + 1,
-    );
-    historyRecordedAtMsByRoot.set(ctx.root, recordedAtMs);
-    try {
-      return await store.record(set, { id, recordedAtMs });
-    } catch (error) {
-      if (!isStaleRecordedAtError(error)) throw error;
-      lastError = error;
-    }
-  }
-  throw lastError;
+// Retirement Phase C (WS-H1): MCP writes NO legacy change sets. The desktop
+// watcher captures MCP's physical writes into engine moments (agent-
+// attributed when a dohc-tracked run is active; an external MCP client
+// without a dohc-tracked run yields actor-neutral engine capture — honest per
+// the actor-neutral principle). Mutating tools report this constant history
+// reference. Legacy .dohc/history left by pre-flip versions is a read-only
+// relic (the read tools below can still list it).
+function recordedChangeFields() {
+  return { recordedBy: "workspace-engine" as const };
 }
 
 function failureReason(error: unknown, fallback: string): string {
@@ -378,15 +329,9 @@ function failureReason(error: unknown, fallback: string): string {
 }
 
 async function ensureRecordable(ctx: ToolContext) {
-  // Flagged workspaces don't need the legacy durable writer (the engine
-  // captures the physical write), so its platform gate must not block them;
-  // the metadata-dir safety check still applies.
-  if (!(await isWorkspaceEngineFlagged(ctx)) && !isDurableChangeSetRecordingSupported()) {
-    return {
-      ok: false as const,
-      reason: "durable history recording is not supported on this platform",
-    };
-  }
+  // Retirement Phase C: no legacy durable-writer platform gate — the engine
+  // captures the physical write. The metadata-dir safety check still fails
+  // closed before visible disk changes (symlinked/escaping .dohc).
   try {
     await safeMetadataDir(ctx);
     return null;
@@ -985,24 +930,12 @@ export async function writeWorkspaceFile(
         : failureReason(error, `failed to write: ${args.path}`),
     };
   }
-  let record: HistoryRecord | null;
-  try {
-    record = await recordChange(ctx, {
-      files: [{ path: resolved.normalized, operation: "write" }],
-      summary: args.summary ?? `MCP wrote ${resolved.normalized}`,
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: mutationRetainedReason(error, `failed to record write: ${args.path}`),
-    };
-  }
   return {
     ok: true as const,
     path: resolved.normalized,
     bytes: bytes.byteLength,
     sha256: sha256(bytes),
-    ...recordedChangeFields(record),
+    ...recordedChangeFields(),
   };
 }
 
@@ -1038,25 +971,10 @@ export async function createWorkspaceDirectory(
       reason: failureReason(error, `failed to create directory: ${args.path}`),
     };
   }
-  let record: HistoryRecord | null;
-  try {
-    record = await recordChange(ctx, {
-      files: [{ path: resolved.normalized, operation: "write" }],
-      summary: args.summary ?? `MCP created ${resolved.normalized}`,
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: mutationRetainedReason(
-        error,
-        `failed to record directory create: ${args.path}`,
-      ),
-    };
-  }
   return {
     ok: true as const,
     path: resolved.normalized,
-    ...recordedChangeFields(record),
+    ...recordedChangeFields(),
   };
 }
 
@@ -1083,26 +1001,12 @@ export async function moveWorkspacePath(
   await mkdir(dirname(to.absolute), { recursive: true });
   try {
     await rename(from.absolute, to.absolute);
-    try {
-      const record = await recordChange(ctx, {
-        files: [
-          { path: from.normalized, operation: "delete" },
-          { path: to.normalized, operation: "write" },
-        ],
-        summary: args.summary ?? `MCP moved ${from.normalized} to ${to.normalized}`,
-      });
-      return {
-        ok: true as const,
-        fromPath: from.normalized,
-        toPath: to.normalized,
-        ...recordedChangeFields(record),
-      };
-    } catch (error) {
-      return {
-        ok: false as const,
-        reason: mutationRetainedReason(error, `failed to record move: ${args.fromPath}`),
-      };
-    }
+    return {
+      ok: true as const,
+      fromPath: from.normalized,
+      toPath: to.normalized,
+      ...recordedChangeFields(),
+    };
   } catch (error) {
     return {
       ok: false as const,
@@ -1127,23 +1031,12 @@ export async function deleteWorkspacePath(
       `${Date.now()}-${randomUUID()}-${basename(resolved.normalized)}`,
     );
     await rename(resolved.absolute, trashedTo);
-    try {
-      const record = await recordChange(ctx, {
-        files: [{ path: resolved.normalized, operation: "delete" }],
-        summary: args.summary ?? `MCP deleted ${resolved.normalized}`,
-      });
-      return {
-        ok: true as const,
-        path: resolved.normalized,
-        trashed: true,
-        ...recordedChangeFields(record),
-      };
-    } catch (error) {
-      return {
-        ok: false as const,
-        reason: mutationRetainedReason(error, `failed to record delete: ${args.path}`),
-      };
-    }
+    return {
+      ok: true as const,
+      path: resolved.normalized,
+      trashed: true,
+      ...recordedChangeFields(),
+    };
   } catch (error) {
     return {
       ok: false as const,
@@ -1425,18 +1318,9 @@ async function recordCloudPull(
     ...result.deletedLocalPaths.map((path) => ({ path, operation: "delete" as const })),
   ];
   if (files.length === 0) return null;
-
-  try {
-    const record = await recordChange(ctx, {
-      kind: "sync",
-      provenance: { source: "sync" },
-      files,
-      summary: `MCP synced ${files.length} ${files.length === 1 ? "file" : "files"} from dohc Cloud`,
-    });
-    return recordedChangeFields(record);
-  } catch (error) {
-    return { historyError: failureReason(error, "cloud sync history could not be recorded") };
-  }
+  // The watcher observes the pulled/deleted files on disk and captures them
+  // as engine moments; no direct history write happens here anymore.
+  return recordedChangeFields();
 }
 
 export async function syncCloud(
@@ -2061,7 +1945,6 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   }
 
   let visibleMutationStarted = false;
-  let record: HistoryRecord | null;
   try {
     await mkdir(root.absolute, { recursive: true });
     if (!existing) visibleMutationStarted = true;
@@ -2080,26 +1963,11 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
         : failureReason(error, `failed to create site: ${root.normalized}`),
     };
   }
-  try {
-    record = await recordChange(ctx, {
-      files: resolvedFiles.map((file) => ({ path: file.normalized, operation: "write" })),
-      summary: `MCP created site ${root.normalized}`,
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: mutationRetainedReason(
-        error,
-        `failed to record site create: ${root.normalized}`,
-      ),
-    };
-  }
-
   return {
     ok: true as const,
     siteRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
-    ...recordedChangeFields(record),
+    ...recordedChangeFields(),
   };
 }
 
@@ -2354,8 +2222,7 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
     siteRoot: root.normalized,
     packagePath: normalizedPackagePath,
     dependency: "@dohc/sdk",
-    changeSetId: written.changeSetId,
-    recordedAtMs: written.recordedAtMs,
+    recordedBy: written.recordedBy,
     usage: `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
   };
 }
@@ -2425,26 +2292,12 @@ export async function importData(
         : failureReason(error, `failed to write import: ${dbRel.normalized}`),
     };
   }
-  let record: HistoryRecord | null;
-  try {
-    record = await recordChange(ctx, {
-      kind: "import",
-      provenance: { source: "import", importPath: sourceRel.normalized },
-      files: [{ path: dbRel.normalized, operation: "write" }],
-      summary: `MCP imported ${sourceRel.normalized} to ${dbRel.normalized}`,
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: mutationRetainedReason(error, `failed to record import: ${dbRel.normalized}`),
-    };
-  }
   return {
     ok: true as const,
     path: dbRel.normalized,
     tableName: result.tableName,
     rowCount: result.rowCount,
-    ...recordedChangeFields(record),
+    ...recordedChangeFields(),
   };
 }
 

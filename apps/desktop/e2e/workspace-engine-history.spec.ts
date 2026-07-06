@@ -85,10 +85,12 @@ test("flagged workspace shows engine moments and restores a file end-to-end", as
   }
 });
 
-// WS-H1 flag flip: "unflagged" means explicitly opted out. The legacy
-// timeline it renders retires with Phase C; this pins the pre-retirement
-// escape-hatch behavior.
-test("explicitly opted-out workspace keeps the legacy history timeline", async () => {
+// WS-H1 retirement Phase C: an explicitly opted-out workspace has NO history
+// recorder at all — the legacy recorder is retired. The escape hatch must
+// still leave a fully working app: files edit and save, nothing crashes, no
+// engine store appears, no legacy change sets are written, and the app says
+// honestly that history is off (rail placeholder + persistent notice).
+test("explicit opt-out: app works, nothing records anywhere, and the app says history is off", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -100,17 +102,54 @@ test("explicitly opted-out workspace keeps the legacy history timeline", async (
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
+    // Files still work: an on-disk write is observed and listed...
     await writeWorkspaceFiles(temp, [
-      { path: "notes/legacy.md", contents: "legacy history\n" },
+      { path: "notes/opted-out.md", contents: "no history here\n" },
     ]);
-    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/legacy.md");
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/opted-out.md");
 
-    // Legacy change sets render; the engine surfaces never mount.
-    await expect(
-      page.getByTestId("history-timeline").getByTestId("change-set").first(),
-    ).toBeVisible();
+    // ...and an app-side edit through the normal bridge saves fine.
+    await page.evaluate(
+      async (input) => {
+        const api = (window as unknown as {
+          dohcDesktop: {
+            writeWorkspaceText(payload: {
+              workspaceId: string;
+              relativePath: string;
+              text: string;
+            }): Promise<unknown>;
+          };
+        }).dohcDesktop;
+        await api.writeWorkspaceText({
+          workspaceId: input.workspaceId,
+          relativePath: "notes/opted-out.md",
+          text: "no history here — edited\n",
+        });
+      },
+      { workspaceId: workspace.workspaceId },
+    );
+    await expect
+      .poll(() =>
+        readFile(join(temp.rootPath, "notes/opted-out.md"), "utf8").catch(() => ""),
+      )
+      .toBe("no history here — edited\n");
+
+    // The history rail says history is off; engine surfaces never mount.
+    await expect(page.getByTestId("history-off-placeholder")).toBeVisible();
     await expect(page.getByTestId("engine-history-list")).toHaveCount(0);
     await expect(page.getByTestId("rail-tab-chats")).toHaveCount(0);
+
+    // The persistent notice is present (reuses the capture-failure pattern).
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(page.getByTestId("notice-history-recording-off")).toBeVisible();
+
+    // And truly nothing records: no engine store, no new legacy change sets.
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(temp.rootPath, ".dohc", "engine", "engine.db"))).toBe(false);
+    const { readdir } = await import("node:fs/promises");
+    expect(
+      (await readdir(join(temp.rootPath, ".dohc", "history")).catch(() => [])).length,
+    ).toBe(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

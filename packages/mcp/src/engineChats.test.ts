@@ -20,13 +20,13 @@ import {
   type ToolContext,
 } from "./tools";
 
-// PR 0N-1 MCP posture on workspace-engine (flagged) workspaces:
-//  - mutating tools stop writing legacy .dohc/history change sets (the
+// PR 0N-1 + WS-H1 retirement Phase C MCP posture:
+//  - mutating tools NEVER write legacy .dohc/history change sets (the
 //    desktop watcher + agent-run slot capture the physical write with
 //    attribution; an external MCP client without a dohc-tracked run yields
 //    actor-neutral engine capture);
 //  - the linked-chat tools make the file rail two-way, replying as the agent;
-//  - unflagged workspaces keep legacy recording byte-for-byte.
+//  - the engine is the default; only an explicit opt-out disables chats.
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
   const base = await mkdtemp(join(tmpdir(), "dohc-mcp-engine-test-"));
@@ -148,17 +148,20 @@ describe("mutating tools on a flagged workspace", () => {
     });
   });
 
-  it("explicitly opted-out workspaces keep legacy recording (until retirement Phase C)", async () => {
+  it("opted-out workspaces get no MCP-written history either (retirement Phase C)", async () => {
     await withWorkspace(async (ctx) => {
       await seedEngineFlag(ctx, false);
       const write = await writeWorkspaceFile(ctx, {
         path: "notes/plan.md",
         content: "# Plan\n",
       });
-      expect(write).toMatchObject({ ok: true });
-      expect(write).toHaveProperty("changeSetId");
-      expect(write).not.toHaveProperty("recordedBy");
-      await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 1 });
+      // The legacy recorder is retired: even an opted-out workspace gets no
+      // change set from MCP. Whether anything records at all is the
+      // workspace's opt-out choice (the desktop shows its history-off
+      // notice); MCP reports the engine seam either way.
+      expect(write).toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+      expect(write).not.toHaveProperty("changeSetId");
+      await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 0 });
     });
   });
 });

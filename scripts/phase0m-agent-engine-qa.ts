@@ -34,7 +34,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { CreatedWorkspace } from "../apps/desktop/src/workspaces/createWorkspaceFolder";
 import { captureForFlaggedWorkspace } from "../apps/desktop/src/workspaces/engineCaptureGate";
 import { createWorkspaceActivity } from "../apps/desktop/src/workspaces/workspaceActivity";
-import { createChangeSetStore } from "../apps/desktop/src/workspaces/workspaceWatcher";
+import { createChangeSetStore } from "@dohc/workspace-history";
 import { defaultWorkspaceMode } from "../packages/workspace-core/src/workspaceMode";
 
 const cli = process.env.DOHC_TEST_AGENT_CLI || "codex";

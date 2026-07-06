@@ -18,7 +18,8 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
+import { createChangeSetStore } from "@dohc/workspace-history";
+import { startWorkspaceWatch } from "./workspaceWatcher";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
 // pipeline cannot statically resolve the node:sqlite builtin yet.
@@ -751,10 +752,10 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     expect(await createChangeSetStore(root).list()).toHaveLength(0);
   });
 
-  it("keeps legacy recording byte-for-byte for unflagged workspaces", async () => {
+  it("records NOTHING without an engine capture (retirement Phase C: opt-out has no recorder)", async () => {
     const root = await tempRoot();
     const workspace: CreatedWorkspace = {
-      workspaceId: "legacy-unflagged",
+      workspaceId: "opted-out-no-recorder",
       rootPath: root,
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
@@ -769,13 +770,14 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     });
     await handle.ready;
     await write(root, "notes.md", "# Notes\n");
+    // The batch still settles (UI refresh / cloud queue), but no history of
+    // any kind is written: no legacy change sets, no engine store.
     await recorded;
     await handle.stop();
 
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    expect(records[0].files.map((file) => file.path)).toEqual(["notes.md"]);
-    expect(records[0].files[0].after?.text).toBe("# Notes\n");
+    expect(await createChangeSetStore(root).list()).toHaveLength(0);
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(false);
   });
 });
 
