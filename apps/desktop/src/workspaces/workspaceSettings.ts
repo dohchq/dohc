@@ -20,9 +20,17 @@ export const WorkspaceSettings = z.object({
   // Defaulted, not required: the top-level schema is .strict() and a failed
   // parse silently resets the whole file, so settings written before this
   // group existed must keep parsing as-is (see the old-shape regression test).
+  //
+  // WS-H1 flag flip: the workspace engine is THE product default. An absent
+  // experimental group (old settings files, brand-new workspaces) reads as
+  // ON; the setting remains as an explicit opt-OUT escape hatch
+  // (workspaceEngineAlpha: false). This schema default and
+  // DEFAULT_WORKSPACE_SETTINGS below are the single source for the flip —
+  // every reader (engineCaptureGate, MCP, renderer) resolves through them or
+  // mirrors their absent-reads-as-on rule.
   experimental: z.object({
     workspaceEngineAlpha: z.boolean(),
-  }).strict().default({ workspaceEngineAlpha: false }),
+  }).strict().default({ workspaceEngineAlpha: true }),
 }).strict();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
 
@@ -40,7 +48,7 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
     confirmExternalLinks: true,
   },
   experimental: {
-    workspaceEngineAlpha: false,
+    workspaceEngineAlpha: true,
   },
 };
 

@@ -13,6 +13,7 @@ import {
   listChannels,
   listChanges,
   listFileChats,
+  readChange,
   readChat,
   replyToChat,
   startChannelChat,
@@ -20,13 +21,13 @@ import {
   type ToolContext,
 } from "./tools";
 
-// PR 0N-1 MCP posture on workspace-engine (flagged) workspaces:
-//  - mutating tools stop writing legacy .dohc/history change sets (the
+// PR 0N-1 + WS-H1 retirement Phase C MCP posture:
+//  - mutating tools NEVER write legacy .dohc/history change sets (the
 //    desktop watcher + agent-run slot capture the physical write with
 //    attribution; an external MCP client without a dohc-tracked run yields
 //    actor-neutral engine capture);
 //  - the linked-chat tools make the file rail two-way, replying as the agent;
-//  - unflagged workspaces keep legacy recording byte-for-byte.
+//  - the engine is the default; only an explicit opt-out disables chats.
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
   const base = await mkdtemp(join(tmpdir(), "dohc-mcp-engine-test-"));
@@ -97,29 +98,32 @@ afterEach(() => {
 });
 
 describe("isWorkspaceEngineFlagged", () => {
-  it("reads the desktop's per-workspace settings file, failing closed", async () => {
+  it("reads the desktop's per-workspace settings file — the engine is the default, explicit false opts out", async () => {
     await withWorkspace(async (ctx) => {
-      expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
+      // WS-H1 flag flip: no settings file at all resolves ON.
+      expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
       await seedEngineFlag(ctx, false);
       expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
       await seedEngineFlag(ctx, true);
       expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
-      // Broken JSON reads as OFF, never a crash.
+      // Broken JSON reads as the DEFAULT (engine on), never a crash — the
+      // same recovery the desktop's settings reader performs.
       await writeFile(join(ctx.root, ".dohc", "settings.local.json"), "{nope");
-      expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
+      expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
     });
   });
 
-  it("refuses a symlinked settings file", async () => {
+  it("refuses a symlinked settings file (a planted symlink cannot opt a workspace out)", async () => {
     await withWorkspace(async (ctx) => {
       const outside = join(ctx.home, "planted-settings.json");
       await writeFile(
         outside,
-        JSON.stringify({ experimental: { workspaceEngineAlpha: true } }),
+        JSON.stringify({ experimental: { workspaceEngineAlpha: false } }),
       );
       await mkdir(join(ctx.root, ".dohc"), { recursive: true });
       await symlink(outside, join(ctx.root, ".dohc", "settings.local.json"));
-      expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
+      // The symlinked file is ignored; the workspace resolves to the default.
+      expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
     });
   });
 });
@@ -145,32 +149,125 @@ describe("mutating tools on a flagged workspace", () => {
     });
   });
 
-  it("unflagged workspaces keep legacy recording exactly as before", async () => {
+  it("opted-out workspaces report history recording honestly OFF (no recorder exists)", async () => {
     await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx, false);
       const write = await writeWorkspaceFile(ctx, {
         path: "notes/plan.md",
         content: "# Plan\n",
       });
-      expect(write).toMatchObject({ ok: true });
-      expect(write).toHaveProperty("changeSetId");
+      // The legacy recorder is retired and this workspace explicitly opted
+      // out of the engine: NOTHING records this write (the desktop shows its
+      // history-off notice). Naming the engine as recorder here would be a
+      // lie, so the tool reports historyRecording: "off" instead.
+      expect(write).toMatchObject({ ok: true, historyRecording: "off" });
       expect(write).not.toHaveProperty("recordedBy");
-      await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 1 });
+      expect(write).not.toHaveProperty("changeSetId");
+      await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 0 });
+    });
+  });
+});
+
+// WS-H1 gate fix: post-flip, dohc_list_changes/dohc_read_change read the
+// ENGINE's moments (the actual recorder) — a real engine edit must show up,
+// never "0 changes".
+describe("history read tools on engine moments", () => {
+  it("lists an engine moment as a change and reads its full detail", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-history");
+      // A real engine edit — the same store the desktop watcher writes.
+      const texts = createVersionedTextStore(ctx.root);
+      await texts.ensureMainVersion({ workspaceId: "ws-history" });
+      const written = await texts.writeTextFile({
+        workspaceId: "ws-history",
+        versionId: "main",
+        path: "notes/plan.md",
+        text: "# Plan\n\nShip it.\n",
+        metadata: { origin: "local-file", summary: "Edited plan" },
+      });
+      await texts.close();
+
+      const listed = await listChanges(ctx, { includeFiles: true });
+      expect(listed).toMatchObject({
+        count: 1,
+        totalAvailable: 1,
+        hasMore: false,
+        changes: [
+          expect.objectContaining({
+            id: written.moment.id,
+            source: "workspace-engine",
+            path: "notes/plan.md",
+            operation: "write",
+            versionId: "main",
+            summary: "Edited plan",
+            fileCount: 1,
+            files: [{ path: "notes/plan.md", operation: "write" }],
+          }),
+        ],
+      });
+      // The legacy-only fields are omitted, never faked.
+      expect(listed.changes[0]).not.toHaveProperty("kind");
+      expect(listed.changes[0]).not.toHaveProperty("boundaryCrossings");
+
+      const read = await readChange(ctx, { id: written.moment.id });
+      expect(read).toMatchObject({
+        ok: true,
+        change: expect.objectContaining({
+          id: written.moment.id,
+          source: "workspace-engine",
+          path: "notes/plan.md",
+          operation: "write",
+          before: null,
+          after: expect.objectContaining({ text: "# Plan\n\nShip it.\n" }),
+        }),
+      });
+
+      // The since cursor is strictly-after, matching the legacy store rule.
+      await expect(
+        listChanges(ctx, { sinceMs: written.moment.recordedAtMs }),
+      ).resolves.toMatchObject({ count: 0 });
+      await expect(
+        listChanges(ctx, { sinceMs: written.moment.recordedAtMs - 1 }),
+      ).resolves.toMatchObject({ count: 1 });
+    });
+  });
+
+  it("never creates an engine store as a read side effect", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-history");
+      await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 0 });
+      await expect(readChange(ctx, { id: "nope" })).resolves.toMatchObject({ ok: false });
+      await expect(
+        access(join(ctx.root, ".dohc", "engine", "engine.db")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     });
   });
 });
 
 describe("linked chat tools", () => {
-  it("refuse when the workspace engine flag is absent or off", async () => {
+  it("refuse when the workspace engine flag is explicitly off (absent now reads as on)", async () => {
     await withWorkspace(async (ctx) => {
       const expected = { ok: false, reason: expect.stringContaining("not enabled") };
+      await seedEngineFlag(ctx, false);
       expect(await listFileChats(ctx, { path: "notes/agenda.md" })).toMatchObject(expected);
       expect(await readChat(ctx, { threadId: "thread-1" })).toMatchObject(expected);
       expect(
         await replyToChat(ctx, { threadId: "thread-1", body: "hello" }),
       ).toMatchObject(expected);
+    });
+  });
 
-      await seedEngineFlag(ctx, false);
-      expect(await listFileChats(ctx, { path: "notes/agenda.md" })).toMatchObject(expected);
+  it("an absent flag reads as engine ON — chats fall through to the identity check, not a flag refusal", async () => {
+    await withWorkspace(async (ctx) => {
+      // WS-H1 flag flip: no settings file means the engine default applies,
+      // so the tool proceeds past the flag gate and refuses on the missing
+      // workspace manifest instead.
+      expect(await listFileChats(ctx, { path: "notes/agenda.md" })).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("manifest"),
+      });
     });
   });
 
@@ -295,14 +392,9 @@ describe("linked chat tools", () => {
 });
 
 describe("channel tools (PR 12/13 slice)", () => {
-  it("refuse when the workspace engine flag is absent or off", async () => {
+  it("refuse when the workspace engine flag is explicitly off (absent now reads as on)", async () => {
     await withWorkspace(async (ctx) => {
       const expected = { ok: false, reason: expect.stringContaining("not enabled") };
-      expect(await listChannels(ctx)).toMatchObject(expected);
-      expect(
-        await startChannelChat(ctx, { channel: "general", body: "hello" }),
-      ).toMatchObject(expected);
-
       await seedEngineFlag(ctx, false);
       expect(await listChannels(ctx)).toMatchObject(expected);
       expect(

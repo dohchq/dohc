@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   mkdtemp,
   readdir,
@@ -17,11 +16,7 @@ import {
   readUiStateFile,
   writeUiStateFile,
 } from "./workspaceUiState";
-import {
-  DESKTOP_HISTORY_STORE_OPTIONS,
-  createChangeSetStore,
-  startWorkspaceWatch,
-} from "./workspaceWatcher";
+import { startWorkspaceWatch } from "./workspaceWatcher";
 
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
@@ -46,9 +41,6 @@ const STATE = {
   historyVisible: true,
 };
 
-function sha256Text(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
 
 describe("ui-state file store", () => {
   it("round-trips state through .dohc/ui-state.json", async () => {
@@ -112,8 +104,10 @@ describe("ui-state file store", () => {
 // THE invariant this file exists for: ui-state writes land under .dohc, which
 // the watcher ignores at any depth — persisting workbench chrome state must
 // NEVER produce a history record (feedback loop, timeline noise, sync upload).
+// Retirement Phase C: the engine capture is the only recorder, so the
+// assertion is against what the watcher enqueues into it.
 describe("ui-state writes never reach history", () => {
-  it("the watcher records the user file but nothing for ui-state.json", async () => {
+  it("the watcher enqueues the user file but nothing for ui-state.json", async () => {
     const root = await tempRoot();
     const workspace = {
       workspaceId: "ws-ui-state-test",
@@ -122,6 +116,7 @@ describe("ui-state writes never reach history", () => {
       mode: "local-first",
     } as CreatedWorkspace;
 
+    const capturedPaths: string[] = [];
     let recorded = 0;
     let resolveFirst: (() => void) | null = null;
     const firstRecord = new Promise<void>((resolve) => {
@@ -129,6 +124,11 @@ describe("ui-state writes never reach history", () => {
     });
     const handle = startWorkspaceWatch(workspace, {
       settleMs: 60,
+      engineCapture: () => ({
+        captureBatch: (events) => {
+          capturedPaths.push(...events.map((event) => event.path));
+        },
+      }),
       onRecorded: () => {
         recorded += 1;
         resolveFirst?.();
@@ -147,211 +147,8 @@ describe("ui-state writes never reach history", () => {
     await handle.stop();
 
     expect(recorded).toBe(1);
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    const paths = records[0].files.map((file) => file.path);
-    expect(paths).toContain("notes.md");
-    expect(paths.some((path) => path.includes(".dohc"))).toBe(false);
-    expect(paths.some((path) => path.includes("ui-state"))).toBe(false);
-  });
-});
-
-describe("workspace watcher history snapshots", () => {
-  it("continues observing local edits when durable history recording is unsupported", async () => {
-    const root = await tempRoot();
-    const workspace = {
-      workspaceId: "ws-history-unsupported-platform-test",
-      rootPath: root,
-      kind: "personal",
-      mode: "local-first",
-    } as CreatedWorkspace;
-    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-    let warn: ReturnType<typeof vi.spyOn> | null = null;
-    let handle: ReturnType<typeof startWorkspaceWatch> | null = null;
-
-    try {
-      Object.defineProperty(process, "platform", {
-        configurable: true,
-        value: "darwin",
-      });
-      warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-      let recorded = 0;
-      let resolveFirst: (() => void) | null = null;
-      const firstRecord = new Promise<void>((resolve) => {
-        resolveFirst = resolve;
-      });
-      handle = startWorkspaceWatch(workspace, {
-        settleMs: 60,
-        onRecorded: () => {
-          recorded += 1;
-          resolveFirst?.();
-        },
-      });
-      await handle.ready;
-
-      await writeFile(join(root, "notes.md"), "# Notes\n");
-      await firstRecord;
-
-      expect(recorded).toBe(1);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("durable local history is unavailable"),
-      );
-      const fallbackRecords = await createChangeSetStore(
-        root,
-        DESKTOP_HISTORY_STORE_OPTIONS,
-      ).list();
-      expect(fallbackRecords).toHaveLength(1);
-      expect(fallbackRecords[0]).toMatchObject({
-        author: { kind: "local", label: "Local file edit" },
-        files: [{ path: "notes.md", operation: "write" }],
-      });
-    } finally {
-      await handle?.stop().catch(() => undefined);
-      warn?.mockRestore();
-      if (originalPlatform) {
-        Object.defineProperty(process, "platform", originalPlatform);
-      }
-    }
-
-    await expect(readFile(join(root, ".dohc/history/index.json"), "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-  });
-
-  it("records bounded before and after text for readable file edits", async () => {
-    const root = await tempRoot();
-    await writeFile(join(root, "notes.md"), "# Notes\nBefore\n");
-    const workspace = {
-      workspaceId: "ws-history-snapshot-test",
-      rootPath: root,
-      kind: "personal",
-      mode: "local-first",
-    } as CreatedWorkspace;
-
-    let resolveFirst: (() => void) | null = null;
-    const firstRecord = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
-    });
-    const handle = startWorkspaceWatch(workspace, {
-      settleMs: 60,
-      onRecorded: () => resolveFirst?.(),
-    });
-    await handle.ready;
-
-    await writeFile(join(root, "notes.md"), "# Notes\nAfter\n");
-    await firstRecord;
-    await handle.stop();
-
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    expect(records[0].files[0]).toMatchObject({
-      path: "notes.md",
-      operation: "write",
-      mediaType: "text/markdown",
-      before: { text: "# Notes\nBefore\n", truncated: false },
-      after: { text: "# Notes\nAfter\n", truncated: false },
-    });
-  });
-
-  it("records matching local restore operations with history provenance", async () => {
-    const root = await tempRoot();
-    await writeFile(join(root, "notes.md"), "after\n");
-    const workspace = {
-      workspaceId: "ws-history-restore-operation-test",
-      rootPath: root,
-      kind: "personal",
-      mode: "local-first",
-    } as CreatedWorkspace;
-
-    let resolveFirst: (() => void) | null = null;
-    const firstRecord = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
-    });
-    const handle = startWorkspaceWatch(workspace, {
-      settleMs: 60,
-      activeLocalOperation: () => ({
-        paths: ["notes.md"],
-        summary: "Restored notes.md from history",
-        provenance: {
-          source: "history-restore",
-          restoreOfChangeSetId: "change-before",
-          restoreOfPath: "notes.md",
-          restoreDirection: "restore",
-        },
-        expectedEvents: [
-          {
-            path: "notes.md",
-            operation: "update",
-            sha256: sha256Text("before\n"),
-          },
-        ],
-      }),
-      onRecorded: () => resolveFirst?.(),
-    });
-    await handle.ready;
-
-    await writeFile(join(root, "notes.md"), "before\n");
-    await firstRecord;
-    await handle.stop();
-
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      kind: "history-restore",
-      summary: "Restored notes.md from history",
-      provenance: {
-        source: "history-restore",
-        restoreOfChangeSetId: "change-before",
-        restoreOfPath: "notes.md",
-        restoreDirection: "restore",
-      },
-    });
-  });
-
-  it("does not consume a local restore operation when the settled event mismatches", async () => {
-    const root = await tempRoot();
-    await writeFile(join(root, "notes.md"), "after\n");
-    const workspace = {
-      workspaceId: "ws-history-restore-mismatch-test",
-      rootPath: root,
-      kind: "personal",
-      mode: "local-first",
-    } as CreatedWorkspace;
-
-    let resolveFirst: (() => void) | null = null;
-    const firstRecord = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
-    });
-    const handle = startWorkspaceWatch(workspace, {
-      settleMs: 60,
-      activeLocalOperation: () => ({
-        paths: ["notes.md"],
-        summary: "Restored notes.md from history",
-        provenance: {
-          source: "history-restore",
-          restoreOfChangeSetId: "change-before",
-          restoreOfPath: "notes.md",
-          restoreDirection: "restore",
-        },
-        expectedEvents: [
-          {
-            path: "notes.md",
-            operation: "update",
-            sha256: sha256Text("before\n"),
-          },
-        ],
-      }),
-      onRecorded: () => resolveFirst?.(),
-    });
-    await handle.ready;
-
-    await writeFile(join(root, "notes.md"), "manual edit\n");
-    await firstRecord;
-    await handle.stop();
-
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    expect(records[0].kind).toBe("user-edit");
-    expect(records[0].provenance).toBeUndefined();
+    expect(capturedPaths).toContain("notes.md");
+    expect(capturedPaths.some((path) => path.includes(".dohc"))).toBe(false);
+    expect(capturedPaths.some((path) => path.includes("ui-state"))).toBe(false);
   });
 });

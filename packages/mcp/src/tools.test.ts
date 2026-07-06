@@ -73,6 +73,25 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   }
 }
 
+
+// WS-H1 flag flip: the engine is the default; an explicit opt-out disables
+// recording entirely (retirement Phase C removed the legacy recorder). Tests
+// seed this to pin the opted-out shapes: mutating tools report
+// historyRecording: "off" and the chat tools refuse.
+async function seedLegacyOptOut(ctx: ToolContext): Promise<void> {
+  await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+  await writeFile(
+    join(ctx.root, ".dohc", "settings.local.json"),
+    `${JSON.stringify({
+      version: 1,
+      agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+      sites: { defaultPreviewMode: "auto" },
+      privacy: { confirmExternalLinks: true },
+      experimental: { workspaceEngineAlpha: false },
+    }, null, 2)}\n`,
+  );
+}
+
 async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
@@ -483,7 +502,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("sync_cloud pulls remote files and records visible sync history", async () => {
+  it("sync_cloud pulls remote files and reports the engine as recorder (Phase C: no change sets)", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);
       const server = fakeCloudServer();
@@ -500,12 +519,12 @@ describe("mcp tools operate on allowed paths", () => {
         "from cloud\n",
       );
 
-      const history = await listChanges(ctx, { includeFiles: true });
-      expect(history).toMatchObject({ count: 1, totalAvailable: 1 });
-      expect(history.changes[0]).toMatchObject({
-        kind: "sync",
-        provenance: { source: "sync" },
-        files: [{ path: "notes/remote.md", operation: "write" }],
+      // Retirement Phase C: MCP writes no change sets — the pull reports the
+      // engine as the recorder (the desktop watcher captures the new file).
+      expect(result).toMatchObject({ recordedBy: "workspace-engine" });
+      await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
+        count: 0,
+        totalAvailable: 0,
       });
     });
   });
@@ -557,7 +576,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("writes, reads, and lists arbitrary visible files while recording sync-visible history", async () => {
+  it("writes, reads, and lists arbitrary visible files (no legacy change sets after Phase C)", async () => {
     await withWorkspace(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {
         path: "docs/report.html",
@@ -596,96 +615,39 @@ describe("mcp tools operate on allowed paths", () => {
         ]);
       }
 
-      const pending = await syncNow(ctx, { sinceMs: 0 });
-      expect(pending).toMatchObject({ clean: false, pendingChangeCount: 1 });
-      expect(pending.cursorMs).toBeGreaterThan(0);
-      expect(pending.pending[0]).toMatchObject({ summary: "Created report", fileCount: 1 });
+      // Retirement Phase C: the write carried no change set (the engine is
+      // the recorder), so the legacy pending view stays clean.
+      expect(written).toMatchObject({ recordedBy: "workspace-engine" });
+      await expect(syncNow(ctx, { sinceMs: 0 })).resolves.toMatchObject({
+        clean: true,
+        pendingChangeCount: 0,
+      });
     });
   });
 
-  it("refuses mutating tools before disk changes when durable history is unsupported", async () => {
+  it("mutating tools work on platforms without durable legacy history (Phase C: engine capture needs none)", async () => {
     await withWorkspace(async (ctx) => {
-      await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
-      await mkdir(join(ctx.root, "drafts"), { recursive: true });
-      await writeFile(join(ctx.root, "drafts/todo.txt"), "move me\n");
-      await mkdir(join(ctx.root, "archive"), { recursive: true });
-      await writeFile(join(ctx.root, "archive/remove-me.txt"), "delete me\n");
-
       await withProcessPlatform("darwin", async () => {
+        // The retired legacy recorder used to fail closed here; the engine
+        // capture path has no such platform gate, so mutations proceed.
         await expect(
           writeWorkspaceFile(ctx, { path: "notes/nested/plan.txt", content: "draft\n" }),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
-        });
-        await expect(readFile(join(ctx.root, "notes/nested/plan.txt"), "utf8")).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-        await expect(readdir(join(ctx.root, "notes"))).rejects.toMatchObject({ code: "ENOENT" });
-
+        ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+        await expect(readFile(join(ctx.root, "notes/nested/plan.txt"), "utf8")).resolves.toBe(
+          "draft\n",
+        );
         await expect(createWorkspaceDirectory(ctx, { path: "new-folder" })).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
+          ok: true,
+          recordedBy: "workspace-engine",
         });
-        await expect(readdir(join(ctx.root, "new-folder"))).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-
-        await expect(createSite(ctx, { path: "site" })).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
-        });
-        await expect(readFile(join(ctx.root, "site/index.html"), "utf8")).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-        await expect(readdir(join(ctx.root, "site"))).rejects.toMatchObject({ code: "ENOENT" });
-
-        await expect(
-          importData(ctx, {
-            sourcePath: "people.csv",
-            databasePath: "imports/people.sqlite",
-            tableName: "people",
-          }),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
-        });
-        await expect(readFile(join(ctx.root, "imports/people.sqlite"))).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-        await expect(readdir(join(ctx.root, "imports"))).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-
-        await expect(
-          moveWorkspacePath(ctx, {
-            fromPath: "drafts/todo.txt",
-            toPath: "archive/todo.txt",
-          }),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
-        });
-        await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).resolves.toBe(
-          "move me\n",
-        );
-        await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-
-        await expect(deleteWorkspacePath(ctx, { path: "archive/remove-me.txt" })).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
-        });
-        await expect(readFile(join(ctx.root, "archive/remove-me.txt"), "utf8")).resolves.toBe(
-          "delete me\n",
-        );
+        await expect(readdir(join(ctx.root, "new-folder"))).resolves.toEqual([]);
       });
     });
   });
 
   it("reads ephemeral watcher history when durable history is unsupported", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await withProcessPlatform("darwin", async () => {
         const store = createChangeSetStore(ctx.root, { ephemeralIfUnsupported: true });
         const set = addFileChanges(
@@ -718,39 +680,15 @@ describe("mcp tools operate on allowed paths", () => {
           change: expect.objectContaining({ id: "watcher-record-1" }),
         });
 
+        // Phase C: writes are no longer blocked by the durable-history
+        // platform gate (and they add no legacy records either). This
+        // workspace explicitly opted out of the engine, so the write reports
+        // recording honestly OFF — never a recorder that isn't running.
         await expect(
-          writeWorkspaceFile(ctx, { path: "notes/blocked.md", content: "blocked\n" }),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("durable history recording is not supported"),
-        });
+          writeWorkspaceFile(ctx, { path: "notes/unblocked.md", content: "fine\n" }),
+        ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
+        await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 1 });
       });
-    });
-  });
-
-  itDurableHistory("retries stale history timestamps during concurrent writes", async () => {
-    await withWorkspace(async (ctx) => {
-      const now = vi.spyOn(Date, "now").mockReturnValue(1234);
-      try {
-        await expect(
-          Promise.all([
-            writeWorkspaceFile(ctx, { path: "notes/a.md", content: "A\n" }),
-            writeWorkspaceFile(ctx, { path: "notes/b.md", content: "B\n" }),
-          ]),
-        ).resolves.toEqual([
-          expect.objectContaining({ ok: true, path: "notes/a.md" }),
-          expect.objectContaining({ ok: true, path: "notes/b.md" }),
-        ]);
-      } finally {
-        now.mockRestore();
-      }
-
-      const records = await createChangeSetStore(ctx.root).list();
-      expect(records).toHaveLength(2);
-      expect(records.map((record) => record.recordedAtMs).sort((a, b) => a - b)).toEqual([
-        1234,
-        1235,
-      ]);
     });
   });
 
@@ -908,42 +846,39 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("lists and reads MCP-recorded change sets for collaboration-aware agents", async () => {
+  it("lists and reads pre-flip legacy change sets as a read-only relic (writes add none)", async () => {
     await withWorkspace(async (ctx) => {
-      const write = await writeWorkspaceFile(ctx, {
-        path: "notes/plan.txt",
-        content: "draft\n",
-        summary: "Agent drafted plan",
-      });
-      expect(write).toMatchObject({ ok: true });
-      if (!write.ok) return;
-      // Unflagged workspace: the write must carry a legacy change set id.
-      const changeSetId = write.changeSetId;
-      if (!changeSetId) {
-        throw new Error("expected a legacy change set id on an unflagged workspace");
-      }
+      // A record left behind by a pre-flip version of the app.
+      const store = createChangeSetStore(ctx.root);
+      await store.record(
+        addFileChanges(
+          createChangeSet({
+            kind: "user-edit",
+            author: createLocalChangeAuthor("Local file edit"),
+            summary: "Pre-flip edit",
+            provenance: { source: "user-edit" },
+          }),
+          [{ path: "notes/old.md", operation: "write" }],
+        ),
+        { id: "relic-1", recordedAtMs: 1000 },
+      );
 
+      // A new MCP write records NOTHING legacy (Phase C)...
+      await expect(
+        writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
+      ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+
+      // ...while the read tools still serve the relic.
       const listed = await listChanges(ctx, { includeFiles: true });
-      expect(listed).toMatchObject({
-        count: 1,
-        totalAvailable: 1,
-        hasMore: false,
-      });
+      expect(listed).toMatchObject({ count: 1, totalAvailable: 1, hasMore: false });
       expect(listed.changes[0]).toMatchObject({
-        id: changeSetId,
-        kind: "agent-run",
-        summary: "Agent drafted plan",
-        author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
-        provenance: { source: "agent-run" },
-        files: [{ path: "notes/plan.txt", operation: "write" }],
+        id: "relic-1",
+        summary: "Pre-flip edit",
+        files: [{ path: "notes/old.md", operation: "write" }],
       });
-
-      await expect(readChange(ctx, { id: changeSetId })).resolves.toMatchObject({
+      await expect(readChange(ctx, { id: "relic-1" })).resolves.toMatchObject({
         ok: true,
-        change: {
-          id: changeSetId,
-          files: [{ path: "notes/plan.txt", operation: "write" }],
-        },
+        change: { id: "relic-1" },
       });
       await expect(readChange(ctx, { id: "missing" })).resolves.toMatchObject({
         ok: false,
@@ -1012,7 +947,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("moves paths and deletes recoverably while recording history", async () => {
+  it("moves paths and deletes recoverably (engine-recorded, trash-backed)", async () => {
     await withWorkspace(async (ctx) => {
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
       const moved = await moveWorkspacePath(ctx, {
@@ -1037,17 +972,13 @@ describe("mcp tools operate on allowed paths", () => {
       const trash = await readdir(join(ctx.root, ".dohc", "trash"));
       expect(trash.some((name) => name.endsWith("-todo.txt"))).toBe(true);
 
-      const pending = await syncNow(ctx, { sinceMs: 0 });
-      expect(pending.pending).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ summary: "MCP wrote drafts/todo.txt", fileCount: 1 }),
-          expect.objectContaining({
-            summary: "MCP moved drafts/todo.txt to archive/todo.txt",
-            fileCount: 2,
-          }),
-          expect.objectContaining({ summary: "MCP deleted archive/todo.txt", fileCount: 1 }),
-        ]),
-      );
+      // Phase C: none of the mutations wrote a legacy change set.
+      expect(moved).toMatchObject({ recordedBy: "workspace-engine" });
+      expect(deleted).toMatchObject({ recordedBy: "workspace-engine" });
+      await expect(syncNow(ctx, { sinceMs: 0 })).resolves.toMatchObject({
+        clean: true,
+        pendingChangeCount: 0,
+      });
     });
   });
 
@@ -1066,128 +997,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  itDurableHistory("retains move/delete mutations if the history record cannot be written", async () => {
-    await withWorkspace(async (ctx) => {
-      await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
-      await rm(join(ctx.root, ".dohc", "history", "index.json"), { force: true });
-      await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
-
-      const moved = await moveWorkspacePath(ctx, {
-        fromPath: "drafts/todo.txt",
-        toPath: "archive/todo.txt",
-      });
-      expect(moved).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).resolves.toBe("ship\n");
-
-      const deleted = await deleteWorkspacePath(ctx, { path: "archive/todo.txt" });
-      expect(deleted).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    });
-  });
-
-  itDurableHistory("retains write/create/import mutations if the history record cannot be written", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
-      await writeFile(join(ctx.root, "existing.txt"), "before\n");
-      await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
-
-      const createdFile = await writeWorkspaceFile(ctx, {
-        path: "notes/nested/new.txt",
-        content: "new\n",
-      });
-      expect(createdFile).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readFile(join(ctx.root, "notes/nested/new.txt"), "utf8")).resolves.toBe(
-        "new\n",
-      );
-
-      const overwritten = await writeWorkspaceFile(ctx, {
-        path: "existing.txt",
-        content: "after\n",
-      });
-      expect(overwritten).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readFile(join(ctx.root, "existing.txt"), "utf8")).resolves.toBe("after\n");
-
-      const directory = await createWorkspaceDirectory(ctx, { path: "created-dir" });
-      expect(directory).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readdir(join(ctx.root, "created-dir"))).resolves.toEqual([]);
-
-      const site = await createSite(ctx, { path: "failed-site" });
-      expect(site).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readFile(join(ctx.root, "failed-site/index.html"), "utf8")).resolves.toContain(
-        "<!doctype html>",
-      );
-
-      const imported = await importData(ctx, {
-        sourcePath: "people.csv",
-        databasePath: "imports/people.sqlite",
-        tableName: "people",
-      });
-      expect(imported).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("visible mutation retained"),
-      });
-      await expect(readFile(join(ctx.root, "imports/people.sqlite"))).resolves.toBeInstanceOf(
-        Buffer,
-      );
-    });
-  });
-
-  itDurableHistory("does not report retained mutations when the visible write phase fails", async () => {
-    await withWorkspace(async (ctx) => {
-      await writeFile(join(ctx.root, "blocked-parent"), "not a directory\n");
-      await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
-
-      const written = await writeWorkspaceFile(ctx, {
-        path: "blocked-parent/new.txt",
-        content: "new\n",
-      });
-      expect(written).toMatchObject({ ok: false });
-      if (!written.ok) expect(written.reason).not.toContain("visible mutation retained");
-
-      const directory = await createWorkspaceDirectory(ctx, {
-        path: "blocked-parent/created-dir",
-      });
-      expect(directory).toMatchObject({ ok: false });
-      if (!directory.ok) expect(directory.reason).not.toContain("visible mutation retained");
-
-      const site = await createSite(ctx, { path: "blocked-parent/site" });
-      expect(site).toMatchObject({ ok: false });
-      if (!site.ok) expect(site.reason).not.toContain("visible mutation retained");
-
-      const imported = await importData(ctx, {
-        sourcePath: "people.csv",
-        databasePath: "blocked-parent/people.sqlite",
-        tableName: "people",
-      });
-      expect(imported).toMatchObject({ ok: false });
-      if (!imported.ok) expect(imported.reason).not.toContain("visible mutation retained");
-    });
-  });
-
-  it("create_site scaffolds a normal website and records history", async () => {
+  it("create_site scaffolds a normal website (engine-recorded)", async () => {
     await withWorkspace(async (ctx) => {
       const result = await createSite(ctx, { path: "finance/ledger", title: "Ledger" });
       expect(result).toMatchObject({ ok: true, siteRoot: "finance/ledger" });
@@ -1223,10 +1033,9 @@ describe("mcp tools operate on allowed paths", () => {
         },
       });
       expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });
-      const changes = await listChanges(ctx, { includeFiles: true });
-      expect(changes.changes[0]).toMatchObject({
-        summary: "MCP created site finance/ledger",
-        files: expect.arrayContaining([expect.objectContaining({ path: "finance/ledger/index.html" })]),
+      // Phase C: the scaffold reports the engine as recorder; no change set.
+      await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
+        count: 0,
       });
     });
   });

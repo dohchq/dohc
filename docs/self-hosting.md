@@ -1,8 +1,10 @@
 # Self-Hosting
 
-Self-hosting is the Postgres-backed path for running dohc outside the Convex
-hosted baseline. This is still an MVP migration mode, not the final production
-runbook.
+Self-hosting runs the opt-in Postgres cloud stack (workspace API, Hocuspocus,
+object storage) for cloud sync and shares. The desktop product itself is
+local-first and needs none of this; the stack below retires per the legacy
+salvage audit's Phase D when engine-native sync replaces it. This is still an
+MVP mode, not the final production runbook.
 
 ## Prerequisites
 
@@ -38,8 +40,6 @@ Important variables live in `.env.self-host.example`:
 - `SQLITE_WORKER_*` for SQLite import/query/materialization.
 - `APP_TESTER_*` for app validation.
 - `WEB_PORT` and `VITE_DOHC_BACKEND` for the frontend.
-- `VITE_CONVEX_URL` is intentionally blank for the Postgres self-host stack;
-  set it only when intentionally running the web app against Convex.
 
 Replace every `change-me` value before starting the stack. Compose refuses to
 start without explicit Postgres and object-storage passwords.
@@ -61,12 +61,6 @@ For local Postgres development:
 
 ```bash
 pnpm reset:postgres
-```
-
-For Convex development:
-
-```bash
-pnpm reset:dev --confirm WIPE_DEV_DATA --email you@example.com --delete-workos-orgs
 ```
 
 Do not use reset commands against production data.

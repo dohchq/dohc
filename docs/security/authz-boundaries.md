@@ -1,87 +1,63 @@
 # Authorization boundaries
 
-dohc's safety properties are enforced server-side in Convex and must not
-be weakened by rebrand or UI work.
+dohc is a local-first desktop product built on the workspace engine
+(`packages/workspace-engine`, per-workspace SQLite under `.dohc/engine/`).
+The Convex-era server enforcement this document used to describe is retired
+(Think Bigger User Decision 6; see the
+[legacy salvage audit](../superpowers/plans/2026-07-06-think-bigger-0n3-legacy-salvage-audit.md)).
+This page states where authorization is enforced today.
 
-## Identity
+## Trust boundary: the Electron main process
 
-- The authenticated identity is derived server-side via
-  `ctx.auth.getUserIdentity()`. Functions NEVER accept a `userId` (or any
-  user identifier) as an argument for authorization from browser/client
-  callers.
-- There is intentionally **no** unauthenticated request → data escape.
-  An earlier env-gated dev bypass was removed because Convex public
-  functions are raw internet endpoints on a shared deployment.
-- Server-to-server bridges may use explicit identity/workspace arguments only
-  behind a shared server secret. The current reviewed exception is
-  `hocuspocusAuth.checkAtomAccess`, which requires
-  `HOCUSPOCUS_CONVEX_SERVER_TOKEN` and is called by the Hocuspocus service,
-  not by the browser. Its `userId` comes from the signed collab token `sub`,
-  while `workspaceId` is the owner workspace encoded in the Hocuspocus
-  document name; Convex performs the final share/org ACL decision.
+- Every IPC handler in `apps/desktop/src/main.ts` verifies the sender
+  (`assertTrustedSender`) and parses its payload against the zod contracts in
+  `apps/desktop/src/ipc/bridgeContract.ts`. The renderer is untrusted input.
+- The renderer never supplies identity or authorization facts. Workspace
+  membership of a request is resolved in main via the workspace registry
+  (`requireWorkspace`); engine surfaces additionally gate on the workspace's
+  live engine capture (`requireEngineCapture`).
+- Agent attribution is server-side: a change is attributed to an agent only
+  when main's own agent-run slot is active — never from client-declared
+  authorship (actor-neutral capture principle).
 
-## Ownership
+## Workspace scoping and the filesystem
 
-- Every atom, folder, entity, and share is scoped to a `workspaceId`
-  derived from the authenticated identity (`requireWorkspace`).
-  `workspace` is a domain concept, not legacy brand — it stays.
-- A user cannot read or mutate another workspace's data. Sharing is the
-  only cross-user path and is consent-gated.
+- All file paths are workspace-relative and pass two independent guards:
+  lexical validation (traversal, encoding, reserved names) and realpath
+  containment (a symlink inside the workspace cannot escape it). The desktop
+  and MCP (`packages/mcp/src/tools.ts`) each enforce both.
+- `.dohc/` metadata is defended in depth: a symlinked `.dohc/` or settings
+  file is refused, settings files are size-capped, and unreadable settings
+  resolve to safe defaults — including the workspace-engine default-on rule
+  (a planted symlink cannot silently change a workspace's posture).
+- Engine stores are per-workspace databases; there is no cross-workspace
+  query surface. One workspace's moments, chats, versions, and search index
+  are unreachable from another workspace's handles.
 
-## Locks and gates
+## Policy, search, export
 
-- A user lock on an atom refuses all agent writes at the data layer; the
-  user's own editor still works. Hocuspocus forwards signed `actorKind` into
-  the Convex ACL bridge so collaborative writes follow the same rule.
-- The skill-turn gate and inline-window caps are structural, fail-closed
-  invariants. The supporting tests (`skillTurnGate`, `strictKeystone`,
-  `r3InlineWindow`, `windows`, `atomShares`) must keep passing.
+- The effective-policy resolver (`packages/workspace-engine/src/effectivePolicy.ts`,
+  `.dohc/files.toml` / `.dohc/visibility.toml`) is the single input for
+  what search indexes and what export may leave the workspace. Secret-backed
+  files (the `.env` driver) keep values out of moments, search, and export.
 
-## HTML atoms
+## MCP
 
-- Author HTML is sanitized before interpolation into a trusted,
-  server-built shell. The shell is fixed and never resolves inline
-  `{= }` formulas (the walk skips STYLE/script ancestors). CSP:
-  `style-src 'unsafe-inline'; font-src data:` with no network fetches.
+- The MCP server is scoped to the `--workspace` root it was launched with and
+  cannot widen it. Mutating tools resolve paths through the same dual guards
+  and record through the engine (the desktop watcher captures physical
+  writes); engine chat tools require the workspace's engine to be enabled and
+  a workspace manifest identity.
 
-## Sites
+## Cloud (opt-in, retiring per audit Phase D)
 
-- Sites are normal website folders in the user's local workspace. dohc can
-  detect, serve, and preview them, but a site folder does not become a
-  privileged dohc integration merely by existing.
-- Static preview serves files from the selected site root through a loopback
-  server with path-containment checks. Dev and build previews run explicit
-  package scripts only when the user starts that mode.
-- Site preview iframes may render loopback preview URLs. Top-level desktop
-  navigation remains locked down; external sharing/publishing is a separate
-  dohc Cloud decision.
-- Site detection is broader than the dedicated `sites/` namespace. Normal
-  website folders such as `report/`, `client-dashboard/`, and
-  `shared-with-me/alex/pricing-portal/` are detected by website signals
-  (`index.html`, package scripts, configs, and build outputs) in
-  `@dohc/workspace-core`, not by their folder name.
-- Source-like files under a `sites/` path segment (`.ts`, `.tsx`, `.mts`,
-  `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.css`, `.scss`, `.json`, `.htm`,
-  `.html`) collab as plain text. This helper is only the path-dependent rule
-  for that dedicated namespace: `isSiteSourcePath()` requires the `sites/`
-  segment, a site folder segment after it, and a matching file extension. For
-  example, `sites/workspace/index.html` and
-  `clients/acme/sites/portal/src/App.tsx` match, while `sites/index.html` and
-  `clients/acme/sites/styles.css` do not. Matching extensions elsewhere
-  remain normal workspace files.
-- `@dohc/sdk` access is separate from merely rendering a site. The first
-  preview bridge supports bounded local file reads through the desktop
-  `readWorkspaceText` IPC path; browser code cannot choose an identity or
-  widen the workspace. The SDK client exposes
-  `dohc.collections.get(...).list()` for explicit transports, but the Phase 1
-  desktop preview host advertises `collections.read: false` and does not handle
-  `collections.list`. The SDK checks that advertised capability before calling
-  `collections.list`; disabled collection reads raise `DOHC_CAPABILITY_DISABLED`,
-  while malformed capability or collection payloads remain `DOHC_BAD_RESPONSE`.
-  A future host may set that capability to true only after server-side
-  collection ACL checks are implemented as the authorization boundary. The
-  preview bridge controls when browser code can call a feature, but it is not
-  the trust boundary: callers cannot bypass server-side identity,
-  workspace-scope, share, lock, or review-gate enforcement by manipulating
-  browser state. Writes, cloud access, sharing, and publishing must continue
-  through explicit workspace, share, lock, and review-gate checks.
+- The legacy cloud stack (`services/workspace-api`, Hocuspocus, Postgres) is
+  reachable only through explicit opt-in cloud sync with bearer-token auth;
+  nothing on the local default path depends on it. Collab tokens are minted
+  only for shared cloud workspaces with a signed-in session and fail closed
+  to local editing. Arc 0P rebuilds sync engine-native; the rebuilt server
+  owns its own authorization design note when it lands.
+
+Security rule unchanged from the beginning: client callers never provide
+user identity or workspace authorization; the process that owns the data
+derives the actor and scopes every operation to a workspace.

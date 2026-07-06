@@ -16,6 +16,7 @@ type Notice = {
     | "sync-conflict"
     | "cloud-disconnected"
     | "history-capture-failed"
+    | "history-recording-off"
     | "agent-active"
     | "update-ready";
   tone: "danger" | "warning" | "success" | "neutral";
@@ -166,6 +167,20 @@ export function NoticeCenter(props: {
         title: "History paused",
         body: "dohc couldn't record history for this workspace. Your files are safe on disk, but recent changes may be missing from History.",
         action: { label: "Open History", onClick: props.onOpenHistory },
+        Icon: AlertTriangle,
+      });
+    }
+
+    // Persistent while true (WS-H1 retirement Phase C): an engine opt-out
+    // means NO history recorder exists at all — the legacy recorder is
+    // retired. Same pattern as the capture-failure notice above: honest,
+    // persistent, never spammy (the flag only changes at workspace open).
+    if (props.syncStatus?.historyRecordingOff) {
+      next.push({
+        id: "history-recording-off",
+        tone: "warning",
+        title: "History is off for this workspace",
+        body: "The workspace engine is turned off in Settings, so changes are not being recorded. Your files still save normally.",
         Icon: AlertTriangle,
       });
     }

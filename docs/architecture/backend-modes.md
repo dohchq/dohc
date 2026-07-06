@@ -1,74 +1,30 @@
 # Backend Modes
 
-dohc currently supports two backend modes during the migration to a
-self-hostable core.
+dohc is local-first: the desktop app and the workspace engine
+(per-workspace SQLite under `.dohc/engine/`) are the product default and
+need no backend at all. The Convex-era dual-backend migration this document
+used to describe is finished — Convex is retired (Think Bigger User
+Decision 6), and there is no `DOHC_BACKEND` switch anymore.
 
-## Convex Mode
+## Local (default)
 
-Convex remains the production baseline. It continues to own the current app
-server functions, auth-derived workspace scoping, sharing boundaries, app trust
-checks, locks, review gates, and agent approval behavior.
+Every workspace works fully offline: files on disk, engine history/versions/
+chats/search in `.dohc/engine/`, MCP agents scoped to the workspace root.
+Nothing here talks to a server.
 
-Use Convex mode when:
+## Postgres cloud stack (opt-in, retiring)
 
-- running the current hosted app.
-- validating compatibility with existing workspaces.
-- testing behavior that still lives in `apps/app/convex`.
+The Postgres-backed cloud stack (`services/workspace-api`,
+`services/hocuspocus`, `packages/workspace-postgres`, the `apps/web` client)
+serves opt-in cloud sync, shares, and live co-editing for cloud-connected
+shared workspaces. It is fully decoupled from the local default path and
+retires as a coupled unit per the
+[legacy salvage audit](../superpowers/plans/2026-07-06-think-bigger-0n3-legacy-salvage-audit.md)
+Phase D; engine-native sync (Arc 0P) replaces it.
 
-Frontend default:
-
-```bash
-DOHC_BACKEND=convex
-```
-
-If no backend mode is set, the app defaults to Convex.
-
-## Postgres Mode
-
-Postgres is the candidate core for self-hosted and cloud-hosted dohc. The goal
-is not to remove Convex early. The goal is to prove that the same workspace
-contract can be served by a durable SQL backend, object storage, Hocuspocus,
-SQLite services, app testing, and agent sandbox tooling.
-
-Use Postgres mode when:
-
-- testing self-host packaging.
-- validating local file sync and filesystem projection.
-- proving backend-neutral app and SQLite behavior.
-- preparing cloud deployments that should not depend on Convex.
-
-Frontend switch:
+Environment variables for running that stack (self-host/dev only):
 
 ```bash
-DOHC_BACKEND=postgres
-VITE_DOHC_BACKEND=postgres
-```
-
-`DOHC_BACKEND` is server/configuration controlled. Browser URL query strings
-must not change backend mode.
-
-## Readiness
-
-Readiness is decided by shared tests, not confidence:
-
-- `@dohc/workspace-contracts` defines the common backend contract.
-- `@dohc/workspace-postgres` implements the Postgres adapter and service
-  tests.
-- `@dohc/workspace-convex-compat` proves Convex compatibility against shared
-  conformance cases.
-- AppTester and future Playwright backend matrix tests compare user flows
-  across modes.
-
-Until the readiness gate passes, Convex remains supported and Postgres remains
-the migration candidate.
-
-## Environment Variables
-
-Core mode variables:
-
-```bash
-DOHC_BACKEND=convex|postgres
-VITE_DOHC_BACKEND=convex|postgres
 POSTGRES_URL=postgres://...
 WORKSPACE_API_BASE_URL=http://127.0.0.1:1786
 HOCUSPOCUS_ADMIN_TOKEN=...
@@ -79,4 +35,5 @@ APP_TESTER_TOKEN=...
 
 Security rule: client callers never provide user identity or workspace
 authorization. Backend services derive actor identity server-side and scope
-every operation to a workspace.
+every operation to a workspace. The local trust boundary is documented in
+[docs/security/authz-boundaries.md](../security/authz-boundaries.md).

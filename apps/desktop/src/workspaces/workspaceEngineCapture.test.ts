@@ -3,7 +3,7 @@ import type { VersionedTextStore } from "@dohc/workspace-engine";
 import { createVersionedTextStore } from "@dohc/workspace-engine";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,7 +18,8 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
+import { createChangeSetStore } from "@dohc/workspace-history";
+import { startWorkspaceWatch } from "./workspaceWatcher";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
 // pipeline cannot statically resolve the node:sqlite builtin yet.
@@ -690,6 +691,105 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     ]);
   });
 
+  // chmod-based fixtures cannot make a path unreadable for root (root
+  // ignores file modes), so these degrade-tolerance tests skip under uid 0.
+  const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
+
+  itNonRoot("cold adoption survives an unreadable subdirectory: the rest of the tree seeds and the pass reports degraded", async () => {
+    const root = await tempRoot();
+    await write(root, "notes/adopted.md", "# Adopted\n");
+    await write(root, "docs/deep/nested.md", "# Nested\n");
+    await write(root, "locked/secret.md", "# Never readable this pass\n");
+    await chmod(join(root, "locked"), 0o000);
+
+    const outcomes: boolean[] = [];
+    const errors: Array<{ context: string; error: unknown }> = [];
+    try {
+      const engine = capture(root, {
+        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onError: (context, error) => errors.push({ context, error }),
+      });
+      engine.start();
+      await engine.stop();
+    } finally {
+      await chmod(join(root, "locked"), 0o755);
+    }
+
+    // Every readable file seeded — one bad directory no longer starves the
+    // whole first reconciliation.
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation]).sort()).toEqual([
+      ["docs/deep/nested.md", "write"],
+      ["notes/adopted.md", "write"],
+    ]);
+    // ...and the failure surfaced as a DEGRADED outcome (raises the capture
+    // notice), never silently.
+    expect(outcomes).toEqual([false]);
+    const scanError = errors.find((entry) => entry.context === "reconciliation scan");
+    expect(String((scanError?.error as Error)?.message)).toContain("locked");
+  });
+
+  itNonRoot("does not retire tracked files under a transiently unreadable directory", async () => {
+    const root = await tempRoot();
+    await write(root, "kept.md", "kept\n");
+    await write(root, "locked/inside.md", "tracked earlier\n");
+
+    // First session seeds both files while everything is readable.
+    const first = capture(root);
+    first.start();
+    await first.stop();
+    expect(readEngineMoments(root).map((m) => m.path).sort()).toEqual([
+      "kept.md",
+      "locked/inside.md",
+    ]);
+
+    // Second session: the directory is unreadable. Absent-from-a-degraded-
+    // listing is NOT deletion evidence — no delete moment may be recorded.
+    await chmod(join(root, "locked"), 0o000);
+    const outcomes: boolean[] = [];
+    try {
+      const second = capture(root, {
+        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onError: () => {},
+      });
+      second.start();
+      await second.stop();
+    } finally {
+      await chmod(join(root, "locked"), 0o755);
+    }
+
+    expect(outcomes).toEqual([false]);
+    expect(
+      readEngineMoments(root).filter((m) => m.operation === "delete"),
+    ).toEqual([]);
+  });
+
+  it("a file deleted between the scan and the pass reconciles as a real delete, not a degraded pass", async () => {
+    const root = await tempRoot();
+    await write(root, "stays.md", "stays\n");
+    await write(root, "vanishes.md", "gone soon\n");
+
+    const first = capture(root);
+    first.start();
+    await first.stop();
+
+    // Delete while dohc is closed: the next startup pass records an honest
+    // delete moment and reports OK (nothing was unreadable).
+    await unlink(join(root, "vanishes.md"));
+    const outcomes: boolean[] = [];
+    const second = capture(root, {
+      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    });
+    second.start();
+    await second.stop();
+
+    expect(outcomes).toEqual([true]);
+    expect(
+      readEngineMoments(root)
+        .filter((m) => m.operation === "delete")
+        .map((m) => m.path),
+    ).toEqual(["vanishes.md"]);
+  });
+
   it("falls back to the TypeScript scan path when the flagged kernel cannot spawn", async () => {
     const root = await tempRoot();
     await write(root, "offline.md", "offline edit\n");
@@ -751,10 +851,10 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     expect(await createChangeSetStore(root).list()).toHaveLength(0);
   });
 
-  it("keeps legacy recording byte-for-byte for unflagged workspaces", async () => {
+  it("records NOTHING without an engine capture (retirement Phase C: opt-out has no recorder)", async () => {
     const root = await tempRoot();
     const workspace: CreatedWorkspace = {
-      workspaceId: "legacy-unflagged",
+      workspaceId: "opted-out-no-recorder",
       rootPath: root,
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
@@ -769,13 +869,14 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     });
     await handle.ready;
     await write(root, "notes.md", "# Notes\n");
+    // The batch still settles (UI refresh / cloud queue), but no history of
+    // any kind is written: no legacy change sets, no engine store.
     await recorded;
     await handle.stop();
 
-    const records = await createChangeSetStore(root).list();
-    expect(records).toHaveLength(1);
-    expect(records[0].files.map((file) => file.path)).toEqual(["notes.md"]);
-    expect(records[0].files[0].after?.text).toBe("# Notes\n");
+    expect(await createChangeSetStore(root).list()).toHaveLength(0);
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(false);
   });
 });
 

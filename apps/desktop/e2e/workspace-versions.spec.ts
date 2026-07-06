@@ -408,12 +408,17 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
   }
 });
 
-test("an unflagged workspace never shows the versions surface", async () => {
+// WS-H1 flag flip: versions are on by default; only an explicit opt-out
+// hides the surface (and gates the IPC in main).
+test("an explicitly opted-out workspace never shows the versions surface", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
     await writeWorkspaceFiles(temp, [{ path: "plain.md", contents: "hello\n" }]);
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: false },
+    });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     const workspace = await openWorkspaceFromFirstRun(page, temp);

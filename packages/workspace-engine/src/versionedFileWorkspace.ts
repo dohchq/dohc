@@ -1,3 +1,11 @@
+// QUARANTINED after the WS-H1 legacy-recorder retirement: this module's
+// createVersionedFileWorkspace still records legacy .dohc/history change sets
+// (createChangeSetStore), which no production surface may do post-flip. Its
+// `./versioned-file-workspace` package subpath export was DROPPED so it is
+// unreachable through the package API; only in-package tests
+// (versionedFileWorkspace.test.ts, phase0Proof.test.ts) import it relatively.
+// The index re-exports only its types and capability helpers, which write
+// nothing. It retires with the rest of the legacy stack in Phase D (0P-B).
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,

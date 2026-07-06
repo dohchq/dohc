@@ -18,7 +18,11 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
-import { isTextMediaType, mediaTypeForPath, scanWorkspaceFiles } from "@dohc/workspace-fs";
+import {
+  isTextMediaType,
+  mediaTypeForPath,
+  scanWorkspaceFilesTolerant,
+} from "@dohc/workspace-fs";
 import {
   WorkspaceKernelClient,
   defaultWorkspaceKernelBinaryPath,
@@ -342,6 +346,21 @@ type DiskTextState =
 
 type ReconcileScanFile = { path: string };
 
+// A reconciliation disk listing plus the workspace-relative paths (files or
+// directory prefixes) the tolerant scan could NOT read. Failed paths are
+// carried alongside the listing so the retire pass never mistakes
+// "unreadable right now" for "deleted while dohc was closed".
+type ReconcileScan = {
+  files: readonly ReconcileScanFile[];
+  failedPaths: readonly string[];
+};
+
+function isUnderScanFailedPath(path: string, failedPaths: readonly string[]): boolean {
+  return failedPaths.some(
+    (failed) => failed === "." || path === failed || path.startsWith(`${failed}/`),
+  );
+}
+
 async function readDiskTextState(rootPath: string, path: string): Promise<DiskTextState> {
   const absolute = join(rootPath, path);
   try {
@@ -568,9 +587,14 @@ export function createWorkspaceEngineCapture(
     return secretStore;
   }
 
-  async function scanWorkspaceFilesForReconcile(): Promise<ReconcileScanFile[]> {
+  // Reconciliation-tolerant listing (WS-H1 gate fix): an unreadable or racy
+  // path is skipped and reported as a failed path instead of aborting the
+  // whole scan, so one bad directory can never stop every OTHER existing
+  // file from seeding the engine on a cold adoption.
+  async function scanWorkspaceFilesForReconcile(): Promise<ReconcileScan> {
     if (process.env.DOHC_KERNEL_SIDECAR !== "1") {
-      return scanWorkspaceFiles(rootPath);
+      const scan = await scanWorkspaceFilesTolerant(rootPath);
+      return { files: scan.files, failedPaths: scan.failures.map((failure) => failure.path) };
     }
     const configured = process.env.DOHC_KERNEL_BINARY_PATH;
     const releasePath = defaultWorkspaceKernelBinaryPath();
@@ -585,10 +609,11 @@ export function createWorkspaceEngineCapture(
     });
     try {
       const result = await client.scan(rootPath);
-      return result.files;
+      return { files: result.files, failedPaths: [] };
     } catch (error) {
       onError("kernel scan fallback", error);
-      return scanWorkspaceFiles(rootPath);
+      const scan = await scanWorkspaceFilesTolerant(rootPath);
+      return { files: scan.files, failedPaths: scan.failures.map((failure) => failure.path) };
     } finally {
       await client.dispose().catch(() => undefined);
     }
@@ -861,11 +886,19 @@ export function createWorkspaceEngineCapture(
     policy: WorkspaceEnginePolicySnapshot,
     metadata: ActorNeutralWriteMetadata,
     // Callers that must pin the disk listing to the START of their task
-    // (before other per-task reads run) pass the scan in; everyone else
-    // lets this function scan.
-    scannedFiles?: readonly ReconcileScanFile[],
+    // (before other per-task reads run) pass the scan in — and own its
+    // failed paths (the startup pass degrades and reports). Everyone else
+    // lets this function scan, and a scan failure FAILS the operation
+    // (version operations reject to their caller, exactly as the strict
+    // scan made them before).
+    scan?: ReconcileScan,
   ): Promise<void> {
-    const scanned = scannedFiles ?? (await scanWorkspaceFilesForReconcile());
+    const { files: scanned, failedPaths } = scan ?? (await scanWorkspaceFilesForReconcile());
+    if (!scan && failedPaths.length > 0) {
+      throw new Error(
+        `Could not scan workspace paths: ${failedPaths.join(", ")}`,
+      );
+    }
     const diskPaths = new Set<string>();
     // Secret paths reconcile into the ENCRYPTED store (PR 08): capture the
     // current disk plaintext (metadata-only moments), and retire entries
@@ -918,10 +951,14 @@ export function createWorkspaceEngineCapture(
       }
     }
     // Files the engine tracked that no longer exist on disk were deleted
-    // outside a live capture window; reconcile the deletions too.
+    // outside a live capture window; reconcile the deletions too. A tracked
+    // path the tolerant scan FAILED to read (unreadable directory, racy
+    // delete) is left alone: absent-from-a-degraded-listing is not evidence
+    // of deletion, and retiring it here would record a false delete moment.
     const tracked = await engine.listTextFiles({ workspaceId, versionId });
     for (const snapshot of tracked) {
       if (diskPaths.has(snapshot.path)) continue;
+      if (isUnderScanFailedPath(snapshot.path, failedPaths)) continue;
       await deleteIfTracked(engine, versionId, snapshot.path, metadata);
     }
     // Same rule for the encrypted store: protected files deleted while dohc
@@ -933,6 +970,7 @@ export function createWorkspaceEngineCapture(
     for (const stat of trackedSecrets) {
       if (secretDiskPaths.has(stat.path)) continue;
       if (secretUnreadablePaths.has(stat.path)) continue;
+      if (isUnderScanFailedPath(stat.path, failedPaths)) continue;
       await secretStoreFor().deleteSecretFile({
         workspaceId,
         versionId,
@@ -942,7 +980,11 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  async function reconcile(): Promise<void> {
+  // Returns true when the pass covered the whole tree; false when the
+  // tolerant scan had to skip paths (the pass still seeded everything
+  // readable, but the outcome is DEGRADED and must reach the capture
+  // notice, never pass silently).
+  async function reconcile(): Promise<boolean> {
     const engine = await engineStore();
     // One actor-neutral correlation id ties the pass's per-file moments
     // together as "reconciled offline edits" without inventing an author.
@@ -959,9 +1001,16 @@ export function createWorkspaceEngineCapture(
     // when the task began; edits landing while this task's own per-task
     // reads run belong to the next serialized batch, not to this pass.
     // Routed through the kernel-aware scan, which falls back to the TS path.
-    const scanned = await scanWorkspaceFilesForReconcile();
+    const scan = await scanWorkspaceFilesForReconcile();
+    if (scan.failedPaths.length > 0) {
+      onError(
+        "reconciliation scan",
+        new Error(`skipped unreadable paths: ${scan.failedPaths.join(", ")}`),
+      );
+    }
     const policy = await readPolicyForTask();
-    await reconcileDiskIntoVersion(engine, versionId, policy, metadata, scanned);
+    await reconcileDiskIntoVersion(engine, versionId, policy, metadata, scan);
+    return scan.failedPaths.length === 0;
   }
 
   // Applies engine-owned text state to the workspace folder, registering
@@ -1157,10 +1206,10 @@ export function createWorkspaceEngineCapture(
   return {
     start() {
       enqueue("startup reconciliation", () =>
-        reportCaptureOutcome(async () => {
-          await reconcile();
-          return true;
-        }),
+        // reconcile() reports false when the tolerant scan skipped paths:
+        // everything readable seeded, but the pass is degraded, so the
+        // capture-failure notice raises instead of a silent partial pass.
+        reportCaptureOutcome(() => reconcile()),
       );
     },
 

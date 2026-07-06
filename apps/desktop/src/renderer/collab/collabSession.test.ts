@@ -305,3 +305,90 @@ describe("CASE 6: rename/delete of a file with a live doc is safe", () => {
     expect(rescuePathFor("dir.with.dot/file")).toBe("dir.with.dot/file.recovered");
   });
 });
+
+// G2-A pinning (collab design, coexistence rule 3): an ENGINE RESTORE into a
+// live collab session is an external edit. Restore writes the file through
+// the normal bridge; the open editor's reconcile effect folds it into the doc
+// via three-way merge, or rescues to <path>.conflict on overlap. The restore
+// is never silently overwritten by the next settle, because the settle's
+// materialization base was advanced by the merge. These tests pin that exact
+// sequence at the canonical-state-model level (the same functions
+// useCollabDoc.reconcile/writeAndRecord drive in production).
+describe("G2-A: engine restore while a collab session is open (coexistence rule 3)", () => {
+  const base = "# Notes\n\nline one\nline two\n";
+
+  it("folds a restore into an idle doc (doc == last materialized) and the next settle cannot overwrite it", () => {
+    // Live session settled at `base`; the doc holds exactly what disk holds.
+    let state = recordMaterialization(
+      { ...createCollabSessionState(), active: true },
+      base,
+      1,
+    );
+    const restored = "# Notes\n\nline one (restored)\nline two\n";
+
+    // Engine restore writes `restored` to disk — an external edit.
+    const res = reconcileExternalEdit({
+      onDiskText: restored,
+      lastMaterializedText: base,
+      docText: base,
+    });
+    // local == base, so the three-way merge adopts the restored text.
+    expect(res).toEqual({ kind: "merge-into-doc", mergedText: restored });
+
+    // useCollabDoc.writeAndRecord advances the materialization base to the
+    // merged text. The NEXT settle must therefore be a no-op (doc == disk ==
+    // base) — the restore is never clobbered by a stale settle.
+    if (res.kind !== "merge-into-doc") throw new Error("unreachable");
+    state = recordMaterialization(state, res.mergedText, 2);
+    expect(
+      shouldMaterialize({
+        state,
+        docText: res.mergedText,
+        onDiskText: res.mergedText,
+        trigger: "settle-debounce",
+      }),
+    ).toBe(false);
+    // Even if the watcher bounce hasn't updated onDiskText yet, the sha match
+    // suppresses a redundant self-write.
+    expect(
+      shouldMaterialize({
+        state,
+        docText: res.mergedText,
+        onDiskText: base,
+        trigger: "settle-debounce",
+      }),
+    ).toBe(false);
+  });
+
+  it("merges a restore with non-overlapping in-flight CRDT edits — both survive, no markers", () => {
+    // The doc diverged from base at the BOTTOM while the restore changed the TOP.
+    const docText = "# Notes\n\nline one\nline two\nline three (typed live)\n";
+    const restored = "# Notes (restored title)\n\nline one\nline two\n";
+
+    const res = reconcileExternalEdit({
+      onDiskText: restored,
+      lastMaterializedText: base,
+      docText,
+    });
+    expect(res.kind).toBe("merge-into-doc");
+    if (res.kind !== "merge-into-doc") throw new Error("unreachable");
+    expect(res.mergedText).toContain("(restored title)");
+    expect(res.mergedText).toContain("line three (typed live)");
+    expect(res.mergedText).not.toMatch(CONFLICT_MARKERS);
+  });
+
+  it("raises a conflict when the restore overlaps in-flight edits — both versions preserved verbatim", () => {
+    // Both sides rewrote the same line: no clean merge exists.
+    const docText = "# Notes\n\nline one (typed live)\nline two\n";
+    const restored = "# Notes\n\nline one (restored)\nline two\n";
+
+    const res = reconcileExternalEdit({
+      onDiskText: restored,
+      lastMaterializedText: base,
+      docText,
+    });
+    // useCollabDoc rescues res.onDiskText to <path>.conflict and keeps the
+    // live doc at <path> — nothing is silently lost.
+    expect(res).toEqual({ kind: "conflict", docText, onDiskText: restored });
+  });
+});

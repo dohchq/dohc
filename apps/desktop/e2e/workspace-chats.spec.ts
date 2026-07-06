@@ -139,11 +139,16 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
   }
 });
 
-test("unflagged: no Chats view, channel handlers reject", async () => {
+// WS-H1 flag flip: chats are engine-backed and the engine is now the
+// default, so only an EXPLICIT opt-out disables the surface.
+test("opted-out workspace: no Chats view, channel handlers reject", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: false },
+    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;

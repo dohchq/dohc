@@ -589,8 +589,8 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-advanced">
             <SettingRow
-              title="Workspace engine (alpha)"
-              description="Experimental: also capture this workspace's file history into the versioned workspace engine. Legacy history keeps recording while the alpha flag is on. Takes effect the next time the workspace is opened."
+              title="Use the workspace engine (default on)"
+              description="The workspace engine records this workspace's history, versions, and chats. Turning it off is an escape hatch: no history is recorded while it is off. Takes effect the next time the workspace is opened."
               modified={isModified(
                 workspaceSettings.experimental.workspaceEngineAlpha,
                 DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha,
@@ -607,7 +607,7 @@ export function SettingsDialog(props: {
               testId="settings-row-workspace-engine-alpha"
             >
               <SwitchControl
-                label="Workspace engine (alpha)"
+                label="Use the workspace engine (default on)"
                 checked={workspaceSettings.experimental.workspaceEngineAlpha}
                 onChange={(workspaceEngineAlpha) =>
                   void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
