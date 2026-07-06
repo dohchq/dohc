@@ -19,10 +19,17 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
   // secret checks on the raw string would let an encoded .env slip through
   // as tracked — into engine capture and search results.
   const candidate = normalized.normalized;
-  if (candidate.split("/").some((segment) => segment.toLowerCase() === ".env")) {
+  // The whole `.env` family is secret-classified: `.env` (as a segment
+  // anywhere), `*.env`, and `.env.*` variants such as `.env.local` or
+  // `.env.production`. This deliberately over-classifies `.env.example`:
+  // protecting a placeholder costs a lock icon; missing a real `.env.local`
+  // would version plaintext secrets.
+  const segments = candidate.split("/");
+  const basename = segments[segments.length - 1]?.toLowerCase() ?? "";
+  if (segments.some((segment) => segment.toLowerCase() === ".env")) {
     return { kind: "secret" };
   }
-  if (candidate.toLowerCase().endsWith(".env")) {
+  if (basename.endsWith(".env") || basename.startsWith(".env.")) {
     return { kind: "secret" };
   }
   return { kind: "tracked" };

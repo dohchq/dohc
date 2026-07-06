@@ -1591,19 +1591,29 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path: secretPath,
           });
-          await materialize(
-            [
-              materialized.present
-                ? {
-                    kind: "write",
-                    path: secretPath,
-                    text: materialized.text,
-                    protected: true,
-                  }
-                : { kind: "delete", path: secretPath, protected: true },
-            ],
-            policy,
-          );
+          // Idempotent restore/undo: skip the disk write when the target
+          // state already matches (mirrors planSecretMaterialization) — an
+          // unconditional .env rewrite fires watchers and dev-server reloads
+          // for identical bytes.
+          const currentDisk = await readDiskTextState(rootPath, secretPath);
+          const alreadyCurrent = materialized.present
+            ? currentDisk.kind === "text" && currentDisk.text === materialized.text
+            : currentDisk.kind === "absent";
+          if (!alreadyCurrent) {
+            await materialize(
+              [
+                materialized.present
+                  ? {
+                      kind: "write",
+                      path: secretPath,
+                      text: materialized.text,
+                      protected: true,
+                    }
+                  : { kind: "delete", path: secretPath, protected: true },
+              ],
+              policy,
+            );
+          }
           return {
             restored: result.restored,
             restoredMomentId: result.restoredMomentId,
