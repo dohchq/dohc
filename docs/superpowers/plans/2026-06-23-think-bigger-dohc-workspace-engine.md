@@ -2051,6 +2051,32 @@ build); cloud sync is wanted eventually and is scheduled as the arc after 0N
 - **Arc 0P (next): engine sync replication** — local-first multi-machine
   sync for engine state; scoped after 0N lands.
 
+### Plan Completion Map (2026-07-06)
+
+User-approved wave plan to complete the remaining roadmap, with three steady
+worktree lanes (max one desktop-UI-heavy lane at a time) and model routing per
+the repository CLAUDE.md. Cloud decision: **rebuild cloud on the engine** —
+Arc 0P builds engine-native sync plus a fresh thin server; shares/multi-user
+rebuild on it later; the legacy cloud stack retires per audit Phase D.
+
+- **Wave 1:** WS-A finish Arc 0N-2 (try-it-in-a-version); WS-F effective
+  policy resolver + `.dohc/files.toml`/`visibility.toml` (PR 04 scope on the
+  engine); WS-I Rust kernel promotion (sidecar, JSON-RPC over stdio,
+  scan/hash/reconcile, negative bridge-auth tests).
+- **Wave 2:** WS-C secret-backed `.env` driver (PR 08, needs WS-F); WS-D
+  indexed search mounted in the desktop incl. chats (PR 11/17); WS-B Arc 0P
+  sync design note then implementation (PR 21R milestones, engine-native).
+- **Wave 3:** WS-E chats expansion (PR 12/13/16 sequence); WS-G content
+  drivers — Y.Doc collab on the engine and binary/asset versioning (the
+  flag-default gates from the 0N-3 audit).
+- **Wave 4:** WS-H flag-default-on + legacy retirement Phases A-D; WS-J
+  release hardening (PR 22), Windows suite validation on the user's PC,
+  external shares (PR 18) on the rebuilt cloud.
+
+Gates: every lane merges when green after orchestrator review; codex-review
+as an extra perspective at wave gates; CodeRabbit batched once per arc gate;
+checkpoint summary to the user between waves.
+
 ### PR 01 - Workspace Engine Contracts And Substrate
 
 **Goal:** Define one canonical schema source for the substrate contracts, with
