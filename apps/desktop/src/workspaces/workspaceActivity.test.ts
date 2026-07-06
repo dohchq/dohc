@@ -169,3 +169,28 @@ describe("workspaceActivity history", () => {
     }
   });
 });
+
+// PR 0N-1: the capture hooks expose the workspace's LIVE agent-run slot (the
+// same slot the legacy recorder read), so the engine capture can stamp
+// settled batches with agent authorship while a dohc-tracked run is active.
+describe("workspaceActivity capture hooks", () => {
+  it("wires the live agent-run slot into captureFor's hooks", async () => {
+    let liveSlot: (() => unknown) | null = null;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: (_workspace, hooks) => {
+        liveSlot = hooks.activeAgentRun;
+        return null;
+      },
+    });
+    await activity.open(workspace());
+    expect(liveSlot).not.toBeNull();
+    expect(liveSlot!()).toBeNull();
+
+    const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+    activity.setAgentRun("activity-test", run);
+    expect(liveSlot!()).toEqual(run);
+    activity.setAgentRun("activity-test", null);
+    expect(liveSlot!()).toBeNull();
+    await activity.stopAll();
+  });
+});

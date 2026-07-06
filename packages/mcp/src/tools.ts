@@ -28,6 +28,16 @@ import {
   type WorkspaceSite,
 } from "@dohc/workspace-core";
 import {
+  LinkedChatStoreError,
+  createLinkedChatStore,
+  createVersionedTextStore,
+  type ChatMessage,
+  type ChatThread,
+  type LinkedChatProjectionFileAccess,
+  type LinkedChatStore,
+  type VersionedTextStore,
+} from "@dohc/workspace-engine";
+import {
   createChangeSetStore,
   isDurableChangeSetRecordingSupported,
   mergeMarkdown,
@@ -277,6 +287,46 @@ async function readFileWindowWithDigest(
   }
 }
 
+// PR 0N-1: is this workspace on the workspace-engine alpha? MCP reads the
+// SAME per-workspace settings file the desktop reads
+// (.dohc/settings.local.json, workspaceSettingsFile.ts) with the same
+// defensive posture: symlinks refused, size-capped, any read/parse failure
+// reads as OFF (legacy behavior byte-for-byte). Cheap enough to read per
+// mutating call — the flag can flip between desktop opens.
+const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
+
+export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolean> {
+  try {
+    const path = join(ctx.root, ".dohc", "settings.local.json");
+    const stats = await lstat(path);
+    if (
+      stats.isSymbolicLink() ||
+      !stats.isFile() ||
+      stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES
+    ) {
+      return false;
+    }
+    if (!(await isWithinRealRoot(ctx.root, path))) return false;
+    const raw = JSON.parse(await readFile(path, "utf8")) as {
+      experimental?: { workspaceEngineAlpha?: unknown };
+    };
+    return raw?.experimental?.workspaceEngineAlpha === true;
+  } catch {
+    return false;
+  }
+}
+
+// The history reference a mutating tool reports. Flagged workspaces have no
+// legacy change set — the desktop watcher captures MCP's physical write into
+// engine moments (agent-attributed when a dohc-tracked run is active; an MCP
+// run WITHOUT a dohc-tracked run context, e.g. an external MCP client, yields
+// actor-neutral engine capture — honest per the actor-neutral principle).
+function recordedChangeFields(record: HistoryRecord | null) {
+  return record
+    ? { changeSetId: record.id, recordedAtMs: record.recordedAtMs }
+    : { recordedBy: "workspace-engine" as const };
+}
+
 async function recordChange(
   ctx: ToolContext,
   input: {
@@ -285,7 +335,11 @@ async function recordChange(
     kind?: ChangeSetKind;
     provenance?: ChangeProvenance;
   },
-) {
+): Promise<HistoryRecord | null> {
+  // Flagged workspaces: no direct legacy .dohc/history record (it was already
+  // invisible to the flagged UI per 0M-5, and the double-record hazard ends
+  // here) — the engine capture is the ONE history for the physical write.
+  if (await isWorkspaceEngineFlagged(ctx)) return null;
   await safeMetadataDir(ctx);
   const store = historyWriteStoreFor(ctx);
   const set = addFileChanges(
@@ -321,7 +375,10 @@ function failureReason(error: unknown, fallback: string): string {
 }
 
 async function ensureRecordable(ctx: ToolContext) {
-  if (!isDurableChangeSetRecordingSupported()) {
+  // Flagged workspaces don't need the legacy durable writer (the engine
+  // captures the physical write), so its platform gate must not block them;
+  // the metadata-dir safety check still applies.
+  if (!(await isWorkspaceEngineFlagged(ctx)) && !isDurableChangeSetRecordingSupported()) {
     return {
       ok: false as const,
       reason: "durable history recording is not supported on this platform",
@@ -883,7 +940,7 @@ export async function writeWorkspaceFile(
         : failureReason(error, `failed to write: ${args.path}`),
     };
   }
-  let record: HistoryRecord;
+  let record: HistoryRecord | null;
   try {
     record = await recordChange(ctx, {
       files: [{ path: resolved.normalized, operation: "write" }],
@@ -900,8 +957,7 @@ export async function writeWorkspaceFile(
     path: resolved.normalized,
     bytes: bytes.byteLength,
     sha256: sha256(bytes),
-    changeSetId: record.id,
-    recordedAtMs: record.recordedAtMs,
+    ...recordedChangeFields(record),
   };
 }
 
@@ -937,7 +993,7 @@ export async function createWorkspaceDirectory(
       reason: failureReason(error, `failed to create directory: ${args.path}`),
     };
   }
-  let record: HistoryRecord;
+  let record: HistoryRecord | null;
   try {
     record = await recordChange(ctx, {
       files: [{ path: resolved.normalized, operation: "write" }],
@@ -955,8 +1011,7 @@ export async function createWorkspaceDirectory(
   return {
     ok: true as const,
     path: resolved.normalized,
-    changeSetId: record.id,
-    recordedAtMs: record.recordedAtMs,
+    ...recordedChangeFields(record),
   };
 }
 
@@ -995,8 +1050,7 @@ export async function moveWorkspacePath(
         ok: true as const,
         fromPath: from.normalized,
         toPath: to.normalized,
-        changeSetId: record.id,
-        recordedAtMs: record.recordedAtMs,
+        ...recordedChangeFields(record),
       };
     } catch (error) {
       return {
@@ -1037,8 +1091,7 @@ export async function deleteWorkspacePath(
         ok: true as const,
         path: resolved.normalized,
         trashed: true,
-        changeSetId: record.id,
-        recordedAtMs: record.recordedAtMs,
+        ...recordedChangeFields(record),
       };
     } catch (error) {
       return {
@@ -1321,7 +1374,7 @@ function combineMergeResults(...results: MergeSyncResult[]): MergeSyncResult {
 async function recordCloudPull(
   ctx: ToolContext,
   result: MergeSyncResult,
-): Promise<{ changeSetId: string; recordedAtMs: number } | { historyError: string } | null> {
+): Promise<ReturnType<typeof recordedChangeFields> | { historyError: string } | null> {
   const files: FileChange[] = [
     ...result.pulledPaths.map((path) => ({ path, operation: "write" as const })),
     ...result.deletedLocalPaths.map((path) => ({ path, operation: "delete" as const })),
@@ -1335,7 +1388,7 @@ async function recordCloudPull(
       files,
       summary: `MCP synced ${files.length} ${files.length === 1 ? "file" : "files"} from dohc Cloud`,
     });
-    return { changeSetId: record.id, recordedAtMs: record.recordedAtMs };
+    return recordedChangeFields(record);
   } catch (error) {
     return { historyError: failureReason(error, "cloud sync history could not be recorded") };
   }
@@ -1963,7 +2016,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   }
 
   let visibleMutationStarted = false;
-  let record: HistoryRecord;
+  let record: HistoryRecord | null;
   try {
     await mkdir(root.absolute, { recursive: true });
     if (!existing) visibleMutationStarted = true;
@@ -2001,8 +2054,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     ok: true as const,
     siteRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
-    changeSetId: record.id,
-    recordedAtMs: record.recordedAtMs,
+    ...recordedChangeFields(record),
   };
 }
 
@@ -2328,7 +2380,7 @@ export async function importData(
         : failureReason(error, `failed to write import: ${dbRel.normalized}`),
     };
   }
-  let record: HistoryRecord;
+  let record: HistoryRecord | null;
   try {
     record = await recordChange(ctx, {
       kind: "import",
@@ -2347,8 +2399,7 @@ export async function importData(
     path: dbRel.normalized,
     tableName: result.tableName,
     rowCount: result.rowCount,
-    changeSetId: record.id,
-    recordedAtMs: record.recordedAtMs,
+    ...recordedChangeFields(record),
   };
 }
 
@@ -2424,6 +2475,259 @@ export async function share(ctx: ToolContext, args: { path: string; scope: "publ
 // Attempts a conservative three-way merge of a markdown conflict. A clean merge
 // is returned as proposed content; an ambiguous one returns conflict so a human
 // decides — never a silent overwrite.
+
+// --- linked Chats (workspace engine, PR 0N-1) --------------------------------
+//
+// The two-way file rail: MCP can list a file's Chats, read a thread, and
+// reply AS THE AGENT. These tools open the same .dohc/engine/engine.db the
+// desktop uses over a separate WAL connection (safe cross-process; writes
+// wait out the desktop's write lock via busy_timeout, with a short retry on
+// a busy failure). They require the workspace-engine flag: absent/off means
+// Chats are honestly unavailable, never a silent empty list.
+
+const CHATS_UNAVAILABLE_REASON =
+  "Chats are not available: the dohc workspace engine is not enabled for this workspace.";
+
+async function workspaceIdForRoot(ctx: ToolContext): Promise<string | null> {
+  // The workspace's own manifest is authoritative (it works for external MCP
+  // clients without a desktop registry); the registry is the fallback.
+  const manifest = await readJson<{ workspaceId?: unknown }>(
+    join(ctx.root, ".dohc", "manifest.json"),
+  );
+  if (nonEmptyString(manifest?.workspaceId)) return manifest.workspaceId;
+  const entry = await findWorkspaceEntry(ctx);
+  return nonEmptyString(entry?.workspaceId) ? entry.workspaceId : null;
+}
+
+async function requireEngineChats(
+  ctx: ToolContext,
+): Promise<{ ok: true; workspaceId: string } | { ok: false; reason: string }> {
+  if (!(await isWorkspaceEngineFlagged(ctx))) {
+    return { ok: false, reason: CHATS_UNAVAILABLE_REASON };
+  }
+  const workspaceId = await workspaceIdForRoot(ctx);
+  if (!workspaceId) {
+    return {
+      ok: false,
+      reason:
+        "Chats are not available: this workspace has no dohc identity (missing .dohc/manifest.json).",
+    };
+  }
+  return { ok: true, workspaceId };
+}
+
+// The reply author's display name — the SAME derivation the desktop uses for
+// its local user (main.ts localUserDisplayName): the dohc Cloud email when a
+// session exists, else "You". Rendered by every shared surface as
+// "<User Name>'s agent".
+async function agentReplyDisplayName(ctx: ToolContext): Promise<string> {
+  if (nonEmptyString(process.env.DOHC_MCP_CLOUD_EMAIL)) {
+    return process.env.DOHC_MCP_CLOUD_EMAIL;
+  }
+  const credentials = await readJson<{ version?: unknown; email?: unknown }>(
+    join(ctx.home, "dohc-cloud.json"),
+  );
+  if (credentials?.version === 1 && nonEmptyString(credentials.email)) {
+    return credentials.email;
+  }
+  return "You";
+}
+
+async function withEngineStores<T>(
+  ctx: ToolContext,
+  task: (stores: { texts: VersionedTextStore; chats: LinkedChatStore }) => Promise<T>,
+): Promise<T> {
+  // Per-call open/close: the MCP process never holds engine.db handles
+  // between tool calls, so it can't pin WAL locks while the desktop works.
+  const texts = createVersionedTextStore(ctx.root);
+  const chats = createLinkedChatStore(ctx.root);
+  try {
+    return await task({ texts, chats });
+  } finally {
+    await chats.close().catch(() => undefined);
+    await texts.close().catch(() => undefined);
+  }
+}
+
+// Exported for tests: the busy/locked classification the reply retry uses.
+export function isSqliteBusyError(error: unknown): boolean {
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 5 && cursor instanceof Error; depth += 1) {
+    if (/database is locked|database table is locked|SQLITE_BUSY/i.test(cursor.message)) {
+      return true;
+    }
+    cursor = (cursor as Error & { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+// busy_timeout already waits 5s inside SQLite; this retry only covers the
+// rare case where the desktop held its write lock even longer.
+async function withBusyRetry<T>(task: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      if (!isSqliteBusyError(error)) throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+function chatThreadResult(thread: ChatThread) {
+  return {
+    id: thread.id,
+    title: thread.title,
+    createdAtMs: thread.createdAtMs,
+    updatedAtMs: thread.updatedAtMs,
+    ...(thread.linkedFile?.pathHint ? { linkedPathHint: thread.linkedFile.pathHint } : {}),
+  };
+}
+
+function chatMessageResult(message: ChatMessage) {
+  return {
+    id: message.id,
+    threadId: message.threadId,
+    authorKind: message.author.kind,
+    authorDisplayName: message.author.displayName,
+    body: message.body,
+    createdAtMs: message.createdAtMs,
+  };
+}
+
+function chatFailureReason(error: unknown, fallback: string): string {
+  return error instanceof LinkedChatStoreError
+    ? error.message
+    : failureReason(error, fallback);
+}
+
+export async function listFileChats(ctx: ToolContext, args: { path: string }) {
+  const gate = await requireEngineChats(ctx);
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const resolved = await safeResolve(ctx, args.path);
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  try {
+    return await withEngineStores(ctx, async ({ texts, chats }) => {
+      // Chats key on the file's STABLE engine object id (they survive
+      // renames); the active version decides which object a path names.
+      const active = await texts.getActiveVersion({ workspaceId: gate.workspaceId });
+      const snapshot = active
+        ? await texts.readTextFile({
+            workspaceId: gate.workspaceId,
+            versionId: active.id,
+            path: resolved.normalized,
+          })
+        : null;
+      const fileObjectId = snapshot?.objectId ?? null;
+      const threads = fileObjectId
+        ? await chats.listThreadsForFile({
+            workspaceId: gate.workspaceId,
+            objectId: fileObjectId,
+          })
+        : [];
+      return {
+        ok: true as const,
+        path: resolved.normalized,
+        // null = dohc does not track this file (yet); only tracked text
+        // files can have Chats.
+        fileObjectId,
+        threads: threads.map(chatThreadResult),
+      };
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: chatFailureReason(error, `failed to list chats for: ${args.path}`),
+    };
+  }
+}
+
+export async function readChat(ctx: ToolContext, args: { threadId: string }) {
+  const gate = await requireEngineChats(ctx);
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  try {
+    return await withEngineStores(ctx, async ({ texts, chats }) => {
+      const messages = await chats.listMessages({
+        workspaceId: gate.workspaceId,
+        threadId: args.threadId,
+      });
+      const threads = await chats.listThreads({ workspaceId: gate.workspaceId });
+      const thread = threads.find((candidate) => candidate.id === args.threadId);
+      if (!thread) {
+        return { ok: false as const, reason: `chat thread not found: ${args.threadId}` };
+      }
+      // Resolve the linked file's CURRENT path (object id -> active-version
+      // path) so the projection can honestly name it.
+      let linkedFileAccess: LinkedChatProjectionFileAccess = { kind: "unknown" };
+      if (thread.linkedFile) {
+        const active = await texts.getActiveVersion({ workspaceId: gate.workspaceId });
+        const files = active
+          ? await texts.listTextFiles({
+              workspaceId: gate.workspaceId,
+              versionId: active.id,
+            })
+          : [];
+        const linked = files.find(
+          (file) => file.objectId === thread.linkedFile?.objectId,
+        );
+        if (linked) linkedFileAccess = { kind: "allowed", path: linked.path };
+      }
+      const projection = await chats.getThreadProjection({
+        workspaceId: gate.workspaceId,
+        threadId: thread.id,
+        linkedFileAccess,
+      });
+      return {
+        ok: true as const,
+        thread: chatThreadResult(thread),
+        messages: messages.map(chatMessageResult),
+        projection: {
+          path: projection.path,
+          readOnly: projection.readOnly,
+          text: projection.text,
+        },
+      };
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: chatFailureReason(error, `failed to read chat: ${args.threadId}`),
+    };
+  }
+}
+
+export async function replyToChat(
+  ctx: ToolContext,
+  args: { threadId: string; body: string },
+) {
+  const gate = await requireEngineChats(ctx);
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const displayName = await agentReplyDisplayName(ctx);
+  try {
+    return await withEngineStores(ctx, async ({ chats }) => {
+      const message = await withBusyRetry(() =>
+        chats.sendMessage({
+          workspaceId: gate.workspaceId,
+          threadId: args.threadId,
+          // Agent authorship, always: this tool IS the agent speaking. Shared
+          // surfaces render it as "<User Name>'s agent".
+          author: { kind: "agent", displayName },
+          body: args.body,
+        }),
+      );
+      return { ok: true as const, message: chatMessageResult(message) };
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: chatFailureReason(error, `failed to reply to chat: ${args.threadId}`),
+    };
+  }
+}
+
 export function resolveConflict(args: { base: string; local: string; remote: string }) {
   const result = mergeMarkdown(args);
   return result.kind === "merged"

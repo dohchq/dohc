@@ -69,7 +69,11 @@ import {
   changedLineCounts,
   type UnifiedDiffLine,
 } from "./workbench/unifiedDiff";
-import { EngineHistoryView, engineMomentSummary } from "./workbench/EngineHistory";
+import {
+  EngineHistoryView,
+  engineMomentSourceLabel,
+  engineMomentSummary,
+} from "./workbench/EngineHistory";
 import {
   VersionComparePage,
   VersionMenu,
@@ -1066,6 +1070,9 @@ function EngineMomentDiffPage({
                 : createdFile
                   ? "Created"
                   : "Changed"}
+            </span>
+            <span data-testid="engine-diff-source">
+              {engineMomentSourceLabel(moment)}
             </span>
             {counts ? (
               <span className="font-mono" data-testid="engine-diff-counts">

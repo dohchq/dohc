@@ -8,6 +8,7 @@ export * from "./dataImport";
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  AgentMomentAuthor,
   ChangeAuthor,
   ChatActor,
   ChatMessage,
@@ -24,6 +25,7 @@ export type {
   LinkedChatStore,
   LinkedChatStoreErrorCode,
   LinkedChatStoreOptions,
+  MomentAuthor,
   NonEmptyLocalAuthorLabel,
   SearchSurface,
   SearchVisibility,

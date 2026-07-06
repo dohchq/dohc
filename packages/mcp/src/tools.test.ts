@@ -847,6 +847,11 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(write).toMatchObject({ ok: true });
       if (!write.ok) return;
+      // Unflagged workspace: the write must carry a legacy change set id.
+      const changeSetId = write.changeSetId;
+      if (!changeSetId) {
+        throw new Error("expected a legacy change set id on an unflagged workspace");
+      }
 
       const listed = await listChanges(ctx, { includeFiles: true });
       expect(listed).toMatchObject({
@@ -855,7 +860,7 @@ describe("mcp tools operate on allowed paths", () => {
         hasMore: false,
       });
       expect(listed.changes[0]).toMatchObject({
-        id: write.changeSetId,
+        id: changeSetId,
         kind: "agent-run",
         summary: "Agent drafted plan",
         author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
@@ -863,10 +868,10 @@ describe("mcp tools operate on allowed paths", () => {
         files: [{ path: "notes/plan.txt", operation: "write" }],
       });
 
-      await expect(readChange(ctx, { id: write.changeSetId })).resolves.toMatchObject({
+      await expect(readChange(ctx, { id: changeSetId })).resolves.toMatchObject({
         ok: true,
         change: {
-          id: write.changeSetId,
+          id: changeSetId,
           files: [{ path: "notes/plan.txt", operation: "write" }],
         },
       });

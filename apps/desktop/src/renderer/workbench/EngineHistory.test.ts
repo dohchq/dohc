@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import {
+  engineMomentSourceLabel,
   engineMomentSummary,
   engineOriginLabel,
+  groupAgentAuthorName,
   groupEngineMoments,
 } from "./EngineHistory";
 import { chatAuthorLabel } from "./LinkedChats";
@@ -46,6 +48,71 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("sync")).toBe("Sync");
     expect(engineOriginLabel("api")).toBe("dohc");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");
+  });
+});
+
+// PR 0N-1: agent-authored moments display as "<User Name>'s agent" — the
+// SAME formatting rule the chat rail uses — while everything else keeps its
+// actor-neutral origin label.
+describe("engineMomentSourceLabel", () => {
+  it("shows an agent-authored moment as \"<User Name>'s agent\"", () => {
+    expect(
+      engineMomentSourceLabel(moment({ id: "m1", agentAuthorName: "You" })),
+    ).toBe("You's agent");
+    expect(
+      engineMomentSourceLabel(
+        moment({ id: "m2", agentAuthorName: "ice@example.com" }),
+      ),
+    ).toBe("ice@example.com's agent");
+  });
+
+  it("matches the chat rail's agent label exactly", () => {
+    expect(
+      engineMomentSourceLabel(moment({ id: "m1", agentAuthorName: "Ice de Vera" })),
+    ).toBe(
+      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice de Vera" }),
+    );
+  });
+
+  it("keeps unattributed moments on their actor-neutral origin label", () => {
+    expect(engineMomentSourceLabel(moment({ id: "m1" }))).toBe("Local file edit");
+    expect(
+      engineMomentSourceLabel(moment({ id: "m2", origin: "restore" })),
+    ).toBe("Restore");
+  });
+});
+
+describe("groupAgentAuthorName", () => {
+  it("returns the shared name when every moment in the group carries it", () => {
+    expect(
+      groupAgentAuthorName([
+        moment({ id: "m2", agentAuthorName: "You" }),
+        moment({ id: "m1", agentAuthorName: "You" }),
+      ]),
+    ).toBe("You");
+  });
+
+  it("returns undefined for mixed, partially attributed, or neutral groups", () => {
+    expect(
+      groupAgentAuthorName([
+        moment({ id: "m2", agentAuthorName: "You" }),
+        moment({ id: "m1", agentAuthorName: "ice@example.com" }),
+      ]),
+    ).toBeUndefined();
+    expect(
+      groupAgentAuthorName([
+        moment({ id: "m2", agentAuthorName: "You" }),
+        moment({ id: "m1" }),
+      ]),
+    ).toBeUndefined();
+    expect(
+      groupAgentAuthorName([
+        moment({ id: "m2" }),
+        moment({ id: "m1", agentAuthorName: "You" }),
+      ]),
+    ).toBeUndefined();
+    expect(groupAgentAuthorName([moment({ id: "m1" })])).toBeUndefined();
+    expect(groupAgentAuthorName([])).toBeUndefined();
   });
 });
 

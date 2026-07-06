@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, FileText, RotateCcw, Search, X } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
+import { chatAuthorLabel } from "./LinkedChats";
 
 // Engine history timeline (PR 0M-5, workspace-engine alpha). Flagged
 // workspaces read ENGINE moments instead of legacy change sets; this renders
@@ -39,7 +40,7 @@ function engineOperationLabel(moment: EngineMomentRecord): string {
 }
 
 // One human label for where a moment came from. Engine moments are
-// actor-neutral at alpha (origin, not author).
+// actor-neutral by default (origin, not author).
 export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string {
   switch (origin) {
     case "local-file":
@@ -53,6 +54,30 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
     default:
       return "Unknown source";
   }
+}
+
+// PR 0N-1: a moment authored by a dohc-tracked agent run displays as
+// "<User Name>'s agent" (the SAME formatting rule the chat rail uses via
+// chatAuthorLabel); everything else keeps its actor-neutral origin label.
+export function engineMomentSourceLabel(
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName">,
+): string {
+  return moment.agentAuthorName !== undefined
+    ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
+    : engineOriginLabel(moment.origin);
+}
+
+// The group-level author: the shared agent author name when every moment in
+// the group carries the same one, else undefined (mixed or neutral groups
+// stay unlabeled — never a guessed attribution).
+export function groupAgentAuthorName(
+  moments: readonly Pick<EngineMomentRecord, "agentAuthorName">[],
+): string | undefined {
+  const first = moments[0]?.agentAuthorName;
+  if (first === undefined) return undefined;
+  return moments.every((moment) => moment.agentAuthorName === first)
+    ? first
+    : undefined;
 }
 
 // Groups CONSECUTIVE moments that share a correlationId (the list is newest
@@ -91,7 +116,7 @@ function engineHistorySearchText(group: EngineHistoryGroup): string {
     ...group.moments.flatMap((moment) => [
       moment.path,
       engineMomentSummary(moment),
-      engineOriginLabel(moment.origin),
+      engineMomentSourceLabel(moment),
     ]),
   ]
     .join("\n")
@@ -166,7 +191,9 @@ function MomentRow(props: {
               engineOperationLabel(moment)
             ) : (
               <>
-                {engineOriginLabel(moment.origin)}
+                <span data-testid="engine-moment-source">
+                  {engineMomentSourceLabel(moment)}
+                </span>
                 {" · "}
                 <time
                   data-testid="engine-moment-recorded-at"
@@ -193,6 +220,9 @@ function GroupRow(props: {
   const { group } = props;
   const [expanded, setExpanded] = useState(false);
   const recordedAt = formatRecordedAt(group.recordedAtMs);
+  // Uniform agent authorship surfaces on the group row itself; mixed or
+  // neutral groups show no author (never a guess).
+  const agentAuthorName = groupAgentAuthorName(group.moments);
   return (
     <div data-testid="engine-moment-group">
       <button
@@ -213,6 +243,17 @@ function GroupRow(props: {
               {group.summary}
             </span>
             <span className="block truncate text-[10px] text-subtle">
+              {agentAuthorName !== undefined ? (
+                <>
+                  <span data-testid="engine-moment-group-source">
+                    {chatAuthorLabel({
+                      authorKind: "agent",
+                      authorDisplayName: agentAuthorName,
+                    })}
+                  </span>
+                  {" · "}
+                </>
+              ) : null}
               <time dateTime={recordedAt.iso} title={recordedAt.iso}>
                 {recordedAt.label}
               </time>

@@ -5,6 +5,7 @@ import {
   compareVersionFiles,
   createVersionedTextStore,
   type ActorNeutralWriteMetadata,
+  type MomentAuthor,
   type VersionFileChange,
   type VersionRecord,
   type VersionedTextConflictRecord,
@@ -16,7 +17,10 @@ import { isTextMediaType, mediaTypeForPath, scanWorkspaceFiles } from "@dohc/wor
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
-import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "./workspaceWatcher";
+import {
+  MAX_HISTORY_TEXT_SNAPSHOT_BYTES,
+  type ActiveAgentRun,
+} from "./workspaceWatcher";
 
 // PR 0M-3 watcher->engine capture + PR 0M-4 named-version operations +
 // PR 0M-5 history/restore (which ended the 0M-3 interim dual-write).
@@ -234,6 +238,16 @@ export interface WorkspaceEngineCaptureOptions {
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
   diskWriter?: EngineDiskWriter;
+  // The live agent-run slot (workspaceActivity owns it; AgentIntegration sets
+  // it while a dohc-tracked run is open). PR 0N-1 attribution rule — the SAME
+  // rule the legacy recorder used: the slot is read once when the batch
+  // SETTLES (captureBatch is called from the watcher's settle path), never
+  // when the capture chain later executes. A run that ends between settle and
+  // capture still owns the batch it caused; writes that settle after the run
+  // ended are actor-neutral. Reconciliation passes and version operations
+  // never read the slot — only physically observed watcher batches carry an
+  // author.
+  activeAgentRun?: () => ActiveAgentRun | null;
 }
 
 export interface EngineDiskWriter {
@@ -495,10 +509,17 @@ export function createWorkspaceEngineCapture(
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
+    author?: MomentAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
-    await engine.deleteTextFile({ workspaceId, versionId, path, metadata });
+    await engine.deleteTextFile({
+      workspaceId,
+      versionId,
+      path,
+      metadata,
+      ...(author !== undefined ? { author } : {}),
+    });
     return true;
   }
 
@@ -508,13 +529,21 @@ export function createWorkspaceEngineCapture(
     path: string,
     disk: { text: string; sha256: string },
     metadata: ActorNeutralWriteMetadata,
+    author?: MomentAuthor,
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     // Content equality is the no-op rule: it keeps one engine record per
     // physical write across settle windows and makes reconciliation
     // idempotent.
     if (current && current.text === disk.text) return false;
-    await engine.writeTextFile({ workspaceId, versionId, path, text: disk.text, metadata });
+    await engine.writeTextFile({
+      workspaceId,
+      versionId,
+      path,
+      text: disk.text,
+      metadata,
+      ...(author !== undefined ? { author } : {}),
+    });
     return true;
   }
 
@@ -523,6 +552,7 @@ export function createWorkspaceEngineCapture(
     versionId: string,
     event: WatcherEvent,
     metadata: ActorNeutralWriteMetadata,
+    author?: MomentAuthor,
   ): Promise<void> {
     if (classifyEngineFilePath(event.path).kind !== "tracked") return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
@@ -530,27 +560,31 @@ export function createWorkspaceEngineCapture(
     // content instead of replaying stale event snapshots.
     if (event.operation === "delete") {
       if (consumeExpectedEvent("delete", event.path)) return;
-      await deleteIfTracked(engine, versionId, event.path, metadata);
+      await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
     const disk = await readDiskTextState(rootPath, event.path);
     if (disk.kind === "unreadable") return;
     if (disk.kind === "absent") {
       if (consumeExpectedEvent("delete", event.path)) return;
-      await deleteIfTracked(engine, versionId, event.path, metadata);
+      await deleteIfTracked(engine, versionId, event.path, metadata, author);
       return;
     }
     if (disk.kind === "untracked-content") {
       // The path stopped being engine-ownable text: retire it from engine
-      // state rather than leaving a stale snapshot behind.
-      await deleteIfTracked(engine, versionId, event.path, {
-        ...metadata,
-        summary: "Stopped tracking non-text content",
-      });
+      // state rather than leaving a stale snapshot behind. The batch author
+      // rides along — the run's write is what retired it.
+      await deleteIfTracked(
+        engine,
+        versionId,
+        event.path,
+        { ...metadata, summary: "Stopped tracking non-text content" },
+        author,
+      );
       return;
     }
     if (consumeExpectedEvent("write", event.path, disk.sha256)) return;
-    await writeIfChanged(engine, versionId, event.path, disk, metadata);
+    await writeIfChanged(engine, versionId, event.path, disk, metadata, author);
   }
 
   // Disk -> engine reconciliation for one version: after it completes, the
@@ -712,6 +746,20 @@ export function createWorkspaceEngineCapture(
     captureBatch(events) {
       if (events.length === 0) return;
       const batch = events.map((event) => ({ ...event }));
+      // Attribution is decided HERE, at settle (captureBatch runs on the
+      // watcher's settle path), not when the chain task executes — the legacy
+      // recorder's rule, kept: a dohc-tracked run owns every batch that
+      // settles while it is active, even if the run ends before the capture
+      // chain drains. The stamp is a synchronous slot read; no extra IO.
+      const run = options.activeAgentRun?.() ?? null;
+      const author: MomentAuthor | undefined = run
+        ? {
+            kind: "agent",
+            agentId: run.agentId,
+            onBehalfOf: run.onBehalfOf,
+            agentRunId: run.agentRunId,
+          }
+        : undefined;
       enqueue("batch capture", () =>
         reportCaptureOutcome(async () => {
           const engine = await engineStore();
@@ -720,7 +768,7 @@ export function createWorkspaceEngineCapture(
           let pathFailures = 0;
           for (const event of batch) {
             try {
-              await captureOnePath(engine, versionId, event, metadata);
+              await captureOnePath(engine, versionId, event, metadata, author);
             } catch (error) {
               // One bad path must not drop the rest of the batch.
               pathFailures += 1;

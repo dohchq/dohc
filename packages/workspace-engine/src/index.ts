@@ -23,7 +23,9 @@ export {
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  AgentMomentAuthor,
   FileObjectRecord,
+  MomentAuthor,
   TextFileSnapshot,
   VersionId,
   VersionKind,
