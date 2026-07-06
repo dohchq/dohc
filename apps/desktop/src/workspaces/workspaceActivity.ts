@@ -1,6 +1,6 @@
 import { deriveSyncStatus } from "@dohc/workspace-core";
 import type { SyncStatusResult } from "../ipc/bridgeContract";
-import type { CloudSyncEngine } from "./cloudSyncEngine";
+import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
@@ -44,7 +44,10 @@ export interface WorkspaceActivityOptions {
   cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean };
   // Builds a sync engine for a workspace when it is enabled AND connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
-  engineFor?: (workspace: CreatedWorkspace) => CloudSyncEngine | null;
+  engineFor?: (
+    workspace: CreatedWorkspace,
+    capture: WorkspaceEngineCapture | null,
+  ) => CloudSyncEngine | null;
   // Builds the watcher->engine capture for a workspace; null (explicit
   // engine opt-out) leaves the workspace with NO history recorder. Called
   // once per open; main owns the flag read. The hooks are activity-owned
@@ -105,6 +108,7 @@ export function createWorkspaceActivity(
       conflictCount,
       historyCaptureFailed: w?.captureFailed ?? false,
       historyRecordingOff: w?.historyRecordingOff ?? false,
+      syncFailing: snap?.syncFailing ?? false,
     };
   }
 
@@ -190,7 +194,7 @@ export function createWorkspaceActivity(
       // watcher is live: closed-period edits become engine moments without
       // blocking the open.
       entry.capture?.start();
-      const engine = options.engineFor?.(workspace) ?? null;
+      const engine = options.engineFor?.(workspace, entry.capture) ?? null;
       if (engine) {
         entry.engine = engine;
         // Initial pull+push runs in the background; status updates stream in
@@ -207,7 +211,7 @@ export function createWorkspaceActivity(
     const entry = watched.get(workspace.workspaceId);
     if (!entry) throw new Error(`Workspace is not open: ${workspace.workspaceId}`);
     if (entry.engine) return;
-    const engine = options.engineFor?.(workspace) ?? null;
+    const engine = options.engineFor?.(workspace, entry.capture) ?? null;
     if (!engine) throw new Error("Cloud sync requires a signed-in dohc Cloud session");
     entry.engine = engine;
     try {
@@ -228,11 +232,14 @@ export function createWorkspaceActivity(
   // session existed). engineFor returns null when the workspace is local-only
   // or signed into a different server.
   function reconcileCloud(
-    engineFor: (workspace: CreatedWorkspace) => CloudSyncEngine | null,
+    engineFor: (
+      workspace: CreatedWorkspace,
+      capture: WorkspaceEngineCapture | null,
+    ) => CloudSyncEngine | null,
   ): void {
     for (const entry of watched.values()) {
       if (entry.engine) continue;
-      const engine = engineFor(entry.workspace);
+      const engine = engineFor(entry.workspace, entry.capture);
       if (!engine) continue;
       entry.engine = engine;
       void engine.start();

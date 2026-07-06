@@ -191,10 +191,12 @@ import {
   revokeCloudDataFragment,
 } from "./workspaces/cloudDataFragments";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
-import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
+import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import {
   createLinkedChatStore,
   createVersionedTextStore,
+  claimRelayWorkspace,
+  RelayWorkspaceUnavailableError,
   searchWorkspaceEngine,
   type ChannelThreadSummary,
   type ChatChannelSummary,
@@ -210,6 +212,7 @@ import {
   versionConflictForIpc,
 } from "./ipc/engineHistoryIpc";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
+import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
 import {
   readWorkspaceEnginePolicy,
@@ -872,17 +875,24 @@ function mcpRuntimeConfigFor(rootPath: string): {
   };
 }
 
-function engineForWorkspace(workspace: { workspaceId: string; rootPath: string }) {
+function engineForWorkspace(
+  workspace: { workspaceId: string; rootPath: string },
+  capture: WorkspaceEngineCapture | null,
+) {
   const remote = findWorkspace(workspace.workspaceId)?.remote;
   if (!remote || !cachedCredentials) return null;
+  if (!capture || !cachedCredentials.relayUrl) return null;
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
   if (!credentialMatchesRemote(remote.serverUrl)) return null;
-  return createCloudSyncEngine({
+  return createRelaySyncEngine({
     rootDir: workspace.rootPath,
     remoteWorkspaceId: remote.remoteWorkspaceId,
-    serverUrl: remote.serverUrl,
-    token: cachedCredentials.token,
+    relay: {
+      baseUrl: cachedCredentials.relayUrl,
+      token: cachedCredentials.token,
+    },
+    capture,
     onChange: notifyRenderer,
   });
 }
@@ -1708,7 +1718,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.cloudLoginStart, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudLoginStartPayload.parse(payload ?? {});
-    return CloudLoginStartResult.parse(await cloudLogin().start(input.serverUrl));
+    return CloudLoginStartResult.parse(await cloudLogin().start(input.serverUrl, input.relayUrl));
   });
 
   ipcMain.handle(CHANNELS.cloudLoginPoll, async (event) => {
@@ -1755,6 +1765,7 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     const credentials = await cloudLogin().credentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first");
+    if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
     setCachedCredentials(credentials);
 
     const response = await fetch(`${credentials.serverUrl}/workspaces`, {
@@ -1772,6 +1783,23 @@ function registerIpcHandlers(): void {
           ? "This workspace id is already claimed by another account"
           : (body.error ?? `Enabling sync failed (${response.status})`),
       );
+    }
+
+    if (credentials.relayUrl) {
+      try {
+        await claimRelayWorkspace({
+          workspaceId: workspace.workspaceId,
+          relay: {
+            baseUrl: credentials.relayUrl,
+            token: credentials.token,
+          },
+        });
+      } catch (error) {
+        if (error instanceof RelayWorkspaceUnavailableError) {
+          throw new Error("This workspace id is already claimed by another account");
+        }
+        throw error;
+      }
     }
 
     setWorkspaceRemote(workspace.workspaceId, {

@@ -1,0 +1,30 @@
+{
+  "name": "@dohc/sync-relay",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts",
+    "./storage": "./src/storage.ts"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "tsx watch src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@dohc/workspace-api": "workspace:*",
+    "better-auth": "^1.6.16",
+    "pg": "^8.21.0"
+  },
+  "devDependencies": {
+    "@dohc/workspace-engine": "workspace:*",
+    "@types/node": "^22.19.19",
+    "@types/pg": "^8.20.0",
+    "esbuild": "0.28.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

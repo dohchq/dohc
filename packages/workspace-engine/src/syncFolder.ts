@@ -1,27 +1,21 @@
-import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type {
   SyncReplicationEnvelope,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
 import {
-  ENGINE_SQLITE_BUSY_TIMEOUT_MS,
-  assertEngineSqliteIntegrity,
-  initializeOrValidateEngineSchema,
-  type EngineSqliteDb,
-} from "./engineDbSchema";
-import { createLinkedChatStore } from "./linkedChatStore";
-import {
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
-  createVersionedTextStore,
 } from "./versionedTextStore";
-
-interface SqliteModule {
-  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => EngineSqliteDb;
-}
+import {
+  applySyncQueues,
+  collectBlobHashesFromOp,
+  hydrateBinaryBlob,
+  hydrateTextBlob,
+  openEngineDb,
+  sha256Hex,
+} from "./syncApply";
 
 export interface ExportSyncBundleInput {
   rootDir: string;
@@ -71,94 +65,8 @@ interface SyncBundleManifest {
   exportedAtMs: number;
 }
 
-const requireModule = createRequire(import.meta.url);
-
-function nodeSqlite(): SqliteModule {
-  return requireModule("node:sqlite") as SqliteModule;
-}
-
 function corruptBundle(message: string): VersionedTextStoreError {
   return new VersionedTextStoreError("state-corrupt", message);
-}
-
-function sha256Hex(content: string | Uint8Array): string {
-  const hash = createHash("sha256");
-  if (typeof content === "string") hash.update(content, "utf8");
-  else hash.update(content);
-  return hash.digest("hex");
-}
-
-function openEngineDb(rootDir: string): EngineSqliteDb {
-  const dbPath = join(resolve(rootDir), VERSIONED_TEXT_STORE_RELATIVE_PATH);
-  const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(dbPath);
-  try {
-    db.exec(`PRAGMA busy_timeout = ${ENGINE_SQLITE_BUSY_TIMEOUT_MS}`);
-    db.exec("PRAGMA foreign_keys = ON");
-    db.exec("PRAGMA journal_mode = WAL");
-    initializeOrValidateEngineSchema(db, (cause?: unknown) => {
-      const error = new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-      if (cause !== undefined) (error as Error & { cause?: unknown }).cause = cause;
-      return error;
-    });
-    assertEngineSqliteIntegrity(db, (cause?: unknown) => {
-      const error = new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-      if (cause !== undefined) (error as Error & { cause?: unknown }).cause = cause;
-      return error;
-    });
-    return db;
-  } catch (error) {
-    try {
-      db.close();
-    } catch {}
-    throw error;
-  }
-}
-
-interface OpBlobRefs {
-  text: string[];
-  binary: string[];
-}
-
-// moment.append references content by sha with a per-side kind (absent means
-// text, the pre-WS-G1 wire truth). conflict.open ships text states inline in
-// payload_json but binary states by sha only — binary bytes never ride JSON.
-// version.create ships its fork-point snapshot rows by sha (both kinds).
-function collectBlobHashesFromOp(op: SyncReplicationEnvelope): OpBlobRefs {
-  const refs: OpBlobRefs = { text: [], binary: [] };
-  const push = (sha: string | null | undefined, kind: "text" | "binary") => {
-    if (typeof sha === "string" && sha.length > 0) refs[kind].push(sha);
-  };
-  if (op.opKind === "moment.append") {
-    const payload = op.payload;
-    push(
-      payload.payloadBeforeBlobSha256,
-      (payload.payloadBeforeContentKind ?? "text") === "binary" ? "binary" : "text",
-    );
-    push(
-      payload.payloadAfterBlobSha256,
-      (payload.payloadAfterContentKind ?? "text") === "binary" ? "binary" : "text",
-    );
-    push(
-      payload.beforeBlobSha256,
-      (payload.beforeContentKind ?? "text") === "binary" ? "binary" : "text",
-    );
-  } else if (op.opKind === "conflict.open") {
-    const conflict = op.payload;
-    for (const state of [conflict.base, conflict.current, conflict.incoming]) {
-      if (state?.exists && (state.contentKind ?? "text") === "binary") {
-        push(state.sha256, "binary");
-      }
-    }
-  } else if (op.opKind === "version.create") {
-    for (const snapshot of op.payload.forkSnapshots ?? []) {
-      push(
-        snapshot.blobSha256,
-        (snapshot.contentKind ?? "text") === "binary" ? "binary" : "text",
-      );
-    }
-  }
-  return refs;
 }
 
 function rowToOp(row: Record<string, unknown>): SyncReplicationEnvelope {
@@ -315,82 +223,6 @@ async function readOps(
   return queues;
 }
 
-function popNextMergedOp(queues: SyncReplicationEnvelope[][]): SyncReplicationEnvelope | null {
-  let bestIndex = -1;
-  for (let index = 0; index < queues.length; index += 1) {
-    const candidate = queues[index]?.[0];
-    if (!candidate) continue;
-    const best = bestIndex === -1 ? undefined : queues[bestIndex]?.[0];
-    if (
-      !best ||
-      candidate.recordedAtMs < best.recordedAtMs ||
-      (candidate.recordedAtMs === best.recordedAtMs && candidate.originId < best.originId) ||
-      (candidate.recordedAtMs === best.recordedAtMs &&
-        candidate.originId === best.originId &&
-        candidate.originSeq < best.originSeq)
-    ) {
-      bestIndex = index;
-    }
-  }
-  if (bestIndex === -1) return null;
-  return queues[bestIndex]?.shift() ?? null;
-}
-
-// Content-verified blob hydration: every bundle file must hash to its
-// filename, and an INSERT OR IGNORE that skips an existing row must find the
-// existing content matching that hash — a tampered file or a poisoned
-// pre-existing row is corruption, never silently adopted state.
-function hydrateTextBlob(db: EngineSqliteDb, sha: string, text: string): void {
-  if (sha256Hex(text) !== sha) {
-    throw corruptBundle(`Sync bundle blob ${sha} does not match its content hash.`);
-  }
-  const inserted = db
-    .prepare("INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, ?)")
-    .run(sha, Buffer.byteLength(text, "utf8"), text);
-  if (inserted.changes > 0) return;
-  const existing = db.prepare("SELECT text FROM blobs WHERE sha256 = ?").get(sha);
-  const existingText = typeof existing?.text === "string" ? existing.text : null;
-  if (existingText === text) return;
-  // A binary compatibility anchor (empty text beside a binary_blobs row of
-  // the same sha) upgrades to the real text, mirroring putBlob's upsert.
-  if (existingText === "" && db.prepare("SELECT 1 FROM binary_blobs WHERE sha256 = ?").get(sha)) {
-    db.prepare("UPDATE blobs SET text = ?, byte_length = ? WHERE sha256 = ?").run(
-      text,
-      Buffer.byteLength(text, "utf8"),
-      sha,
-    );
-    return;
-  }
-  throw corruptBundle(`Existing blob ${sha} does not match the sync bundle content.`);
-}
-
-function hydrateBinaryBlob(db: EngineSqliteDb, sha: string, bytes: Buffer): void {
-  if (sha256Hex(bytes) !== sha) {
-    throw corruptBundle(`Sync bundle binary blob ${sha} does not match its content hash.`);
-  }
-  const inserted = db
-    .prepare("INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)")
-    .run(sha, bytes.byteLength, bytes);
-  if (inserted.changes === 0) {
-    const existing = db.prepare("SELECT content FROM binary_blobs WHERE sha256 = ?").get(sha);
-    const content = existing?.content;
-    const existingBytes = Buffer.isBuffer(content)
-      ? content
-      : content instanceof Uint8Array
-        ? Buffer.from(content)
-        : null;
-    if (!existingBytes || sha256Hex(existingBytes) !== sha) {
-      throw corruptBundle(`Existing binary blob ${sha} does not match the sync bundle content.`);
-    }
-  }
-  // Compatibility anchor row, mirroring putBinaryBlob: *_blob_sha256
-  // foreign keys still reference blobs, and content_kind gates reads.
-  db.prepare("INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, '')").run(
-    sha,
-    bytes.byteLength,
-  );
-}
-
 export async function importSyncBundle(
   input: ImportSyncBundleInput,
 ): Promise<ImportSyncBundleResult> {
@@ -412,11 +244,25 @@ export async function importSyncBundle(
     try {
       const blobDir = join(input.fromDir, "blobs");
       for (const file of await readdir(blobDir).catch(() => [] as string[])) {
-        hydrateTextBlob(db, file, await readFile(join(blobDir, file), "utf8"));
+        try {
+          hydrateTextBlob(db, file, await readFile(join(blobDir, file), "utf8"));
+        } catch (error) {
+          if (error instanceof VersionedTextStoreError) {
+            throw corruptBundle(error.message.replace(/^Sync text/u, "Sync bundle"));
+          }
+          throw error;
+        }
       }
       const binaryBlobDir = join(input.fromDir, "blobs-bin");
       for (const file of await readdir(binaryBlobDir).catch(() => [] as string[])) {
-        hydrateBinaryBlob(db, file, await readFile(join(binaryBlobDir, file)));
+        try {
+          hydrateBinaryBlob(db, file, await readFile(join(binaryBlobDir, file)));
+        } catch (error) {
+          if (error instanceof VersionedTextStoreError) {
+            throw corruptBundle(error.message.replace(/^Sync binary/u, "Sync bundle binary"));
+          }
+          throw error;
+        }
       }
       for (const queue of queues) {
         for (const op of queue) {
@@ -443,34 +289,13 @@ export async function importSyncBundle(
   } finally {
     db.close();
   }
-
-  const versions = createVersionedTextStore(input.rootDir);
-  const chats = createLinkedChatStore(input.rootDir);
-  try {
-    let applied = 0;
-    let skipped = 0;
-    let conflictsOpened = 0;
-    let pendingConflictResolves = 0;
-    for (;;) {
-      const op = popNextMergedOp(queues);
-      if (!op) break;
-      const result =
-        op.opKind === "chat.channel.create" ||
-        op.opKind === "chat.thread.create" ||
-        op.opKind === "chat.message.append"
-          ? await chats.applyReplicationOp(op)
-          : await versions.applyReplicationOp(op);
-      if (result.status === "skipped") {
-        skipped += 1;
-      } else {
-        applied += 1;
-        conflictsOpened += result.conflictsOpened;
-        pendingConflictResolves += result.pendingConflictResolves ?? 0;
-      }
-    }
-    return { applied, skipped, conflictsOpened, pendingConflictResolves };
-  } finally {
-    await chats.close();
-    await versions.close();
-  }
+  return applySyncQueues({
+    rootDir: input.rootDir,
+    workspaceId: input.workspaceId,
+    queues,
+    blobSource: async (sha, kind) =>
+      kind === "text"
+        ? readFile(join(input.fromDir, "blobs", sha), "utf8")
+        : readFile(join(input.fromDir, "blobs-bin", sha)),
+  });
 }

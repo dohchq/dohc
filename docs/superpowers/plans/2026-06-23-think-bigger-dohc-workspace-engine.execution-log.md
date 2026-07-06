@@ -16702,3 +16702,399 @@ Codex-review findings against the WS-H1 branch, fixed as one commit
 CodeRabbit's 6 minor/trivial findings were recorded for the arc-gate
 sweep; only the stale `seedLegacyOptOut` rationale was updated here (it
 overlapped fix 3).
+
+## PR 0P-B - Thin Relay And Machine Auth (Sync Relay + Desktop Loop)
+
+Status: implemented and locally validated on branch; not pushed
+Branch: codex/think-bigger-0pb-relay
+Worktree: /home/ice/dev/dohc-0pb-relay (rebased onto main 4fdb0e65,
+post WS-H1 flag flip)
+Implementation workstream: codex CLI (gpt-5.5) rounds 1 (relay service)
+and 2 (desktop loop + integration) via the codex-implementation skill;
+Claude lane driver reviewed auth/isolation and the disk-materialization
+seam line-by-line, fixed the gate findings below, and ran ALL
+verification unsandboxed (codex's sandbox denies listen(), so every
+child-process integration result below is driver-verified)
+PR Link: (pending)
+Date started: 2026-07-07
+Date completed: 2026-07-07
+
+### Scope
+
+Round 1 — the relay service:
+
+- [x] NEW `services/sync-relay` (@dohc/sync-relay): a dumb authenticated
+  store, raw node:http + pure fetch-handler factory (workspace-api
+  conventions; hand-rolled body adapter per the sqlite-worker
+  precedent), ONE server-side SQLite file (node:sqlite idiom, WAL),
+  workspace-scoped tables: `sync_relay_workspaces` (bucket -> exactly
+  one owner), `sync_relay_log` (UNIQUE per-origin seq; `relay_seq`
+  AUTOINCREMENT purely for pagination, no merge authority), and
+  `sync_relay_blobs` keyed `(workspace_id, sha256)` — blobs are scoped
+  PER BUCKET, deliberately not deduped across tenants, so cross-user
+  leakage is structurally impossible rather than authz-check-dependent.
+- [x] Endpoints: `POST /sync/workspaces` (claim; idempotent same-user;
+  404 on foreign owner), `POST /sync/:ws/log` (per-origin batch append;
+  gap or seq-collision-with-different-content = atomic 409, identical
+  replay = idempotent skip, empty batch = high-water probe),
+  `GET /sync/:ws/log?since&limit` (relay_seq pagination, cap 500;
+  since=0 IS the bootstrap path — no separate endpoint),
+  `PUT/GET /sync/:ws/blobs/:sha256` (server-verified hash on PUT, 10MB
+  cap), `POST /sync/:ws/blobs/have` (missing-set diff). The relay never
+  parses payload_json beyond JSON validity + size caps (pinned by an
+  opaque-unknown-opKind round-trip test).
+- [x] Auth slice: REUSE of workspace-api's Better Auth via new subpath
+  exports (`@dohc/workspace-api/auth/betterAuth`, `./auth/session`) —
+  same BETTER_AUTH_SECRET + Postgres means device-flow bearer tokens
+  minted by workspace-api validate at the relay with no second login
+  system. Fail-closed `SYNC_RELAY_TEST_AUTH` seam mirrors workspace-api's
+  DOHC_TEST_AUTH (dev/test NODE_ENV only, refuses to start otherwise,
+  loopback-only bind when active).
+- [x] docker-compose.self-host.yml gains the sync-relay service (own
+  persistent volume for the sqlite file) and the previously-MISSING
+  BETTER_AUTH_SECRET wiring for workspace-api; .env.self-host.example
+  documents the shared secret + SYNC_RELAY_PORT.
+
+Round 2 — engine client + desktop loop:
+
+- [x] `packages/workspace-engine/src/syncApply.ts`: importSyncBundle's
+  apply internals extracted transport-agnostic (hash-verified blob
+  hydration incl. binary anchor rows, ref validation, k-way
+  `(recordedAtMs, originId, originSeq)` merge, two-store apply
+  dispatch); syncFolder.ts is now a thin folder-transport wrapper.
+  Zero behavior change (339 pre-existing engine tests green unmodified).
+- [x] `packages/workspace-engine/src/syncRelay.ts`: the relay client.
+  Push = per-origin ops above the persisted pushed cursor, blobs/have
+  diff then hash-verified PUTs, per-origin append, cursor advanced to
+  the relay's currentMaxOriginSeq (relay contiguity makes that exact);
+  ONE 409 recovery via empty-batch probe then fail closed. Pull = page
+  `GET log?since=<persisted fetch cursor>`, hydrate missing blobs via
+  GET with MANDATORY client-side sha256 re-verification, apply through
+  syncApply; the fetch cursor is returned as `nextCursor` +
+  `commitFetchCursor()` and committed by the desktop capture only AFTER
+  disk materialization succeeds (gate fix 1 below — crash or
+  materialization failure before the commit re-fetches; apply is
+  idempotent and retry re-reports the owed disk work). Typed
+  RelayUnauthorizedError (401) / RelayWorkspaceUnavailableError (404) /
+  RelayConflictError (409) / RelayOriginDivergedError (restored or
+  cloned engine.db) / RelayBlobMissingError (relay lost a blob). Tokens
+  never in URLs or logs.
+- [x] CURSOR PERSISTENCE IN ENGINE.DB (the 0P-A handoff item this lane
+  owns): lazy-additive `sync_relay_cursors(workspace_id,
+  relay_fetch_cursor)` + `sync_relay_push_state(workspace_id,
+  origin_id, pushed_seq)` in the existing SYNC_REPLICATION_DDL block,
+  no schema-version bump.
+- [x] Desktop loop `apps/desktop/src/workspaces/relaySyncEngine.ts`
+  (legacy cloudSyncEngine.ts DELETED with its test — audit Phase C/D
+  retirement; packages/workspace-sync itself stays, packages/mcp still
+  imports it — follow-up cleanup): salvaged loop shape (one serialized
+  chain, debounced queueSync behind settled watcher batches, start()
+  rethrows first-contact failures, terminal authExpired on typed 401),
+  plus exponential backoff 5s..5min with coalescing (queueSync during
+  backoff joins the scheduled attempt instead of resetting it) and a
+  transition-only `syncFailing` flag after 3 consecutive failures
+  (cleared on success), surfaced through SyncStatusResult into a new
+  NoticeCenter warning.
+- [x] Capture-chain integration: new
+  `WorkspaceEngineCapture.runRelaySync(task)` — the whole push+pull+
+  materialize pass rides the SAME serialized capture chain as batch
+  capture and version operations. Fast-forwarded active-version paths
+  are materialized to disk through the existing `materialize()` helper,
+  which registers expected engine events (sha-matched) so the watcher's
+  observation of sync writes is never re-captured as a new local
+  moment; divergence conflicts never touch disk (P0D: local file stays,
+  conflict row carries the remote side). Policy assertions
+  (assertEngineWritablePath) gate every materialized path.
+- [x] Wiring: CloudCredentials gains optional `relayUrl` (backward-
+  compatible load/save; captured in the connect UI beside the server
+  URL; never silently derived), cloudEnableSync claims the relay bucket
+  (foreign-owner 404 -> the existing "already claimed by another
+  account" message) alongside the legacy workspace-api claim (shares
+  still depend on the remote identity), and engineForWorkspace builds
+  the relay engine only when remote identity + credentials + relayUrl +
+  capture are all present and credentialMatchesRemote passes.
+
+### Files Changed
+
+Round 1: services/sync-relay/{package.json, tsconfig.json,
+scripts/build.mjs, src/{server.ts, storage.ts, main.ts, server.test.ts,
+main.integration.test.ts}} (new); services/workspace-api/package.json
+(auth subpath exports only); docker-compose.self-host.yml;
+.env.self-host.example; pnpm-lock.yaml.
+
+Round 2: packages/workspace-engine/src/{syncApply.ts (new),
+syncRelay.ts (new), syncRelay.test.ts (new), syncFolder.ts (refactor),
+engineDbSchema.ts (cursor tables), index.ts (exports)};
+apps/desktop/src/workspaces/{relaySyncEngine.ts (new),
+relaySyncEngine.test.ts (new), cloudSyncEngine.ts + test (DELETED),
+workspaceEngineCapture.ts (runRelaySync), workspaceEngineCapture.test.ts
+(materialization/echo tests), workspaceActivity.ts (engineFor carries
+the capture), cloudCredentialStore.ts, cloudLogin.ts + test};
+apps/desktop/src/main.ts, src/ipc/bridgeContract.ts,
+src/renderer/CloudLogin.tsx, src/renderer/workbench/NoticeCenter.tsx;
+services/sync-relay/src/main.integration.test.ts (extended).
+
+### Tests Added Or Updated
+
+Relay unit (9): auth required on EVERY route incl. blob GET (a
+throwing-Proxy storage proves rejection happens BEFORE any storage
+access); adversarial cross-user isolation on every workspace route with
+the intruder's response asserted BYTE-IDENTICAL to the absent-workspace
+response (and foreign claim = 404); origin_seq gap -> atomic 409 with a
+follow-up fetch proving nothing landed; regression-with-different-
+content -> 409; overlapping replay idempotent (no duplicate rows); blob
+PUT hash mismatch stores nothing; have-set diff; multi-origin relay_seq
+pagination; unknown-opKind opaque payload stored/returned verbatim.
+
+Engine client unit (6, injected in-memory fake relay — engine never
+depends on services/*): push/bootstrap-pull round trip; cursors survive
+store-handle restarts; ONE 409 probe-recovery; typed 401; blob GET hash
+mismatch fails closed; chat replication through bootstrap pull.
+
+Desktop unit: relaySyncEngine debounce/serialization, backoff schedule
+with fake timers (coalescing during backoff, reset on success),
+syncFailing transitions, terminal authExpired; runRelaySync
+materializes remote writes/deletes to disk AND the watcher echo is
+suppressed while a subsequent REAL user edit still captures (gate-fix
+tests, driver-added); cloudLogin persists the explicit relayUrl.
+
+Integration over real HTTP (5, real child-process relay, real bearer
+auth, real SQLite): journal+blob round trip; two stores converge via
+the engine client and a fresh THIRD store bootstraps from since=0;
+bounded seeded fuzz (seed 0x0f0b2026 logged on failure, 10 iterations,
+collision-biased text/binary/delete writes + chat messages, sync to
+quiescence each round, non-conflicted file equality + mirrored
+conflicts + chat digest equality); secret-exclusion over the transport
+(real secret-store write, push, adversarial byte-walk of relay
+db+WAL+shm AND every captured HTTP request body — with a positive
+control asserting workspace.init IS present in the walked bytes);
+mid-push network-failure retry converging with no duplicates.
+
+### Commands Run (driver, unsandboxed, final state)
+
+```bash
+pnpm --filter @dohc/workspace-engine test   # 345 passed (339 baseline + 6)
+pnpm --filter @dohc/sync-relay test         # 14 passed (9 unit + 5 integration, none skipped)
+pnpm --filter @dohc/desktop test            # 905 passed (901 post-flip baseline + additions)
+pnpm --filter @dohc/mcp test                # 76 passed
+pnpm --filter @dohc/workspace-fs test       # 44 passed
+pnpm --filter @dohc/workspace-api test      # 76 passed
+pnpm typecheck                              # clean repo-wide
+node scripts/check-think-bigger-doc-links.mjs
+git diff --check                            # clean
+node scripts/check-self-host.mjs            # same 3 pre-existing misses as main (apps/app, app-tester)
+```
+
+### Driver Gate Findings (fixed before commit)
+
+- R1-C1: better-auth's toNodeHandler silently drops request bodies that
+  arrive WITHOUT a content-type header, breaking raw-bytes blob PUTs.
+  Codex could not catch it (sandbox denies listen(); the integration
+  test skipped). Replaced with the repo's hand-rolled node:http adapter
+  (sqlite-worker precedent) — the relay never mounts better-auth
+  routes, it only calls auth.api.getSession.
+- R1-M1: the integration helper exported WS-G1 binary ANCHOR rows
+  (empty-text blobs rows beside binary_blobs) as shippable text blobs;
+  fixed to exclude anchors on export and recreate them on hydrate,
+  mirroring syncFolder's hydrateBinaryBlob.
+- R2-M1: runRelaySync (the only new code path that writes user files to
+  disk) had no test — codex mocked the capture in the loop tests.
+  Driver added materialization + echo-suppression + real-user-edit-
+  still-captures tests against the persisted engine.db.
+- R2-M2: the secret-exclusion byte walk read only the main sqlite file;
+  under WAL the fresh writes live in relay.sqlite-wal, so the absence
+  assertion could false-pass. Now walks db+WAL+shm with a positive
+  control (workspace.init must be present).
+- Trivia: relay URL placeholder said 1787 (the sqlite-worker port);
+  compose/env default is 1788.
+
+### Security / Privacy Notes
+
+- Isolation is structural AND behavioral: blobs/log rows are keyed by
+  bucket; a non-owner is indistinguishable from an absent workspace on
+  every route (adversarial byte-identical-response tests are the lane's
+  blocking gate and pass). Residual accepted leak: a claim attempt on a
+  foreign-owned id 404s while a fresh id succeeds — inherent to claim
+  semantics; ids are UUID-shaped and unguessable.
+- Tokens: bearer header only, never in URLs, never logged, 404 bodies
+  are a fixed string. Desktop token stays in the safeStorage-sealed
+  credential store; the relay engine receives it in-process only.
+- Secrets: secret ops never journal (0P-A invariant), so the transport
+  ships nothing secret by construction — now adversarially re-proven at
+  the HTTP boundary and at-rest on the relay (WAL-aware byte walk).
+- Client trusts nothing: blob GETs re-verify sha256 client-side; server
+  re-verifies on PUT; tampered content fails closed as state-corrupt.
+
+### Performance Notes
+
+- Machine: AMD Ryzen 9 7950X, WSL2, node v25.2.1. sync-relay suite
+  ~10s (5 child-process integration specs incl. the 10-iteration fuzz
+  at ~2.4s); desktop suite 905 tests ~16s wall; engine 345 in ~35s.
+- Blob hydration originally ran inside the apply-side BEGIN IMMEDIATE
+  transaction, holding the write lock across network GETs. Fixed in the
+  gate round below (fetch-then-begin: blobs are fetched before the
+  transaction opens and hydrated synchronously inside it).
+
+### Migration Notes
+
+- Engine: two lazy-additive cursor tables in the existing sync DDL
+  block; no ENGINE_SCHEMA_VERSION bump; older readers unaffected.
+- Relay: brand-new deployment surface; schema init is idempotent
+  CREATE IF NOT EXISTS on boot. Self-host operators must set ONE
+  BETTER_AUTH_SECRET shared by workspace-api and sync-relay (compose
+  now enforces it; this also fixed workspace-api's compose, which never
+  received the secret at all).
+- Desktop: credential files without relayUrl keep loading (relay sync
+  simply unavailable until the user reconnects with a relay URL).
+
+### E2E / Visual / Manual QA
+
+- No new Electron E2E spec: driving two desktop instances against a
+  spawned relay needs multi-instance orchestration + packaged-app auth
+  seams the harness lacks; the design doc pins the full product E2E
+  (offline rejoin, conflict round trip) to 0P-C. The five child-process
+  HTTP integration specs cover transport end-to-end headlessly.
+
+### Remaining Risk / Follow-Ups (0P-C / 0P-D handoff)
+
+- 0P-C consumes: the bootstrap path exists at the engine level
+  (since=0 pull + materialization); a product "join this workspace on a
+  fresh machine" flow (remote workspace listing + local folder creation
+  + first-pull UX) is NOT built. Offline-rejoin E2E, conflict-
+  resolution round trip over the relay, and search rebuild on rejoin
+  are 0P-C's gate.
+- 0P-D consumes: `PUT/GET /sync/:ws/keys` (wrapped workspace-key
+  envelope) deliberately NOT implemented; secret blob replication
+  (ciphertext-only) plugs into the same blob store; the secret
+  EXCLUSION tests here become secret INCLUSION-as-ciphertext tests.
+- Carried from 0P-A (unsolved by design): divergence conflict-id
+  symmetry (mirrored-heads resolve matching remains the mechanism),
+  rollback compensating ops, conflict coalescing on long divergent
+  chains.
+- Legacy retirement: packages/workspace-sync still exists for
+  packages/mcp's cloud file tools; retiring it needs an mcp migration
+  to the relay/engine surface (audit Phase D follow-up). The legacy
+  workspace-api /workspaces claim is still performed for shares — the
+  shares surface now reads atoms nothing pushes to; PR 18's rebuild
+  supersedes it.
+- Relay GC/quotas: append-only at alpha per the design's Risk 2.
+- Multi-page pulls hold the full fetched backlog in memory before
+  apply; fine for text-first alpha, revisit with blob-heavy workspaces.
+
+### 0P-B Gate Fix Round (codex + CodeRabbit findings, one commit)
+
+Tests-first: every behavior fix below landed with a failing repro
+before the fix (the two data-safety Highs' repros are called out).
+
+1. Cursor-before-materialization (codex HIGH, data safety): the pull
+   committed the relay fetch cursor before the desktop materialized
+   pulled state to disk — a failed materialization permanently skipped
+   the remote op, and a later disk reconciliation could overwrite
+   pulled engine state with stale disk. Now `pullWorkspaceFromRelay`
+   returns `nextCursor` + `commitFetchCursor()` and never persists the
+   cursor itself; the capture's `runRelaySync` commits ONLY after
+   `materialize()` succeeds. Retry passes re-report owed disk work:
+   `applySyncQueues` returns its idempotently-skipped ops and the pull
+   re-emits write entries for skipped REMOTE-origin paths whose active
+   snapshot exists (own-origin echoes stay excluded; deletes ride the
+   snapshot diff only, so a merely-referenced path can never delete an
+   untracked user file). Repro (failed pre-fix): pull without commit →
+   cursor was already 2; retry pull reported no disk work. Capture-side
+   repro: directory squatting on the target path → materialization
+   throws → commit spy must not run; unblocked retry materializes then
+   commits; quiescent pass still commits.
+2. Oversized binary blob hydration (codex HIGH, data safety): the
+   engine forbids binaries > MAX_VERSIONED_BINARY_FILE_BYTES (5 MiB)
+   locally, but the relay's 10MB MAX_BLOB_BYTES (text headroom —
+   split now documented in server.ts) let an authenticated peer ship a
+   binary blob peers would hydrate. `hydrateBinaryBlob` (shared by
+   relay pull AND bundle import) now enforces the engine limit by
+   referenced kind BEFORE insertion, failing closed as a typed
+   file-too-large protocol violation; the pull path also asserts at the
+   transport edge before staging. Repro (failed pre-fix): 5MiB+1 blob
+   in a relay log → hydrated into binary_blobs, then died on an
+   incidental apply error instead of an honest rejection.
+3. 409 recovery / same-origin divergence (codex MEDIUM):
+   `pushWorkspaceToRelay` now never advances pushed_seq past the local
+   journal's max for an origin. A relay AHEAD of local reality (append
+   result or probe above local max) or a 409 with the probe at/above
+   the push cursor (same seq, different content) is a restored/cloned
+   engine.db → typed RelayOriginDivergedError, fail closed (origin
+   reset recovery recorded as 0P-C follow-up). The one legitimate
+   recovery — relay BEHIND the cursor after relay-side data loss —
+   still rewinds and retries once. Repros (failed pre-fix): restored
+   older DB resolved silently with pushed_seq advanced past local max;
+   post-restore divergent write was silently dropped.
+4. Unbounded request buffering (CodeRabbit CRITICAL): main.ts now caps
+   bodies AT THE STREAM (MAX_BLOB_BYTES + 1MB headroom) — oversized
+   uploads get a flushed 413 then a destroyed socket mid-stream, and
+   the request stream has an error listener (aborted uploads no longer
+   crash the process). Integration-proven with a 48MB streamed PUT:
+   the client cannot deliver the full body, and the server stays
+   healthy (health + normal blob PUT succeed after).
+5. pg.Pool error listener (CodeRabbit CRITICAL): idle-client pool
+   errors are logged instead of crashing the relay; an auth-backend
+   failure surfaces as a generic 5xx (unit test with a throwing
+   resolveActor).
+6. Pagination forward-progress guard (CodeRabbit MAJOR): a relay page
+   claiming hasMore without advancing nextCursor aborts the pull with
+   an error. Pre-fix repro spun a vitest worker at 96% CPU for six
+   minutes before being killed.
+7. Blob-miss vs workspace-miss (CodeRabbit MAJOR): the relay returns a
+   distinct 404 code `blob_not_found` for a missing blob in an OWNED
+   workspace (absent/foreign workspaces keep the byte-identical fixed
+   404, adversarially re-asserted); the client maps it to typed
+   RelayBlobMissingError instead of RelayWorkspaceUnavailableError.
+8. Write lock across blob fetches (CodeRabbit MAJOR): applySyncQueues
+   fetches missing blobs BEFORE `BEGIN IMMEDIATE` and hydrates
+   synchronously inside the transaction. Repro (failed pre-fix): a
+   BEGIN IMMEDIATE probe connection inside the blob fetch hook hit
+   "database is locked"; now it succeeds.
+9. relaySyncEngine over-mock (CodeRabbit MAJOR): the loop tests now
+   mock only the transport (vi.mock of push/pull) while the capture
+   stub executes the REAL callback and the commit contract; new wiring
+   test asserts push-then-pull order, exact inputs, commitFetchCursor
+   invocation, and conflictsOpened folding into conflictCount.
+10. Error-message leak (CodeRabbit MAJOR): unclassified errors (no
+    intentional 4xx statusCode) now log server-side and answer a
+    generic `{error:"internal error"}` 500 — error.message passthrough
+    only for typed HttpError/Conflict and duck-typed 4xx auth errors.
+
+Recorded for the arc-gate sweep (NOT fixed here — CodeRabbit
+minors/trivials):
+
+- main.ts:11 hardcoded default Postgres URL fallback instead of
+  failing fast when POSTGRES_URL is unset outside dev/test.
+- main.ts:10 no validation of SYNC_RELAY_PORT (NaN → obscure listen
+  error).
+- syncRelay.test.ts: no regression test for claiming a workspace
+  already owned by another user (FakeRelay implements the check).
+- syncRelay.test.ts: no coverage for irrecoverable conflict after
+  retry exhaustion or unclaimed-workspace push/pull errors (the
+  divergence tests added here cover the adjacent fail-closed paths).
+- storage.ts missingBlobs: N+1 point queries (up to 2,000 sequential
+  SELECTs) instead of one batched IN query.
+- storage.ts appendLogBatch: re-queries MAX(origin_seq) per op instead
+  of tracking it locally.
+- scripts/build.mjs: no sourcemap for the bundled service.
+- workspaceEngineCapture.test.ts: relay materialization coverage lacks
+  a binary fast-forward case and a missing-snapshot silent-skip case.
+- workspaceActivity.ts:214: engine-opted-out workspaces get the
+  generic signed-in-session error from enableCloud (and cloudEnableSync
+  marks the workspace remote before the check).
+- (fixed incidentally by fix 1's restructure) capture runRelaySync ran
+  policy/engine reads before the quiescent early return.
+- server.test.ts 413 regression gap: covered here by the new
+  handler-level 413 test + the streamed integration test.
+
+Verification (all green, unsandboxed):
+
+```bash
+pnpm --filter @dohc/workspace-engine test   # 352 passed (345 + 7 new)
+pnpm --filter @dohc/sync-relay test         # 19 passed (14 + 5 new, none skipped)
+pnpm --filter @dohc/desktop test            # 907 passed (905 + capture test, relay loop 4→5)
+pnpm --filter @dohc/workspace-api test      # 76 passed
+pnpm typecheck                              # clean repo-wide
+git diff --check                            # clean
+node scripts/check-think-bigger-doc-links.mjs
+```

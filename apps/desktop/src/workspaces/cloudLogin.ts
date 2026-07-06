@@ -22,9 +22,9 @@ export interface CloudLoginOptions {
 }
 
 export interface CloudLogin {
-  start(serverUrl?: string): Promise<{ userCode: string; verificationUri: string }>;
+  start(serverUrl?: string, relayUrl?: string): Promise<{ userCode: string; verificationUri: string }>;
   poll(): Promise<{ status: "pending" | "complete" | "denied" | "expired"; email?: string }>;
-  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string }>;
+  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string }>;
   logout(): Promise<void>;
   // The persisted token for the sync engine (main-process only — never IPC).
   credentials(): Promise<CloudCredentials | null>;
@@ -32,7 +32,7 @@ export interface CloudLogin {
 
 export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   const fetchImpl = options.fetch ?? fetch;
-  let pending: { serverUrl: string; deviceCode: string } | null = null;
+  let pending: { serverUrl: string; relayUrl?: string; deviceCode: string } | null = null;
 
   async function postJson(url: string, body: unknown): Promise<Response> {
     return fetchImpl(url, {
@@ -43,8 +43,9 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   }
 
   return {
-    async start(serverUrl) {
+    async start(serverUrl, relayUrl) {
       const server = (serverUrl ?? options.defaultServerUrl).replace(/\/+$/, "");
+      const relay = relayUrl?.trim().replace(/\/+$/, "");
       const response = await postJson(`${server}/api/auth/device/code`, {
         client_id: CLIENT_ID,
       });
@@ -57,7 +58,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         verification_uri: string;
         verification_uri_complete?: string;
       };
-      pending = { serverUrl: server, deviceCode: data.device_code };
+      pending = { serverUrl: server, ...(relay ? { relayUrl: relay } : {}), deviceCode: data.device_code };
       return {
         userCode: data.user_code,
         verificationUri: data.verification_uri_complete ?? data.verification_uri,
@@ -66,7 +67,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
     async poll() {
       if (!pending) throw new Error("No cloud login in progress");
-      const { serverUrl, deviceCode } = pending;
+      const { serverUrl, relayUrl, deviceCode } = pending;
       const response = await postJson(`${serverUrl}/api/auth/device/token`, {
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: deviceCode,
@@ -84,7 +85,12 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         });
         const body = (await session.json()) as { user?: { email?: string } } | null;
         const email = body?.user?.email ?? "";
-        await options.store.save({ serverUrl, email, token: data.access_token });
+        await options.store.save({
+          serverUrl,
+          ...(relayUrl ? { relayUrl } : {}),
+          email,
+          token: data.access_token,
+        });
         pending = null;
         return { status: "complete" as const, email };
       }
@@ -105,7 +111,12 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
     async status() {
       const credentials = await options.store.load();
       return credentials
-        ? { connected: true, email: credentials.email, serverUrl: credentials.serverUrl }
+        ? {
+            connected: true,
+            email: credentials.email,
+            serverUrl: credentials.serverUrl,
+            ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
+          }
         : { connected: false };
     },
 

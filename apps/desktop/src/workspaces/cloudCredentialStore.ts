@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 export interface CloudCredentials {
   serverUrl: string;
+  relayUrl?: string;
   email: string;
   token: string;
 }
@@ -74,7 +75,12 @@ export function createCloudCredentialStore(options: {
         return null;
       }
       if (!nonEmptyString(token)) return null;
-      return { serverUrl: obj.serverUrl, email: obj.email, token };
+      return {
+        serverUrl: obj.serverUrl,
+        ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
+        email: obj.email,
+        token,
+      };
     },
 
     async save(credentials: CloudCredentials): Promise<void> {
@@ -87,6 +93,7 @@ export function createCloudCredentialStore(options: {
       const payload = {
         version: 1,
         serverUrl: credentials.serverUrl,
+        ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
         email: credentials.email,
         token,
       };

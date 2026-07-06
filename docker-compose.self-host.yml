@@ -74,6 +74,7 @@ services:
         condition: service_healthy
     environment:
       DOHC_BACKEND: postgres
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
@@ -86,6 +87,31 @@ services:
       - "${WORKSPACE_API_BIND:-127.0.0.1}:${WORKSPACE_API_PORT:-1786}:1786"
     volumes:
       - .:/workspace
+
+  sync-relay:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Must match workspace-api exactly so Better Auth bearer tokens minted by
+      # workspace-api's desktop device flow validate at the relay too.
+      POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
+      SYNC_RELAY_BIND: "0.0.0.0"
+      SYNC_RELAY_PORT: "1788"
+      SYNC_RELAY_DB_PATH: /data/sync-relay.sqlite
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @dohc/sync-relay dev"
+    ports:
+      - "${SYNC_RELAY_BIND:-127.0.0.1}:${SYNC_RELAY_PORT:-1788}:1788"
+    volumes:
+      - .:/workspace
+      - dohc_self_host_sync_relay:/data
 
   sqlite-worker:
     image: node:22-bookworm-slim
@@ -147,4 +173,5 @@ services:
 volumes:
   dohc_self_host_postgres:
   dohc_self_host_object_storage:
+  dohc_self_host_sync_relay:
   dohc_self_host_agent_sandbox:
