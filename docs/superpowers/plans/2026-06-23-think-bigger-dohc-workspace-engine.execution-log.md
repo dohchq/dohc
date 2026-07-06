@@ -15269,3 +15269,74 @@ node scripts/check-think-bigger-doc-links.mjs
   are boring (P0R adoption criteria).
 - Retire crates/workspace-kernel-spike once the sidecar fully supersedes
   it and the recorded benchmarks are re-provenanced against the kernel.
+
+## PR WS-B - Arc 0P Sync Design
+
+Status: design doc landed on branch (docs only, no product code)
+Branch: codex/think-bigger-wsb-sync-design
+Worktree: /home/ice/dev/dohc-wsb-sync-design
+Implementation workstream, if used: none (single Claude lane, design only)
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+Docs-only lane: design the engine-native replication protocol so Arc 0P
+(the PR 21R re-cut) is implementable in bounded lanes, honoring Refined
+Implementation Default 1 (local engine authoritative, cloud never) and
+the Plan Completion Map's cloud-on-engine decision. No schema, engine,
+desktop, or server code changed.
+
+### Files Changed
+
+- docs/superpowers/plans/2026-07-06-think-bigger-0p-sync-design.md (new)
+- docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json
+  (added the new doc)
+- this execution log (this entry)
+
+### Commands Run
+
+- `node scripts/check-think-bigger-doc-links.mjs` — passed (9 files).
+
+### Decisions
+
+- Log replication scheme: multi-origin log — every replicated op is
+  identified by `(originId, originSeq)` with per-origin high-water
+  marks (vector-clock-lite), rejecting the single-writer lease because
+  an authoritative offline-first local engine cannot refuse writes, so
+  a lease hides divergence without removing the merge machinery P0D
+  already shipped.
+- `moment_order` (and chat `message_order`) never replicate: they stay
+  per-store local pagination order; importers reallocate them with a
+  deterministic `(recordedAtMs, originId, originSeq)` interleave.
+  State convergence rests on per-object head checks
+  (`snapshots.latest_moment_id` vs the op's before head), not on the
+  display interleave.
+- Divergent heads degrade to the existing P0D conflict rows
+  (base/current/incoming) on both machines — never clobber.
+- Secrets replicate ciphertext-only; key exchange at alpha is a
+  passphrase-wrapped workspace data key stored on the relay (Argon2id
+  KEK), with manual key-file transfer as the fallback.
+- Server is a dumb relay: per-user buckets, content-addressed blob
+  put/get/have, per-origin contiguous log append, since-cursor fetch,
+  no server-side merge; machine auth salvages the existing better-auth
+  device flow; explicitly not the legacy atoms API, and
+  workspace-postgres stays retired per the 0N-3 audit.
+- Milestones re-cut 21R-A..E as 0P-A (sync-over-a-folder proving
+  semantics with no server), 0P-B (thin relay + device auth), 0P-C
+  (offline rejoin + conflict E2E, absorbs 21R-C as "derived state is
+  rebuilt, never replicated"), 0P-D (encrypted secrets, depends WS-C).
+
+### Unresolved Findings / Open Questions
+
+For the user (also in the design doc): (1) encrypt all blobs at the
+relay or only secrets at alpha; (2) is bootstrap-from-relay (fresh
+machine, empty folder) in 0P-B scope; (3) relay hosting — dohc-hosted
+only or docker-compose self-host from day one.
+
+### Follow-Up / Deletion Conditions
+
+- 0P-A opens the implementation arc; legacy `packages/workspace-sync` +
+  `cloudSyncEngine.ts` retire when 0P-B replaces the desktop loop
+  (audit Phase C/D).
