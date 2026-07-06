@@ -36,6 +36,8 @@ import {
   type ChatThread,
   type LinkedChatProjectionFileAccess,
   type LinkedChatStore,
+  type VersionedTextMoment,
+  type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import {
@@ -313,15 +315,24 @@ export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolea
   }
 }
 
-// Retirement Phase C (WS-H1): MCP writes NO legacy change sets. The desktop
-// watcher captures MCP's physical writes into engine moments (agent-
-// attributed when a dohc-tracked run is active; an external MCP client
-// without a dohc-tracked run yields actor-neutral engine capture — honest per
-// the actor-neutral principle). Mutating tools report this constant history
-// reference. Legacy .dohc/history left by pre-flip versions is a read-only
-// relic (the read tools below can still list it).
-function recordedChangeFields() {
-  return { recordedBy: "workspace-engine" as const };
+// Retirement Phase C (WS-H1): MCP writes NO legacy change sets. For an engine
+// workspace (the default) the desktop watcher captures MCP's physical writes
+// into engine moments (agent-attributed when a dohc-tracked run is active; an
+// external MCP client without a dohc-tracked run yields actor-neutral engine
+// capture — honest per the actor-neutral principle). Caveat a standalone MCP
+// client should know: that capture happens via the desktop watcher when the
+// app is open — a write made while the desktop is closed is picked up by the
+// next startup reconciliation. A workspace that explicitly opted OUT of the
+// engine has NO recorder at all; naming a recorder there would be a lie, so
+// mutating tools report `historyRecording: "off"` instead. Legacy
+// .dohc/history left by pre-flip versions is a read-only relic (the read
+// tools below can still list it).
+async function recordedChangeFields(
+  ctx: ToolContext,
+): Promise<{ recordedBy: "workspace-engine" } | { historyRecording: "off" }> {
+  return (await isWorkspaceEngineFlagged(ctx))
+    ? { recordedBy: "workspace-engine" as const }
+    : { historyRecording: "off" as const };
 }
 
 function failureReason(error: unknown, fallback: string): string {
@@ -935,7 +946,7 @@ export async function writeWorkspaceFile(
     path: resolved.normalized,
     bytes: bytes.byteLength,
     sha256: sha256(bytes),
-    ...recordedChangeFields(),
+    ...(await recordedChangeFields(ctx)),
   };
 }
 
@@ -974,7 +985,7 @@ export async function createWorkspaceDirectory(
   return {
     ok: true as const,
     path: resolved.normalized,
-    ...recordedChangeFields(),
+    ...(await recordedChangeFields(ctx)),
   };
 }
 
@@ -1005,7 +1016,7 @@ export async function moveWorkspacePath(
       ok: true as const,
       fromPath: from.normalized,
       toPath: to.normalized,
-      ...recordedChangeFields(),
+      ...(await recordedChangeFields(ctx)),
     };
   } catch (error) {
     return {
@@ -1035,7 +1046,7 @@ export async function deleteWorkspacePath(
       ok: true as const,
       path: resolved.normalized,
       trashed: true,
-      ...recordedChangeFields(),
+      ...(await recordedChangeFields(ctx)),
     };
   } catch (error) {
     return {
@@ -1258,9 +1269,10 @@ export async function workspaceStatus(ctx: ToolContext) {
 
 // --- dohc_sync_now / dohc_sync_cloud ---------------------------------------
 
-// Local-first: "sync" reports the change sets recorded since the cursor (what
-// would be pushed) rather than performing a network push. A clean state means
-// nothing pending.
+// LEGACY cloud path (WS-H1): this reports the pre-flip legacy change sets
+// still pending against the retired cloud-sync cursor — engine moments never
+// appear here. Kept (not rewired) until the engine's folder-based sync (0P-B)
+// replaces the cloud stack; use dohc_list_changes for real history.
 export async function syncNow(ctx: ToolContext, args: { sinceMs?: number }) {
   const store = historyReadStoreFor(ctx);
   const pending = await store.listSince(args.sinceMs ?? 0);
@@ -1312,7 +1324,7 @@ function combineMergeResults(...results: MergeSyncResult[]): MergeSyncResult {
 async function recordCloudPull(
   ctx: ToolContext,
   result: MergeSyncResult,
-): Promise<ReturnType<typeof recordedChangeFields> | { historyError: string } | null> {
+): Promise<Awaited<ReturnType<typeof recordedChangeFields>> | { historyError: string } | null> {
   const files: FileChange[] = [
     ...result.pulledPaths.map((path) => ({ path, operation: "write" as const })),
     ...result.deletedLocalPaths.map((path) => ({ path, operation: "delete" as const })),
@@ -1320,7 +1332,7 @@ async function recordCloudPull(
   if (files.length === 0) return null;
   // The watcher observes the pulled/deleted files on disk and captures them
   // as engine moments; no direct history write happens here anymore.
-  return recordedChangeFields();
+  return recordedChangeFields(ctx);
 }
 
 export async function syncCloud(
@@ -1411,10 +1423,21 @@ export async function syncCloud(
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
+// WS-H1 gate fix: after the flag flip the workspace ENGINE records history
+// (moments in .dohc/engine/engine.db), so these tools read engine moments
+// first — otherwise agents would honestly-falsely see "0 changes" after real
+// edits. Pre-flip legacy .dohc/history change sets remain readable as a
+// read-only relic and are merged in (each entry names its `source`). Legacy
+// fields that no longer exist on a moment (kind, boundaryCrossings,
+// provenance) are omitted, not faked; a moment adds path/operation/versionId.
+
+const LIST_CHANGES_HARD_LIMIT = 500;
+
 function changeSummary(record: HistoryRecord, includeFiles: boolean) {
   return {
     id: record.id,
     recordedAtMs: record.recordedAtMs,
+    source: "legacy-change-set" as const,
     kind: record.kind,
     author: record.author,
     summary: record.summary,
@@ -1425,31 +1448,136 @@ function changeSummary(record: HistoryRecord, includeFiles: boolean) {
   };
 }
 
+// Structural pick so both the timeline summary (listMoments) and the full
+// moment (getMoment) can be summarized with one shape.
+type MomentSummaryFields = Pick<
+  VersionedTextMomentSummary,
+  "id" | "recordedAtMs" | "operation" | "path" | "versionId" | "metadata" | "author"
+>;
+
+function momentChangeSummary(moment: MomentSummaryFields, includeFiles: boolean) {
+  return {
+    id: moment.id,
+    recordedAtMs: moment.recordedAtMs,
+    source: "workspace-engine" as const,
+    operation: moment.operation,
+    path: moment.path,
+    versionId: moment.versionId,
+    ...(moment.metadata.summary ? { summary: moment.metadata.summary } : {}),
+    ...(moment.author ? { author: moment.author } : {}),
+    fileCount: 1,
+    ...(includeFiles ? { files: [{ path: moment.path, operation: moment.operation }] } : {}),
+  };
+}
+
+// Per-call open/close, same as the chat tools: the MCP process never holds
+// engine.db handles between tool calls.
+async function withVersionedTextStore<T>(
+  ctx: ToolContext,
+  task: (texts: VersionedTextStore) => Promise<T>,
+): Promise<T> {
+  const texts = createVersionedTextStore(ctx.root);
+  try {
+    return await task(texts);
+  } finally {
+    await texts.close().catch(() => undefined);
+  }
+}
+
+// True only when the engine store already exists on disk: history READS must
+// never create .dohc/engine/engine.db as a side effect (opening the store
+// initializes it).
+async function engineStoreExists(ctx: ToolContext): Promise<boolean> {
+  const stats = await lstat(join(ctx.root, ".dohc", "engine", "engine.db")).catch(() => null);
+  return stats?.isFile() ?? false;
+}
+
+async function engineMomentsForRoot(
+  ctx: ToolContext,
+  limit: number,
+): Promise<VersionedTextMomentSummary[]> {
+  const workspaceId = await workspaceIdForRoot(ctx);
+  if (!workspaceId) return [];
+  if (!(await engineStoreExists(ctx))) return [];
+  try {
+    return await withVersionedTextStore(ctx, async (texts) => {
+      const page = await texts.listMoments({ workspaceId, limit });
+      return page.moments;
+    });
+  } catch {
+    // Unreadable/locked engine store: the read tool degrades to the legacy
+    // view instead of crashing (same posture as durableRecordsOrEmpty).
+    return [];
+  }
+}
+
+async function engineMomentForRoot(
+  ctx: ToolContext,
+  momentId: string,
+): Promise<VersionedTextMoment | null> {
+  const workspaceId = await workspaceIdForRoot(ctx);
+  if (!workspaceId) return null;
+  if (!(await engineStoreExists(ctx))) return null;
+  try {
+    return await withVersionedTextStore(ctx, (texts) =>
+      texts.getMoment({ workspaceId, momentId }),
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function listChanges(
   ctx: ToolContext,
   args: { sinceMs?: number; limit?: number; includeFiles?: boolean } = {},
 ) {
+  const includeFiles = args.includeFiles ?? false;
+  const sinceMs = args.sinceMs;
+  const limit = Math.min(LIST_CHANGES_HARD_LIMIT, Math.max(1, Math.floor(args.limit ?? 50)));
+  const moments = await engineMomentsForRoot(ctx, LIST_CHANGES_HARD_LIMIT);
+  // Same strictly-after cursor rule as the legacy store's listSince.
+  const selectedMoments =
+    sinceMs === undefined
+      ? moments
+      : moments.filter((moment) => moment.recordedAtMs > sinceMs);
   const store = historyReadStoreFor(ctx);
   const records =
-    args.sinceMs === undefined ? await store.list() : await store.listSince(args.sinceMs);
-  const limit = Math.min(500, Math.max(1, Math.floor(args.limit ?? 50)));
-  const selected = records.slice(0, limit);
+    sinceMs === undefined ? await store.list() : await store.listSince(sinceMs);
+  // Newest first across BOTH sources, ties broken by id for a stable order.
+  const merged = [
+    ...selectedMoments.map((moment) => momentChangeSummary(moment, includeFiles)),
+    ...records.map((record) => changeSummary(record, includeFiles)),
+  ].sort((a, b) => b.recordedAtMs - a.recordedAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const selected = merged.slice(0, limit);
   const cursorMs = selected.reduce(
-    (max, record) => Math.max(max, record.recordedAtMs),
+    (max, entry) => Math.max(max, entry.recordedAtMs),
     args.sinceMs ?? 0,
   );
   return {
-    changes: selected.map((record) => changeSummary(record, args.includeFiles ?? false)),
+    changes: selected,
     count: selected.length,
-    totalAvailable: records.length,
-    hasMore: records.length > selected.length,
+    totalAvailable: merged.length,
+    hasMore: merged.length > selected.length,
     cursorMs,
   };
 }
 
 export async function readChange(ctx: ToolContext, args: { id: string }) {
+  const moment = await engineMomentForRoot(ctx, args.id);
+  if (moment) {
+    return {
+      ok: true as const,
+      change: {
+        ...momentChangeSummary(moment, true),
+        // The moment's full detail: before is null for a first write; text is
+        // empty ("") for binary payloads (contentKind marks them).
+        before: moment.payload.before,
+        after: moment.payload.after,
+      },
+    };
+  }
   const record = await historyReadStoreFor(ctx).get(args.id);
-  if (!record) return { ok: false as const, reason: `change set not found: ${args.id}` };
+  if (!record) return { ok: false as const, reason: `change not found: ${args.id}` };
   return { ok: true as const, change: changeSummary(record, true) };
 }
 
@@ -1967,7 +2095,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     ok: true as const,
     siteRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
-    ...recordedChangeFields(),
+    ...(await recordedChangeFields(ctx)),
   };
 }
 
@@ -2222,7 +2350,11 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
     siteRoot: root.normalized,
     packagePath: normalizedPackagePath,
     dependency: "@dohc/sdk",
-    recordedBy: written.recordedBy,
+    // Forward the write's history-recording shape honestly (recordedBy for
+    // engine workspaces, historyRecording: "off" for opted-out ones).
+    ...("recordedBy" in written
+      ? { recordedBy: written.recordedBy }
+      : { historyRecording: written.historyRecording }),
     usage: `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
   };
 }
@@ -2297,7 +2429,7 @@ export async function importData(
     path: dbRel.normalized,
     tableName: result.tableName,
     rowCount: result.rowCount,
-    ...recordedChangeFields(),
+    ...(await recordedChangeFields(ctx)),
   };
 }
 

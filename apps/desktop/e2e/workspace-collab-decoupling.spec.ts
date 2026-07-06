@@ -142,7 +142,10 @@ test("engine-flagged local workspace edits a rich doc with zero Hocuspocus — e
       },
       { workspaceId: workspace.workspaceId, relativePath: "notes/solo.md" },
     );
-    expect(collabToken.available).toBe(false);
+    // Exact-shape refusal: available:false and NOTHING else — a token, url,
+    // or partial credential leaking alongside the refusal would defeat the
+    // decoupling this spec pins.
+    expect(collabToken).toEqual({ available: false });
     expect(webSockets).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

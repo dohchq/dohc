@@ -16641,3 +16641,64 @@ createChangeSetStore from @dohc/workspace-history directly).
   consider a confirmation dialog on the settings toggle.
 - The pre-existing apps/web backendSwitch test failure should be fixed
   in a cloud-focused lane (it predates this work).
+
+### Flip-Gate Fix Round (2026-07-07)
+
+Codex-review findings against the WS-H1 branch, fixed as one commit
+("Address flip gate findings"), tests first:
+
+1. **Cold-adoption fragility (High).** `scanWorkspaceFiles` threw out of
+   the whole recursive scan on any unreadable/racy path, and startup
+   reconciliation is one background task — one bad directory prevented
+   ALL existing files from seeding the engine on first open. Fix: a
+   reconciliation-tolerant sibling `scanWorkspaceFilesTolerant`
+   (workspace-fs) that skips-and-collects per-directory/per-entry
+   failures; the strict default is unchanged for every other caller
+   (sync, diff, kernel spike scripts). Reconciliation uses the tolerant
+   scan, reports a DEGRADED outcome through the existing
+   onCaptureOutcome/notice machinery when paths were skipped (plus an
+   onError naming them), and — critically — the retire pass never
+   deletes engine-tracked files under a failed path: absent from a
+   degraded listing is not evidence of deletion. Version operations that
+   scan internally keep failing closed exactly as the strict scan made
+   them. Tests: unreadable-subdirectory and unreadable-file fixtures
+   (chmod 000, restored in finally, skipped gracefully under uid 0), a
+   deterministic file-deleted-mid-scan simulation (stat ENOENT between
+   readdir and the per-file read), rest-of-tree-seeds + degraded-outcome
+   capture tests, and a no-false-retire test.
+2. **MCP history honesty post-flip (Medium).** `dohc_list_changes` /
+   `dohc_read_change` read only the legacy `.dohc/history` relic, so
+   agents saw "0 changes" after real engine edits. Rehomed onto engine
+   moments (`listMoments`/`getMoment` over the same per-call engine.db
+   open/close idiom the chat tools use), merged newest-first with the
+   pre-flip legacy relic; each entry names its `source`. Legacy-only
+   fields (kind, boundaryCrossings, provenance) are omitted on moments,
+   not faked; moments add path/operation/versionId and read_change
+   returns the full before/after payload. Reads never CREATE engine.db
+   (store open initializes it, so reads check existence first).
+   `dohc_sync_now` was relabeled as the LEGACY cloud path pending 0P-B —
+   description only, not rewired.
+3. **recordedBy honesty (Medium).** `recordedChangeFields` now consults
+   the workspace flag: engine workspaces report
+   `recordedBy: "workspace-engine"`; explicitly opted-out workspaces
+   report `historyRecording: "off"` (naming a recorder that does not run
+   would be a lie). Mutating tool descriptions carry the standalone-MCP
+   caveat: capture happens via the desktop watcher while the app is
+   open; a standalone write is picked up by the next startup
+   reconciliation. Tests pin both shapes.
+4. **`./versioned-file-workspace` quarantine (Medium).** The engine
+   package still exported `createVersionedFileWorkspace`, which writes
+   legacy `.dohc/history` via createChangeSetStore — a reachable package
+   API after retirement. Nothing outside the package imported the
+   subpath (verified), so the export was DROPPED from
+   packages/workspace-engine/package.json (fail-closed by
+   unreachability, preferred over a test-env gate). In-package tests
+   keep importing it relatively; the module header documents the
+   quarantine. It retires fully in Phase D.
+5. **G2-A token assertion (Low).** Tightened to
+   `expect(collabToken).toEqual({ available: false })` so a token/url
+   leaking beside the refusal would fail the spec.
+
+CodeRabbit's 6 minor/trivial findings were recorded for the arc-gate
+sweep; only the stale `seedLegacyOptOut` rationale was updated here (it
+overlapped fix 3).

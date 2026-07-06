@@ -13,6 +13,7 @@ import {
   listChannels,
   listChanges,
   listFileChats,
+  readChange,
   readChat,
   replyToChat,
   startChannelChat,
@@ -148,20 +149,99 @@ describe("mutating tools on a flagged workspace", () => {
     });
   });
 
-  it("opted-out workspaces get no MCP-written history either (retirement Phase C)", async () => {
+  it("opted-out workspaces report history recording honestly OFF (no recorder exists)", async () => {
     await withWorkspace(async (ctx) => {
       await seedEngineFlag(ctx, false);
       const write = await writeWorkspaceFile(ctx, {
         path: "notes/plan.md",
         content: "# Plan\n",
       });
-      // The legacy recorder is retired: even an opted-out workspace gets no
-      // change set from MCP. Whether anything records at all is the
-      // workspace's opt-out choice (the desktop shows its history-off
-      // notice); MCP reports the engine seam either way.
-      expect(write).toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+      // The legacy recorder is retired and this workspace explicitly opted
+      // out of the engine: NOTHING records this write (the desktop shows its
+      // history-off notice). Naming the engine as recorder here would be a
+      // lie, so the tool reports historyRecording: "off" instead.
+      expect(write).toMatchObject({ ok: true, historyRecording: "off" });
+      expect(write).not.toHaveProperty("recordedBy");
       expect(write).not.toHaveProperty("changeSetId");
       await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 0 });
+    });
+  });
+});
+
+// WS-H1 gate fix: post-flip, dohc_list_changes/dohc_read_change read the
+// ENGINE's moments (the actual recorder) — a real engine edit must show up,
+// never "0 changes".
+describe("history read tools on engine moments", () => {
+  it("lists an engine moment as a change and reads its full detail", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-history");
+      // A real engine edit — the same store the desktop watcher writes.
+      const texts = createVersionedTextStore(ctx.root);
+      await texts.ensureMainVersion({ workspaceId: "ws-history" });
+      const written = await texts.writeTextFile({
+        workspaceId: "ws-history",
+        versionId: "main",
+        path: "notes/plan.md",
+        text: "# Plan\n\nShip it.\n",
+        metadata: { origin: "local-file", summary: "Edited plan" },
+      });
+      await texts.close();
+
+      const listed = await listChanges(ctx, { includeFiles: true });
+      expect(listed).toMatchObject({
+        count: 1,
+        totalAvailable: 1,
+        hasMore: false,
+        changes: [
+          expect.objectContaining({
+            id: written.moment.id,
+            source: "workspace-engine",
+            path: "notes/plan.md",
+            operation: "write",
+            versionId: "main",
+            summary: "Edited plan",
+            fileCount: 1,
+            files: [{ path: "notes/plan.md", operation: "write" }],
+          }),
+        ],
+      });
+      // The legacy-only fields are omitted, never faked.
+      expect(listed.changes[0]).not.toHaveProperty("kind");
+      expect(listed.changes[0]).not.toHaveProperty("boundaryCrossings");
+
+      const read = await readChange(ctx, { id: written.moment.id });
+      expect(read).toMatchObject({
+        ok: true,
+        change: expect.objectContaining({
+          id: written.moment.id,
+          source: "workspace-engine",
+          path: "notes/plan.md",
+          operation: "write",
+          before: null,
+          after: expect.objectContaining({ text: "# Plan\n\nShip it.\n" }),
+        }),
+      });
+
+      // The since cursor is strictly-after, matching the legacy store rule.
+      await expect(
+        listChanges(ctx, { sinceMs: written.moment.recordedAtMs }),
+      ).resolves.toMatchObject({ count: 0 });
+      await expect(
+        listChanges(ctx, { sinceMs: written.moment.recordedAtMs - 1 }),
+      ).resolves.toMatchObject({ count: 1 });
+    });
+  });
+
+  it("never creates an engine store as a read side effect", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-history");
+      await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 0 });
+      await expect(readChange(ctx, { id: "nope" })).resolves.toMatchObject({ ok: false });
+      await expect(
+        access(join(ctx.root, ".dohc", "engine", "engine.db")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     });
   });
 });

@@ -105,7 +105,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_sync_now",
     {
-      description: "Report the change sets pending since a cursor (what would sync). Local-first: no network push.",
+      description:
+        "LEGACY cloud path: report pre-flip legacy change sets pending since a cursor for the retired cloud sync. Engine moments never appear here (use dohc_list_changes); kept until the engine folder sync replaces it. No network push.",
       inputSchema: { sinceMs: z.number().int().nonnegative().optional() },
     },
     async (args) => text(await syncNow(ctx, args)),
@@ -126,7 +127,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_list_changes",
     {
-      description: "List dohc change sets for history, provenance, and sync-aware collaboration.",
+      description:
+        "List workspace history: workspace-engine moments (the recorder since the engine became the default) merged with pre-flip legacy change sets (read-only relic). Each entry names its source; engine entries carry path/operation/versionId instead of the legacy kind/boundaryCrossings.",
       inputSchema: {
         sinceMs: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().max(500).optional(),
@@ -139,7 +141,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_read_change",
     {
-      description: "Read one dohc change set, including touched files, author, provenance, and boundary crossings.",
+      description:
+        "Read one history entry by id: a workspace-engine moment (with its full before/after payload) or a pre-flip legacy change set (files, author, provenance, boundary crossings).",
       inputSchema: {
         id: z.string().min(1).max(500),
       },
@@ -194,7 +197,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_write_file",
     {
-      description: "Write any visible workspace file and record a dohc change set so sync/history can see it.",
+      description:
+        "Write any visible workspace file. History: the desktop watcher captures the write as a workspace-engine moment while the app is open (a standalone MCP write is captured on the next desktop open); engine-opted-out workspaces record nothing (historyRecording: off).",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -209,7 +213,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_create_directory",
     {
-      description: "Create a visible workspace directory and record it in dohc history.",
+      description:
+        "Create a visible workspace directory. Files later written inside it are captured as engine moments by the desktop watcher; opted-out workspaces record nothing.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
@@ -221,7 +226,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_move_path",
     {
-      description: "Move or rename a visible workspace file/folder and record the change for sync/history.",
+      description:
+        "Move or rename a visible workspace file/folder. The desktop watcher captures the change as engine moments while the app is open; opted-out workspaces record nothing.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -235,7 +241,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_delete_path",
     {
-      description: "Delete a visible workspace file/folder by moving it to dohc's recoverable trash and recording the change.",
+      description:
+        "Delete a visible workspace file/folder by moving it to dohc's recoverable trash. The desktop watcher captures the delete as an engine moment while the app is open; opted-out workspaces record nothing.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),

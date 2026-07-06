@@ -74,9 +74,10 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
 }
 
 
-// WS-H1 flag flip: the engine is the default, so tests that pin the LEGACY
-// change-set recording path (kept only for explicitly opted-out workspaces
-// until retirement Phase C deletes it) must seed the opt-out first.
+// WS-H1 flag flip: the engine is the default; an explicit opt-out disables
+// recording entirely (retirement Phase C removed the legacy recorder). Tests
+// seed this to pin the opted-out shapes: mutating tools report
+// historyRecording: "off" and the chat tools refuse.
 async function seedLegacyOptOut(ctx: ToolContext): Promise<void> {
   await mkdir(join(ctx.root, ".dohc"), { recursive: true });
   await writeFile(
@@ -503,7 +504,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("sync_cloud pulls remote files and reports the engine as recorder (Phase C: no change sets)", async () => {
     await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
       await bindCloudWorkspace(ctx);
       const server = fakeCloudServer();
       server.set("notes/remote.md", "from cloud\n");
@@ -578,7 +578,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("writes, reads, and lists arbitrary visible files (no legacy change sets after Phase C)", async () => {
     await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
       const written = await writeWorkspaceFile(ctx, {
         path: "docs/report.html",
         content: "<h1>I ate 10 apples</h1>\n",
@@ -628,7 +627,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("mutating tools work on platforms without durable legacy history (Phase C: engine capture needs none)", async () => {
     await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
       await withProcessPlatform("darwin", async () => {
         // The retired legacy recorder used to fail closed here; the engine
         // capture path has no such platform gate, so mutations proceed.
@@ -683,10 +681,12 @@ describe("mcp tools operate on allowed paths", () => {
         });
 
         // Phase C: writes are no longer blocked by the durable-history
-        // platform gate (and they add no legacy records either).
+        // platform gate (and they add no legacy records either). This
+        // workspace explicitly opted out of the engine, so the write reports
+        // recording honestly OFF — never a recorder that isn't running.
         await expect(
           writeWorkspaceFile(ctx, { path: "notes/unblocked.md", content: "fine\n" }),
-        ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
+        ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
         await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 1 });
       });
     });
@@ -848,7 +848,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("lists and reads pre-flip legacy change sets as a read-only relic (writes add none)", async () => {
     await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
       // A record left behind by a pre-flip version of the app.
       const store = createChangeSetStore(ctx.root);
       await store.record(
@@ -950,7 +949,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("moves paths and deletes recoverably (engine-recorded, trash-backed)", async () => {
     await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
       const moved = await moveWorkspacePath(ctx, {
         fromPath: "drafts/todo.txt",
@@ -1001,7 +999,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("create_site scaffolds a normal website (engine-recorded)", async () => {
     await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
       const result = await createSite(ctx, { path: "finance/ledger", title: "Ledger" });
       expect(result).toMatchObject({ ok: true, siteRoot: "finance/ledger" });
       if (!result.ok) return;
