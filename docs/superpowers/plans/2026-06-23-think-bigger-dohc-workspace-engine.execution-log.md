@@ -15764,3 +15764,228 @@ Date completed: 2026-07-06
   query matching only projection framing could differ from the linear
   path's chat results when a caller supplies a custom chatVisibility (the
   engine falls back to linear for the zero-hit case to compensate).
+
+## PR WS-E - Chats Expansion: Channels, Read Cursors, Chats View (Plan PR 12/13 Core)
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-wse-chats
+Worktree: /home/ice/dev/dohc-wse-chats
+Implementation workstream, if used: Claude (fable-5) direct implementation,
+tests-first for the engine store behavior.
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] SCHEMA OWNERSHIP HANDOFF (Phase 0 / PR 01 / PR 12 matrix): this PR is
+      the PR 12 FINAL WRITER for `ChatThread`/`ThreadMessage`/read-state
+      symbols. It adopts the shipped linkedChatStore (the chat-core bridge
+      the desktop already runs) IN PLACE and extends it — no parallel store,
+      no migration job. Read-state adoption from `chat-read-state-bridge-v0`
+      is trivially satisfied: no bridge read-state rows ever shipped (the
+      bridge store had no cursors), so the final cursor model starts from
+      zero rows and "missing row = nothing read" is the compatible reading
+      of every pre-PR-12 thread.
+- [x] ENGINE SCHEMA (`engineDbSchema.ts`, lazy additive like
+      `active_versions`/search — ENGINE_SCHEMA_VERSION stays 1):
+      `chat_channels` (workspace_id, channel_id PK; name; slug with a
+      per-workspace UNIQUE index; kind; timestamps),
+      `chat_thread_read_state` (workspace_id, thread_id PK;
+      last_read_sequence; revision; updated_at_ms), and a nullable
+      `chat_threads.channel_id` column added on open (the
+      moments.author_json ALTER pattern) plus an index on
+      (workspace_id, channel_id, updated_at_ms, thread_id).
+- [x] ENGINE STORE (`linkedChatStore.ts`): createChannel (slug derived from
+      the display name; slug is a LOOKUP ALIAS only — durable rows key on
+      channelId so a rename can never fork channel state; duplicate slug =
+      channel-exists), ensureGeneralChannel (idempotent; first chat use
+      auto-creates "general"), listChannels (with derived threadCount +
+      unreadCount rollups), findChannelBySlug, startChannelThread (thread +
+      first message in ONE transaction — a failed send can never strand an
+      empty thread; title optional), listChannelThreads (most recent
+      activity first, derived unread), markThreadRead (monotonic, clamped
+      to the real message count, server-owned revision, optional CAS via
+      expectedRevision -> read-state-revision-mismatch).
+- [x] UNTITLED THREADS (the anti-forum rule): threads created without a
+      title store '' and every read path derives the display title from the
+      first message's first line (<=80 chars + ellipsis) through ONE shared
+      SQL fragment, so list/lookup/projection/search titles can never drift.
+- [x] XOR OWNERSHIP (P0E rule): a thread is file-linked OR channel-owned,
+      never both — structurally (createThread takes linkedFile,
+      startChannelThread takes channelId, no API accepts both) AND
+      fail-closed (a hand-edited row carrying both reads as state-corrupt).
+      File-rail threads were NOT migrated into channels.
+- [x] FTS (WS-D hooks): startChannelThread indexes the message and a
+      `__thread__` header row carrying the snippet display title; channel
+      messages flow through the same chat FTS as file-rail messages, so
+      engine search finds them with zero search-path changes.
+- [x] IPC + MAIN (zod contracts, flag-gated via requireEngineCapture, the
+      cached-store idiom): listChatChannels (ensures general; also returns
+      the file-linked threads with their CURRENT path resolved
+      objectId->path through the cached engine store, hint fallback),
+      createChatChannel, listChannelThreads, startChannelThread (author
+      derived in MAIN, human, localUserDisplayName — no renderer identity),
+      markChatThreadRead. sendChatMessage/listChatMessages reused unchanged
+      for channel threads.
+- [x] READ-STATE RULE (single-user): a HUMAN-authored send advances the
+      thread cursor to include the sent message inside the same store
+      transaction; agent-authored sends never touch the cursor — they are
+      what the unread signal exists to surface. Lives in the STORE so the
+      desktop and MCP can never disagree.
+- [x] UI (Chats view, new `ChatsView.tsx` in the SidePanel behind a new
+      "chats" VIEW_IDS entry; ActivityBar hides the entry for unflagged
+      workspaces and a persisted "chats" activeView falls back to explorer
+      without marking the workbench user-touched): channel list with unread
+      pills + thread counts, channel view with thread list (unread pills,
+      snippet titles) and a bottom composer where ENTER STARTS THE CHAT (no
+      title prompt exists on the path), thread view reusing the SHARED
+      message list + composer extracted from LinkedChats into
+      `chatMessages.tsx` (authorship display "<User Name>'s agent" stays
+      one implementation), a read-only "Files" grouping that cross-links
+      file-rail Chats (opens the file + rail thread via the existing
+      consume-once initialThread seam), Escape walks back one level (never
+      stealing Escape from a composer holding a draft), every async
+      response liveness-token gated.
+- [x] MCP: dohc_list_channels (ensures general; returns channels + their
+      threads with ids/titles so replies have real targets),
+      dohc_start_channel_chat (channel by id, name, or #slug; agent
+      authorship; busy retry). dohc_reply_to_chat/dohc_read_chat work
+      against channel threads unchanged. All deny unflagged workspaces.
+
+### Model Decisions vs docs/superpowers/specs/2026-06-23-dohc-chats-design.md
+
+Adopted: Channel as the container owning identity/kind; ChatThread as the
+durable stream inside it; slug-as-alias with channelId-keyed durable state;
+DM as a private channel subtype (kind enum); monotonic read cursors with
+server-owned revision + CAS shape; workspace-scoped keys everywhere;
+channel/thread/message vocabulary ("Chats" in every user-facing string).
+
+Simplifications (each deliberate, single-user alpha):
+1. ThreadReadState is keyed (workspaceId, threadId) — the spec's per-actor
+   cursor tuple collapses to the one local human. Schema regains an actor
+   column trivially when multi-user lands (new column + PK widening is a
+   lazy additive upgrade).
+2. CAS is optional-expectedRevision inside one process/one DB instead of
+   the spec's full server CAS-upsert protocol; the revision is still
+   store-owned and monotonic so the wire shape can harden later without a
+   data migration.
+3. DMs ship as the kind enum only: no canonicalizeDmParticipantIds, no
+   participant table, no DM UI — there is exactly one human. The dm kind is
+   stored and round-trips so seeded/agent-created DMs are not lost.
+4. No ChannelVisibility/membership/notification scope — Channel rows carry
+   identity + kind only; visibility stays workspace-wide like every other
+   flagged surface this arc.
+5. No presence, typing, reactions, message edit/delete (and therefore no
+   MAC-tombstones), pinned/status fields, named subconversations, or
+   shared channels (PR 18 owns share grants).
+6. Thread status/lastActivityAt collapse to updated_at_ms; no
+   open/closed/decided lifecycle yet.
+7. No live push: the view refreshes on navigation (PR 16 notifications is
+   the recorded follow-up slice that will bring change signals).
+8. Channel deletion/rename: not built (create + list only this slice).
+9. listChatChannels returns file-linked threads inline (one IPC round trip
+   for first paint) instead of a separate ThreadLink listing API; the
+   canonical ThreadLink shape stays the store's linkedFile ref from PR 0M-5.
+
+### Files Changed
+
+- packages/workspace-contracts/src/engine.ts / engine.compile.ts
+- packages/workspace-engine/src/engineDbSchema.ts
+- packages/workspace-engine/src/linkedChatStore.ts / linkedChatStore.test.ts
+- packages/workspace-engine/src/workspaceSearch.test.ts
+- packages/workspace-engine/src/phase0Proof.test.ts (createId kind union)
+- packages/workspace-engine/src/index.ts
+- apps/desktop/src/ipc/channels.ts / bridgeContract.ts
+- apps/desktop/src/preload.ts
+- apps/desktop/src/main.ts
+- apps/desktop/src/renderer/workbench/workbenchState.ts
+- apps/desktop/src/renderer/workbench/ActivityBar.tsx
+- apps/desktop/src/renderer/workbench/chatMessages.tsx (new, shared parts)
+- apps/desktop/src/renderer/workbench/LinkedChats.tsx (rewired onto shared)
+- apps/desktop/src/renderer/workbench/ChatsView.tsx (new) / ChatsView.test.tsx (new)
+- apps/desktop/src/renderer/DesktopWorkspaceShell.tsx
+- packages/mcp/src/tools.ts / server.ts / engineChats.test.ts
+- apps/desktop/e2e/workspace-chats.spec.ts (new)
+
+### Tests Added Or Updated
+
+- Engine (16 new): channel create/slug alias/dm kind/unknown kind/duplicate
+  slug/unusable names; ensureGeneralChannel idempotence; cross-workspace
+  denial for channels and channel threads; untitled snippet titles (incl.
+  bounding + explicit-title override); most-recent-activity ordering; XOR
+  fail-closed on a both-owners row; FTS rows for channel messages + snippet
+  headers; unread derivation (human read / agent unread, channel rollup);
+  agent-started threads fully unread; monotonic/clamped/revisioned cursors
+  with invalid-input + not-found + workspace-mismatch failures; CAS stale
+  revision; read-state reopen durability. Plus a searchWorkspaceEngine
+  channel-thread case (search test file).
+- Renderer (7 new, ChatsView.test.tsx): channel list with unread badges;
+  inline channel create + auto-open; Files grouping cross-link (read-only);
+  composer-first thread start with NO title input; thread reply + agent
+  authorship rendering; open-marks-read badge clearing; stale-response
+  liveness drop.
+- MCP (3 new): channel tools refuse unflagged; list/start/reply/read arc
+  with agent authorship + snippet titles; unknown-channel refusal; tool
+  registration schema pins extended.
+- E2E workspace-chats.spec.ts (3): flagged full arc (general auto-created,
+  composer-first chat with zero title UI, relaunch persistence, mid-session
+  agent write -> unread badges at thread + channel level -> open clears
+  both, engine search finds the channel message as a Chat row); unflagged
+  (no rail entry, handler rejects); performance budgets.
+
+### Commands Run
+
+- pnpm --filter @dohc/workspace-engine test: 302 passed (baseline 286).
+- pnpm --filter @dohc/workspace-contracts test: 10 passed.
+- pnpm --filter @dohc/desktop test: 907 passed (baseline 900).
+- pnpm --filter @dohc/mcp test: 76 passed (baseline 73).
+- Typechecks: workspace-contracts, workspace-engine, desktop, mcp — clean.
+- Playwright: workspace-chats (3), workspace-linked-chats,
+  workspace-engine-search, workspace-secret-env, workspace-engine-capture,
+  workspace-engine-history, workspace-versions, workspace-switch-race —
+  all passed.
+- node scripts/check-think-bigger-doc-links.mjs — clean.
+- git diff --check: clean.
+
+### Performance Notes
+
+- Machine: AMD Ryzen 9 7950X, WSL2 Linux 6.18, node v25.2.1, /tmp tmpfs.
+- Channel list first paint, 50 channels / 500 threads (E2E, measured
+  in-page click -> 50 painted rows via rAF, includes the lazy view chunk +
+  IPC + store aggregation): 314.8ms — budget 500ms. Store-side cost is
+  ~4ms (listChannels 0.8ms, listThreads 2.3ms at that size); the balance
+  is first-visit chunk load + React mount.
+- Composer send-to-rendered (E2E, in-page submit -> painted message node,
+  11 sends, first dropped as cold): p50 16.7ms — budget 100ms, 6x headroom.
+
+### Security / Privacy Notes
+
+- Authorship stays main-derived on every renderer path (human,
+  localUserDisplayName) and agent-only on every MCP path; the renderer and
+  MCP still cannot supply identity. Read cursors are store-owned: the
+  renderer sends only "read up to N", revisions are never client-writable.
+- All five new handlers gate on requireEngineCapture (flag) and
+  workspace-scope every store call; unflagged rejection is E2E-pinned.
+- The XOR fail-closed read means a tampered row cannot make a channel
+  thread masquerade as a file thread (or vice versa) — it reads as
+  state-corrupt, matching the store's existing author_kind posture.
+- Channel messages ride the existing chat FTS (title/author/body only); no
+  new plaintext surface. Slug derivation strips to [a-z0-9-] so channel
+  lookup aliases cannot smuggle control characters or path separators.
+
+### Remaining Risk / Follow-Ups
+
+- No live updates: another process's chat writes appear on navigation, not
+  push. PR 16 (notifications/mentions) is the recorded follow-up slice and
+  should add a change signal (workspaceActivity-style event or poll).
+- Unread rollup in listChannels runs correlated subqueries per thread —
+  fine at alpha scale (0.8ms @ 500 threads), revisit with a denormalized
+  unread projection if channels reach many thousands of threads.
+- DM kind is storage-only; DM creation/UI, participant canonicalization,
+  and membership land with multi-user work.
+- Search-result chat rows still open in the file rail (WS-D behavior) even
+  for channel threads — works (the rail renders any thread by id), but a
+  follow-up could route channel threads to the Chats view instead.
+- Channel rename/archive/delete not built; slug uniqueness means a deleted
+  name cannot be reused until deletion exists.

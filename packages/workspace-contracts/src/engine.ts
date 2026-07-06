@@ -553,13 +553,25 @@ export interface VersionedFileWorkspaceOptions extends VersionedTextStoreOptions
 
 export type ChatThreadId = string;
 export type ChatMessageId = string;
+export type ChatChannelId = string;
+
+// PR 12 (WS-E): a DM is a private channel subtype. Single-user alpha ships the
+// kind enum only — no participant sets, presence, or DM UI yet.
+export type ChatChannelKind = "channel" | "dm";
 
 export type LinkedChatStoreErrorCode =
+  | "channel-exists"
+  | "channel-not-found"
+  | "invalid-channel-kind"
+  | "invalid-channel-name"
   | "invalid-message-body"
   | "invalid-path"
+  | "invalid-read-cursor"
   | "invalid-sender"
+  | "invalid-thread-owner"
   | "invalid-thread-title"
   | "invalid-workspace"
+  | "read-state-revision-mismatch"
   | "state-corrupt"
   | "thread-not-found"
   | "workspace-mismatch";
@@ -574,13 +586,62 @@ export interface LinkedChatFileRef {
   linkedAtMs: number;
 }
 
+// The Channel owns membership/visibility/container semantics per the chats
+// design spec. Single-user alpha stores identity + kind only: `slug` is a
+// LOOKUP ALIAS derived from the name — durable rows key on the stable
+// channelId so a future rename can never fork channel state.
+export interface ChatChannel {
+  id: ChatChannelId;
+  workspaceId: WorkspaceId;
+  name: string;
+  slug: string;
+  kind: ChatChannelKind;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface ChatChannelSummary extends ChatChannel {
+  threadCount: number;
+  // Derived: sum over the channel's threads of messages past the (single
+  // local user's) read cursor. Never stored.
+  unreadCount: number;
+}
+
+// Per-thread monotonic read cursor (the spec's ThreadReadState, simplified to
+// ONE local human actor for the single-user alpha). `lastReadSequence` counts
+// messages read from the start of the thread; `revision` is server-owned and
+// bumps on every APPLIED advance — callers may CAS on it but never write it.
+export interface ChatThreadReadState {
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  lastReadSequence: number;
+  revision: number;
+  updatedAtMs: number;
+}
+
 export interface ChatThread {
   id: ChatThreadId;
   workspaceId: WorkspaceId;
+  // Display title. Untitled channel threads (the fast, no-title-prompt
+  // composer path) derive this from their first message snippet at read time.
   title: string;
   createdAtMs: number;
   updatedAtMs: number;
+  // Exactly-one-owner (P0E rule, tightened at the WS-E gate): a thread is
+  // file-linked OR belongs to a channel — never both, never neither. The
+  // store enforces this at creation (createThread requires a linked file;
+  // startChannelThread owns the channel path) and fails closed on rows that
+  // violate it, including channel threads whose channel no longer exists.
   linkedFile?: LinkedChatFileRef;
+  channelId?: ChatChannelId;
+}
+
+export interface ChannelThreadSummary {
+  thread: ChatThread;
+  messageCount: number;
+  lastReadSequence: number;
+  // Derived: messageCount - lastReadSequence, clamped at zero. Never stored.
+  unreadCount: number;
 }
 
 export interface ChatMessage {
@@ -605,16 +666,63 @@ export interface LinkedChatProjection {
 }
 
 export interface LinkedChatStore {
+  // Creates a FILE-LINKED thread. linkedFile is REQUIRED (exactly-one-owner
+  // at creation): an ownerless thread would be readable and indexed but
+  // unreachable by navigation. Channel threads go through startChannelThread.
   createThread(input: {
     workspaceId: WorkspaceId;
     title: string;
-    linkedFile?: { objectId: WorkspaceObjectId; pathHint?: string };
+    linkedFile: { objectId: WorkspaceObjectId; pathHint?: string };
   }): Promise<ChatThread>;
+  // --- Channels (PR 12, WS-E) ---------------------------------------------
+  createChannel(input: {
+    workspaceId: WorkspaceId;
+    name: string;
+    kind?: ChatChannelKind;
+  }): Promise<ChatChannel>;
+  // Idempotent: creates the workspace's default "general" channel on first
+  // chat use, returns the existing one afterwards.
+  ensureGeneralChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
+  listChannels(input: { workspaceId: WorkspaceId }): Promise<ChatChannelSummary[]>;
+  // Slug is a lookup ALIAS only; durable state keys on channelId.
+  findChannelBySlug(input: {
+    workspaceId: WorkspaceId;
+    slug: string;
+  }): Promise<ChatChannel | null>;
+  // The fast composer path: thread + first message land in ONE transaction so
+  // a failed send can never strand an empty thread. Title is optional — an
+  // untitled thread displays its first-message snippet (the anti-forum rule).
+  startChannelThread(input: {
+    workspaceId: WorkspaceId;
+    channelId: ChatChannelId;
+    title?: string;
+    author: ChatActor;
+    body: string;
+  }): Promise<{ thread: ChatThread; message: ChatMessage }>;
+  // Most-recent-activity first, with derived unread counts.
+  listChannelThreads(input: {
+    workspaceId: WorkspaceId;
+    channelId: ChatChannelId;
+  }): Promise<ChannelThreadSummary[]>;
+  // Monotonic cursor advance: a lower-or-equal sequence is a no-op returning
+  // the current state (revision unchanged); upToSequence clamps to the
+  // thread's message count. Optional CAS: a stale expectedRevision fails with
+  // "read-state-revision-mismatch" instead of silently applying.
+  markThreadRead(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    upToSequence: number;
+    expectedRevision?: number;
+  }): Promise<ChatThreadReadState>;
   listThreads(input: { workspaceId: WorkspaceId }): Promise<ChatThread[]>;
   listThreadsForFile(input: {
     workspaceId: WorkspaceId;
     objectId: WorkspaceObjectId;
   }): Promise<ChatThread[]>;
+  // Single-user alpha read-state rule: a HUMAN-authored send advances the
+  // thread's read cursor to include the sent message (your own message is
+  // never unread); agent-authored sends never touch the cursor — they are
+  // exactly what the unread signal exists to surface.
   sendMessage(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -638,7 +746,7 @@ export interface LinkedChatStore {
 
 export interface LinkedChatStoreOptions {
   nowMs?: () => number;
-  createId?: (kind: "message" | "thread") => string;
+  createId?: (kind: "channel" | "message" | "thread") => string;
 }
 
 export type SearchSurface = "chat" | "file";

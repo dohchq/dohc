@@ -140,6 +140,64 @@ export const ENGINE_SEARCH_INDEX_DDL = `
   )
 `;
 
+// Chat channels + per-thread read cursors (PR 12, WS-E) are the same lazy
+// additive pattern: stores created before channels gain the tables on open,
+// and a missing row reads as "no channels yet" / "nothing read yet". NOT in
+// REQUIRED_ENGINE_TABLES for that reason. The slug unique index makes the
+// lookup alias collision-safe per workspace; durable rows key on channel_id.
+const CHAT_CHANNEL_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS chat_channels (
+    workspace_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    created_at_ms REAL NOT NULL,
+    updated_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, channel_id)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_channels_slug
+    ON chat_channels(workspace_id, slug);
+  CREATE TABLE IF NOT EXISTS chat_thread_read_state (
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    last_read_sequence INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    updated_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id)
+  )
+`;
+
+// chat_threads.channel_id is a lazy additive nullable column (the
+// moments.author_json pattern): older readers select named columns and ignore
+// it; an older writer leaves it NULL (a file-linked thread — the pre-PR-12
+// truth, since createThread has always required a linked file in practice).
+// Exactly-one-owner with linked_object_id is enforced by the store, which
+// fails closed on rows carrying both owners, neither owner, or a channel_id
+// whose channel row no longer exists.
+function ensureChatThreadsChannelColumn(
+  db: EngineSqliteDb,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  const hasChannelColumn = () =>
+    db
+      .prepare("PRAGMA table_info(chat_threads)")
+      .all()
+      .some((row) => String(row.name) === "channel_id");
+  if (!hasChannelColumn()) {
+    try {
+      db.exec("ALTER TABLE chat_threads ADD COLUMN channel_id TEXT");
+    } catch (error) {
+      // Two first-opens can race the ALTER; the loser sees "duplicate column".
+      if (!hasChannelColumn()) throw corrupt(error);
+    }
+  }
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_chat_threads_channel
+       ON chat_threads(workspace_id, channel_id, updated_at_ms, thread_id)`,
+  );
+}
+
 // moments.author_json is a lazy additive upgrade (PR 0N-1, same pattern as
 // active_versions): a nullable column added on open, no schema-version bump.
 // Safe because it is additive-nullable both ways — older readers select named
@@ -190,7 +248,9 @@ export function initializeOrValidateEngineSchema(
   db.exec(ACTIVE_VERSIONS_DDL);
   db.exec(SECRET_TABLES_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
+  db.exec(CHAT_CHANNEL_TABLES_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
+  ensureChatThreadsChannelColumn(db, corrupt);
 }
 
 export function assertRequiredEngineTables(
@@ -409,6 +469,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       );
       ${ACTIVE_VERSIONS_DDL};
       ${SECRET_TABLES_DDL};
+      ${CHAT_CHANNEL_TABLES_DDL};
       CREATE INDEX IF NOT EXISTS idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX IF NOT EXISTS idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
       CREATE INDEX IF NOT EXISTS idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);

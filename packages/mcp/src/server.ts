@@ -14,9 +14,11 @@ import { z } from "zod";
 import {
   createWorkspaceDirectory,
   addSiteSdk,
+  listChannels,
   listFileChats,
   readChat,
   replyToChat,
+  startChannelChat,
   buildSite,
   createSite,
   deleteWorkspacePath,
@@ -388,6 +390,30 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await readChat(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_channels",
+    {
+      description:
+        "List the workspace's Chats channels (including the default #general) with each channel's chats and their ids. Requires the workspace engine.",
+      inputSchema: {},
+    },
+    async () => text(await listChannels(ctx)),
+  );
+
+  server.registerTool(
+    "dohc_start_channel_chat",
+    {
+      description:
+        "Start a new chat in a channel as the agent. `channel` accepts a channel name, #slug, or id. No title needed — the chat displays its first message.",
+      inputSchema: {
+        channel: z.string().min(1).max(200),
+        body: z.string().min(1).max(65536),
+        title: z.string().min(1).max(200).optional(),
+      },
+    },
+    async (args) => text(await startChannelChat(ctx, args)),
   );
 
   server.registerTool(

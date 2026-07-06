@@ -52,7 +52,7 @@ function versionStore() {
 }
 
 function chatStore() {
-  const counters = { message: 0, thread: 0 };
+  const counters = { channel: 0, message: 0, thread: 0 };
   return createLinkedChatStore(root, {
     nowMs: () => {
       now += 10;
@@ -142,6 +142,42 @@ describe("workspace engine search", () => {
     ]);
     expect(results[0]?.preview).toContain("alpha keyword");
     expect(results[1]?.preview).toContain("chat alpha keyword");
+  });
+
+  it("finds messages in channel threads (PR 12: search spans channels too)", async () => {
+    const { chats, main, versions } = await seededStores();
+    const channel = await chats.ensureGeneralChannel({ workspaceId: "workspace-a" });
+    const started = await chats.startChannelThread({
+      workspaceId: "workspace-a",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "The channelalpha keyword lives in a channel thread.",
+    });
+
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "channelalpha",
+      versions,
+      chats,
+    });
+
+    // The query hits both the snippet-derived projection heading and the
+    // message body; every hit belongs to the channel thread.
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    for (const result of results) {
+      expect(result).toMatchObject({
+        surface: "chat",
+        threadId: started.thread.id,
+        // The untitled thread surfaces under its snippet display title.
+        title: "The channelalpha keyword lives in a channel thread.",
+      });
+    }
+    expect(
+      results.some((result) =>
+        result.preview.includes("channelalpha keyword lives in a channel thread."),
+      ),
+    ).toBe(true);
   });
 
   it("defaults .env files to excluded from search", async () => {

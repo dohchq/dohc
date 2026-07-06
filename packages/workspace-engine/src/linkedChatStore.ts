@@ -3,11 +3,17 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type {
+  ChannelThreadSummary,
   ChatActor,
+  ChatChannel,
+  ChatChannelId,
+  ChatChannelKind,
+  ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
   ChatThread,
   ChatThreadId,
+  ChatThreadReadState,
   LinkedChatFileRef,
   LinkedChatProjection,
   LinkedChatProjectionFileAccess,
@@ -30,16 +36,28 @@ import {
   upsertChatMessageSearchIndex,
   upsertThreadHeaderSearchIndex,
 } from "./searchIndex";
+import {
+  THREAD_SNIPPET_TITLE_MAX_CHARS,
+  UNTITLED_THREAD_FALLBACK_TITLE,
+  threadDisplayTitle,
+  threadSnippetTitle,
+} from "./chatThreadTitle";
 
 export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
 
 export type {
+  ChannelThreadSummary,
   ChatActor,
+  ChatChannel,
+  ChatChannelId,
+  ChatChannelKind,
+  ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
   ChatThread,
   ChatThreadId,
+  ChatThreadReadState,
   LinkedChatFileRef,
   LinkedChatProjection,
   LinkedChatProjectionFileAccess,
@@ -47,6 +65,12 @@ export type {
   LinkedChatStoreErrorCode,
   LinkedChatStoreOptions,
 } from "@dohc/workspace-contracts/engine";
+
+export const GENERAL_CHANNEL_NAME = "general";
+// Display-title derivation lives in chatThreadTitle.ts (a leaf shared with
+// the search index rebuild); re-exported here so store consumers keep one
+// import surface.
+export { THREAD_SNIPPET_TITLE_MAX_CHARS, UNTITLED_THREAD_FALLBACK_TITLE, threadSnippetTitle };
 
 export class LinkedChatStoreError extends Error {
   readonly code: LinkedChatStoreErrorCode;
@@ -160,6 +184,67 @@ function normalizeThreadTitle(title: string): string {
   return normalized;
 }
 
+// Optional-title variant for the fast channel composer: absent/blank means
+// "untitled" (stored as ''), which displays as the first-message snippet.
+function normalizeOptionalThreadTitle(title: string | undefined): string {
+  if (title === undefined || title.trim() === "") return "";
+  return normalizeThreadTitle(title);
+}
+
+function normalizeChannelName(name: string): string {
+  const normalized = name.normalize("NFC").trim();
+  // PROJECTION_FIELD_CONTROL_CHAR is the store's shared control-char class.
+  if (!normalized || normalized.length > 80 || PROJECTION_FIELD_CONTROL_CHAR.test(normalized)) {
+    throw new LinkedChatStoreError(
+      "invalid-channel-name",
+      "Channel name must be 1-80 characters without control characters.",
+    );
+  }
+  return normalized;
+}
+
+// The slug is a LOOKUP ALIAS derived from the display name — lowercase,
+// dash-separated, ascii-safe. Durable rows key on channelId, never the slug,
+// so a future rename cannot fork channel state.
+export function channelSlugForName(name: string): string {
+  return name
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[\s_]+/gu, "-")
+    .replace(/[^a-z0-9-]/gu, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function normalizeChannelKind(kind: ChatChannelKind | undefined): ChatChannelKind {
+  if (kind === undefined) return "channel";
+  if (kind !== "channel" && kind !== "dm") {
+    throw new LinkedChatStoreError("invalid-channel-kind", "Channel kind is invalid.");
+  }
+  return kind;
+}
+
+function normalizeReadSequence(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new LinkedChatStoreError(
+      "invalid-read-cursor",
+      "Read cursor sequence must be a non-negative integer.",
+    );
+  }
+  return value;
+}
+
+function normalizeExpectedRevision(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new LinkedChatStoreError(
+      "invalid-read-cursor",
+      "Expected read-state revision must be a non-negative integer.",
+    );
+  }
+  return value;
+}
+
 function normalizeDisplayName(displayName: string): string {
   const normalized = displayName.trim();
   if (!normalized || normalized.length > 200) {
@@ -183,7 +268,7 @@ function normalizeBody(body: string): string {
   return normalized;
 }
 
-function defaultCreateId(kind: "message" | "thread"): string {
+function defaultCreateId(kind: "channel" | "message" | "thread"): string {
   return `${kind}_${randomUUID()}`;
 }
 
@@ -243,12 +328,34 @@ export function linkedChatProjectionPath(input: {
   return `.dohc/chats/v1-${base32LowercaseNoPadding(digest)}.md`;
 }
 
+// Thread rows are always read through these columns so the display-title
+// derivation (untitled -> first-message snippet) and the ownership checks can
+// never drift between the list, lookup, and projection paths.
+const THREAD_SELECT_COLUMNS = `t.*,
+         (SELECT m.body FROM chat_messages m
+          WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id
+          ORDER BY m.message_order LIMIT 1) AS first_body,
+         EXISTS(SELECT 1 FROM chat_channels c
+          WHERE c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id)
+           AS channel_owner_exists`;
+const THREAD_SELECT_SQL = `SELECT ${THREAD_SELECT_COLUMNS} FROM chat_threads t`;
+
 function threadFromRow(row: Record<string, unknown>): ChatThread {
   const linkedObjectId = optionalString(row.linked_object_id);
+  const channelId = optionalString(row.channel_id);
+  // Exactly-one-owner fail-closed: a hand-edited row claiming BOTH a file
+  // link and a channel — or NEITHER (creation enforces one owner, so an
+  // ownerless row can only be tampering) — must never render as either. A
+  // channel owner must also still EXIST: a thread pointing at a deleted or
+  // planted channel id is unreachable-by-navigation state, not a chat.
+  if (linkedObjectId && channelId) throw corruptStore();
+  if (!linkedObjectId && !channelId) throw corruptStore();
+  if (channelId && numberValue(row.channel_owner_exists) !== 1) throw corruptStore();
+  const title = threadDisplayTitle(stringValue(row.title), optionalString(row.first_body));
   return {
     id: stringValue(row.thread_id),
     workspaceId: stringValue(row.workspace_id),
-    title: stringValue(row.title),
+    title,
     createdAtMs: numberValue(row.created_at_ms),
     updatedAtMs: numberValue(row.updated_at_ms),
     ...(linkedObjectId
@@ -262,6 +369,22 @@ function threadFromRow(row: Record<string, unknown>): ChatThread {
           },
         }
       : {}),
+    ...(channelId ? { channelId } : {}),
+  };
+}
+
+function channelFromRow(row: Record<string, unknown>): ChatChannel {
+  const kind = stringValue(row.kind);
+  // Fail closed on a corrupt/hand-edited kind, like actorKindValue.
+  if (kind !== "channel" && kind !== "dm") throw corruptStore();
+  return {
+    id: stringValue(row.channel_id),
+    workspaceId: stringValue(row.workspace_id),
+    name: stringValue(row.name),
+    slug: stringValue(row.slug),
+    kind,
+    createdAtMs: numberValue(row.created_at_ms),
+    updatedAtMs: numberValue(row.updated_at_ms),
   };
 }
 
@@ -309,7 +432,7 @@ function requireWorkspaceThread(
   threadId: ChatThreadId,
 ): ChatThread {
   const row = db
-    .prepare("SELECT * FROM chat_threads WHERE workspace_id = ? AND thread_id = ?")
+    .prepare(`${THREAD_SELECT_SQL} WHERE t.workspace_id = ? AND t.thread_id = ?`)
     .get(workspaceId, threadId);
   if (row) return threadFromRow(row);
   const other = db
@@ -325,6 +448,155 @@ function requireWorkspaceThread(
     "thread-not-found",
     `Thread ${threadId} was not found in workspace ${workspaceId}.`,
   );
+}
+
+function requireWorkspaceChannel(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  channelId: ChatChannelId,
+): ChatChannel {
+  const row = db
+    .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND channel_id = ?")
+    .get(workspaceId, channelId);
+  if (row) return channelFromRow(row);
+  const other = db
+    .prepare("SELECT workspace_id FROM chat_channels WHERE channel_id = ? AND workspace_id <> ?")
+    .get(channelId, workspaceId);
+  if (other) {
+    throw new LinkedChatStoreError(
+      "workspace-mismatch",
+      `Channel ${channelId} does not belong to workspace ${workspaceId}.`,
+    );
+  }
+  throw new LinkedChatStoreError(
+    "channel-not-found",
+    `Channel ${channelId} was not found in workspace ${workspaceId}.`,
+  );
+}
+
+function messageCountForThread(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+): number {
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM chat_messages WHERE workspace_id = ? AND thread_id = ?",
+    )
+    .get(workspaceId, threadId);
+  return Number(row?.count ?? 0);
+}
+
+// Fail closed on a tampered persisted read cursor: negative, non-integer, or
+// beyond-safe-integer values must never feed unread math as if valid. An
+// OVER-COUNT cursor (> the thread's real message count) is handled separately
+// by advanceReadCursor, which clamps and repairs it in place.
+function readSequenceValue(value: unknown): number {
+  const sequence = numberValue(value);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) throw corruptStore();
+  return sequence;
+}
+
+// Guard for the SQL unread rollups (listChannels): a negative or non-integer
+// cursor row would silently INFLATE unread sums inside the aggregate, so the
+// read fails closed instead. Over-count rows are fine here — the rollup's
+// MAX(..., 0) already reads them as zero unread, and advanceReadCursor
+// repairs them on the next mark-read.
+function assertReadStateRowsSane(db: SqliteDb, workspaceId: WorkspaceId): void {
+  const bad = db
+    .prepare(
+      `SELECT 1 FROM chat_thread_read_state
+       WHERE workspace_id = ?
+         AND (last_read_sequence < 0
+              OR last_read_sequence <> CAST(last_read_sequence AS INTEGER)
+              OR revision < 0
+              OR revision <> CAST(revision AS INTEGER))
+       LIMIT 1`,
+    )
+    .get(workspaceId);
+  if (bad) throw corruptStore();
+}
+
+function readStateForThread(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+): ChatThreadReadState {
+  const row = db
+    .prepare(
+      `SELECT last_read_sequence, revision, updated_at_ms
+       FROM chat_thread_read_state WHERE workspace_id = ? AND thread_id = ?`,
+    )
+    .get(workspaceId, threadId);
+  if (!row) {
+    return { workspaceId, threadId, lastReadSequence: 0, revision: 0, updatedAtMs: 0 };
+  }
+  return {
+    workspaceId,
+    threadId,
+    lastReadSequence: readSequenceValue(row.last_read_sequence),
+    revision: readSequenceValue(row.revision),
+    updatedAtMs: numberValue(row.updated_at_ms),
+  };
+}
+
+function persistReadState(db: SqliteDb, state: ChatThreadReadState): void {
+  db.prepare(
+    `INSERT INTO chat_thread_read_state (
+      workspace_id, thread_id, last_read_sequence, revision, updated_at_ms
+    ) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(workspace_id, thread_id) DO UPDATE SET
+      last_read_sequence = excluded.last_read_sequence,
+      revision = excluded.revision,
+      updated_at_ms = excluded.updated_at_ms`,
+  ).run(
+    state.workspaceId,
+    state.threadId,
+    state.lastReadSequence,
+    state.revision,
+    state.updatedAtMs,
+  );
+}
+
+// The ONE cursor writer: monotonic (never moves backwards), clamped to the
+// thread's real message count, server-owned revision bumped only on an
+// APPLIED advance. Callers pass the transaction's db handle.
+function advanceReadCursor(input: {
+  db: SqliteDb;
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  upToSequence: number;
+  expectedRevision?: number;
+  nowMs: number;
+}): ChatThreadReadState {
+  let current = readStateForThread(input.db, input.workspaceId, input.threadId);
+  if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
+    throw new LinkedChatStoreError(
+      "read-state-revision-mismatch",
+      `Read-state revision ${input.expectedRevision} is stale (current ${current.revision}).`,
+    );
+  }
+  const messageCount = messageCountForThread(input.db, input.workspaceId, input.threadId);
+  if (current.lastReadSequence > messageCount) {
+    // A tampered/corrupt OVER-COUNT cursor would otherwise make every future
+    // advance a no-op (nothing can ever exceed it), leaving unread counts
+    // unrepairable. Clamp to the thread's real message count and PERSIST the
+    // repair inside this store-owned transaction; the revision holds — a
+    // repair is not an applied advance, so CAS callers stay coherent.
+    current = { ...current, lastReadSequence: messageCount };
+    persistReadState(input.db, current);
+  }
+  const target = Math.min(input.upToSequence, messageCount);
+  if (target <= current.lastReadSequence) return current;
+  const next: ChatThreadReadState = {
+    workspaceId: input.workspaceId,
+    threadId: input.threadId,
+    lastReadSequence: target,
+    revision: current.revision + 1,
+    updatedAtMs: input.nowMs,
+  };
+  persistReadState(input.db, next);
+  return next;
 }
 
 function formatProjection(input: {
@@ -419,6 +691,17 @@ export function createLinkedChatStore(
       return serialize(async (db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const title = normalizeThreadTitle(input.title);
+        // Exactly-one-owner at creation: this path creates FILE-LINKED
+        // threads only (channel threads go through startChannelThread).
+        // Without an owner a thread is unreachable by navigation — readable
+        // and indexed but orphaned — so refusing here is what keeps the
+        // read-side neither-owner check meaning "tampering", not "legacy".
+        if (!input.linkedFile) {
+          throw new LinkedChatStoreError(
+            "invalid-thread-owner",
+            "createThread requires a linked file; channel threads are created through startChannelThread.",
+          );
+        }
         const id = createId("thread");
         const recordedAtMs = nowMs();
         const linkedObjectId = input.linkedFile
@@ -468,15 +751,270 @@ export function createLinkedChatStore(
       });
     },
 
+    createChannel(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const name = normalizeChannelName(input.name);
+        const kind = normalizeChannelKind(input.kind);
+        const slug = channelSlugForName(name);
+        if (!slug) {
+          throw new LinkedChatStoreError(
+            "invalid-channel-name",
+            "Channel name must contain at least one letter or number.",
+          );
+        }
+        const existing = db
+          .prepare("SELECT channel_id FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+          .get(workspaceId, slug);
+        if (existing) {
+          throw new LinkedChatStoreError(
+            "channel-exists",
+            `A channel named ${JSON.stringify(name)} already exists.`,
+          );
+        }
+        const recordedAtMs = nowMs();
+        const channel: ChatChannel = {
+          id: createId("channel"),
+          workspaceId,
+          name,
+          slug,
+          kind,
+          createdAtMs: recordedAtMs,
+          updatedAtMs: recordedAtMs,
+        };
+        db.prepare(
+          `INSERT INTO chat_channels (
+            workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(workspaceId, channel.id, name, slug, kind, recordedAtMs, recordedAtMs);
+        return cloneJson(channel);
+      });
+    },
+
+    // Idempotent inside the write chain: first chat use creates "general",
+    // every later call returns the same row.
+    ensureGeneralChannel(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const slug = channelSlugForName(GENERAL_CHANNEL_NAME);
+        const existing = db
+          .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+          .get(workspaceId, slug);
+        if (existing) return cloneJson(channelFromRow(existing));
+        const recordedAtMs = nowMs();
+        const channel: ChatChannel = {
+          id: createId("channel"),
+          workspaceId,
+          name: GENERAL_CHANNEL_NAME,
+          slug,
+          kind: "channel",
+          createdAtMs: recordedAtMs,
+          updatedAtMs: recordedAtMs,
+        };
+        db.prepare(
+          `INSERT INTO chat_channels (
+            workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(workspaceId, channel.id, channel.name, slug, channel.kind, recordedAtMs, recordedAtMs);
+        return cloneJson(channel);
+      });
+    },
+
+    listChannels(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        return withDb((db) => {
+          assertReadStateRowsSane(db, workspaceId);
+          return db
+            .prepare(
+              `SELECT c.*,
+                      COALESCE(agg.thread_count, 0) AS thread_count,
+                      COALESCE(agg.unread_count, 0) AS unread_count
+               FROM chat_channels c
+               LEFT JOIN (
+                 SELECT t.workspace_id, t.channel_id,
+                        COUNT(*) AS thread_count,
+                        SUM(MAX(
+                          (SELECT COUNT(*) FROM chat_messages m
+                           WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id)
+                          - COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs
+                                      WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0),
+                          0)) AS unread_count
+                 FROM chat_threads t
+                 WHERE t.channel_id IS NOT NULL
+                 GROUP BY t.workspace_id, t.channel_id
+               ) agg ON agg.workspace_id = c.workspace_id AND agg.channel_id = c.channel_id
+               WHERE c.workspace_id = ?
+               ORDER BY c.created_at_ms, c.channel_id`,
+            )
+            .all(workspaceId)
+            .map((row): ChatChannelSummary => ({
+              ...channelFromRow(row),
+              threadCount: numberValue(row.thread_count),
+              unreadCount: numberValue(row.unread_count),
+            }))
+            .map(cloneJson);
+        });
+      });
+    },
+
+    findChannelBySlug(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const slug = channelSlugForName(input.slug);
+        if (!slug) return null;
+        return withDb((db) => {
+          const row = db
+            .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+            .get(workspaceId, slug);
+          return row ? cloneJson(channelFromRow(row)) : null;
+        });
+      });
+    },
+
+    // Thread + first message in ONE transaction (the fast composer path): a
+    // failed send can never strand an empty thread.
+    startChannelThread(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const channel = requireWorkspaceChannel(db, workspaceId, input.channelId);
+        const title = normalizeOptionalThreadTitle(input.title);
+        const author = normalizeActor(input.author);
+        const body = normalizeBody(input.body);
+        const threadId = createId("thread");
+        const recordedAtMs = nowMs();
+        db.prepare(
+          `INSERT INTO chat_threads (
+            workspace_id, thread_id, title, created_at_ms, updated_at_ms,
+            linked_object_id, linked_path_hint, linked_at_ms, channel_id
+          ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
+        ).run(workspaceId, threadId, title, recordedAtMs, recordedAtMs, channel.id);
+        const message: ChatMessage = {
+          id: createId("message"),
+          workspaceId,
+          threadId,
+          author,
+          body,
+          createdAtMs: recordedAtMs,
+        };
+        db.prepare(
+          `INSERT INTO chat_messages (
+            workspace_id, thread_id, message_order, message_id, author_kind,
+            author_display_name, body, created_at_ms
+          ) VALUES (?, ?, 0, ?, ?, ?, ?, ?)`,
+        ).run(
+          workspaceId,
+          threadId,
+          message.id,
+          author.kind,
+          author.displayName,
+          body,
+          recordedAtMs,
+        );
+        if (author.kind === "human") {
+          advanceReadCursor({
+            db,
+            workspaceId,
+            threadId,
+            upToSequence: 1,
+            nowMs: recordedAtMs,
+          });
+        }
+        const displayTitle = threadDisplayTitle(title, body);
+        upsertThreadHeaderSearchIndex({
+          db,
+          workspaceId,
+          threadId,
+          title: displayTitle,
+        });
+        upsertChatMessageSearchIndex({
+          db,
+          workspaceId,
+          threadId,
+          messageId: message.id,
+          author,
+          body,
+        });
+        const thread: ChatThread = {
+          id: threadId,
+          workspaceId,
+          title: displayTitle,
+          createdAtMs: recordedAtMs,
+          updatedAtMs: recordedAtMs,
+          channelId: channel.id,
+        };
+        return cloneJson({ thread, message });
+      });
+    },
+
+    listChannelThreads(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        return withDb((db) => {
+          const channel = requireWorkspaceChannel(db, workspaceId, input.channelId);
+          return db
+            .prepare(
+              `SELECT ${THREAD_SELECT_COLUMNS},
+                    (SELECT COUNT(*) FROM chat_messages m
+                     WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id)
+                      AS message_count,
+                    COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs
+                              WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0)
+                      AS last_read_sequence
+               FROM chat_threads t
+               WHERE t.workspace_id = ? AND t.channel_id = ?
+               ORDER BY t.updated_at_ms DESC, t.thread_id DESC`,
+            )
+            .all(workspaceId, channel.id)
+            .map((row): ChannelThreadSummary => {
+              const messageCount = numberValue(row.message_count);
+              // Fail closed on negative/non-integer cursors; clamp a (not yet
+              // repaired) over-count cursor to the real message count so the
+              // summary never claims more read than exists.
+              const lastReadSequence = Math.min(
+                readSequenceValue(row.last_read_sequence),
+                messageCount,
+              );
+              return {
+                thread: threadFromRow(row),
+                messageCount,
+                lastReadSequence,
+                unreadCount: Math.max(0, messageCount - lastReadSequence),
+              };
+            })
+            .map(cloneJson);
+        });
+      });
+    },
+
+    markThreadRead(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const upToSequence = normalizeReadSequence(input.upToSequence);
+        const expectedRevision = normalizeExpectedRevision(input.expectedRevision);
+        const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+        return cloneJson(
+          advanceReadCursor({
+            db,
+            workspaceId,
+            threadId: thread.id,
+            upToSequence,
+            ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+            nowMs: nowMs(),
+          }),
+        );
+      });
+    },
+
     listThreads(input) {
       return afterWrites(async () => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         return withDb((db) =>
           db
             .prepare(
-              `SELECT * FROM chat_threads
-               WHERE workspace_id = ?
-               ORDER BY created_at_ms, thread_id`,
+              `${THREAD_SELECT_SQL}
+               WHERE t.workspace_id = ?
+               ORDER BY t.created_at_ms, t.thread_id`,
             )
             .all(workspaceId)
             .map(threadFromRow)
@@ -492,9 +1030,9 @@ export function createLinkedChatStore(
         return withDb((db) =>
           db
             .prepare(
-              `SELECT * FROM chat_threads
-               WHERE workspace_id = ? AND linked_object_id = ?
-               ORDER BY created_at_ms, thread_id`,
+              `${THREAD_SELECT_SQL}
+               WHERE t.workspace_id = ? AND t.linked_object_id = ?
+               ORDER BY t.created_at_ms, t.thread_id`,
             )
             .all(workspaceId, objectId)
             .map(threadFromRow)
@@ -515,11 +1053,7 @@ export function createLinkedChatStore(
           body: normalizeBody(input.body),
           createdAtMs: nowMs(),
         };
-        const count = db
-          .prepare(
-            "SELECT COUNT(*) AS count FROM chat_messages WHERE workspace_id = ? AND thread_id = ?",
-          )
-          .get(workspaceId, thread.id);
+        const count = messageCountForThread(db, workspaceId, thread.id);
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
@@ -528,7 +1062,7 @@ export function createLinkedChatStore(
         ).run(
           workspaceId,
           thread.id,
-          Number(count?.count ?? 0),
+          count,
           message.id,
           message.author.kind,
           message.author.displayName,
@@ -538,6 +1072,17 @@ export function createLinkedChatStore(
         db.prepare(
           "UPDATE chat_threads SET updated_at_ms = ? WHERE workspace_id = ? AND thread_id = ?",
         ).run(message.createdAtMs, workspaceId, thread.id);
+        // Single-user read-state rule: your own (human) message is never
+        // unread; agent messages are exactly what unread exists to surface.
+        if (message.author.kind === "human") {
+          advanceReadCursor({
+            db,
+            workspaceId,
+            threadId: thread.id,
+            upToSequence: count + 1,
+            nowMs: message.createdAtMs,
+          });
+        }
         upsertChatMessageSearchIndex({
           db,
           workspaceId,

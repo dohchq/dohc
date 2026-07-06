@@ -2742,6 +2742,104 @@ export async function readChat(ctx: ToolContext, args: { threadId: string }) {
   }
 }
 
+// --- channels (PR 12/15 slice, WS-E) ----------------------------------------
+
+// Channel discovery for agents: names, slugs, kinds, and each channel's
+// threads (id + display title) so a follow-up reply/read has real ids to
+// target. Ensures the workspace's default "general" channel on first use —
+// the same rule the desktop applies.
+export async function listChannels(ctx: ToolContext) {
+  const gate = await requireEngineChats(ctx);
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  try {
+    return await withEngineStores(ctx, async ({ chats }) => {
+      await withBusyRetry(() =>
+        chats.ensureGeneralChannel({ workspaceId: gate.workspaceId }),
+      );
+      const channels = await chats.listChannels({ workspaceId: gate.workspaceId });
+      const withThreads = [];
+      for (const channel of channels) {
+        const threads = await chats.listChannelThreads({
+          workspaceId: gate.workspaceId,
+          channelId: channel.id,
+        });
+        withThreads.push({
+          id: channel.id,
+          name: channel.name,
+          slug: channel.slug,
+          kind: channel.kind,
+          threadCount: channel.threadCount,
+          threads: threads.map((entry) => ({
+            id: entry.thread.id,
+            title: entry.thread.title,
+            messageCount: entry.messageCount,
+            updatedAtMs: entry.thread.updatedAtMs,
+          })),
+        });
+      }
+      return { ok: true as const, channels: withThreads };
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: chatFailureReason(error, "failed to list channels"),
+    };
+  }
+}
+
+// Start a chat in a channel AS THE AGENT. `channel` accepts a channel id or
+// a name/slug ("general", "#general", "Client ACME"). No title is required:
+// untitled chats display their first-message snippet.
+export async function startChannelChat(
+  ctx: ToolContext,
+  args: { channel: string; body: string; title?: string },
+) {
+  const gate = await requireEngineChats(ctx);
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const displayName = await agentReplyDisplayName(ctx);
+  try {
+    return await withEngineStores(ctx, async ({ chats }) => {
+      const requested = args.channel.replace(/^#/, "").trim();
+      const bySlug = await chats.findChannelBySlug({
+        workspaceId: gate.workspaceId,
+        slug: requested,
+      });
+      // Fall back to an exact id or display-name match so every form the
+      // tool documents ("general", "#general", "Client ACME", a channel id)
+      // resolves — a channel id slugifies to something no channel owns.
+      const channel =
+        bySlug ??
+        (await chats.listChannels({ workspaceId: gate.workspaceId })).find(
+          (candidate) => candidate.id === requested || candidate.name === requested,
+        );
+      if (!channel) {
+        return { ok: false as const, reason: `channel not found: ${args.channel}` };
+      }
+      const started = await withBusyRetry(() =>
+        chats.startChannelThread({
+          workspaceId: gate.workspaceId,
+          channelId: channel.id,
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          // Agent authorship, always: this tool IS the agent speaking.
+          author: { kind: "agent", displayName },
+          body: args.body,
+        }),
+      );
+      return {
+        ok: true as const,
+        channel: { id: channel.id, name: channel.name, slug: channel.slug },
+        thread: chatThreadResult(started.thread),
+        message: chatMessageResult(started.message),
+      };
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: chatFailureReason(error, `failed to start a chat in: ${args.channel}`),
+    };
+  }
+}
+
 export async function replyToChat(
   ctx: ToolContext,
   args: { threadId: string; body: string },

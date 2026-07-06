@@ -187,6 +187,9 @@ const LazyLinkedChatsPanel = lazy(() =>
     default: mod.LinkedChatsPanel,
   })),
 );
+const LazyChatsView = lazy(() =>
+  import("./workbench/ChatsView").then((mod) => ({ default: mod.ChatsView })),
+);
 
 // Every folder above a path — expanded when a create/open must REVEAL it.
 function ancestorDirs(path: string): string[] {
@@ -1970,6 +1973,17 @@ export function DesktopWorkspaceShell(props: {
       .then((result) => {
         if (cancelled) return;
         setVersionsEnabled(result.settings.experimental.workspaceEngineAlpha);
+        // A persisted "chats" view from a previously flagged session must
+        // not strand an unflagged workspace on an empty panel. Raw setWb:
+        // this is a correction, not a user touch — it must not block the
+        // stored ui-state merge-on-load.
+        if (!result.settings.experimental.workspaceEngineAlpha) {
+          setWb((state) =>
+            state.activeView === "chats"
+              ? { ...state, activeView: "explorer" }
+              : state,
+          );
+        }
       })
       .catch(() => {
         // Settings unavailable reads as flag off — never a broken shell.
@@ -2093,25 +2107,52 @@ export function DesktopWorkspaceShell(props: {
     [mutateWb, openFile],
   );
 
-  // Search-result click: open + land at the line (source mode this phase).
+  // The ONE way a chat thread lands in the rail (search hits and the Chats
+  // view "Files" grouping both route here): hand the thread to the rail's
+  // consume-once initialThread seam, switch to the Chats tab, and force the
+  // rail visible.
+  const openChatThreadInRail = useCallback(
+    (thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number }) => {
+      setSearchChatThread({
+        id: thread.id,
+        title: thread.title,
+        createdAtMs: thread.createdAtMs,
+        updatedAtMs: thread.updatedAtMs,
+      });
+      setRailView("chats");
+      mutateWb((state) => ({ ...state, historyVisible: true }));
+    },
+    [mutateWb],
+  );
+
+  // Chats view "Files" grouping cross-link: a file-linked Chat opens where
+  // it lives — the file (when it still resolves) plus the rail on the thread.
+  const openFileChatInRail = useCallback(
+    (thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number; path: string | null }) => {
+      openChatThreadInRail(thread);
+      if (thread.path) openFile(thread.path);
+    },
+    [openChatThreadInRail, openFile],
+  );
+
+  // Search-result click: open + land at the line (source mode this phase);
+  // chat results open in the rail instead.
   const openSearchResult = useCallback(
     (path: string, line: number, _column: number, entry?: SearchResultsEventEntry) => {
       if (entry?.surface === "chat" && entry.threadId) {
         const now = Date.now();
-        setSearchChatThread({
+        openChatThreadInRail({
           id: entry.threadId,
           title: entry.title ?? entry.threadId,
           createdAtMs: now,
           updatedAtMs: now,
         });
-        setRailView("chats");
-        mutateWb((state) => ({ ...state, historyVisible: true }));
         return;
       }
       setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
       openFile(path);
     },
-    [mutateWb, openFile],
+    [openChatThreadInRail, openFile],
   );
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -2530,11 +2571,13 @@ export function DesktopWorkspaceShell(props: {
         label: "Toggle history rail",
         run: () => mutateWb(toggleHistory),
       },
-      ...VIEW_IDS.map((view) => ({
-        id: `show-${view}`,
-        label: `View: ${activityViewLabel(view)}`,
-        run: () => mutateWb((state) => setView(state, view)),
-      })),
+      ...VIEW_IDS.filter((view) => view !== "chats" || versionsEnabled).map(
+        (view) => ({
+          id: `show-${view}`,
+          label: `View: ${activityViewLabel(view)}`,
+          run: () => mutateWb((state) => setView(state, view)),
+        }),
+      ),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -2587,6 +2630,7 @@ export function DesktopWorkspaceShell(props: {
       installDesktopUpdate,
       openSettings,
       reportShellError,
+      versionsEnabled,
       workspaceId,
     ],
   );
@@ -2713,6 +2757,7 @@ export function DesktopWorkspaceShell(props: {
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
           agentActive={agentActive}
+          chatsEnabled={versionsEnabled}
           searchResultCount={
             search.model.totalMatches > 0 ? search.model.totalMatches : undefined
           }
@@ -2801,6 +2846,22 @@ export function DesktopWorkspaceShell(props: {
                   onOpenPath={openFile}
                 />
               </Suspense>
+            ) : wb.activeView === "chats" ? (
+              versionsEnabled ? (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyChatsView
+                    workspaceId={workspaceId}
+                    onOpenFileChat={openFileChatInRail}
+                    onError={(message) => setShellError(message)}
+                  />
+                </Suspense>
+              ) : (
+                // Transient: the settings load corrects activeView moments
+                // later; never a blank panel meanwhile.
+                <div className="flex flex-1 items-center justify-center px-4 text-center text-xs text-subtle">
+                  Chats aren't enabled for this workspace.
+                </div>
+              )
             ) : wb.activeView === "history" ? (
               historyTimeline
             ) : wb.activeView === "agent" ? (

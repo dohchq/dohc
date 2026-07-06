@@ -9,6 +9,9 @@ import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 export const VIEW_IDS = [
   "explorer",
   "search",
+  // Chats (PR 13, WS-E): only offered on the rail for workspaces with the
+  // workspace-engine alpha flag — the Shell filters it out otherwise.
+  "chats",
   "graph",
   "sites",
   "agent",
