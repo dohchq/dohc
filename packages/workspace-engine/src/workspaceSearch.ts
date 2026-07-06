@@ -128,6 +128,108 @@ export async function searchWorkspaceEngine(
   const fileVisibility = options.policy?.fileVisibility;
   const chatVisibility = options.policy?.chatVisibility ?? defaultChatVisibility;
 
+  if (options.versions.ensureSearchIndex && options.versions.querySearchIndex) {
+    await options.versions.ensureSearchIndex({
+      workspaceId: options.workspaceId,
+      versionId: options.versionId,
+    });
+    // Visibility hooks can drop indexed candidates, so a single limit-sized
+    // fetch may under-fill the page while later index hits stay unread. Grow
+    // the candidate fetch geometrically (dedup by identity, not position —
+    // file/chat interleaving is not prefix-stable across fetch sizes) until
+    // the page is full or the index stops yielding a full candidate batch.
+    let indexAvailable = true;
+    let fetchLimit = limit;
+    let threadsById: Map<string, ChatThread> | undefined;
+    const seenCandidates = new Set<string>();
+    for (;;) {
+      const candidates = await options.versions.querySearchIndex({
+        workspaceId: options.workspaceId,
+        versionId: options.versionId,
+        query,
+        limit: fetchLimit,
+      });
+      if (!candidates) {
+        indexAvailable = false;
+        break;
+      }
+      for (const candidate of candidates) {
+        const candidateKey =
+          candidate.surface === "file"
+            ? `file\0${candidate.path}\0${candidate.objectId}`
+            : `chat\0${candidate.threadId}`;
+        if (seenCandidates.has(candidateKey)) continue;
+        seenCandidates.add(candidateKey);
+        if (candidate.surface === "file") {
+          // Hooks and results must see the REAL snapshot (metadata, moment,
+          // timestamps) exactly as the linear path does — a synthetic
+          // stand-in could make a custom fileVisibility policy diverge
+          // between the indexed and linear paths. A candidate whose current
+          // snapshot is gone (or re-owned) is stale index data: skip it.
+          const snapshot = await options.versions.readTextFile({
+            workspaceId: options.workspaceId,
+            versionId: options.versionId,
+            path: candidate.path,
+          });
+          if (!snapshot || snapshot.objectId !== candidate.objectId) continue;
+          const baselineVisibility = defaultFileVisibility(snapshot);
+          if (!baselineVisibility.searchable) continue;
+          const visibility = fileVisibility?.(snapshot) ?? baselineVisibility;
+          if (!visibility.searchable) continue;
+          results.push(
+            ...textMatches({
+              text: snapshot.text,
+              query,
+              path: snapshot.path,
+              title: snapshot.path,
+              surface: "file",
+              objectId: snapshot.objectId,
+              remaining: limit - results.length,
+            }),
+          );
+        } else {
+          // Same rule for chats: custom chatVisibility hooks get the real
+          // thread record (title, linkedFile, timestamps), never a cast.
+          threadsById ??= new Map(
+            (await options.chats.listThreads({ workspaceId: options.workspaceId })).map(
+              (thread) => [thread.id, thread],
+            ),
+          );
+          const thread = threadsById.get(candidate.threadId);
+          if (!thread) continue;
+          const visibility = chatVisibility(thread);
+          if (!visibility.searchable) continue;
+          const projection = await options.chats.getThreadProjection({
+            workspaceId: options.workspaceId,
+            threadId: thread.id,
+            linkedFileAccess: visibility.projectionFileAccess ?? { kind: "unknown" },
+          });
+          results.push(
+            ...textMatches({
+              text: projection.text,
+              query,
+              path: projection.path,
+              title: projectionTitle(projection),
+              surface: "chat",
+              threadId: thread.id,
+              remaining: limit - results.length,
+            }),
+          );
+        }
+        if (results.length >= limit) return results;
+      }
+      // A short batch means the index has no further candidates to offer.
+      if (candidates.length < fetchLimit) break;
+      fetchLimit *= 2;
+    }
+    // Chat projections contain synthesized lines (headers, linked-file
+    // notes) the message index never stores, so an empty indexed result
+    // under a custom chatVisibility policy still needs the linear pass.
+    if (indexAvailable && (results.length > 0 || !options.policy?.chatVisibility)) {
+      return results;
+    }
+  }
+
   const files = await options.versions.listTextFiles({
     workspaceId: options.workspaceId,
     versionId: options.versionId,

@@ -112,6 +112,34 @@ const SECRET_TABLES_DDL = `
     ON secret_moments(workspace_id, version_id, path, moment_order)
 `;
 
+// Search index tables are lazy additive (WS-D): existing engine.db files gain
+// them on open without a schema-version bump. The FTS tables store only
+// currently searchable text; write-time policy hooks delete rows for secret,
+// ignored, untracked, or non-searchable paths instead of indexing them.
+export const ENGINE_SEARCH_INDEX_DDL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS engine_search_files_fts USING fts5(
+    workspace_id UNINDEXED,
+    version_id UNINDEXED,
+    object_id UNINDEXED,
+    path UNINDEXED,
+    text,
+    tokenize='trigram'
+  );
+  CREATE VIRTUAL TABLE IF NOT EXISTS engine_search_chat_messages_fts USING fts5(
+    workspace_id UNINDEXED,
+    thread_id UNINDEXED,
+    message_id UNINDEXED,
+    text,
+    tokenize='trigram'
+  );
+  CREATE TABLE IF NOT EXISTS engine_search_index_state (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    indexed_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id)
+  )
+`;
+
 // moments.author_json is a lazy additive upgrade (PR 0N-1, same pattern as
 // active_versions): a nullable column added on open, no schema-version bump.
 // Safe because it is additive-nullable both ways — older readers select named
@@ -161,6 +189,7 @@ export function initializeOrValidateEngineSchema(
   assertRequiredEngineTables(db, corrupt);
   db.exec(ACTIVE_VERSIONS_DDL);
   db.exec(SECRET_TABLES_DDL);
+  db.exec(ENGINE_SEARCH_INDEX_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
 }
 
@@ -392,6 +421,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_chat_threads_workspace_created ON chat_threads(workspace_id, created_at_ms, thread_id);
       CREATE INDEX IF NOT EXISTS idx_chat_threads_linked_file ON chat_threads(workspace_id, linked_object_id, created_at_ms, thread_id);
       CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_order ON chat_messages(workspace_id, thread_id, message_order);
+      ${ENGINE_SEARCH_INDEX_DDL};
       INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, ${ENGINE_SCHEMA_VERSION});
     `);
     db.exec("COMMIT");

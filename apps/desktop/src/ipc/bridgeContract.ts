@@ -1527,6 +1527,10 @@ const SearchResultEntrySchema = z.object({
   preview: z.string().max(SEARCH_EVENT_MAX_PREVIEW_CHARS),
   matchStart: z.number().int().min(0),
   matchEnd: z.number().int().min(0),
+  surface: z.enum(["file", "chat"]).optional(),
+  threadId: z.string().min(1).max(200).optional(),
+  objectId: z.string().min(1).max(200).optional(),
+  title: z.string().min(1).max(500).optional(),
 });
 
 export const SearchResultsEventSchema = z.object({

@@ -1,8 +1,11 @@
 import {
   parseFilesPolicy,
   parseVisibilityPolicy,
+  resolveEffectivePolicy,
   type FilesPolicyRule,
   type PolicyParseResult,
+  type SearchVisibility,
+  type TextFileSnapshot,
   type VisibilityPolicyRule,
 } from "@dohc/workspace-engine";
 import { lstat, readFile } from "node:fs/promises";
@@ -55,6 +58,41 @@ async function readPolicyFile<T>(
       errors: [`${fileName} could not be read and was ignored.`],
     };
   }
+}
+
+// Search-side policy decision (WS-D). Capture stays FLOOR-ONLY when a policy
+// file is malformed (WS-F's documented rule: writes are never dropped), but
+// search must FAIL CLOSED: resolveEffectivePolicy defaults tracked paths to
+// searchable, so feeding it null rules from an unparseable policy file would
+// WIDEN search and resurface content the (broken) rules meant to hide. Any
+// parse/read error therefore blocks engine search outright — the caller
+// returns an empty result set and surfaces the error.
+export type EngineSearchPolicyDecision =
+  | { kind: "blocked"; message: string }
+  | { kind: "search"; fileVisibility: (file: TextFileSnapshot) => SearchVisibility };
+
+export function resolveEngineSearchPolicy(
+  policy: WorkspaceEnginePolicySnapshot,
+): EngineSearchPolicyDecision {
+  if (policy.errors.length > 0) {
+    return { kind: "blocked", message: policy.errors.join("; ") };
+  }
+  return {
+    kind: "search",
+    fileVisibility: (file) => {
+      const resolved = resolveEffectivePolicy({
+        path: file.path,
+        filesPolicy: policy.filesPolicy,
+        visibilityPolicy: policy.visibilityPolicy,
+      });
+      return resolved.tracked && resolved.searchable && resolved.visibility !== "hidden"
+        ? { searchable: true }
+        : {
+            searchable: false,
+            reason: resolved.floor === "secret" ? "secret" : "ignored",
+          };
+    },
+  };
 }
 
 export async function readWorkspaceEnginePolicy(

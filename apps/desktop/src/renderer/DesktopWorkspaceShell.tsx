@@ -29,6 +29,7 @@ import type {
   ChangeSetDetailRecord,
   ChangeSetFileRecord,
   ChangeSetRecord,
+  ChatThreadRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
   FileChangeSnapshot,
@@ -38,6 +39,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
@@ -1875,6 +1877,7 @@ export function DesktopWorkspaceShell(props: {
   // Right rail content for flagged workspaces: History timeline or the
   // active file's Chats. Runtime-only — not persisted.
   const [railView, setRailView] = useState<"history" | "chats">("history");
+  const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(null);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
@@ -2092,11 +2095,23 @@ export function DesktopWorkspaceShell(props: {
 
   // Search-result click: open + land at the line (source mode this phase).
   const openSearchResult = useCallback(
-    (path: string, line: number) => {
+    (path: string, line: number, _column: number, entry?: SearchResultsEventEntry) => {
+      if (entry?.surface === "chat" && entry.threadId) {
+        const now = Date.now();
+        setSearchChatThread({
+          id: entry.threadId,
+          title: entry.title ?? entry.threadId,
+          createdAtMs: now,
+          updatedAtMs: now,
+        });
+        setRailView("chats");
+        mutateWb((state) => ({ ...state, historyVisible: true }));
+        return;
+      }
       setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
       openFile(path);
     },
-    [openFile],
+    [mutateWb, openFile],
   );
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -3039,6 +3054,8 @@ export function DesktopWorkspaceShell(props: {
                 <LazyLinkedChatsPanel
                   workspaceId={workspaceId}
                   filePath={activeDocumentPath}
+                  initialThread={searchChatThread}
+                  onInitialThreadConsumed={() => setSearchChatThread(null)}
                   onError={(message) => setShellError(message)}
                 />
               </Suspense>

@@ -15582,3 +15582,185 @@ Date completed: 2026-07-06
 - Export surfaces do not exist yet; when PR 11-era export lands, its
   redact/exclude behavior must consume the same floor and add its own
   adversarial byte-scan tests.
+
+## PR WS-D - Indexed Engine Search Mounted In The Desktop (Plan PR 11/17 Scope)
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-wsd-search
+Worktree: /home/ice/dev/dohc-wsd-search
+Implementation workstream, if used: codex CLI (gpt-5.5) bulk implementation
+driven per skills/codex-implementation, one round (302k tokens); Claude
+(fable-5) rebased across the WS-C secrets/hardening merges, reviewed the
+diff, hand-fixed the renderer chat-open loop and the per-keystroke store
+open, wrote the E2E spec, and ran all verification independently.
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] FTS DECISION: node:sqlite's bundled SQLite has FTS5 (spike-verified
+      live and pinned by a unit test that creates a trigram FTS5 table
+      through the repo's own dependency graph). Trigram tokenizer gives
+      substring matching that mirrors the linear scan's semantics; queries
+      under 3 chars return null from the index layer and fall back to the
+      linear scan.
+- [x] INDEX SCHEMA (`engineDbSchema.ts`, lazy additive like
+      `active_versions` — ENGINE_SCHEMA_VERSION stays 1, existing engine.dbs
+      upgrade on open): `engine_search_files_fts` (workspace_id, version_id,
+      object_id, path UNINDEXED; text indexed) and
+      `engine_search_chat_messages_fts` (workspace_id, thread_id, message_id
+      UNINDEXED; text indexed), both `tokenize='trigram'`, plus
+      `engine_search_index_state` (workspace_id, version_id, indexed_at_ms)
+      recording which versions have been bulk-populated.
+- [x] MAINTENANCE (`searchIndex.ts`, hooks INSIDE the existing store
+      transactions so index updates commit atomically with the writes they
+      describe): writeTextFileInDb upserts, deleteTextFileInDb deletes,
+      renameTextFile swaps old-path row for new; linkedChatStore createThread
+      indexes the title (a `__thread__` header row), sendMessage indexes
+      author display name + body (with an "(agent)" marker matching the
+      projection format). Zero changes to workspaceEngineCapture.ts (the
+      WS-C-contended file): the store-level hooks cover every caller.
+- [x] COW/FORK CORRECTNESS: a freshly forked named version has no physical
+      `snapshots` rows (reads resolve through `fork_base_snapshots`), so a
+      mirror-only index would be empty for it. `ensureSearchIndexForVersion`
+      lazily bulk-populates a version's file rows on first indexed search
+      via a snapshots-UNION-fork_base_snapshots query (COW-resolved), then
+      records index state so the wholesale scan never reruns; the write
+      hooks keep it current incrementally afterwards. Unit test pins:
+      fork B from A, search B immediately (inherited content found), then
+      one write in B is reflected without touching the rest.
+- [x] POLICY: `pathIsSearchIndexed` (floor classifier + live
+      files.toml/visibility.toml via resolveEffectivePolicy) gates every
+      index insert — secret/ignored/untracked/unsearchable paths are never
+      indexed. Defense in depth on top of WS-C's plaintext write gate, which
+      now REJECTS secret-classified paths at the store boundary outright.
+      Read time re-checks policy per candidate, so a policy narrowed after
+      indexing stops surfacing immediately (pinned by a test that flips
+      files.toml searchable=false after indexing).
+- [x] ENGINE API: searchWorkspaceEngine takes the indexed path when the
+      store provides ensureSearchIndex/querySearchIndex (optional seam on
+      the VersionedTextStore contract), re-checks visibility per candidate,
+      and re-extracts line/preview/matchStart/matchEnd through the SAME
+      textMatches windowing as the linear path — identical result shape.
+      Linear scan remains the fallback (no index seam, short queries, or
+      zero indexed hits under a caller chatVisibility policy, where
+      projections may contain linked-file text the chat index does not
+      carry). Parity pinned by a fixture-corpus test comparing both paths.
+- [x] DESKTOP MOUNT (main.ts searchWorkspace handler): branches on
+      `activity.engineCaptureFor` (the same gate as history) — flagged
+      workspaces flush the capture chain (read-your-writes) and run engine
+      search over a cached per-workspace store connection (the
+      linkedChatStores lazy-singleton idiom, closed at quit; search-as-you-
+      type never pays a per-keystroke SQLite open/quick_check), emitting ONE
+      done:true SearchResultsEvent batch. Unflagged workspaces keep the
+      streamed ripgrep path untouched. Contract: optional
+      surface/threadId/objectId/title fields added in lockstep to
+      channels.ts's dependency-free preload validator, bridgeContract's zod
+      mirror, and channels.test.ts; ripgrep entries (which never set them)
+      validate unchanged.
+- [x] RENDERER (minimal): SearchView renders chat groups with a Chat badge
+      and the thread title; clicking a chat row opens the Chats rail on
+      that thread (consume-once initialThread seam into LinkedChatsPanel).
+      File results keep the existing open-at-line behavior.
+
+### Files Changed
+
+- packages/workspace-engine/src/searchIndex.ts (new)
+- packages/workspace-engine/src/engineDbSchema.ts
+- packages/workspace-engine/src/versionedTextStore.ts
+- packages/workspace-engine/src/linkedChatStore.ts
+- packages/workspace-engine/src/workspaceSearch.ts
+- packages/workspace-engine/src/workspaceSearch.test.ts
+- packages/workspace-engine/src/linkedChatStore.test.ts
+- packages/workspace-engine/src/bench/storageBench.ts
+- packages/workspace-contracts/src/engine.ts
+- apps/desktop/src/main.ts
+- apps/desktop/src/ipc/channels.ts / channels.test.ts / bridgeContract.ts
+- apps/desktop/src/renderer/workbench/SearchView.tsx
+- apps/desktop/src/renderer/workbench/LinkedChats.tsx
+- apps/desktop/src/renderer/DesktopWorkspaceShell.tsx
+- apps/desktop/e2e/workspace-engine-search.spec.ts (new)
+
+### Tests Added Or Updated
+
+- FTS5 availability probe (trigram table create/match through node:sqlite).
+- Index maintenance: write/delete/rename reflected; fork-then-search COW
+  case; incremental write in a fork.
+- Policy exclusions: the `.env` family (`.env`, `secrets.env`, `.env.local`,
+  `config/.env.production`) is refused by the store write gate AND absent
+  from a raw `engine_search_files_fts` dump that provably contains the
+  tracked corpus; files.toml searchable=false narrows results at read time.
+- Indexed/linear parity on a fixture corpus of files + chats.
+- Adapter contract: channels.test.ts pins the optional engine fields across
+  the preload validator and the zod mirror (old ripgrep-shaped payloads
+  unchanged).
+- E2E workspace-engine-search.spec.ts: flagged search finds file content
+  AND a chat message (Chat-badged row opens the Chats rail on the thread);
+  `.env.local` content never findable AND absent from a raw FTS-table dump
+  of the persisted engine.db; unflagged workspace stays on ripgrep with
+  `.env` content excluded.
+- Regression suites: WS-C's workspace-secret-env.spec.ts (its flagged
+  search step now routes through engine search) re-run green, including its
+  byte-level engine.db plaintext scan.
+
+### Commands Run
+
+- pnpm --filter @dohc/workspace-engine test: 282 passed (baseline 277).
+- pnpm --filter @dohc/desktop test: 891 passed (baseline 890).
+- pnpm --filter @dohc/mcp test: 73 passed.
+- Typechecks: workspace-engine, workspace-contracts, desktop — clean.
+- Playwright: workspace-engine-search (2), workspace-secret-env,
+  workspace-linked-chats, workspace-engine-capture, workspace-engine-history,
+  workspace-versions, workspace-switch-race — all passed.
+- git diff --check: clean.
+
+### Performance Notes
+
+- Machine: AMD Ryzen 9 7950X, WSL2 Linux 6.18, node v25.2.1, /tmp tmpfs.
+- Indexed search, 10,000 files + 10,000 chat messages: 234ms cold
+  (includes first-search lazy index population) — budget 500ms, met with
+  2.1x headroom (bench: storageBench.ts).
+- Incremental index cost, 100-file capture burst (paired runs, same
+  session): main 5.77-5.80ms/file; this branch 6.09-6.75ms/file —
+  ~+0.7ms/file for the per-write trigram FTS upsert. Honest framing: the
+  cost IS measurable (~+12%), but total burst (~650ms) keeps 4.6x headroom
+  against the plan's 3s/100-write coalesce budget; batching store
+  transactions remains the recorded pre-default-on follow-up from 0M-3.
+
+### Security / Privacy Notes
+
+- Secret floor: index inserts run pathIsSearchIndexed (floor first), and
+  WS-C's store write gate independently refuses plaintext secret paths —
+  two layers between `.env` content and the FTS tables. Adversarial
+  evidence at both altitudes: unit (raw FTS dump after refused direct
+  store writes across the `.env.*` family) and E2E (raw FTS dump of the
+  live app's engine.db after a real `.env.local` capture, plus WS-C's
+  whole-file byte scan re-run green over the new search route).
+- Read-time policy re-check means a stale index row can never OUTLIVE a
+  policy narrowing in results; the row itself is purged on the next write
+  to that file (not proactively) — see Remaining Risk.
+- No new IPC surface; the search channel's added fields are optional,
+  bounded, and validated on both sides of the preload boundary.
+
+### Remaining Risk / Follow-Ups
+
+- Rows for a path whose policy LATER turns unsearchable stay in the FTS
+  table (never surfaced; purged on next write or full reindex). A policy-
+  edit-triggered purge pass is a small follow-up if plaintext-at-rest of
+  policy-hidden (non-secret) files matters before then.
+- Engine-path search ignores caseSensitive/wholeWord/regex/include/exclude
+  options (fixed-string, case-insensitive, whole-workspace) — the plan's
+  PR 17 ranking/options work; the UI toggles are no-ops for flagged
+  workspaces this PR.
+- Engine search returns one bounded batch (50 entries — the per-event
+  contract cap) vs ripgrep's streamed 2000; acceptable at alpha, revisit
+  with result paging.
+- ensureSearchIndexForVersion's first run for a big version happens
+  synchronously on the search call (main process); 10k files measured
+  ~230ms — acceptable, but a background warm at capture attach is a cheap
+  improvement.
+- Chat index stores title/author/body, not the full projection text; a
+  query matching only projection framing could differ from the linear
+  path's chat results when a caller supplies a custom chatVisibility (the
+  engine falls back to linear for the zero-hit case to compensate).

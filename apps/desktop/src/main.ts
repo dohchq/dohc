@@ -153,7 +153,7 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
-import { CHANNELS } from "./ipc/channels";
+import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "./ipc/channels";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
 import {
@@ -192,10 +192,13 @@ import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
 import {
   createLinkedChatStore,
+  createVersionedTextStore,
+  searchWorkspaceEngine,
   type ChatMessage,
   type ChatThread,
   type LinkedChatStore,
   type VersionedTextMomentSummary,
+  type VersionedTextStore,
 } from "@dohc/workspace-engine";
 import type {
   WorkspaceEngineMomentDetail,
@@ -203,6 +206,10 @@ import type {
 } from "./workspaces/workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
+import {
+  readWorkspaceEnginePolicy,
+  resolveEngineSearchPolicy,
+} from "./workspaces/workspaceEnginePolicyFile";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
@@ -989,6 +996,22 @@ function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }
   return store;
 }
 
+// Engine search (WS-D): per-workspace versioned-text-store connection for the
+// indexed search path, the same lazy-singleton idiom as linkedChatStores —
+// search-as-you-type must not pay a fresh SQLite open (and its quick_check)
+// per keystroke. Closed beside the chat stores at quit.
+const engineSearchStores = new Map<string, VersionedTextStore>();
+function engineSearchStoreFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): VersionedTextStore {
+  const existing = engineSearchStores.get(workspace.workspaceId);
+  if (existing) return existing;
+  const store = createVersionedTextStore(workspace.rootPath);
+  engineSearchStores.set(workspace.workspaceId, store);
+  return store;
+}
+
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's
 // only durable identity is the dohc Cloud session email; signed-out
@@ -1050,10 +1073,18 @@ app.on("will-quit", (event) => {
   const chatStoreStop = Promise.all(
     [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
   );
+  // Engine search stores hold the same kind of lazy SQLite handle; close them
+  // with the chat stores so WAL locks never outlive the app.
+  const searchStoreStop = Promise.all(
+    [...engineSearchStores.values()].map((store) => store.close().catch(() => undefined)),
+  );
   void Promise.race([
-    Promise.all([agentSessionStop, activity.stopAll(), chatStoreStop]).then(
-      () => undefined,
-    ),
+    Promise.all([
+      agentSessionStop,
+      activity.stopAll(),
+      chatStoreStop,
+      searchStoreStop,
+    ]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
   ]).finally(() => app.exit(0));
 });
@@ -2681,6 +2712,75 @@ function registerIpcHandlers(): void {
     const input = WorkspaceSearchPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const sender = event.sender;
+    const capture = activity.engineCaptureFor(workspace.workspaceId);
+    if (capture) {
+      // Read-your-writes: the batch whose capture triggered this search must
+      // already be in the index the query runs against.
+      await capture.flush();
+      const versions = engineSearchStoreFor(workspace);
+      {
+        const active = await versions.getActiveVersion({
+          workspaceId: workspace.workspaceId,
+        });
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        const decision = resolveEngineSearchPolicy(policy);
+        if (decision.kind === "blocked") {
+          // FAIL CLOSED: a malformed policy file must never widen search
+          // (resolveEffectivePolicy would default tracked paths to
+          // searchable). Capture stays floor-only per WS-F; search returns
+          // nothing until the policy file is fixed.
+          console.error(
+            `[desktop] workspace search blocked by policy validation for ${workspace.rootPath}: ${decision.message}`,
+          );
+          if (!sender.isDestroyed()) {
+            sender.send(
+              CHANNELS.searchResults,
+              SearchResultsEventSchema.parse({
+                searchId: input.searchId,
+                entries: [],
+                done: true,
+                limitHit: false,
+              }),
+            );
+          }
+          return;
+        }
+        const results = await searchWorkspaceEngine({
+          workspaceId: workspace.workspaceId,
+          versionId: active?.id ?? "main",
+          query: input.query,
+          versions,
+          chats: linkedChatStoreFor(workspace),
+          limit: SEARCH_EVENT_MAX_ENTRIES,
+          policy: {
+            fileVisibility: decision.fileVisibility,
+          },
+        });
+        if (!sender.isDestroyed()) {
+          sender.send(
+            CHANNELS.searchResults,
+            SearchResultsEventSchema.parse({
+              searchId: input.searchId,
+              entries: results.map((result) => ({
+                path: result.path,
+                line: result.line,
+                column: result.matchStart + 1,
+                preview: result.preview,
+                matchStart: result.matchStart,
+                matchEnd: result.matchEnd,
+                surface: result.surface,
+                title: result.title,
+                ...(result.threadId ? { threadId: result.threadId } : {}),
+                ...(result.objectId ? { objectId: result.objectId } : {}),
+              })),
+              done: true,
+              limitHit: false,
+            }),
+          );
+        }
+      }
+      return;
+    }
     if (!searchCleanupHooked.has(sender)) {
       searchCleanupHooked.add(sender);
       // Window closed / renderer gone: kill this renderer's rg child.

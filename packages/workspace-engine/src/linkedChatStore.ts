@@ -26,6 +26,10 @@ import {
   type WorkspaceId,
   type WorkspaceObjectId,
 } from "./versionedTextStore";
+import {
+  upsertChatMessageSearchIndex,
+  upsertThreadHeaderSearchIndex,
+} from "./searchIndex";
 
 export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
@@ -454,6 +458,12 @@ export function createLinkedChatStore(
           linkedPathHint ?? null,
           linkedObjectId ? recordedAtMs : null,
         );
+        upsertThreadHeaderSearchIndex({
+          db,
+          workspaceId,
+          threadId: id,
+          title,
+        });
         return cloneJson(thread);
       });
     },
@@ -528,6 +538,14 @@ export function createLinkedChatStore(
         db.prepare(
           "UPDATE chat_threads SET updated_at_ms = ? WHERE workspace_id = ? AND thread_id = ?",
         ).run(message.createdAtMs, workspaceId, thread.id);
+        upsertChatMessageSearchIndex({
+          db,
+          workspaceId,
+          threadId: thread.id,
+          messageId: message.id,
+          author: message.author,
+          body: message.body,
+        });
         return cloneJson(message);
       });
     },
