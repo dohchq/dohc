@@ -1,4 +1,5 @@
 import type {
+  PendingConflictResolve,
   SyncReplicationEnvelope,
   SyncReplicationOpKind,
   TextFileSnapshot,
@@ -37,6 +38,10 @@ export interface PullWorkspaceFromRelayResult {
   skipped: number;
   conflictsOpened: number;
   pendingConflictResolves: number;
+  // Identities behind pendingConflictResolves (0P-C gate fix): the sync
+  // engine tracks these so its "a choice needs a look" notice clears when
+  // the referenced conflict is later resolved, instead of accumulating.
+  pendingResolves: PendingConflictResolve[];
   fastForwardedPaths: RelayMaterializedPath[];
   // The relay cursor this pull reached. NOT persisted by the pull itself:
   // the caller must invoke commitFetchCursor() only after fastForwardedPaths
@@ -119,6 +124,13 @@ interface RelayLogPage {
   nextCursor: number;
   hasMore: boolean;
 }
+
+// The relay rejects log appends above its per-request op cap (server
+// MAX_OPS_PER_REQUEST = 500). The push chunks to the same bound so a large
+// first sync — e.g. joining pushes back, or enabling sync on a workspace
+// with a long history — lands as several contiguous batches instead of one
+// oversized request that would fail every retry forever.
+const MAX_PUSH_OPS_PER_BATCH = 500;
 
 function relayFetch(relay: SyncRelayConnection): typeof fetch {
   return relay.fetch ?? fetch;
@@ -377,16 +389,26 @@ export async function pushWorkspaceToRelay(
             "to push. Recovering requires an origin reset (0P-C).",
         );
       let cursor = readPushedSeq(db, input.workspaceId, originId);
+      let originPushedAnything = false;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const ops = readOpsAboveCursor(db, input.workspaceId, originId, cursor);
         if (ops.length === 0) break;
         await uploadMissingBlobs(db, input.relay, input.workspaceId, ops);
         try {
-          const result = await appendOriginOps(input.relay, input.workspaceId, originId, ops);
-          if (result.currentMaxOriginSeq > localMax) throw divergedError(result.currentMaxOriginSeq);
-          writePushedSeq(db, input.workspaceId, originId, result.currentMaxOriginSeq);
-          pushed += result.inserted;
-          originsPushed.push(originId);
+          // Contiguous chunks within the relay's per-request cap; the pushed
+          // cursor commits after EVERY accepted chunk so an interruption
+          // resumes where it stopped instead of replaying the whole backlog.
+          for (let offset = 0; offset < ops.length; offset += MAX_PUSH_OPS_PER_BATCH) {
+            const batch = ops.slice(offset, offset + MAX_PUSH_OPS_PER_BATCH);
+            const result = await appendOriginOps(input.relay, input.workspaceId, originId, batch);
+            if (result.currentMaxOriginSeq > localMax) {
+              throw divergedError(result.currentMaxOriginSeq);
+            }
+            writePushedSeq(db, input.workspaceId, originId, result.currentMaxOriginSeq);
+            cursor = result.currentMaxOriginSeq;
+            pushed += result.inserted;
+            originPushedAnything = true;
+          }
           break;
         } catch (error) {
           if (!(error instanceof RelayConflictError) || attempt > 0) throw error;
@@ -400,6 +422,7 @@ export async function pushWorkspaceToRelay(
           writePushedSeq(db, input.workspaceId, originId, cursor);
         }
       }
+      if (originPushedAnything) originsPushed.push(originId);
     }
     return { pushed, originsPushed };
   } finally {
@@ -495,6 +518,17 @@ function snapshotChanged(before: SnapshotSummary, after: SnapshotSummary): boole
 function candidateMaterializationPaths(ops: readonly SyncReplicationEnvelope[]): Set<string> {
   const paths = new Set<string>();
   for (const op of ops) {
+    if (op.opKind === "conflict.resolve") {
+      // A mirrored resolution can change the active snapshot on THIS machine
+      // (the peer kept its own copy and the apply adopts it here) — the
+      // conflict's path must ride the before/after materialization diff or
+      // the engine would update while the file on disk stays stale.
+      const payload = op.payload as { path?: unknown };
+      if (typeof payload.path === "string" && payload.path.length > 0) {
+        paths.add(payload.path);
+      }
+      continue;
+    }
     if (op.opKind !== "moment.append") continue;
     for (const path of [
       op.payload.path,
@@ -565,6 +599,7 @@ export async function pullWorkspaceFromRelay(
       skipped: 0,
       conflictsOpened: 0,
       pendingConflictResolves: 0,
+      pendingResolves: [],
       fastForwardedPaths: [],
       nextCursor: cursor,
       commitFetchCursor,
@@ -620,6 +655,27 @@ export async function pullWorkspaceFromRelay(
   }
 
   return { fetched, ...applyCounts, fastForwardedPaths, nextCursor: cursor, commitFetchCursor };
+}
+
+export interface ProbeRelayWorkspaceResult {
+  hasContent: boolean;
+}
+
+// Cheap pre-flight for the desktop join flow: fetch the FIRST log page only
+// (no engine store, no disk writes). Distinguishes "no such workspace for
+// this account" (the relay's fixed 404 -> RelayWorkspaceUnavailableError)
+// from "claimed but nothing synced yet" (an owned workspace with an empty
+// log). The join flow refuses both before it creates any local state, so a
+// mistyped code can never mint an empty local workspace.
+export async function probeRelayWorkspace(input: {
+  workspaceId: WorkspaceId;
+  relay: SyncRelayConnection;
+}): Promise<ProbeRelayWorkspaceResult> {
+  const page = await jsonRelay<RelayLogPage>(
+    input.relay,
+    `/sync/${encodeURIComponent(input.workspaceId)}/log?since=0&limit=1`,
+  );
+  return { hasContent: page.ops.length > 0 };
 }
 
 export async function claimRelayWorkspace(input: {

@@ -947,6 +947,41 @@ function ConflictSidePane(props: {
   );
 }
 
+// Side labels depend on where the conflict came from: a version merge names
+// the versions ("On Main" / "In Client Draft"); a sync divergence names the
+// machines ("On this machine" / "On your other machine") — never sync
+// jargon, and never a misleading version name for a two-machine conflict.
+function conflictSideLabels(
+  conflict: WorkspaceVersionConflict,
+  sourceName: string,
+): {
+  currentHeading: string;
+  incomingHeading: string;
+  keepCurrent: string;
+  keepIncoming: string;
+  currentMissing: string;
+  incomingMissing: string;
+} {
+  if (conflict.origin === "sync") {
+    return {
+      currentHeading: "On this machine",
+      incomingHeading: "On your other machine",
+      keepCurrent: "Keep this machine's copy",
+      keepIncoming: "Keep the other machine's copy",
+      currentMissing: "This machine doesn't have this file.",
+      incomingMissing: "Your other machine removed this file.",
+    };
+  }
+  return {
+    currentHeading: "On Main",
+    incomingHeading: `In ${sourceName}`,
+    keepCurrent: "Keep Main's copy",
+    keepIncoming: `Keep ${sourceName}'s copy`,
+    currentMissing: "Main doesn't have this file.",
+    incomingMissing: `${sourceName} removed this file.`,
+  };
+}
+
 function ConflictResolver(props: {
   workspaceId: string;
   conflict: WorkspaceVersionConflict;
@@ -958,6 +993,7 @@ function ConflictResolver(props: {
   const [error, setError] = useState<string | null>(null);
   const [combined, setCombined] = useState<string | null>(null);
   const isBinary = conflict.contentKind === "binary";
+  const labels = conflictSideLabels(conflict, sourceName);
   const liveToken = useRef(0);
   useEffect(
     () => () => {
@@ -1015,9 +1051,9 @@ function ConflictResolver(props: {
           data-testid="version-conflict-binary"
           className="mb-2 rounded border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
         >
-          Binary file. Main has{" "}
+          Binary file. {labels.currentHeading}:{" "}
           {conflict.currentBinary ? `${conflict.currentBinary.byteLength} bytes` : "no copy"};{" "}
-          {sourceName} has{" "}
+          {labels.incomingHeading.toLowerCase()}:{" "}
           {conflict.incomingBinary ? `${conflict.incomingBinary.byteLength} bytes` : "no copy"}.
         </div>
       ) : null}
@@ -1025,9 +1061,9 @@ function ConflictResolver(props: {
         <div className="flex min-w-0 flex-col gap-1.5">
           {isBinary ? null : (
             <ConflictSidePane
-              heading="On Main"
+              heading={labels.currentHeading}
               text={conflict.currentText}
-              missingNote="Main doesn't have this file."
+              missingNote={labels.currentMissing}
             />
           )}
           <button
@@ -1037,15 +1073,15 @@ function ConflictResolver(props: {
             onClick={() => void resolve({ kind: "keep-current" })}
             className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
           >
-            Keep Main's copy
+            {labels.keepCurrent}
           </button>
         </div>
         <div className="flex min-w-0 flex-col gap-1.5">
           {isBinary ? null : (
             <ConflictSidePane
-              heading={`In ${sourceName}`}
+              heading={labels.incomingHeading}
               text={conflict.incomingText}
-              missingNote={`${sourceName} removed this file.`}
+              missingNote={labels.incomingMissing}
             />
           )}
           <button
@@ -1055,7 +1091,7 @@ function ConflictResolver(props: {
             onClick={() => void resolve({ kind: "keep-incoming" })}
             className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
           >
-            Keep {sourceName}'s copy
+            {labels.keepIncoming}
           </button>
         </div>
       </div>
@@ -1292,5 +1328,152 @@ export function VersionComparePage(props: {
         )}
       </div>
     </section>
+  );
+}
+
+// Standalone review of every OPEN conflict (0P-C). The merge dialog handles
+// conflicts born inside a merge; this dialog is how conflicts reach the user
+// OUTSIDE that flow — two machines editing the same file while apart, or a
+// merge closed with "Finish later". Opened from the notice center's conflict
+// notice; reuses the exact ConflictResolver cards so choosing what stays
+// looks the same everywhere.
+export function ConflictReviewDialog(props: {
+  workspaceId: string;
+  onWorkspaceStateChanged: () => void;
+  onClose: () => void;
+}) {
+  const { workspaceId } = props;
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "error"; message: string }
+    | { status: "ready"; conflicts: WorkspaceVersionConflict[]; resolvedAny: boolean }
+  >({ status: "loading" });
+  const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
+  const liveToken = useRef(0);
+  useEffect(
+    () => () => {
+      liveToken.current += 1;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const token = liveToken.current;
+    void (async () => {
+      try {
+        const [result, versions] = await Promise.all([
+          bridge().listWorkspaceVersionConflicts({ workspaceId }),
+          // Version names label merge-origin conflicts; a failure here only
+          // degrades labels, never the review itself.
+          bridge()
+            .listWorkspaceVersions({ workspaceId })
+            .catch(() => null),
+        ]);
+        if (token !== liveToken.current) return;
+        setVersionNames(
+          new Map(
+            (versions?.versions ?? []).map((version) => [version.id, version.name]),
+          ),
+        );
+        setState({ status: "ready", conflicts: result.conflicts, resolvedAny: false });
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        setState({
+          status: "error",
+          message: ipcErrorMessage(error, "Couldn't load the conflicting files."),
+        });
+      }
+    })();
+  }, [workspaceId]);
+
+  const onResolved = useCallback(
+    (remaining: WorkspaceVersionConflict[]) => {
+      props.onWorkspaceStateChanged();
+      setState({ status: "ready", conflicts: remaining, resolvedAny: true });
+    },
+    [props],
+  );
+
+  const conflicts = state.status === "ready" ? state.conflicts : [];
+  // Same close discipline as the merge dialog: while conflicts are open,
+  // closing is explicit only — a stray backdrop click must not discard a
+  // hand-written combined copy.
+  const canCloseFromBackdrop = state.status !== "ready" || conflicts.length === 0;
+
+  return (
+    <Overlay onClose={() => (canCloseFromBackdrop ? props.onClose() : undefined)}>
+      <div
+        data-testid="conflict-review-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="conflict-review-title"
+        className="flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded border border-line bg-panel shadow-xl"
+      >
+        <header className="border-b border-line px-4 py-3">
+          <h3 id="conflict-review-title" className="m-0 text-sm font-semibold text-ink">
+            Decide what to keep
+          </h3>
+          {state.status === "ready" && conflicts.length > 0 ? (
+            <p className="mb-0 mt-1 text-xs leading-5 text-muted">
+              {conflicts.length === 1
+                ? "One file has two copies."
+                : `${conflicts.length} files have two copies.`}{" "}
+              Choose what stays — nothing is lost either way, and History keeps
+              both.
+            </p>
+          ) : null}
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {state.status === "loading" ? (
+            <p className="m-0 text-xs leading-5 text-muted" role="status">
+              Looking for conflicting files…
+            </p>
+          ) : null}
+          {state.status === "error" ? (
+            <p className="m-0 text-xs leading-5 text-danger" role="alert">
+              {state.message}
+            </p>
+          ) : null}
+          {state.status === "ready" && conflicts.length === 0 ? (
+            <p
+              data-testid="conflict-review-empty"
+              className="m-0 text-xs leading-5 text-success"
+              role="status"
+            >
+              {state.resolvedAny
+                ? "All set — every conflict is resolved."
+                : "Nothing needs your attention here."}
+            </p>
+          ) : null}
+          {state.status === "ready" && conflicts.length > 0 ? (
+            <div className="flex flex-col gap-3">
+              {conflicts.map((conflict) => (
+                <ConflictResolver
+                  key={conflict.conflictId}
+                  workspaceId={workspaceId}
+                  conflict={conflict}
+                  sourceName={
+                    versionNames.get(conflict.sourceVersionId) ?? "the other version"
+                  }
+                  onResolved={onResolved}
+                />
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
+          <button
+            type="button"
+            data-testid="conflict-review-done"
+            onClick={props.onClose}
+            className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+          >
+            {conflicts.length > 0 ? "Finish later" : "Done"}
+          </button>
+        </footer>
+      </div>
+    </Overlay>
   );
 }

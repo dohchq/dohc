@@ -46,6 +46,12 @@ export function findWorkspace(workspaceId: string): RegistryEntry | null {
   return store().find(workspaceId);
 }
 
+// Failed-join rollback (0P-C gate fix): unregister a workspace this process
+// just created. No-op for unknown ids.
+export function removeWorkspace(workspaceId: string): void {
+  store().remove(workspaceId);
+}
+
 export function setWorkspaceRemote(
   workspaceId: string,
   remote: { serverUrl: string; remoteWorkspaceId: string },

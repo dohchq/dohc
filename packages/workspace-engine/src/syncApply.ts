@@ -14,7 +14,7 @@ import {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
-import type { SyncReplicationEnvelope } from "./syncReplication";
+import type { PendingConflictResolve, SyncReplicationEnvelope } from "./syncReplication";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
@@ -48,6 +48,10 @@ export interface ApplySyncQueuesResult {
   // mirrored heads); journaled and acked but surfaced, never silently
   // swallowed.
   pendingConflictResolves: number;
+  // Identities behind the count (0P-C gate fix): lets the surfacing layer
+  // clear its "needs a look" state when the referenced conflict is later
+  // resolved instead of accumulating a session-sticky counter.
+  pendingResolves: PendingConflictResolve[];
   // Ops whose apply was an idempotent skip (already journaled). The relay
   // pull uses these to re-report disk work owed by a previous pass whose
   // materialization failed before the fetch cursor committed.
@@ -155,6 +159,17 @@ export function popNextMergedOp(queues: SyncReplicationEnvelope[][]): SyncReplic
   return queues[bestIndex]?.shift() ?? null;
 }
 
+// True only when the blobs row's TEXT hashes to the ref — the one check that
+// distinguishes a real hydrated text blob from a binary blob's compatibility
+// anchor row (text = "", written by hydrateBinaryBlob/putBinaryBlob under the
+// BINARY content's sha). A text ref satisfied by such an anchor would
+// materialize empty text under a mismatched sha, so callers treat "present
+// but mismatching" exactly like "absent" and re-verify at apply time.
+export function isHydratedTextBlob(db: EngineSqliteDb, sha: string): boolean {
+  const row = db.prepare("SELECT text FROM blobs WHERE sha256 = ?").get(sha);
+  return typeof row?.text === "string" && sha256Hex(row.text) === sha;
+}
+
 // Content-verified blob hydration: every source blob must hash to its name,
 // and an INSERT OR IGNORE that skips an existing row must find the existing
 // content matching that hash — a tampered transfer or poisoned pre-existing
@@ -248,7 +263,11 @@ export async function applySyncQueues(
     const fetchedText = new Map<string, string>();
     const fetchedBinary = new Map<string, Uint8Array>();
     for (const sha of textHashes) {
-      if (db.prepare("SELECT 1 FROM blobs WHERE sha256 = ?").get(sha)) continue;
+      // A text ref is hydrated ONLY by a row whose text hashes to the ref
+      // (0P-C gate fix). Presence alone is not enough: binary hydration
+      // writes a compatibility ANCHOR row (text = "") under the binary sha,
+      // and a kind-confused op must never adopt that as text content.
+      if (isHydratedTextBlob(db, sha)) continue;
       const text = await input.blobSource(sha, "text");
       if (typeof text !== "string") {
         throw corruptSyncPayload(`Sync blob ${sha} was not text content.`);
@@ -273,8 +292,11 @@ export async function applySyncQueues(
         for (const op of queue) {
           const refs = collectBlobHashesFromOp(op);
           for (const sha of refs.text) {
-            if (!db.prepare("SELECT 1 FROM blobs WHERE sha256 = ?").get(sha)) {
-              throw corruptSyncPayload(`Sync payload is missing blob ${sha}.`);
+            // Content-verified, not presence-checked: a binary anchor row
+            // (text = "") under this sha means the op's TEXT ref is
+            // kind-confused — fail closed instead of applying empty text.
+            if (!isHydratedTextBlob(db, sha)) {
+              throw corruptSyncPayload(`Sync payload is missing text blob ${sha}.`);
             }
           }
           for (const sha of refs.binary) {
@@ -301,7 +323,7 @@ export async function applySyncQueues(
     let applied = 0;
     let skipped = 0;
     let conflictsOpened = 0;
-    let pendingConflictResolves = 0;
+    const pendingResolves: PendingConflictResolve[] = [];
     const skippedOps: SyncReplicationEnvelope[] = [];
     for (;;) {
       const op = popNextMergedOp(input.queues);
@@ -318,10 +340,17 @@ export async function applySyncQueues(
       } else {
         applied += 1;
         conflictsOpened += result.conflictsOpened;
-        pendingConflictResolves += result.pendingConflictResolves ?? 0;
+        pendingResolves.push(...(result.pendingResolves ?? []));
       }
     }
-    return { applied, skipped, conflictsOpened, pendingConflictResolves, skippedOps };
+    return {
+      applied,
+      skipped,
+      conflictsOpened,
+      pendingConflictResolves: pendingResolves.length,
+      pendingResolves,
+      skippedOps,
+    };
   } finally {
     await chats.close();
     await versions.close();

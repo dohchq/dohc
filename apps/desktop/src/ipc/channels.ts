@@ -425,6 +425,8 @@ export const CHANNELS = {
   cloudStatus: "desktop:cloud-status",
   cloudLogout: "desktop:cloud-logout",
   cloudEnableSync: "desktop:cloud-enable-sync",
+  cloudJoinWorkspace: "desktop:cloud-join-workspace",
+  dismissSyncReviewNotice: "desktop:dismiss-sync-review-notice",
   listWorkspaceShares: "desktop:list-workspace-shares",
   createWorkspaceShare: "desktop:create-workspace-share",
   revokeWorkspaceShare: "desktop:revoke-workspace-share",

@@ -119,5 +119,15 @@ export function createRegistryStore(registryFile: string) {
       entry.remote = remote;
       write(registry);
     },
+
+    // Failed-join rollback (0P-C gate fix): removes a registration this
+    // process just created. Unknown ids are a no-op — the rollback path must
+    // never throw over state that is already gone.
+    remove(workspaceId: string): void {
+      const registry = read();
+      const remaining = registry.workspaces.filter((w) => w.workspaceId !== workspaceId);
+      if (remaining.length === registry.workspaces.length) return;
+      write({ ...registry, workspaces: remaining });
+    },
   };
 }

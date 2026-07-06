@@ -23,6 +23,8 @@ const bridge = {
   listWorkspaceFiles: vi.fn(async () => ({ files: [] })),
   createWorkspaceFile: vi.fn(async () => ({ path: "notes/welcome.md" })),
   importWorkspaceFiles: vi.fn(async () => ({ imported: [] })),
+  cloudStatus: vi.fn(async () => ({ connected: false })),
+  cloudJoinWorkspace: vi.fn(),
 };
 
 beforeEach(() => {
@@ -120,6 +122,27 @@ describe("first run", () => {
       screen.getByText(/stays fully functional locally/i),
     ).toBeTruthy();
     expect(screen.queryByLabelText(/email|password/i)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /create workspace/i }),
+    ).toBeTruthy();
+  });
+
+  it("offers joining a synced workspace, gated on sign-in (0P-C)", async () => {
+    const user = userEvent.setup();
+    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    await screen.findByText("/home/ice/dohc");
+    await user.click(
+      screen.getByRole("button", { name: /join a synced workspace/i }),
+    );
+    expect(await screen.findByTestId("join-synced-workspace")).toBeTruthy();
+    // No session yet: the panel asks for sign-in before showing the code
+    // field, and the normal cloud sign-in is embedded right there.
+    expect(
+      await screen.findByText(/sign in first, then paste the code/i),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("join-sync-code")).toBeNull();
+    // Back returns to the normal first-run card.
+    await user.click(screen.getByRole("button", { name: "Back" }));
     expect(
       screen.getByRole("button", { name: /create workspace/i }),
     ).toBeTruthy();

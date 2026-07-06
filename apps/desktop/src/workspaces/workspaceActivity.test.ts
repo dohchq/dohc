@@ -78,3 +78,82 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     await activity.stopAll();
   });
 });
+
+describe("workspaceActivity cloud sync nudge (0P-C)", () => {
+  it("queueCloudSync reaches the workspace's engine and no-ops everywhere else", async () => {
+    let queued = 0;
+    let dismissed = 0;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {
+        queued += 1;
+      },
+      snapshot: () => ({
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        unmatchedRemoteResolves: 2,
+        authExpired: false,
+      }),
+      dismissUnmatchedResolves: () => {
+        dismissed += 1;
+      },
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    // Before open: silently nothing (a resolve on an unopened workspace
+    // cannot happen, but the method must never throw).
+    activity.queueCloudSync("activity-test");
+    expect(queued).toBe(0);
+
+    await activity.open(workspace());
+    activity.queueCloudSync("activity-test");
+    expect(queued).toBe(1);
+    // The engine snapshot's unmatched remote resolves ride the status.
+    expect(activity.getStatus("activity-test").unmatchedRemoteResolves).toBe(2);
+    // Explicit notice dismissal reaches the engine (0P-C gate fix) and
+    // no-ops for unknown workspaces.
+    activity.dismissUnmatchedRemoteResolves("activity-test");
+    expect(dismissed).toBe(1);
+    activity.dismissUnmatchedRemoteResolves("not-open");
+    expect(dismissed).toBe(1);
+    await activity.stopAll();
+  });
+
+  // Failed-join rollback (0P-C gate fix): close() tears down exactly one
+  // workspace — engine stopped, entry forgotten — leaving others untouched.
+  it("close stops and forgets a single workspace", async () => {
+    let stopped = 0;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      snapshot: () => ({
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        unmatchedRemoteResolves: 0,
+        authExpired: false,
+      }),
+      dismissUnmatchedResolves: () => {},
+      stop: async () => {
+        stopped += 1;
+      },
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+    await activity.close("activity-test");
+    expect(stopped).toBe(1);
+    // The entry is gone: status derives from nothing and re-open works.
+    expect(activity.getStatus("activity-test").conflictCount).toBe(0);
+    await activity.close("activity-test"); // idempotent, never throws
+    await activity.stopAll();
+  });
+});

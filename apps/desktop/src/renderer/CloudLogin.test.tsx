@@ -138,6 +138,42 @@ describe("CloudLogin", () => {
     ).toBe(false);
   });
 
+  it("shows the copyable sync code for a synced workspace (0P-C join handle)", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+      serverUrl: "http://localhost:1786",
+      relayUrl: "http://localhost:1788",
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    const code = await screen.findByTestId("cloud-sync-code");
+    expect(code.textContent).toBe("dohc-sync:ws-1:http://localhost:1788");
+    expect(screen.getByTestId("cloud-sync-code-block").textContent).toContain(
+      "Add this workspace on another machine",
+    );
+
+    fireEvent.click(screen.getByTestId("cloud-copy-sync-code"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("dohc-sync:ws-1:http://localhost:1788"),
+    );
+  });
+
+  it("omits the sync code when the session has no relay (nothing to join through)", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+      serverUrl: "http://localhost:1786",
+    });
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-workspace-synced");
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+  });
+
   it("does not let a stale enable-sync result mark the next workspace as synced", async () => {
     const oldEnable = deferred<void>();
     bridgeMock.cloudStatus.mockResolvedValue({

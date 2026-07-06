@@ -2,10 +2,13 @@ import { Cloud, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { Titlebar } from "./Titlebar";
 
 // First launch is a working tool, not a marketing page: pick where your
-// files live, create the folder, start working. No account exists here.
+// files live, create the folder, start working. No account exists here —
+// unless you're adding a workspace you already sync elsewhere, which is the
+// "Join a synced workspace" path.
 export function DesktopFirstRun(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
 }) {
@@ -13,6 +16,7 @@ export function DesktopFirstRun(props: {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cloudNote, setCloudNote] = useState(false);
+  const [joining, setJoining] = useState(false);
 
   useEffect(() => {
     void bridge()
@@ -67,6 +71,12 @@ export function DesktopFirstRun(props: {
         <p className="m-0 text-sm text-muted">Your workspace is a folder.</p>
       </div>
 
+      {joining ? (
+        <JoinSyncedWorkspace
+          onWorkspaceReady={props.onWorkspaceReady}
+          onBack={() => setJoining(false)}
+        />
+      ) : (
       <div className="flex w-105 flex-col gap-3 rounded-lg border border-line bg-panel p-5">
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium uppercase tracking-wide text-subtle">
@@ -106,6 +116,15 @@ export function DesktopFirstRun(props: {
           Open an existing folder as a workspace
         </button>
 
+        <button
+          type="button"
+          data-testid="first-run-join-synced"
+          onClick={() => setJoining(true)}
+          className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+        >
+          Join a synced workspace from another machine
+        </button>
+
         {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
 
         <div className="flex items-center justify-between gap-4">
@@ -129,6 +148,7 @@ export function DesktopFirstRun(props: {
           </p>
         ) : null}
       </div>
+      )}
       </div>
     </div>
   );

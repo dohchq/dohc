@@ -148,10 +148,17 @@ export async function createSiblingWorkspaceDir(
 
 // Pre-seeds the hermetic registry (dohc-workspaces.json under the test home)
 // so the app launches with multiple known workspaces and the titlebar
-// switcher can move between them.
+// switcher can move between them. An entry's optional `remote` marks the
+// workspace as cloud-synced (the 0P sync specs seed it so the relay engine
+// attaches at open without driving the enable-sync UI, which has its own
+// coverage).
 export async function seedWorkspaceRegistry(
   workspace: Pick<TempWorkspace, "homeDir">,
-  entries: Array<{ workspaceId: string; rootPath: string }>,
+  entries: Array<{
+    workspaceId: string;
+    rootPath: string;
+    remote?: { serverUrl: string; remoteWorkspaceId: string };
+  }>,
 ): Promise<void> {
   await mkdir(workspace.homeDir, { recursive: true });
   await writeFile(
@@ -163,7 +170,33 @@ export async function seedWorkspaceRegistry(
           workspaceId: entry.workspaceId,
           rootPath: entry.rootPath,
           ...SEEDED_WORKSPACE_SHAPE,
+          ...(entry.remote ? { remote: entry.remote } : {}),
         })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+// Seeds the desktop's cloud session file (dohc-cloud.json in the hermetic
+// state dir) with a plaintext-fallback token — exactly what the credential
+// store writes when no OS keychain exists — so a spec launches signed in.
+// The relay's SYNC_RELAY_TEST_AUTH seam accepts `test:<user>` bearers.
+export async function seedCloudCredentials(
+  workspace: Pick<TempWorkspace, "homeDir">,
+  input: { serverUrl: string; relayUrl: string; email?: string; token?: string },
+): Promise<void> {
+  await mkdir(workspace.homeDir, { recursive: true });
+  await writeFile(
+    join(workspace.homeDir, "dohc-cloud.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        serverUrl: input.serverUrl,
+        relayUrl: input.relayUrl,
+        email: input.email ?? "e2e@dohc.dev",
+        token: `plain:${input.token ?? "test:e2e-user"}`,
       },
       null,
       2,
