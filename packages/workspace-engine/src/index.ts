@@ -1,5 +1,6 @@
 export {
   GENERAL_CHANNEL_NAME,
+  GENERAL_CHANNEL_WIRE_ID,
   LINKED_CHAT_PROJECTION_KIND,
   LINKED_CHAT_STORE_RELATIVE_PATH,
   LinkedChatStoreError,
@@ -16,6 +17,26 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+export {
+  exportSyncBundle,
+  importSyncBundle,
+} from "./syncFolder";
+export type {
+  ExportSyncBundleInput,
+  ExportSyncBundleResult,
+  ImportSyncBundleInput,
+  ImportSyncBundleResult,
+} from "./syncFolder";
+export {
+  ensureOriginId,
+  journalReplicationOp,
+  nextOriginSeq,
+} from "./syncReplication";
+export type {
+  SyncApplyResult,
+  SyncReplicationEnvelope,
+  SyncReplicationOpKind,
+} from "./syncReplication";
 export { compareVersionFiles } from "./versionCompare";
 export type {
   VersionFileChange,

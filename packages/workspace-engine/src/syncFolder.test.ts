@@ -1,0 +1,1862 @@
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createLinkedChatStore } from "./linkedChatStore";
+import { createSecretFileStore } from "./secretFileStore";
+import { exportSyncBundle, importSyncBundle } from "./syncFolder";
+import { VERSIONED_TEXT_STORE_RELATIVE_PATH, createVersionedTextStore } from "./versionedTextStore";
+import { searchWorkspaceEngine } from "./workspaceSearch";
+
+interface RawSqliteStatement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes: number };
+}
+
+interface RawSqliteDb {
+  prepare(sql: string): RawSqliteStatement;
+  close(): void;
+}
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => RawSqliteDb;
+};
+
+const WORKSPACE_ID = "workspace-sync";
+const SECRET_MARKER = "SYNC_SECRET_MARKER_17b90d";
+
+let roots: string[] = [];
+
+beforeEach(() => {
+  roots = [];
+});
+
+afterEach(async () => {
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function tempRoot(label: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), `dohc-${label}-`));
+  roots.push(root);
+  return root;
+}
+
+function createIdFactory(prefix = "") {
+  const counters = { channel: 0, conflict: 0, message: 0, moment: 0, object: 0, thread: 0, version: 0 };
+  return (kind: keyof typeof counters) => {
+    counters[kind] += 1;
+    return `${prefix}${kind}-${counters[kind]}`;
+  };
+}
+
+function textStore(root: string, now: { value: number }) {
+  const createId = createIdFactory();
+  return createVersionedTextStore(root, {
+    nowMs: () => {
+      now.value += 10;
+      return now.value;
+    },
+    createId,
+  });
+}
+
+function chatStore(root: string, now: { value: number }) {
+  const createId = createIdFactory();
+  return createLinkedChatStore(root, {
+    nowMs: () => {
+      now.value += 10;
+      return now.value;
+    },
+    createId,
+  });
+}
+
+function rawDb(root: string): RawSqliteDb {
+  return new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+}
+
+function replicationRows(root: string): Array<Record<string, unknown>> {
+  const db = rawDb(root);
+  try {
+    return db
+      .prepare("SELECT * FROM replication_log ORDER BY origin_id, origin_seq")
+      .all();
+  } finally {
+    db.close();
+  }
+}
+
+function rowCount(root: string, table: string): number {
+  const db = rawDb(root);
+  try {
+    return Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count ?? 0);
+  } finally {
+    db.close();
+  }
+}
+
+function snapshotLatestMomentId(root: string, path: string): string | null {
+  const db = rawDb(root);
+  try {
+    const row = db
+      .prepare("SELECT latest_moment_id FROM snapshots WHERE workspace_id = ? AND version_id = 'main' AND path = ?")
+      .get(WORKSPACE_ID, path);
+    return typeof row?.latest_moment_id === "string" ? row.latest_moment_id : null;
+  } finally {
+    db.close();
+  }
+}
+
+// Concatenates every UTF-8-decodable file under dir. Binary files (e.g.
+// blobs-bin payloads) are skipped via a FATAL decode instead of being
+// silently mangled by lossy utf8 conversion — mangled bytes could turn a
+// "does not contain X" assertion into a false negative.
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+async function walkTextFiles(dir: string): Promise<string> {
+  let out = "";
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out += await walkTextFiles(path);
+    if (entry.isFile()) {
+      try {
+        out += strictUtf8Decoder.decode(await readFile(path));
+      } catch {
+        // Not UTF-8-safe: binary content, skip.
+      }
+    }
+  }
+  return out;
+}
+
+function prng(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+async function syncBothWays(a: string, b: string, label: string): Promise<void> {
+  for (let round = 0; round < 4; round += 1) {
+    const ab = await tempRoot(`${label}-ab-${round}`);
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    const toB = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    const ba = await tempRoot(`${label}-ba-${round}`);
+    await exportSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, toDir: ba });
+    const toA = await importSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, fromDir: ba });
+    if (toA.applied === 0 && toB.applied === 0) return;
+  }
+  throw new Error(`sync did not quiesce for ${label}`);
+}
+
+describe("sync folder replication", () => {
+  it("journals every reachable op kind beside its store mutation", async () => {
+    const root = await tempRoot("sync-journal");
+    const now = { value: 1000 };
+    const versions = textStore(root, now);
+    const chats = chatStore(root, now);
+    try {
+      const main = await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      const first = await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        path: "docs/a.md",
+        text: "base\n",
+        metadata: { origin: "api", summary: "base" },
+      });
+      await versions.renameTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        fromPath: "docs/a.md",
+        toPath: "docs/b.md",
+        metadata: { origin: "api", summary: "rename" },
+      });
+      const named = await versions.createNamedVersion({
+        workspaceId: WORKSPACE_ID,
+        name: "Branch",
+        fromVersionId: main.id,
+      });
+      await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        path: "docs/b.md",
+        text: "main edit\n",
+        metadata: { origin: "api" },
+      });
+      await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: named.id,
+        path: "docs/b.md",
+        text: "branch edit\n",
+        metadata: { origin: "api" },
+      });
+      const merge = await versions.mergeTextFileFromVersion({
+        workspaceId: WORKSPACE_ID,
+        targetVersionId: main.id,
+        sourceVersionId: named.id,
+        path: "docs/b.md",
+        metadata: { origin: "api", summary: "merge" },
+      });
+      expect(merge.kind).toBe("conflict");
+      if (merge.kind !== "conflict") throw new Error("expected conflict");
+      await versions.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: merge.conflict.id,
+        resolution: { kind: "apply-incoming" },
+        metadata: { origin: "api", summary: "resolve" },
+      });
+      await versions.deleteTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        path: "docs/b.md",
+        metadata: { origin: "api", summary: "delete" },
+      });
+      const thread = await chats.createThread({
+        workspaceId: WORKSPACE_ID,
+        title: "Thread",
+        linkedFile: { objectId: first.object.id, pathHint: "docs/a.md" },
+      });
+      await chats.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: thread.id,
+        author: { kind: "human", displayName: "Ice" },
+        body: "hello journal",
+      });
+
+      const rows = replicationRows(root);
+      expect(rows.map((row) => row.op_kind)).toEqual([
+        "workspace.init",
+        "moment.append",
+        "moment.append",
+        "version.create",
+        "moment.append",
+        "moment.append",
+        "conflict.open",
+        "moment.append",
+        "conflict.resolve",
+        "moment.append",
+        "chat.thread.create",
+        "chat.message.append",
+      ]);
+      const appendPayload = JSON.parse(String(rows.find((row) => row.op_kind === "moment.append")?.payload_json));
+      expect(appendPayload).toMatchObject({
+        momentId: "moment-1",
+        versionId: "main",
+        objectId: "object-1",
+        beforePresent: "null",
+        payloadAfterBlobSha256: expect.any(String),
+      });
+    } finally {
+      await chats.close();
+      await versions.close();
+    }
+  });
+
+  it("round-trips, re-imports idempotently, and preserves original origin on transitive re-export", async () => {
+    const a = await tempRoot("sync-a");
+    const b = await tempRoot("sync-b");
+    const c = await tempRoot("sync-c");
+    const ab = await tempRoot("sync-ab");
+    const bc = await tempRoot("sync-bc");
+    const now = { value: 2000 };
+    const versions = textStore(a, now);
+    const chats = chatStore(a, now);
+    try {
+      const main = await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      const file = await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        path: "docs/sync.md",
+        text: "round trip searchable alpha\n",
+        metadata: { origin: "api" },
+      });
+      const named = await versions.createNamedVersion({
+        workspaceId: WORKSPACE_ID,
+        name: "Snapshot",
+        fromVersionId: main.id,
+      });
+      await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: named.id,
+        path: "docs/sync.md",
+        text: "named version text\n",
+        metadata: { origin: "api" },
+      });
+      const thread = await chats.createThread({
+        workspaceId: WORKSPACE_ID,
+        title: "Sync thread",
+        linkedFile: { objectId: file.object.id, pathHint: "docs/sync.md" },
+      });
+      await chats.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: thread.id,
+        author: { kind: "agent", displayName: "Agent" },
+        body: "chat alpha import",
+      });
+    } finally {
+      await chats.close();
+      await versions.close();
+    }
+
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab, nowMs: () => 3000 });
+    const firstImport = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    expect(firstImport.applied).toBeGreaterThan(0);
+    const counts = {
+      moments: rowCount(b, "moments"),
+      messages: rowCount(b, "chat_messages"),
+      conflicts: rowCount(b, "conflicts"),
+      log: rowCount(b, "replication_log"),
+    };
+    const secondImport = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    expect(secondImport.applied).toBe(0);
+    expect({
+      moments: rowCount(b, "moments"),
+      messages: rowCount(b, "chat_messages"),
+      conflicts: rowCount(b, "conflicts"),
+      log: rowCount(b, "replication_log"),
+    }).toEqual(counts);
+
+    const bVersions = createVersionedTextStore(b);
+    const bChats = createLinkedChatStore(b);
+    try {
+      await expect(
+        bVersions.readTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "docs/sync.md",
+        }),
+      ).resolves.toMatchObject({ text: "round trip searchable alpha\n" });
+      await expect(bChats.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-1" })).resolves.toHaveLength(1);
+    } finally {
+      await bChats.close();
+      await bVersions.close();
+    }
+
+    const aRows = replicationRows(a).map((row) => [row.origin_id, row.origin_seq]);
+    await exportSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, toDir: bc, nowMs: () => 4000 });
+    await importSyncBundle({ rootDir: c, workspaceId: WORKSPACE_ID, fromDir: bc });
+    expect(replicationRows(c).map((row) => [row.origin_id, row.origin_seq])).toEqual(aRows);
+  });
+
+  it("opens a P0D-shaped conflict and leaves the importer live file untouched on divergence", async () => {
+    const a = await tempRoot("sync-div-a");
+    const b = await tempRoot("sync-div-b");
+    const seed = await tempRoot("sync-div-seed");
+    const ab = await tempRoot("sync-div-ab");
+    const ba = await tempRoot("sync-div-ba");
+    const nowA = { value: 1000 };
+    const versionsA = textStore(a, nowA);
+    try {
+      const main = await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        path: "docs/diverge.md",
+        text: "base\n",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versionsA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+
+    const editA = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a-") });
+    const editB = createVersionedTextStore(b, { nowMs: () => 3000, createId: createIdFactory("b-") });
+    try {
+      await editA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/diverge.md",
+        text: "from A\n",
+        metadata: { origin: "api" },
+      });
+      await editB.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/diverge.md",
+        text: "from B\n",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await editB.close();
+      await editA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    await exportSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, toDir: ba });
+    const result = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    expect(result.conflictsOpened).toBe(1);
+    expect(replicationRows(b).filter((row) => row.op_kind === "conflict.open")).toHaveLength(0);
+    const mirrorResult = await importSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, fromDir: ba });
+    expect(mirrorResult.conflictsOpened).toBe(1);
+    const check = createVersionedTextStore(b);
+    const checkA = createVersionedTextStore(a);
+    try {
+      await expect(
+        check.readTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "docs/diverge.md",
+        }),
+      ).resolves.toMatchObject({ text: "from B\n" });
+      const conflicts = await check.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]).toMatchObject({
+        base: { exists: true, text: "base\n" },
+        current: { exists: true, text: "from B\n" },
+        incoming: { exists: true, text: "from A\n" },
+        chosenFrom: "current",
+        metadata: { origin: "sync" },
+      });
+      await expect(
+        checkA.readTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "docs/diverge.md",
+        }),
+      ).resolves.toMatchObject({ text: "from A\n" });
+      const mirrored = await checkA.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(mirrored).toHaveLength(1);
+      expect(mirrored[0]?.current.text).toBe(conflicts[0]?.incoming.text);
+      expect(mirrored[0]?.incoming.text).toBe(conflicts[0]?.current.text);
+    } finally {
+      await checkA.close();
+      await check.close();
+    }
+  });
+
+  it("keeps record-only divergence rows valid after conflict resolution and reopen", async () => {
+    const a = await tempRoot("sync-bug1-a");
+    const b = await tempRoot("sync-bug1-b");
+    const seed = await tempRoot("sync-bug1-seed");
+    const ab = await tempRoot("sync-bug1-ab");
+    const versionsA = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        text: "base",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versionsA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+
+    const editA = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a2-") });
+    const editB = createVersionedTextStore(b, { nowMs: () => 3000, createId: createIdFactory("b-") });
+    try {
+      await editA.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from A", metadata: { origin: "api" } });
+      await editB.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from B", metadata: { origin: "api" } });
+    } finally {
+      await editB.close();
+      await editA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    const resolving = createVersionedTextStore(b, { nowMs: () => 4000, createId: createIdFactory("br-") });
+    try {
+      const [conflict] = await resolving.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflict).toBeTruthy();
+      await resolving.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: conflict!.id,
+        resolution: { kind: "apply-incoming" },
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await resolving.close();
+    }
+    const reopened = createVersionedTextStore(b);
+    try {
+      await expect(reopened.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md" })).resolves.toMatchObject({ text: "from A" });
+      const conflicts = await reopened.listTextConflicts({ workspaceId: WORKSPACE_ID });
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]?.status).toBe("resolved");
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("does not fast-forward over a local file while a sync conflict is open", async () => {
+    const a = await tempRoot("sync-bug2-a");
+    const b = await tempRoot("sync-bug2-b");
+    const seed = await tempRoot("sync-bug2-seed");
+    const ab1 = await tempRoot("sync-bug2-ab1");
+    const ab2 = await tempRoot("sync-bug2-ab2");
+    const aStore = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await aStore.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await aStore.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "base", metadata: { origin: "api" } });
+    } finally {
+      await aStore.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+    const editA = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a2-") });
+    const editB = createVersionedTextStore(b, { nowMs: () => 3000, createId: createIdFactory("b-") });
+    try {
+      await editA.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from A", metadata: { origin: "api" } });
+      await editB.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from B", metadata: { origin: "api" } });
+    } finally {
+      await editB.close();
+      await editA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab1 });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab1 });
+    const bHeadBefore = snapshotLatestMomentId(b, "docs/x.md");
+    const aAgain = createVersionedTextStore(a, { nowMs: () => 5000, createId: createIdFactory("a3-") });
+    try {
+      await aAgain.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from A again", metadata: { origin: "api" } });
+    } finally {
+      await aAgain.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab2 });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab2 });
+    const check = createVersionedTextStore(b);
+    try {
+      await expect(check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md" })).resolves.toMatchObject({ text: "from B" });
+      expect(snapshotLatestMomentId(b, "docs/x.md")).toBe(bHeadBefore);
+      const conflicts = await check.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflicts).toHaveLength(2);
+      expect(conflicts.some((conflict) => conflict.incoming.text === "from A again")).toBe(true);
+    } finally {
+      await check.close();
+    }
+  });
+
+  it("syncs delete followed by recreate and still fails closed on origin sequence gaps", async () => {
+    const a = await tempRoot("sync-bug3-a");
+    const b = await tempRoot("sync-bug3-b");
+    const seed = await tempRoot("sync-bug3-seed");
+    const bundle = await tempRoot("sync-bug3-bundle");
+    const gapBundle = await tempRoot("sync-gap-bundle");
+    const versions = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versions.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "base", metadata: { origin: "api" } });
+    } finally {
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+    const edit = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a2-") });
+    try {
+      await edit.deleteTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", metadata: { origin: "api" } });
+      await edit.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "recreated", metadata: { origin: "api" } });
+    } finally {
+      await edit.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const check = createVersionedTextStore(b);
+    try {
+      await expect(check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md" })).resolves.toMatchObject({ text: "recreated" });
+    } finally {
+      await check.close();
+    }
+
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: gapBundle });
+    const [opsFile] = (await readdir(join(gapBundle, "ops"))).filter((file) => file.endsWith(".jsonl"));
+    const opsPath = join(gapBundle, "ops", opsFile!);
+    const lines = (await readFile(opsPath, "utf8")).trimEnd().split("\n");
+    await writeFile(opsPath, `${[lines[0], ...lines.slice(2)].join("\n")}\n`, "utf8");
+    // Keep the manifest consistent with the tampered file (count down one,
+    // same min/max) so the STORE-level per-origin gap check is what trips,
+    // not the earlier manifest/file verification.
+    const manifestPath = join(gapBundle, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      origins: Array<{ originId: string; count: number }>;
+    };
+    const originId = String(JSON.parse(lines[0]!).originId);
+    const origin = manifest.origins.find((entry) => entry.originId === originId);
+    origin!.count -= 1;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const c = await tempRoot("sync-gap-c");
+    await expect(importSyncBundle({ rootDir: c, workspaceId: WORKSPACE_ID, fromDir: gapBundle })).rejects.toThrow(/gap before sequence/u);
+  });
+
+  it("keeps active version and chat read cursors local-only in logs and bundles", async () => {
+    const root = await tempRoot("sync-local-only");
+    const bundle = await tempRoot("sync-local-only-bundle");
+    const now = { value: 6000 };
+    const versions = textStore(root, now);
+    const chats = chatStore(root, now);
+    try {
+      const main = await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      const named = await versions.createNamedVersion({ workspaceId: WORKSPACE_ID, name: "Local", fromVersionId: main.id });
+      const beforeActiveRows = replicationRows(root).length;
+      await versions.setActiveVersion({ workspaceId: WORKSPACE_ID, versionId: named.id });
+      expect(replicationRows(root)).toHaveLength(beforeActiveRows);
+      const general = await chats.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const started = await chats.startChannelThread({
+        workspaceId: WORKSPACE_ID,
+        channelId: general.id,
+        title: "Read cursor",
+        author: { kind: "agent", displayName: "Agent" },
+        body: "please read",
+      });
+      const beforeReadRows = replicationRows(root).length;
+      await chats.markThreadRead({ workspaceId: WORKSPACE_ID, threadId: started.thread.id, upToSequence: 1 });
+      expect(replicationRows(root)).toHaveLength(beforeReadRows);
+      await exportSyncBundle({ rootDir: root, workspaceId: WORKSPACE_ID, toDir: bundle });
+      const bytes = await walkTextFiles(bundle);
+      expect(bytes).not.toContain("active_versions");
+      expect(bytes).not.toContain("chat_thread_read_state");
+      expect(bytes).not.toContain("engine_search_files_fts");
+      expect(bytes).not.toContain("engine_search_chat_messages_fts");
+    } finally {
+      await chats.close();
+      await versions.close();
+    }
+  });
+
+  it("excludes secret store writes from the replication log and exported bundle bytes", async () => {
+    const root = await tempRoot("sync-secret");
+    const bundle = await tempRoot("sync-secret-bundle");
+    const versions = createVersionedTextStore(root);
+    const secrets = createSecretFileStore(root, { createId: () => "secret-moment-1" });
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: `TOKEN=${SECRET_MARKER}\n`,
+        metadata: { origin: "local-file", summary: "secret" },
+      });
+      expect(replicationRows(root).map((row) => row.op_kind)).toEqual(["workspace.init"]);
+      await exportSyncBundle({ rootDir: root, workspaceId: WORKSPACE_ID, toDir: bundle });
+      await expect(walkTextFiles(bundle)).resolves.not.toContain(SECRET_MARKER);
+      await expect(walkTextFiles(bundle)).resolves.not.toContain(".env");
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+  });
+
+  it("rebuilds file and chat FTS surfaces after import", async () => {
+    const a = await tempRoot("sync-fts-a");
+    const b = await tempRoot("sync-fts-b");
+    const bundle = await tempRoot("sync-fts-bundle");
+    const now = { value: 5000 };
+    const versions = textStore(a, now);
+    const chats = chatStore(a, now);
+    try {
+      const main = await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      const file = await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: main.id,
+        path: "docs/search.md",
+        text: "findable imported keyword\n",
+        metadata: { origin: "api" },
+      });
+      const thread = await chats.createThread({
+        workspaceId: WORKSPACE_ID,
+        title: "Search thread",
+        linkedFile: { objectId: file.object.id, pathHint: "docs/search.md" },
+      });
+      await chats.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: thread.id,
+        author: { kind: "human", displayName: "Ice" },
+        body: "chat imported keyword",
+      });
+    } finally {
+      await chats.close();
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const importedVersions = createVersionedTextStore(b);
+    const importedChats = createLinkedChatStore(b);
+    try {
+      const results = await searchWorkspaceEngine({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        query: "imported",
+        versions: importedVersions,
+        chats: importedChats,
+      });
+      expect(results.map((result) => result.surface).sort()).toEqual(["chat", "file"]);
+      expect(results.map((result) => result.preview).join("\n")).not.toContain(SECRET_MARKER);
+    } finally {
+      await importedChats.close();
+      await importedVersions.close();
+    }
+  });
+
+  it("round-trips general channel threads, messages, search, and unread state", async () => {
+    const a = await tempRoot("sync-channel-a");
+    const b = await tempRoot("sync-channel-b");
+    const bundle = await tempRoot("sync-channel-bundle");
+    const now = { value: 7000 };
+    const chats = chatStore(a, now);
+    const versions = createVersionedTextStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      const general = await chats.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const started = await chats.startChannelThread({
+        workspaceId: WORKSPACE_ID,
+        channelId: general.id,
+        title: "",
+        author: { kind: "human", displayName: "Ice" },
+        body: "channel first searchable",
+      });
+      await chats.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: started.thread.id,
+        author: { kind: "agent", displayName: "Agent" },
+        body: "channel second message",
+      });
+      await chats.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: started.thread.id,
+        author: { kind: "human", displayName: "Ice" },
+        body: "channel third message",
+      });
+    } finally {
+      await versions.close();
+      await chats.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const importedChats = createLinkedChatStore(b);
+    const importedVersions = createVersionedTextStore(b);
+    try {
+      const channels = await importedChats.listChannels({ workspaceId: WORKSPACE_ID });
+      expect(channels).toHaveLength(1);
+      expect(channels[0]).toMatchObject({ name: "general", slug: "general", threadCount: 1, unreadCount: 3 });
+      expect(channels[0]?.id).not.toBe("channel-1");
+      const threads = await importedChats.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: channels[0]!.id });
+      expect(threads).toHaveLength(1);
+      expect(threads[0]).toMatchObject({
+        messageCount: 3,
+        lastReadSequence: 0,
+        unreadCount: 3,
+      });
+      expect(threads[0]?.thread.title).toContain("channel first searchable");
+      const messages = await importedChats.listMessages({ workspaceId: WORKSPACE_ID, threadId: threads[0]!.thread.id });
+      expect(messages.map((message) => message.body)).toEqual([
+        "channel first searchable",
+        "channel second message",
+        "channel third message",
+      ]);
+      const results = await searchWorkspaceEngine({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        query: "second",
+        versions: importedVersions,
+        chats: importedChats,
+      });
+      expect(results.some((result) => result.surface === "chat" && result.threadId === threads[0]?.thread.id)).toBe(true);
+    } finally {
+      await importedVersions.close();
+      await importedChats.close();
+    }
+  });
+
+  it("converges independently-created general channels by the well-known wire id", async () => {
+    const a = await tempRoot("sync-general-a");
+    const b = await tempRoot("sync-general-b");
+    const nowA = { value: 8000 };
+    const nowB = { value: 9000 };
+    const chatsA = createLinkedChatStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("ga-"),
+    });
+    const chatsB = createLinkedChatStore(b, {
+      nowMs: () => {
+        nowB.value += 10;
+        return nowB.value;
+      },
+      createId: createIdFactory("gb-"),
+    });
+    const versionsA = createVersionedTextStore(a);
+    const versionsB = createVersionedTextStore(b);
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsB.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      const generalA = await chatsA.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const generalB = await chatsB.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      await chatsA.startChannelThread({
+        workspaceId: WORKSPACE_ID,
+        channelId: generalA.id,
+        title: "A thread",
+        author: { kind: "agent", displayName: "Agent A" },
+        body: "hello from A",
+      });
+      await chatsB.startChannelThread({
+        workspaceId: WORKSPACE_ID,
+        channelId: generalB.id,
+        title: "B thread",
+        author: { kind: "agent", displayName: "Agent B" },
+        body: "hello from B",
+      });
+      await syncBothWays(a, b, "sync-general");
+      const [channelsA, channelsB] = await Promise.all([
+        chatsA.listChannels({ workspaceId: WORKSPACE_ID }),
+        chatsB.listChannels({ workspaceId: WORKSPACE_ID }),
+      ]);
+      expect(channelsA).toHaveLength(1);
+      expect(channelsB).toHaveLength(1);
+      expect(channelsA[0]).toMatchObject({ slug: "general", threadCount: 2 });
+      expect(channelsB[0]).toMatchObject({ slug: "general", threadCount: 2 });
+      const [threadsA, threadsB] = await Promise.all([
+        chatsA.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: channelsA[0]!.id }),
+        chatsB.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: channelsB[0]!.id }),
+      ]);
+      expect(threadsA.map(({ thread }) => thread.title).sort()).toEqual(["A thread", "B thread"]);
+      expect(threadsB.map(({ thread }) => thread.title).sort()).toEqual(["A thread", "B thread"]);
+      expect(rowCount(a, "chat_messages")).toBe(rowCount(b, "chat_messages"));
+    } finally {
+      await versionsB.close();
+      await versionsA.close();
+      await chatsB.close();
+      await chatsA.close();
+    }
+  });
+
+  it("round-trips binary files byte-exactly with bundled binary blobs", async () => {
+    const a = await tempRoot("sync-bin-a");
+    const b = await tempRoot("sync-bin-b");
+    const bundle = await tempRoot("sync-bin-bundle");
+    const bytes = Uint8Array.from([0x00, 0x01, 0xfe, 0xff, 0x89, 0x50, 0x4e, 0x47, 0x0a, 0x00]);
+    const now = { value: 7000 };
+    const versions = textStore(a, now);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versions.writeBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/logo.png",
+        bytes,
+        metadata: { origin: "api", summary: "binary seed" },
+      });
+    } finally {
+      await versions.close();
+    }
+    const exported = await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    expect(exported.blobCount).toBeGreaterThan(0);
+    const binDir = await readdir(join(bundle, "blobs-bin"));
+    expect(binDir).toHaveLength(1);
+    await expect(readFile(join(bundle, "blobs-bin", binDir[0]!))).resolves.toEqual(Buffer.from(bytes));
+
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const imported = createVersionedTextStore(b);
+    try {
+      const read = await imported.readBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/logo.png",
+      });
+      expect(read && Buffer.from(read).equals(Buffer.from(bytes))).toBe(true);
+      const files = await imported.listTextFiles({ workspaceId: WORKSPACE_ID, versionId: "main" });
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatchObject({ path: "assets/logo.png", contentKind: "binary" });
+      // Binary content must never enter the FTS surface on the importer. No
+      // optional chaining: if the search seam disappears this must FAIL, not
+      // silently no-op the boundary check.
+      const results = await imported.querySearchIndex!({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        query: "PNG",
+        limit: 10,
+      });
+      expect(results).toHaveLength(0);
+    } finally {
+      await imported.close();
+    }
+  });
+
+  it("preserves both sides as a conflict when the same binary path diverges", async () => {
+    const a = await tempRoot("sync-bindiv-a");
+    const b = await tempRoot("sync-bindiv-b");
+    const seedDir = await tempRoot("sync-bindiv-seed");
+    const abDir = await tempRoot("sync-bindiv-ab");
+    const now = { value: 8000 };
+    const seedStore = textStore(a, now);
+    try {
+      await seedStore.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await seedStore.writeBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/data.bin",
+        bytes: Uint8Array.from([1, 2, 3]),
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await seedStore.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+
+    const editA = createVersionedTextStore(a, { nowMs: () => 9000, createId: createIdFactory("ba-") });
+    const editB = createVersionedTextStore(b, { nowMs: () => 9500, createId: createIdFactory("bb-") });
+    try {
+      await editA.writeBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/data.bin",
+        bytes: Uint8Array.from([0xaa, 0xaa]),
+        metadata: { origin: "api" },
+      });
+      await editB.writeBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/data.bin",
+        bytes: Uint8Array.from([0xbb, 0xbb, 0xbb]),
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await editB.close();
+      await editA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: abDir });
+    const result = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: abDir });
+    expect(result.conflictsOpened).toBe(1);
+    const check = createVersionedTextStore(b);
+    try {
+      const live = await check.readBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/data.bin",
+      });
+      expect(live && Buffer.from(live).equals(Buffer.from([0xbb, 0xbb, 0xbb]))).toBe(true);
+      const conflicts = await check.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]!.current).toMatchObject({ exists: true, contentKind: "binary" });
+      expect(conflicts[0]!.incoming).toMatchObject({ exists: true, contentKind: "binary" });
+      expect(conflicts[0]!.current.sha256).not.toBe(conflicts[0]!.incoming.sha256);
+      // The incoming binary bytes are already local (shipped in the bundle),
+      // one restore away even though the live file kept the local edit.
+      const incomingBytes = await check.readBinaryBlob({
+        workspaceId: WORKSPACE_ID,
+        sha256: conflicts[0]!.incoming.sha256 ?? "",
+      });
+      expect(incomingBytes && Buffer.from(incomingBytes).equals(Buffer.from([0xaa, 0xaa]))).toBe(true);
+    } finally {
+      await check.close();
+    }
+  });
+
+  it("ignores non-manifest op files, clears reused export dirs, and fails closed on manifest mismatches", async () => {
+    const a = await tempRoot("sync-m4-a");
+    const b = await tempRoot("sync-m4-b");
+    const bundle = await tempRoot("sync-m4-bundle");
+    const versions = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        text: "manifest hygiene",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    // A stale/foreign op file that is NOT in the manifest is ignored — it
+    // would crash any reader that touched it.
+    await writeFile(join(bundle, "ops", "origin_stale.jsonl"), "not json at all\n", "utf8");
+    const imported = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    expect(imported.applied).toBeGreaterThan(0);
+    // Re-exporting into the same directory clears previous files first.
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await expect(readdir(join(bundle, "ops"))).resolves.not.toContain("origin_stale.jsonl");
+    // An ops file that does not match its manifest entry fails closed.
+    const [opsFile] = (await readdir(join(bundle, "ops"))).filter((file) => file.endsWith(".jsonl"));
+    const opsPath = join(bundle, "ops", opsFile!);
+    const lines = (await readFile(opsPath, "utf8")).trimEnd().split("\n");
+    await writeFile(opsPath, `${lines.slice(0, -1).join("\n")}\n`, "utf8");
+    const c = await tempRoot("sync-m4-c");
+    await expect(
+      importSyncBundle({ rootDir: c, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toThrow(/do not match the manifest entry/u);
+  });
+
+  it("rejects tampered bundle blobs and detects poisoned pre-existing blob rows", async () => {
+    const a = await tempRoot("sync-m5-a");
+    const bundle = await tempRoot("sync-m5-bundle");
+    const versions = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versions.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        text: "blob integrity content",
+        metadata: { origin: "api" },
+      });
+      await versions.writeBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/data.bin",
+        bytes: Uint8Array.from([9, 8, 7, 0, 255]),
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    const [textBlob] = (await readdir(join(bundle, "blobs"))).sort();
+    const originalText = await readFile(join(bundle, "blobs", textBlob!), "utf8");
+    // Tampered text blob: filename/content mismatch fails closed.
+    await writeFile(join(bundle, "blobs", textBlob!), "tampered text", "utf8");
+    const b1 = await tempRoot("sync-m5-b1");
+    await expect(
+      importSyncBundle({ rootDir: b1, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toThrow(/does not match its content hash/u);
+    await writeFile(join(bundle, "blobs", textBlob!), originalText, "utf8");
+    // Tampered binary blob likewise.
+    const [binBlob] = await readdir(join(bundle, "blobs-bin"));
+    const originalBin = await readFile(join(bundle, "blobs-bin", binBlob!));
+    await writeFile(join(bundle, "blobs-bin", binBlob!), Buffer.from([1, 2, 3]));
+    const b2 = await tempRoot("sync-m5-b2");
+    await expect(
+      importSyncBundle({ rootDir: b2, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toThrow(/does not match its content hash/u);
+    await writeFile(join(bundle, "blobs-bin", binBlob!), originalBin);
+    // Poisoned pre-existing row on the importer: same sha key, different
+    // content. INSERT OR IGNORE would silently keep it; verification refuses.
+    const b3 = await tempRoot("sync-m5-b3");
+    const poisonedSetup = createVersionedTextStore(b3);
+    try {
+      await poisonedSetup.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    } finally {
+      await poisonedSetup.close();
+    }
+    const db = rawDb(b3);
+    try {
+      db.prepare("INSERT INTO blobs (sha256, byte_length, text) VALUES (?, ?, ?)").run(
+        textBlob,
+        8,
+        "poisoned",
+      );
+    } finally {
+      db.close();
+    }
+    await expect(
+      importSyncBundle({ rootDir: b3, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toThrow(/does not match the sync bundle content/u);
+  });
+
+  it("keeps same-slug channels with different wire ids distinct across sync", async () => {
+    const a = await tempRoot("sync-m6-a");
+    const b = await tempRoot("sync-m6-b");
+    const nowA = { value: 1000 };
+    const nowB = { value: 2000 };
+    const versionsA = createVersionedTextStore(a);
+    const versionsB = createVersionedTextStore(b);
+    // Distinct id prefixes per side: wire ids are the creators' channel ids,
+    // which are globally unique uuids in production.
+    const chatsA = createLinkedChatStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("m6a-"),
+    });
+    const chatsB = createLinkedChatStore(b, {
+      nowMs: () => {
+        nowB.value += 10;
+        return nowB.value;
+      },
+      createId: createIdFactory("m6b-"),
+    });
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsB.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      // "a b" and "a_b" slugify identically — but they are DIFFERENT channels
+      // (different wire ids) and must never merge under sync.
+      await chatsA.createChannel({ workspaceId: WORKSPACE_ID, name: "a b" });
+      await chatsB.createChannel({ workspaceId: WORKSPACE_ID, name: "a_b" });
+      await syncBothWays(a, b, "sync-m6");
+      const [channelsA, channelsB] = await Promise.all([
+        chatsA.listChannels({ workspaceId: WORKSPACE_ID }),
+        chatsB.listChannels({ workspaceId: WORKSPACE_ID }),
+      ]);
+      expect(channelsA).toHaveLength(2);
+      expect(channelsB).toHaveLength(2);
+      expect(channelsA.map((channel) => channel.name).sort()).toEqual(["a b", "a_b"]);
+      expect(channelsB.map((channel) => channel.name).sort()).toEqual(["a b", "a_b"]);
+      // The local channel keeps its slug; the imported same-slug channel gets
+      // a numbered variant.
+      expect(channelsA.map((channel) => channel.slug).sort()).toEqual(["a-b", "a-b-2"]);
+      expect(channelsB.map((channel) => channel.slug).sort()).toEqual(["a-b", "a-b-2"]);
+      expect(channelsA.find((channel) => channel.name === "a b")?.slug).toBe("a-b");
+      expect(channelsB.find((channel) => channel.name === "a_b")?.slug).toBe("a-b");
+    } finally {
+      await chatsB.close();
+      await chatsA.close();
+      await versionsB.close();
+      await versionsA.close();
+    }
+  });
+
+  // Shared setup for the record-only divergence scenarios: seed docs/x.md on
+  // A, replicate to B, then let both sides edit so importing A's op lands on B
+  // as a record-only moment (aMomentId) newer than B's live head (bMomentId).
+  async function seedRecordOnlyDivergence(label: string): Promise<{
+    a: string;
+    b: string;
+    aMomentId: string;
+    bMomentId: string;
+  }> {
+    const a = await tempRoot(`${label}-a`);
+    const b = await tempRoot(`${label}-b`);
+    const seed = await tempRoot(`${label}-seed`);
+    const ab = await tempRoot(`${label}-ab`);
+    const versionsA = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        text: "base",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versionsA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+    const editA = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a2-") });
+    let aMomentId = "";
+    try {
+      aMomentId = (
+        await editA.writeTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "docs/x.md",
+          text: "from A",
+          metadata: { origin: "api" },
+        })
+      ).moment.id;
+    } finally {
+      await editA.close();
+    }
+    const editB = createVersionedTextStore(b, { nowMs: () => 3000, createId: createIdFactory("b-") });
+    let bMomentId = "";
+    try {
+      bMomentId = (
+        await editB.writeTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "docs/x.md",
+          text: "from B",
+          metadata: { origin: "api" },
+        })
+      ).moment.id;
+    } finally {
+      await editB.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    return { a, b, aMomentId, bMomentId };
+  }
+
+  it("marks record-only divergence moments on timeline surfaces and rejects rolling them back", async () => {
+    const { b, aMomentId, bMomentId } = await seedRecordOnlyDivergence("sync-c1");
+    const store = createVersionedTextStore(b, { nowMs: () => 5000, createId: createIdFactory("bc1-") });
+    try {
+      // Timeline surfaces show the divergent history, explicitly marked.
+      const page = await store.listMoments({ workspaceId: WORKSPACE_ID, versionId: "main" });
+      const recordOnly = page.moments.find((moment) => moment.id === aMomentId);
+      expect(recordOnly).toBeTruthy();
+      expect(recordOnly?.syncRecordOnly).toBe(true);
+      expect(page.moments.find((moment) => moment.id === bMomentId)?.syncRecordOnly).toBeUndefined();
+      await expect(store.getMoment({ workspaceId: WORKSPACE_ID, momentId: aMomentId })).resolves.toMatchObject({
+        syncRecordOnly: true,
+      });
+      // Rolling back the record-only moment must be rejected: pre-fix it
+      // rewrote/deleted B's LIVE snapshot from A's divergent preimage.
+      await expect(
+        store.rollbackTextFileMutation({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: "docs/x.md",
+          mutationMomentId: aMomentId,
+        }),
+      ).rejects.toThrow(/record-only/u);
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md" }),
+      ).resolves.toMatchObject({ text: "from B" });
+      // B's own head stays rollback-able even though the record-only row has a
+      // newer moment_order: record-only rows are inert for head selection.
+      await store.rollbackTextFileMutation({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        mutationMomentId: bMomentId,
+      });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md" }),
+      ).resolves.toMatchObject({ text: "base" });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("selects the materialized head as the fork point when record-only rows are newer", async () => {
+    const { b, aMomentId, bMomentId } = await seedRecordOnlyDivergence("sync-c2-head");
+    const store = createVersionedTextStore(b, { nowMs: () => 5000, createId: createIdFactory("bf-") });
+    try {
+      const version = await store.createNamedVersion({
+        workspaceId: WORKSPACE_ID,
+        name: "Fork",
+        fromVersionId: "main",
+      });
+      expect(version.forkPoint?.momentId).toBe(bMomentId);
+      expect(version.forkPoint?.momentId).not.toBe(aMomentId);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("replays version.create from the origin fork-point state, not the importer's snapshots", async () => {
+    const a = await tempRoot("sync-c2-a");
+    const b = await tempRoot("sync-c2-b");
+    const seed = await tempRoot("sync-c2-seed");
+    const ab = await tempRoot("sync-c2-ab");
+    const versionsA = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/shared.md",
+        text: "shared base",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versionsA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+
+    // B makes unrelated main edits that must NOT be absorbed into A's fork.
+    const editB = createVersionedTextStore(b, { nowMs: () => 2000, createId: createIdFactory("b-") });
+    try {
+      await editB.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/b-local.md",
+        text: "b local only",
+        metadata: { origin: "api" },
+      });
+      await editB.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/shared.md",
+        text: "shared from B",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await editB.close();
+    }
+
+    const forkA = createVersionedTextStore(a, { nowMs: () => 3000, createId: createIdFactory("a2-") });
+    let versionId = "";
+    try {
+      versionId = (
+        await forkA.createNamedVersion({ workspaceId: WORKSPACE_ID, name: "Feature", fromVersionId: "main" })
+      ).id;
+    } finally {
+      await forkA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+
+    const check = createVersionedTextStore(b);
+    try {
+      const forkFiles = await check.listTextFiles({ workspaceId: WORKSPACE_ID, versionId });
+      expect(forkFiles.map((file) => [file.path, file.text])).toEqual([["docs/shared.md", "shared base"]]);
+      // B's own main state stays untouched.
+      await expect(
+        check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/shared.md" }),
+      ).resolves.toMatchObject({ text: "shared from B" });
+      await expect(
+        check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/b-local.md" }),
+      ).resolves.toMatchObject({ text: "b local only" });
+    } finally {
+      await check.close();
+    }
+  });
+
+  it("models rename-vs-rename with an occupied destination as object + occupancy conflicts", async () => {
+    const a = await tempRoot("sync-m2-a");
+    const b = await tempRoot("sync-m2-b");
+    const seed = await tempRoot("sync-m2-seed");
+    const ab = await tempRoot("sync-m2-ab");
+    const versionsA = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        text: "object content",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versionsA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+    const editA = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a2-") });
+    const editB = createVersionedTextStore(b, { nowMs: () => 3000, createId: createIdFactory("b-") });
+    try {
+      await editA.renameTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        fromPath: "docs/x.md",
+        toPath: "docs/z.md",
+        metadata: { origin: "api" },
+      });
+      await editB.renameTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        fromPath: "docs/x.md",
+        toPath: "docs/y.md",
+        metadata: { origin: "api" },
+      });
+      await editB.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/z.md",
+        text: "occupant",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await editB.close();
+      await editA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    const result = await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    // One divergence conflict at the OBJECT (both paths recorded) plus one
+    // path-occupancy conflict for the z occupant.
+    expect(result.conflictsOpened).toBe(2);
+    const check = createVersionedTextStore(b, { nowMs: () => 5000, createId: createIdFactory("bc-") });
+    try {
+      const conflicts = await check.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflicts).toHaveLength(2);
+      const divergence = conflicts.find(
+        (conflict) => conflict.current.objectId === conflict.incoming.objectId,
+      );
+      const occupancy = conflicts.find(
+        (conflict) => conflict.current.objectId !== conflict.incoming.objectId,
+      );
+      expect(divergence).toMatchObject({
+        current: { exists: true, path: "docs/y.md" },
+        incoming: { exists: true, path: "docs/z.md" },
+      });
+      expect(occupancy).toMatchObject({
+        path: "docs/z.md",
+        current: { exists: true, path: "docs/z.md", text: "occupant" },
+        incoming: { exists: true, path: "docs/z.md" },
+      });
+      // Applying the incoming MOVE while z is occupied fails closed instead
+      // of silently writing the incoming state back at the local path y.
+      await expect(
+        check.resolveTextConflict({
+          workspaceId: WORKSPACE_ID,
+          conflictId: divergence!.id,
+          resolution: { kind: "apply-incoming" },
+          metadata: { origin: "api" },
+        }),
+      ).rejects.toThrow(/already exists/u);
+      await expect(
+        check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/y.md" }),
+      ).resolves.toMatchObject({ text: "object content" });
+      await expect(
+        check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/z.md" }),
+      ).resolves.toMatchObject({ text: "occupant" });
+      // Once the occupant is handled (deleted here), applying incoming
+      // performs the move to incoming.path.
+      await check.deleteTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/z.md",
+        metadata: { origin: "api" },
+      });
+      await check.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: divergence!.id,
+        resolution: { kind: "apply-incoming" },
+        metadata: { origin: "api" },
+      });
+      await expect(
+        check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/y.md" }),
+      ).resolves.toBeNull();
+      await expect(
+        check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/z.md" }),
+      ).resolves.toMatchObject({ text: "object content" });
+    } finally {
+      await check.close();
+    }
+  });
+
+  it("resolves the mirrored sync conflict from a peer's conflict.resolve and surfaces unmatched ones", async () => {
+    const a = await tempRoot("sync-m3-a");
+    const b = await tempRoot("sync-m3-b");
+    const seed = await tempRoot("sync-m3-seed");
+    const ab = await tempRoot("sync-m3-ab");
+    const ba = await tempRoot("sync-m3-ba");
+    const versionsA = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    try {
+      await versionsA.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versionsA.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/x.md",
+        text: "base",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await versionsA.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seed });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seed });
+    const editA = createVersionedTextStore(a, { nowMs: () => 2000, createId: createIdFactory("a2-") });
+    const editB = createVersionedTextStore(b, { nowMs: () => 3000, createId: createIdFactory("b-") });
+    try {
+      await editA.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from A", metadata: { origin: "api" } });
+      await editB.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md", text: "from B", metadata: { origin: "api" } });
+    } finally {
+      await editB.close();
+      await editA.close();
+    }
+    // Both sides import the other's divergent edit: mirrored conflicts with
+    // independent local ids.
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: ab });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: ab });
+    await exportSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, toDir: ba });
+    await importSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, fromDir: ba });
+
+    const resolveB = createVersionedTextStore(b, { nowMs: () => 6000, createId: createIdFactory("br-") });
+    try {
+      const [conflict] = await resolveB.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      await resolveB.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: conflict!.id,
+        resolution: { kind: "apply-incoming" },
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await resolveB.close();
+    }
+    const checkA = createVersionedTextStore(a);
+    let mirrorConflictId = "";
+    try {
+      const [mirror] = await checkA.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      mirrorConflictId = mirror!.id;
+    } finally {
+      await checkA.close();
+    }
+    const ba2 = await tempRoot("sync-m3-ba2");
+    await exportSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, toDir: ba2 });
+    const imported = await importSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, fromDir: ba2 });
+    // B's resolve matched A's mirror conflict (by swapped heads): nothing
+    // pending, and A's row is resolved with the choice mirrored — B applying
+    // "incoming" (A's content) reads on A as keeping "current".
+    expect(imported.pendingConflictResolves).toBe(0);
+    const verifyA = createVersionedTextStore(a);
+    try {
+      const conflicts = await verifyA.listTextConflicts({ workspaceId: WORKSPACE_ID });
+      const mirror = conflicts.find((conflict) => conflict.id === mirrorConflictId);
+      expect(mirror).toMatchObject({
+        status: "resolved",
+        chosenFrom: "current",
+        resolution: "kept-current",
+      });
+      // An unmatched resolve (unknown id, no head match) is applied but
+      // surfaced, never silently acked away.
+      const unmatched = await verifyA.applyReplicationOp({
+        workspaceId: WORKSPACE_ID,
+        originId: "origin_test_unmatched",
+        originSeq: 0,
+        opKind: "conflict.resolve",
+        payload: {
+          conflictId: "conflict_missing",
+          status: "resolved",
+          chosenFrom: "incoming",
+          resolution: "applied-incoming",
+          updatedAtMs: 9000,
+          targetVersionId: "main",
+          path: "docs/none.md",
+          currentLatestMomentId: "moment_none_a",
+          incomingLatestMomentId: "moment_none_b",
+        },
+        recordedAtMs: 9000,
+      });
+      expect(unmatched).toEqual({ status: "applied", conflictsOpened: 0, pendingConflictResolves: 1 });
+    } finally {
+      await verifyA.close();
+    }
+  });
+
+  it("replicates binary content_kind through version.create forks byte-exactly", async () => {
+    const a = await tempRoot("sync-m1-a");
+    const b = await tempRoot("sync-m1-b");
+    const bundle = await tempRoot("sync-m1-bundle");
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x01]);
+    const versions = createVersionedTextStore(a, { nowMs: () => 1000, createId: createIdFactory("a-") });
+    let versionId = "";
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await versions.writeBinaryFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "assets/logo.png",
+        bytes,
+        metadata: { origin: "api" },
+      });
+      versionId = (
+        await versions.createNamedVersion({ workspaceId: WORKSPACE_ID, name: "BinFork", fromVersionId: "main" })
+      ).id;
+    } finally {
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    const check = createVersionedTextStore(b);
+    try {
+      const files = await check.listTextFiles({ workspaceId: WORKSPACE_ID, versionId });
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatchObject({ path: "assets/logo.png", contentKind: "binary" });
+      const read = await check.readBinaryFile({ workspaceId: WORKSPACE_ID, versionId, path: "assets/logo.png" });
+      expect(read && Buffer.from(read).equals(Buffer.from(bytes))).toBe(true);
+    } finally {
+      await check.close();
+    }
+  });
+
+  it("preserves conflicts and converges non-conflicted state under concurrent batch fuzz", async () => {
+    const seed = 0x0f0a2026;
+    const random = prng(seed);
+    const a = await tempRoot("sync-fuzz-a");
+    const b = await tempRoot("sync-fuzz-b");
+    const nowA = { value: 10_000 };
+    const nowB = { value: 20_000 };
+    const paths = ["docs/fuzz-0.md", "docs/fuzz-1.md", "docs/fuzz-2.md", "docs/fuzz-3.md"];
+    const setup = createVersionedTextStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("fs-"),
+    });
+    const setupChats = createLinkedChatStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("fsc-"),
+    });
+    let sharedThreadId = "";
+    try {
+      await setup.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      for (const [index, path] of paths.entries()) {
+        await setup.writeTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path,
+          text: `seed ${index}\n`,
+          metadata: { origin: "api" },
+        });
+      }
+      const general = await setupChats.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const started = await setupChats.startChannelThread({
+        workspaceId: WORKSPACE_ID,
+        channelId: general.id,
+        title: "Fuzz thread",
+        author: { kind: "agent", displayName: "Agent A" },
+        body: "seed chat",
+      });
+      sharedThreadId = started.thread.id;
+    } finally {
+      await setupChats.close();
+      await setup.close();
+    }
+    await syncBothWays(a, b, "sync-fuzz-seed");
+
+    const aStore = createVersionedTextStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("fa-"),
+    });
+    const bStore = createVersionedTextStore(b, {
+      nowMs: () => {
+        nowB.value += 10;
+        return nowB.value;
+      },
+      createId: createIdFactory("fb-"),
+    });
+    const aChats = createLinkedChatStore(a, {
+      nowMs: () => {
+        nowA.value += 10;
+        return nowA.value;
+      },
+      createId: createIdFactory("fca-"),
+    });
+    const bChats = createLinkedChatStore(b, {
+      nowMs: () => {
+        nowB.value += 10;
+        return nowB.value;
+      },
+      createId: createIdFactory("fcb-"),
+    });
+
+    // Binary snapshots read back with text "" — identity for them is the
+    // content-addressed sha, so the comparator keys on kind + sha/text.
+    const fileMapForVersion = async (store: typeof aStore, versionId: string) =>
+      new Map(
+        (await store.listTextFiles({ workspaceId: WORKSPACE_ID, versionId })).map(
+          (file) =>
+            [
+              file.path,
+              (file.contentKind ?? "text") === "binary" ? `bin:${file.sha256}` : `txt:${file.text}`,
+            ] as const,
+        ),
+      );
+    const fileMap = (store: typeof aStore) => fileMapForVersion(store, "main");
+    // Conflicts mirror across peers with current/incoming SWAPPED, and a
+    // divergent move records different paths per side (current at the local
+    // path, incoming at the remote one). Keying by the SORTED pair of side
+    // paths is therefore the symmetric identity: the same divergence (or
+    // path-occupancy) produces the same key on both machines. Object ids stay
+    // out of the key — per-op conflicts pair the remote op with whatever
+    // object holds the path locally AT IMPORT TIME, so the object pairing is
+    // legitimately side-local under create/delete races.
+    type FuzzConflict = {
+      targetVersionId: string;
+      path: string;
+      current: { path: string };
+      incoming: { path: string };
+    };
+    const conflictKey = (conflict: FuzzConflict) =>
+      `${conflict.targetVersionId}\0${[conflict.current.path, conflict.incoming.path]
+        .sort()
+        .join("\0")}`;
+    const conflictCounts = (conflicts: FuzzConflict[]) => {
+      const counts = new Map<string, number>();
+      for (const conflict of conflicts) {
+        const key = conflictKey(conflict);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      return counts;
+    };
+    const chatDigest = async (chats: typeof aChats) => {
+      const threads = await chats.listThreads({ workspaceId: WORKSPACE_ID });
+      const rows: string[] = [];
+      for (const thread of threads.sort((left, right) => left.id.localeCompare(right.id))) {
+        const messages = await chats.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
+        for (const message of messages.sort(
+          (left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id),
+        )) {
+          rows.push(`${thread.id}\0${message.id}\0${message.createdAtMs}\0${message.author.kind}\0${message.author.displayName}\0${message.body}`);
+        }
+      }
+      return rows;
+    };
+    const seqDigest = (root: string) =>
+      replicationRows(root)
+        .map((row) => `${row.origin_id}:${row.origin_seq}`)
+        .sort();
+    type FuzzPlan = { kind: "binary" | "chat" | "delete" | "rename" | "write"; path: string };
+    const applyBatch = async (
+      store: typeof aStore,
+      chats: typeof aChats,
+      side: "a" | "b",
+      iteration: number,
+      plans: FuzzPlan[],
+    ) => {
+      for (let opIndex = 0; opIndex < plans.length; opIndex += 1) {
+        const plan = plans[opIndex]!;
+        if (plan.kind === "chat") {
+          await chats.sendMessage({
+            workspaceId: WORKSPACE_ID,
+            threadId: sharedThreadId,
+            author: { kind: "agent", displayName: side === "a" ? "Agent A" : "Agent B" },
+            body: `chat ${side} ${iteration}.${opIndex} seed ${seed}`,
+          });
+          continue;
+        }
+        const files = await fileMap(store);
+        const path = plan.path;
+        if (plan.kind === "binary") {
+          await store.writeBinaryFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path,
+            bytes: Uint8Array.from([
+              0x00,
+              0xff,
+              side === "a" ? 1 : 2,
+              iteration & 0xff,
+              opIndex & 0xff,
+              0x7f,
+            ]),
+            metadata: { origin: "api", summary: `fuzz ${side} binary` },
+          });
+        } else if (plan.kind === "write" || !files.has(path)) {
+          await store.writeTextFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path,
+            text: `write ${side} ${iteration}.${opIndex} seed ${seed}\n`,
+            metadata: { origin: "api", summary: `fuzz ${side} write` },
+          });
+        } else if (plan.kind === "delete") {
+          await store.deleteTextFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path,
+            metadata: { origin: "api", summary: `fuzz ${side} delete` },
+          });
+        } else {
+          const target = paths.find((candidate) => candidate !== path && !files.has(candidate));
+          if (target) {
+            await store.renameTextFile({
+              workspaceId: WORKSPACE_ID,
+              versionId: "main",
+              fromPath: path,
+              toPath: target,
+              metadata: { origin: "api", summary: `fuzz ${side} rename` },
+            });
+          } else {
+            await store.writeTextFile({
+              workspaceId: WORKSPACE_ID,
+              versionId: "main",
+              path,
+              text: `rewrite ${side} ${iteration}.${opIndex} seed ${seed}\n`,
+              metadata: { origin: "api", summary: `fuzz ${side} rewrite` },
+            });
+          }
+        }
+      }
+    };
+
+    try {
+      for (let index = 0; index < 30; index += 1) {
+        const collisionPath = paths[index % paths.length]!;
+        const batchSize = 2 + Math.floor(random() * 4);
+        const plans: FuzzPlan[] = Array.from({ length: batchSize }, (_, opIndex) => {
+          if (opIndex > 0 && random() < 0.15) return { kind: "chat", path: collisionPath };
+          const roll = random();
+          return {
+            kind:
+              opIndex === 0 || roll < 0.5
+                ? "write"
+                : roll < 0.62
+                  ? "binary"
+                  : roll < 0.8
+                    ? "delete"
+                    : "rename",
+            path: random() < 0.72 ? collisionPath : paths[Math.floor(random() * paths.length)]!,
+          };
+        });
+        try {
+          await applyBatch(aStore, aChats, "a", index, plans);
+          await applyBatch(bStore, bChats, "b", index, plans);
+          // version-create divergence corpus: each side occasionally forks a
+          // named version from main while the other side keeps editing main —
+          // the replicated fork must converge on the ORIGIN's fork-point
+          // state, never absorb the importer's edits.
+          if (index % 7 === 3) {
+            await aStore.createNamedVersion({
+              workspaceId: WORKSPACE_ID,
+              name: `Fuzz A ${index}`,
+              fromVersionId: "main",
+            });
+          }
+          if (index % 7 === 5) {
+            await bStore.createNamedVersion({
+              workspaceId: WORKSPACE_ID,
+              name: `Fuzz B ${index}`,
+              fromVersionId: "main",
+            });
+          }
+          await syncBothWays(a, b, `sync-fuzz-${index}`);
+          const [filesA, filesB] = await Promise.all([
+            fileMap(aStore),
+            fileMap(bStore),
+          ]);
+          const [conflictsA, conflictsB] = await Promise.all([
+            aStore.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
+            bStore.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
+          ]);
+          // A conflict shields BOTH of its side paths from the convergence
+          // check: a divergent move legitimately leaves the two machines with
+          // the object at different paths until a human resolves it.
+          const conflictedPaths = new Set(
+            [...conflictsA, ...conflictsB].flatMap((conflict) => [
+              conflict.path,
+              conflict.current.path,
+              conflict.incoming.path,
+            ]),
+          );
+          for (const path of new Set([...filesA.keys(), ...filesB.keys(), ...paths])) {
+            if (conflictedPaths.has(path)) continue;
+            expect(filesB.get(path) ?? null).toBe(filesA.get(path) ?? null);
+          }
+          expect([...conflictCounts(conflictsB)].sort()).toEqual([...conflictCounts(conflictsA)].sort());
+          // Replicated named versions must be BYTE-IDENTICAL across peers:
+          // fork state ships in the version.create payload, so no local edit
+          // can leak into a peer's fork.
+          const [versionsOnA, versionsOnB] = await Promise.all([
+            aStore.listVersions({ workspaceId: WORKSPACE_ID }),
+            bStore.listVersions({ workspaceId: WORKSPACE_ID }),
+          ]);
+          expect(versionsOnB.map((version) => version.id).sort()).toEqual(
+            versionsOnA.map((version) => version.id).sort(),
+          );
+          for (const version of versionsOnA) {
+            if (version.id === "main") continue;
+            const [forkA, forkB] = await Promise.all([
+              fileMapForVersion(aStore, version.id),
+              fileMapForVersion(bStore, version.id),
+            ]);
+            expect([...forkB.entries()].sort()).toEqual([...forkA.entries()].sort());
+          }
+          for (const [key, count] of conflictCounts(conflictsA)) {
+            if (count !== 1) continue;
+            const left = conflictsA.find((conflict) => conflictKey(conflict) === key);
+            const right = conflictsB.find((conflict) => conflictKey(conflict) === key);
+            if (!left || !right) continue;
+            const stateKey = (state: { contentKind?: string; sha256?: string; text?: string }) =>
+              (state.contentKind ?? "text") === "binary" ? `bin:${state.sha256}` : `txt:${state.text}`;
+            expect(stateKey(left.current)).toBe(stateKey(right.incoming));
+            expect(stateKey(left.incoming)).toBe(stateKey(right.current));
+          }
+          await expect(chatDigest(bChats)).resolves.toEqual(await chatDigest(aChats));
+          expect(seqDigest(b)).toEqual(seqDigest(a));
+        } catch (error) {
+          console.error(`sync fuzz seed=${seed} iteration=${index}`);
+          throw error;
+        }
+      }
+    } finally {
+      await bChats.close();
+      await aChats.close();
+      await bStore.close();
+      await aStore.close();
+    }
+  }, 60_000);
+});

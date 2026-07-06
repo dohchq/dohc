@@ -8,6 +8,8 @@ import type {
   AgentMomentAuthor,
   FileObjectRecord,
   MomentAuthor,
+  SyncApplyResult,
+  SyncReplicationEnvelope,
   TextFileSnapshot,
   VersionId,
   VersionKind,
@@ -53,6 +55,18 @@ import {
   querySearchIndex,
   upsertFileSearchIndex,
 } from "./searchIndex";
+import {
+  ackReplicationPeer,
+  appliedApplyResult,
+  journalLocalReplicationOp,
+  journalReplicationOp,
+  readReplicationAckedSeq,
+  skippedApplyResult,
+  type ConflictResolvePayload,
+  type MomentAppendPayload,
+  type VersionCreateForkSnapshot,
+  type VersionCreatePayload,
+} from "./syncReplication";
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
@@ -65,6 +79,8 @@ export type {
   AgentMomentAuthor,
   FileObjectRecord,
   MomentAuthor,
+  SyncApplyResult,
+  SyncReplicationEnvelope,
   TextFileSnapshot,
   VersionId,
   VersionKind,
@@ -510,7 +526,11 @@ function persistFailed(cause: unknown): VersionedTextStoreError {
   return error;
 }
 
-function normalizeHydratedState(raw: unknown): PersistedVersionedTextState {
+function normalizeHydratedState(
+  raw: unknown,
+  recordOnlyMomentIds = new Set<VersionedTextMomentId>(),
+  syncMaterializedVersionIds = new Set<VersionId>(),
+): PersistedVersionedTextState {
   if (raw === undefined) return initialState();
   if (!isRecord(raw) || raw.schemaVersion !== 1 || !isRecord(raw.workspaces)) {
     throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
@@ -523,7 +543,12 @@ function normalizeHydratedState(raw: unknown): PersistedVersionedTextState {
       workspace.forkBaseSnapshots ??= createDictionary();
       workspace.conflicts ??= createDictionary();
     }
-    assertHydratedWorkspaceState(workspaceId, workspace);
+    assertHydratedWorkspaceState(
+      workspaceId,
+      workspace,
+      recordOnlyMomentIds,
+      syncMaterializedVersionIds,
+    );
     const normalizedWorkspace = normalizeWorkspaceState(
       workspace as unknown as PersistedWorkspaceState,
     );
@@ -642,7 +667,12 @@ function normalizeWorkspaceState(workspace: PersistedWorkspaceState): PersistedW
   };
 }
 
-function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void {
+function assertHydratedWorkspaceState(
+  workspaceId: string,
+  value: unknown,
+  recordOnlyMomentIds = new Set<VersionedTextMomentId>(),
+  syncMaterializedVersionIds = new Set<VersionId>(),
+): void {
   assertPersistedNormalizedString(workspaceId);
   assertRecord(value);
   assertPersistedGeneratedId(value.mainVersionId);
@@ -919,7 +949,11 @@ function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void
     for (let index = bucket.length - 1; index >= 0; index -= 1) {
       const moment = bucket[index];
       const persistedIndex = momentIndexes.get(moment.id);
-      if (persistedIndex !== undefined && persistedIndex <= maxIndex) {
+      if (
+        persistedIndex !== undefined &&
+        persistedIndex <= maxIndex &&
+        !recordOnlyMomentIds.has(moment.id)
+      ) {
         latestMomentCache.set(cacheKey, moment);
         return moment;
       }
@@ -968,6 +1002,7 @@ function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void
   for (const [index, moment] of persistedMoments.entries()) {
     const before = moment.before;
     if (before === undefined) continue;
+    if (recordOnlyMomentIds.has(moment.id)) continue;
     const expectedBefore =
       latestMomentForObject(moment.versionId, moment.objectId, index - 1) ??
       inheritedLatestMomentForObject(moment.versionId, moment.objectId);
@@ -1037,6 +1072,12 @@ function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void
         continue;
       }
 
+      // A sync-materialized fork's SEEDED rows come from the origin's shipped
+      // fork-point state: their heads are real recorded moments (verified
+      // above) but may be record-only here — local fork-point lineage
+      // inference is not their source of truth. Writes made IN the fork after
+      // materialization take the same-version branch above and stay strict.
+      if (syncMaterializedVersionIds.has(versionId)) continue;
       const expected = inheritedLatestMomentForObject(versionId, objectId);
       if (expected?.id !== persistedSnapshot.latestMomentId) {
         throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
@@ -1050,10 +1091,12 @@ function assertHydratedWorkspaceState(workspaceId: string, value: unknown): void
     assertRecord(snapshots);
     assertRecord(aliases);
     for (const objectId of Object.keys(value.objects)) {
-      const expectedMoment =
-        latestMomentForObject(versionId, objectId) ??
-        inheritedLatestMomentForObject(versionId, objectId);
+      const ownMoment = latestMomentForObject(versionId, objectId);
+      const expectedMoment = ownMoment ?? inheritedLatestMomentForObject(versionId, objectId);
       if (!expectedMoment) continue;
+      // Same exemption as above: expectations that cross a sync-materialized
+      // fork's boundary derive from LOCAL lineage the origin never saw.
+      if (!ownMoment && syncMaterializedVersionIds.has(versionId)) continue;
       const snapshot = getOwn(snapshots, objectId);
       if (expectedMoment.operation === "delete") {
         if (snapshot !== undefined || getOwn(aliases, expectedMoment.path) === objectId) {
@@ -1180,7 +1223,9 @@ function putBlob(db: SqliteDb, text: string): string {
 function putBinaryBlob(db: SqliteDb, bytes: Uint8Array): string {
   const content = Buffer.from(bytes);
   const sha256 = sha256Bytes(content);
-  // TODO(0P-A): binary writes need the sync journal hook here too.
+  // Sync journaling happens at the moment level (writeBinaryFileInDb journals
+  // a moment.append whose payload references this sha); bundle export ships
+  // the bytes from binary_blobs under blobs-bin/.
   db.prepare("INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)").run(
     sha256,
     content.byteLength,
@@ -1196,6 +1241,206 @@ function putBinaryBlob(db: SqliteDb, bytes: Uint8Array): string {
   return sha256;
 }
 
+function selectBlobText(db: SqliteDb, sha256: string): string | null {
+  const row = db.prepare("SELECT text FROM blobs WHERE sha256 = ?").get(sha256);
+  return typeof row?.text === "string" ? row.text : null;
+}
+
+function requireBlobText(db: SqliteDb, sha256: string): string {
+  const text = selectBlobText(db, sha256);
+  if (text === null) throw corruptStore();
+  return text;
+}
+
+function requirePayloadString(value: string | undefined): string {
+  if (value === undefined) throw corruptStore();
+  return value;
+}
+
+function requirePayloadNumber(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) throw corruptStore();
+  return value;
+}
+
+// Wire → local payload snapshot: text resolves through blobs, binary resolves
+// through binary_blobs (bytes were hydrated from the bundle before any op is
+// applied, so a missing hash here is a corrupt/incomplete bundle).
+function payloadSnapshotFromWire(
+  db: SqliteDb,
+  input: {
+    path: string;
+    sha256: string;
+    contentKind?: VersionedFileContentKind;
+    byteLength?: number;
+  },
+): VersionedTextMomentPayloadSnapshot {
+  if ((input.contentKind ?? "text") === "binary") {
+    const bytes = readBinaryBlobFromDb(db, input.sha256);
+    return {
+      path: input.path,
+      contentKind: "binary",
+      sha256: input.sha256,
+      byteLength: input.byteLength ?? bytes.byteLength,
+      text: "",
+    };
+  }
+  return { path: input.path, text: requireBlobText(db, input.sha256) };
+}
+
+// A binary payload side never re-hashes bytes here: writeBinaryFileInDb
+// already content-addressed them into binary_blobs, so the journal payload
+// carries that sha (bundle export ships the bytes under blobs-bin/).
+function payloadSnapshotWireFields(
+  db: SqliteDb,
+  snapshot: VersionedTextMomentPayloadSnapshot,
+): { sha256: string; contentKind?: VersionedFileContentKind; byteLength?: number } {
+  if ((snapshot.contentKind ?? "text") === "binary") {
+    if (!snapshot.sha256 || snapshot.byteLength === undefined) throw corruptStore();
+    return { sha256: snapshot.sha256, contentKind: "binary", byteLength: snapshot.byteLength };
+  }
+  return { sha256: putBlob(db, snapshot.text) };
+}
+
+function momentAppendPayload(input: {
+  db: SqliteDb;
+  moment: VersionedTextMoment;
+  objectCreatedAtMs?: number;
+}): MomentAppendPayload {
+  const before = input.moment.before;
+  const payloadBefore = input.moment.payload.before
+    ? payloadSnapshotWireFields(input.db, input.moment.payload.before)
+    : null;
+  const payloadAfter = payloadSnapshotWireFields(input.db, input.moment.payload.after);
+  const beforeWire = before && before !== null ? payloadSnapshotWireFields(input.db, before) : null;
+  return {
+    momentId: input.moment.id,
+    versionId: input.moment.versionId,
+    objectId: input.moment.objectId,
+    ...(input.objectCreatedAtMs !== undefined ? { objectCreatedAtMs: input.objectCreatedAtMs } : {}),
+    path: input.moment.path,
+    recordedAtMs: input.moment.recordedAtMs,
+    operation: input.moment.operation,
+    payloadBeforeBlobSha256: payloadBefore?.sha256 ?? null,
+    payloadBeforePath: input.moment.payload.before?.path ?? null,
+    payloadAfterBlobSha256: payloadAfter.sha256,
+    payloadAfterPath: input.moment.payload.after.path,
+    ...(payloadBefore?.contentKind === "binary"
+      ? {
+          payloadBeforeContentKind: "binary" as const,
+          payloadBeforeByteLength: payloadBefore.byteLength,
+        }
+      : {}),
+    ...(payloadAfter.contentKind === "binary"
+      ? {
+          payloadAfterContentKind: "binary" as const,
+          payloadAfterByteLength: payloadAfter.byteLength,
+        }
+      : {}),
+    metadata: pickWriteMetadata(input.moment.metadata),
+    ...(input.moment.author !== undefined ? { author: pickMomentAuthor(input.moment.author) } : {}),
+    beforePresent: before === undefined ? "absent" : before === null ? "null" : "present",
+    ...(before && before !== null && beforeWire
+      ? {
+          beforeObjectId: before.objectId,
+          beforeVersionId: before.versionId,
+          beforePath: before.path,
+          beforeBlobSha256: beforeWire.sha256,
+          ...(beforeWire.contentKind === "binary"
+            ? { beforeContentKind: "binary" as const, beforeByteLength: beforeWire.byteLength }
+            : {}),
+          beforeUpdatedAtMs: before.updatedAtMs,
+          beforeLatestMomentId: before.latestMomentId,
+          beforeMetadata: pickWriteMetadata(before.metadata),
+        }
+      : {}),
+  };
+}
+
+function momentFromAppendPayload(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: MomentAppendPayload,
+): VersionedTextMoment {
+  const beforeSha = payload.beforeBlobSha256 ?? "";
+  const beforeIsBinary = (payload.beforeContentKind ?? "text") === "binary";
+  const before =
+    payload.beforePresent === "present"
+      ? {
+          objectId: requirePayloadString(payload.beforeObjectId),
+          versionId: requirePayloadString(payload.beforeVersionId),
+          path: requirePayloadString(payload.beforePath),
+          ...(beforeIsBinary
+            ? {
+                contentKind: "binary" as const,
+                sha256: beforeSha,
+                byteLength:
+                  payload.beforeByteLength ?? readBinaryBlobFromDb(db, beforeSha).byteLength,
+                text: "",
+              }
+            : { text: requireBlobText(db, beforeSha) }),
+          updatedAtMs: requirePayloadNumber(payload.beforeUpdatedAtMs),
+          latestMomentId: requirePayloadString(payload.beforeLatestMomentId),
+          metadata: pickWriteMetadata(payload.beforeMetadata ?? { origin: "unknown" }),
+        }
+      : payload.beforePresent === "null"
+        ? null
+        : undefined;
+  return {
+    id: payload.momentId,
+    workspaceId,
+    versionId: payload.versionId,
+    objectId: payload.objectId,
+    path: payload.path,
+    recordedAtMs: payload.recordedAtMs,
+    operation: payload.operation,
+    payload: {
+      before:
+        payload.payloadBeforeBlobSha256 && payload.payloadBeforePath
+          ? payloadSnapshotFromWire(db, {
+              path: payload.payloadBeforePath,
+              sha256: payload.payloadBeforeBlobSha256,
+              contentKind: payload.payloadBeforeContentKind,
+              byteLength: payload.payloadBeforeByteLength,
+            })
+          : null,
+      after: payloadSnapshotFromWire(db, {
+        path: payload.payloadAfterPath,
+        sha256: payload.payloadAfterBlobSha256,
+        contentKind: payload.payloadAfterContentKind,
+        byteLength: payload.payloadAfterByteLength,
+      }),
+    },
+    metadata: pickWriteMetadata(payload.metadata),
+    ...(payload.author !== undefined ? { author: pickMomentAuthor(payload.author) } : {}),
+    ...(before === undefined ? {} : { before }),
+  };
+}
+
+function fileStateFromAppendBefore(
+  db: SqliteDb,
+  payload: MomentAppendPayload,
+): VersionedTextFileState {
+  if (payload.beforePresent !== "present") {
+    return { exists: false, path: payload.payloadBeforePath ?? payload.path };
+  }
+  const beforeSha = payload.beforeBlobSha256 ?? "";
+  return {
+    exists: true,
+    path: payload.beforePath ?? payload.path,
+    objectId: payload.beforeObjectId,
+    ...((payload.beforeContentKind ?? "text") === "binary"
+      ? {
+          contentKind: "binary" as const,
+          sha256: beforeSha,
+          byteLength: payload.beforeByteLength ?? readBinaryBlobFromDb(db, beforeSha).byteLength,
+          text: "",
+        }
+      : { text: requireBlobText(db, beforeSha) }),
+    updatedAtMs: payload.beforeUpdatedAtMs,
+    latestMomentId: payload.beforeLatestMomentId,
+    metadata: pickWriteMetadata(payload.beforeMetadata ?? { origin: "unknown" }),
+  };
+}
 
 function snapshotFromRow(row: Record<string, unknown>): TextFileSnapshot {
   const contentKind = rowContentKind(row, "content_kind");
@@ -1326,6 +1571,8 @@ function fileStateFromConflictRow(
 
 function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
   const state = initialState();
+  const recordOnlyMomentIds = new Set<VersionedTextMomentId>();
+  const syncMaterializedVersionIds = new Set<VersionId>();
   try {
     for (const row of db
       .prepare("SELECT workspace_id, main_version_id FROM versioned_workspaces ORDER BY workspace_id")
@@ -1368,6 +1615,9 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
           : {}),
       };
       workspace.versions[version.id] = version;
+      if (Number(row.sync_materialized ?? 0) === 1) {
+        syncMaterializedVersionIds.add(version.id);
+      }
       workspace.pathAliases[version.id] ??= createDictionary();
       workspace.snapshots[version.id] ??= createDictionary();
     }
@@ -1441,6 +1691,9 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
       .all()) {
       const workspace = state.workspaces[rowString(row, "workspace_id")];
       if (!workspace) throw corruptStore();
+      if (Number(row.sync_record_only ?? 0) === 1) {
+        recordOnlyMomentIds.add(rowString(row, "moment_id"));
+      }
       workspace.moments.push(momentFromRow(row));
     }
 
@@ -1476,7 +1729,7 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
     throw corruptStore(error);
   }
 
-  return normalizeHydratedState(state);
+  return normalizeHydratedState(state, recordOnlyMomentIds, syncMaterializedVersionIds);
 }
 
 function insertConflictFileState(
@@ -2218,6 +2471,30 @@ function selectSnapshotByObject(
   return row ? snapshotFromRow(row) : null;
 }
 
+function selectLatestMomentForObject(input: {
+  db: SqliteDb;
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  objectId: WorkspaceObjectId;
+}): { momentId: VersionedTextMomentId; momentOrder: number } | null {
+  const row = input.db
+    .prepare(
+      `SELECT moment_id, moment_order
+       FROM moments
+       WHERE workspace_id = ? AND version_id = ? AND object_id = ?
+         AND (sync_record_only IS NULL OR sync_record_only = 0)
+       ORDER BY moment_order DESC
+       LIMIT 1`,
+    )
+    .get(input.workspaceId, input.versionId, input.objectId);
+  return row
+    ? {
+        momentId: rowString(row, "moment_id"),
+        momentOrder: rowNumber(row, "moment_order"),
+      }
+    : null;
+}
+
 function selectSnapshotByPath(
   db: SqliteDb,
   workspaceId: WorkspaceId,
@@ -2306,6 +2583,7 @@ function ensureWorkspaceRow(
   db: SqliteDb,
   workspaceId: WorkspaceId,
   nowMs: number,
+  options: { journal?: boolean } = {},
 ): VersionRecord {
   const existing = db
     .prepare(
@@ -2335,6 +2613,14 @@ function ensureWorkspaceRow(
       workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id
     ) VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
   ).run(workspaceId, main.id, main.kind, main.name, main.createdAtMs);
+  if (options.journal !== false) {
+    journalLocalReplicationOp(db, {
+      workspaceId,
+      opKind: "workspace.init",
+      payload: {},
+      recordedAtMs: main.createdAtMs,
+    });
+  }
   return main;
 }
 
@@ -2387,7 +2673,11 @@ function nextMomentOrder(db: SqliteDb, workspaceId: WorkspaceId): number {
   return Number(row?.next_order ?? 0);
 }
 
-function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
+function insertMomentRow(
+  db: SqliteDb,
+  moment: VersionedTextMoment,
+  options: { recordOnly?: boolean } = {},
+): void {
   const payloadBeforeKind = moment.payload.before?.contentKind ?? "text";
   const payloadAfterKind = moment.payload.after.contentKind ?? "text";
   const payloadBeforeSha = moment.payload.before
@@ -2415,7 +2705,9 @@ function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
   ) {
     throw corruptStore();
   }
-  // TODO(0P-A): binary writes need the sync journal hook here too.
+  // Sync journaling is the CALLER's job (writeTextFileInDb, deleteTextFileInDb,
+  // renameTextFile, writeBinaryFileInDb journal a moment.append beside this
+  // insert; applyRemoteMomentAppend journals the imported envelope instead).
   db.prepare(
     `INSERT INTO moments (
       workspace_id, moment_order, moment_id, version_id, object_id, path,
@@ -2425,8 +2717,8 @@ function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
       metadata_summary, metadata_correlation_id, before_present, before_object_id,
       before_version_id, before_path, before_content_kind, before_blob_sha256, before_updated_at_ms,
       before_latest_moment_id, before_metadata_origin, before_metadata_summary,
-      before_metadata_correlation_id, author_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      before_metadata_correlation_id, author_json, sync_record_only
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     moment.workspaceId,
     nextMomentOrder(db, moment.workspaceId),
@@ -2453,6 +2745,7 @@ function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
     moment.before && moment.before !== null ? moment.before.latestMomentId : null,
     ...(moment.before && moment.before !== null ? metadataValues(moment.before.metadata) : [null, null, null]),
     momentAuthorToJson(moment.author),
+    options.recordOnly ? 1 : null,
   );
 }
 
@@ -2559,10 +2852,14 @@ function selectMomentByOrder(
   objectId: WorkspaceObjectId,
   maxOrder: number,
 ): { moment: VersionedTextMoment; order: number } | null {
+  // Record-only sync divergence rows are timeline-visible history, never a
+  // materialized predecessor: rollback preimages and fork-point inheritance
+  // must resolve through applied moments only.
   const row = db
     .prepare(
       momentSelectSql(
         `WHERE m.workspace_id = ? AND m.version_id = ? AND m.object_id = ? AND m.moment_order <= ?
+           AND (m.sync_record_only IS NULL OR m.sync_record_only = 0)
          ORDER BY m.moment_order DESC LIMIT 1`,
       ),
     )
@@ -2625,6 +2922,7 @@ function rollbackMomentHasDependentsInDb(input: {
       .prepare(
         `SELECT 1 FROM moments
          WHERE workspace_id = ? AND moment_id <> ? AND object_id = ? AND before_latest_moment_id = ?
+           AND (sync_record_only IS NULL OR sync_record_only = 0)
          LIMIT 1`,
       )
       .get(input.workspaceId, input.momentId, input.objectId, input.momentId)
@@ -2649,6 +2947,7 @@ function rollbackMomentHasDependentsInDb(input: {
       `SELECT version_id, moment_order, before_present
        FROM moments
        WHERE workspace_id = ? AND object_id = ?
+         AND (sync_record_only IS NULL OR sync_record_only = 0)
        ORDER BY moment_order`,
     )
     .all(input.workspaceId, input.objectId);
@@ -3161,6 +3460,16 @@ function createVersionedTextStoreWithHooks(
     };
 
     insertMomentRow(input.db, moment);
+    journalLocalReplicationOp(input.db, {
+      workspaceId: input.workspaceId,
+      opKind: "moment.append",
+      payload: momentAppendPayload({
+        db: input.db,
+        moment,
+        objectCreatedAtMs: object.createdAtMs,
+      }),
+      recordedAtMs: moment.recordedAtMs,
+    });
     insertOrReplaceSnapshot(input.db, "snapshots", input.workspaceId, input.versionId, snapshot);
     input.db
       .prepare(
@@ -3228,6 +3537,16 @@ function createVersionedTextStoreWithHooks(
     });
 
     insertMomentRow(input.db, moment);
+    journalLocalReplicationOp(input.db, {
+      workspaceId: input.workspaceId,
+      opKind: "moment.append",
+      payload: momentAppendPayload({
+        db: input.db,
+        moment,
+        objectCreatedAtMs: object.createdAtMs,
+      }),
+      recordedAtMs: moment.recordedAtMs,
+    });
     input.db
       .prepare(
         "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
@@ -3323,6 +3642,16 @@ function createVersionedTextStoreWithHooks(
     };
 
     insertMomentRow(input.db, moment);
+    journalLocalReplicationOp(input.db, {
+      workspaceId: input.workspaceId,
+      opKind: "moment.append",
+      payload: momentAppendPayload({
+        db: input.db,
+        moment,
+        objectCreatedAtMs: object.createdAtMs,
+      }),
+      recordedAtMs: moment.recordedAtMs,
+    });
     insertOrReplaceSnapshot(input.db, "snapshots", input.workspaceId, input.versionId, snapshot);
     input.db
       .prepare(
@@ -3375,7 +3704,341 @@ function createVersionedTextStoreWithHooks(
       metadata: pickWriteMetadata(input.metadata),
     };
     insertConflictRow(input.db, conflict);
+    journalLocalReplicationOp(input.db, {
+      workspaceId: conflict.workspaceId,
+      opKind: "conflict.open",
+      payload: conflict,
+      recordedAtMs: conflict.createdAtMs,
+    });
     return conflict;
+  }
+
+  function journalImportedReplicationOp(db: SqliteDb, input: SyncReplicationEnvelope): void {
+    db.prepare(
+      `INSERT OR IGNORE INTO replication_log (
+        workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.workspaceId,
+      input.originId,
+      input.originSeq,
+      input.opKind,
+      JSON.stringify(input.payload),
+      input.recordedAtMs,
+    );
+  }
+
+  function importedReplicationLogExists(db: SqliteDb, input: SyncReplicationEnvelope): boolean {
+    return Boolean(
+      db
+        .prepare(
+          `SELECT 1 FROM replication_log
+           WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
+        )
+        .get(input.workspaceId, input.originId, input.originSeq),
+    );
+  }
+
+  function insertVersionFromReplication(
+    db: SqliteDb,
+    workspaceId: WorkspaceId,
+    payload: VersionCreatePayload,
+  ): void {
+    const existing = db
+      .prepare("SELECT 1 FROM versions WHERE workspace_id = ? AND version_id = ?")
+      .get(workspaceId, payload.versionId);
+    if (existing) return;
+    if (payload.versionId !== "main" && db.prepare("SELECT 1 FROM versions WHERE version_id = ?").get(payload.versionId)) {
+      rejectDuplicateId("version", payload.versionId);
+    }
+    const source = payload.forkVersionId
+      ? requireWorkspaceVersionRow(db, workspaceId, payload.forkVersionId)
+      : undefined;
+    db.prepare(
+      `INSERT INTO versions (
+        workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id,
+        sync_materialized
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      workspaceId,
+      payload.versionId,
+      payload.kind,
+      payload.name,
+      payload.createdAtMs,
+      payload.forkVersionId ?? null,
+      payload.forkMomentId ?? null,
+      // Payload-materialized fork state is exempt from local fork-point
+      // lineage inference (see engineDbSchema sync_materialized note).
+      payload.forkSnapshots !== undefined ? 1 : null,
+    );
+    if (!source) return;
+    if (payload.forkSnapshots !== undefined) {
+      // Deterministic replay: materialize the fork from the ORIGIN's shipped
+      // fork-point state. The importer's own current snapshots may hold local
+      // edits the origin never saw — copying them would silently absorb them
+      // into the origin's fork.
+      for (const snapshot of payload.forkSnapshots) {
+        const isBinary = (snapshot.contentKind ?? "text") === "binary";
+        if (isBinary) {
+          const blob = db
+            .prepare("SELECT byte_length FROM binary_blobs WHERE sha256 = ?")
+            .get(snapshot.blobSha256);
+          if (!blob) throw corruptStore();
+          // Compatibility anchor, mirroring putBinaryBlob: *_blob_sha256
+          // foreign keys reference blobs, content_kind gates reads.
+          db.prepare(
+            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, '')",
+          ).run(snapshot.blobSha256, rowNumber(blob, "byte_length"));
+        } else if (!db.prepare("SELECT 1 FROM blobs WHERE sha256 = ?").get(snapshot.blobSha256)) {
+          throw corruptStore();
+        }
+        db.prepare(
+          "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)",
+        ).run(workspaceId, snapshot.objectId, snapshot.objectCreatedAtMs ?? payload.createdAtMs);
+        for (const table of ["snapshots", "fork_base_snapshots"] as const) {
+          db.prepare(
+            `INSERT INTO ${table} (
+              workspace_id, version_id, object_id, path, content_kind, blob_sha256, updated_at_ms,
+              latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            workspaceId,
+            payload.versionId,
+            snapshot.objectId,
+            snapshot.path,
+            isBinary ? "binary" : "text",
+            snapshot.blobSha256,
+            snapshot.updatedAtMs,
+            snapshot.latestMomentId,
+            ...metadataValues(pickWriteMetadata(snapshot.metadata)),
+          );
+        }
+        db.prepare(
+          `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+           VALUES (?, ?, ?, ?)`,
+        ).run(workspaceId, payload.versionId, snapshot.path, snapshot.objectId);
+      }
+      return;
+    }
+    // Legacy payloads (journaled before fork-state shipping) fall back to
+    // copying the importer's local source-version snapshots, content_kind
+    // included so binary snapshots never degrade to empty text.
+    db.prepare(
+      `INSERT INTO snapshots (
+        workspace_id, version_id, object_id, path, content_kind, blob_sha256, updated_at_ms,
+        latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+      )
+      SELECT workspace_id, ?, object_id, path, content_kind, blob_sha256, updated_at_ms,
+             latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+      FROM snapshots
+      WHERE workspace_id = ? AND version_id = ?`,
+    ).run(payload.versionId, workspaceId, source.id);
+    db.prepare(
+      `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+       SELECT workspace_id, ?, path, object_id
+       FROM path_aliases
+       WHERE workspace_id = ? AND version_id = ?`,
+    ).run(payload.versionId, workspaceId, source.id);
+    db.prepare(
+      `INSERT INTO fork_base_snapshots (
+        workspace_id, version_id, object_id, path, content_kind, blob_sha256, updated_at_ms,
+        latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+      )
+      SELECT workspace_id, ?, object_id, path, content_kind, blob_sha256, updated_at_ms,
+             latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
+      FROM snapshots
+      WHERE workspace_id = ? AND version_id = ?`,
+    ).run(payload.versionId, workspaceId, source.id);
+  }
+
+  function applyRemoteMomentAppend(
+    db: SqliteDb,
+    workspaceId: WorkspaceId,
+    payload: MomentAppendPayload,
+  ): number {
+    requireWorkspaceVersionRow(db, workspaceId, payload.versionId);
+    if (db.prepare("SELECT 1 FROM moments WHERE workspace_id = ? AND moment_id = ?").get(workspaceId, payload.momentId)) {
+      return 0;
+    }
+    const latest = selectLatestMomentForObject({
+      db,
+      workspaceId,
+      versionId: payload.versionId,
+      objectId: payload.objectId,
+    });
+    const localSnapshot = selectSnapshotByObject(
+      db,
+      workspaceId,
+      payload.versionId,
+      payload.objectId,
+    );
+    const pathOccupant =
+      payload.operation === "delete"
+        ? null
+        : selectSnapshotByPath(db, workspaceId, payload.versionId, payload.payloadAfterPath);
+    const conflictingPathOccupant =
+      pathOccupant && pathOccupant.objectId !== payload.objectId ? pathOccupant : null;
+    const localHeadMomentId = localSnapshot?.latestMomentId ?? latest?.momentId ?? null;
+    const originSawAbsent =
+      payload.beforePresent === "absent" || payload.beforePresent === "null";
+    const canFastForward = originSawAbsent
+      ? localSnapshot === null && conflictingPathOccupant === null
+      : localSnapshot !== null &&
+        localSnapshot.latestMomentId === payload.beforeLatestMomentId &&
+        conflictingPathOccupant === null;
+    const moment = momentFromAppendPayload(db, workspaceId, payload);
+    if (canFastForward) {
+      db.prepare(
+        "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)",
+      ).run(workspaceId, payload.objectId, payload.objectCreatedAtMs ?? payload.recordedAtMs);
+      insertMomentRow(db, moment);
+      if (payload.operation === "delete") {
+        db.prepare(
+          "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
+        ).run(workspaceId, payload.versionId, payload.path, payload.objectId);
+        db.prepare(
+          "DELETE FROM snapshots WHERE workspace_id = ? AND version_id = ? AND object_id = ?",
+        ).run(workspaceId, payload.versionId, payload.objectId);
+        deleteFileSearchIndex({
+          db,
+          workspaceId,
+          versionId: payload.versionId,
+          objectId: payload.objectId,
+        });
+        return 0;
+      }
+      const afterIsBinary = (payload.payloadAfterContentKind ?? "text") === "binary";
+      const snapshot: TextFileSnapshot = {
+        objectId: payload.objectId,
+        versionId: payload.versionId,
+        path: payload.payloadAfterPath,
+        ...(afterIsBinary
+          ? {
+              contentKind: "binary" as const,
+              sha256: payload.payloadAfterBlobSha256,
+              byteLength:
+                payload.payloadAfterByteLength ??
+                readBinaryBlobFromDb(db, payload.payloadAfterBlobSha256).byteLength,
+              text: "",
+            }
+          : { text: requireBlobText(db, payload.payloadAfterBlobSha256) }),
+        updatedAtMs: payload.recordedAtMs,
+        latestMomentId: payload.momentId,
+        metadata: pickWriteMetadata(payload.metadata),
+      };
+      if (payload.operation === "rename" && payload.payloadBeforePath) {
+        db.prepare(
+          "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
+        ).run(workspaceId, payload.versionId, payload.payloadBeforePath, payload.objectId);
+      }
+      db.prepare(
+        `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET object_id = excluded.object_id`,
+      ).run(workspaceId, payload.versionId, snapshot.path, payload.objectId);
+      insertOrReplaceSnapshot(db, "snapshots", workspaceId, payload.versionId, snapshot);
+      upsertFileSearchIndex({ db, rootDir, workspaceId, snapshot });
+      return 0;
+    }
+
+    db.prepare(
+      "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)",
+    ).run(workspaceId, payload.objectId, payload.objectCreatedAtMs ?? payload.recordedAtMs);
+    insertMomentRow(db, moment, { recordOnly: true });
+    const currentSnapshot = localSnapshot ?? conflictingPathOccupant;
+    const current = currentSnapshot
+      ? fileStateFromSnapshot(currentSnapshot.path, currentSnapshot)
+      : ({
+          exists: false,
+          path: payload.beforePath ?? payload.payloadBeforePath ?? payload.path,
+        } satisfies VersionedTextFileState);
+    const incomingIsBinary = (payload.payloadAfterContentKind ?? "text") === "binary";
+    const incoming: VersionedTextFileState =
+      payload.operation === "delete"
+        ? { exists: false, path: payload.payloadAfterPath }
+        : {
+            exists: true,
+            path: payload.payloadAfterPath,
+            objectId: payload.objectId,
+            ...(incomingIsBinary
+              ? {
+                  contentKind: "binary" as const,
+                  sha256: payload.payloadAfterBlobSha256,
+                  byteLength:
+                    payload.payloadAfterByteLength ??
+                    readBinaryBlobFromDb(db, payload.payloadAfterBlobSha256).byteLength,
+                  text: "",
+                }
+              : { text: requireBlobText(db, payload.payloadAfterBlobSha256) }),
+            updatedAtMs: payload.recordedAtMs,
+            latestMomentId: payload.momentId,
+            metadata: pickWriteMetadata(payload.metadata),
+          };
+    const conflictId = `conflict_sync_${sha256Text(
+      `${workspaceId}\0${payload.versionId}\0${payload.objectId}\0${localHeadMomentId}\0${payload.momentId}`,
+    ).slice(0, 32)}`;
+    let conflictsOpened = 0;
+    if (
+      !db
+        .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
+        .get(workspaceId, conflictId)
+    ) {
+      insertConflictRow(db, {
+        id: conflictId,
+        workspaceId,
+        path: current.path,
+        // Sync divergences do not have separate merge source/target versions;
+        // both fields name the replicated version whose object head diverged.
+        targetVersionId: payload.versionId,
+        sourceVersionId: payload.versionId,
+        createdAtMs: payload.recordedAtMs,
+        updatedAtMs: payload.recordedAtMs,
+        base: fileStateFromAppendBefore(db, payload),
+        current,
+        incoming,
+        status: "open",
+        chosenFrom: "current",
+        metadata: { origin: "sync" },
+      });
+      // 0P-A records one conflict per divergent remote op; coalescing is a
+      // 0P-B follow-up once the folder sync contract is proven.
+      conflictsOpened += 1;
+    }
+    // Destination occupancy is modeled EXPLICITLY: when the diverged object's
+    // incoming path is occupied by a DIFFERENT local object, that occupant
+    // gets its own path-occupancy conflict. Applying the incoming move later
+    // requires the occupant to be handled first — nothing is silently written
+    // elsewhere and the occupant is never silently clobbered.
+    if (localSnapshot && conflictingPathOccupant) {
+      const occupancyConflictId = `conflict_sync_${sha256Text(
+        `${workspaceId}\0${payload.versionId}\0${conflictingPathOccupant.objectId}\0${conflictingPathOccupant.latestMomentId}\0${payload.momentId}`,
+      ).slice(0, 32)}`;
+      if (
+        !db
+          .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
+          .get(workspaceId, occupancyConflictId)
+      ) {
+        insertConflictRow(db, {
+          id: occupancyConflictId,
+          workspaceId,
+          path: conflictingPathOccupant.path,
+          targetVersionId: payload.versionId,
+          sourceVersionId: payload.versionId,
+          createdAtMs: payload.recordedAtMs,
+          updatedAtMs: payload.recordedAtMs,
+          // No shared base: the occupant and the incoming object never had a
+          // common state at this path.
+          base: { exists: false, path: conflictingPathOccupant.path },
+          current: fileStateFromSnapshot(conflictingPathOccupant.path, conflictingPathOccupant),
+          incoming,
+          status: "open",
+          chosenFrom: "current",
+          metadata: { origin: "sync" },
+        });
+        conflictsOpened += 1;
+      }
+    }
+    return conflictsOpened;
   }
 
   return {
@@ -3538,10 +4201,14 @@ function createVersionedTextStoreWithHooks(
           rejectDuplicateId("version", id);
         }
         const createdAtMs = readNowMs();
+        // Materialized-head semantics: a record-only sync divergence row may
+        // hold the highest moment_order, but it never touched this version's
+        // snapshots, so it must never become the fork point.
         const latestMoment = txDb
           .prepare(
             `SELECT moment_id FROM moments
              WHERE workspace_id = ? AND version_id = ?
+               AND (sync_record_only IS NULL OR sync_record_only = 0)
              ORDER BY moment_order DESC LIMIT 1`,
           )
           .get(workspaceId, source.id);
@@ -3605,6 +4272,60 @@ function createVersionedTextStoreWithHooks(
             WHERE workspace_id = ? AND version_id = ?`,
           )
           .run(id, workspaceId, source.id);
+        // Ship the fork-point state in the payload: the source version's
+        // snapshots AS OF this creation ARE the fork base, and importers must
+        // replay from them — their own current snapshots may contain edits
+        // this origin never saw.
+        const forkSnapshots = txDb
+          .prepare(
+            `SELECT s.object_id, s.path, s.content_kind, s.blob_sha256, s.updated_at_ms,
+                    s.latest_moment_id, s.metadata_origin, s.metadata_summary,
+                    s.metadata_correlation_id,
+                    COALESCE(b.byte_length, bb.byte_length) AS byte_length,
+                    o.created_at_ms AS object_created_at_ms
+             FROM snapshots s
+             JOIN file_objects o
+               ON o.workspace_id = s.workspace_id
+              AND o.object_id = s.object_id
+             LEFT JOIN blobs b
+               ON b.sha256 = s.blob_sha256
+              AND COALESCE(s.content_kind, 'text') = 'text'
+             LEFT JOIN binary_blobs bb
+               ON bb.sha256 = s.blob_sha256
+              AND COALESCE(s.content_kind, 'text') = 'binary'
+             WHERE s.workspace_id = ? AND s.version_id = ?
+             ORDER BY s.path`,
+          )
+          .all(workspaceId, source.id)
+          .map(
+            (row): VersionCreateForkSnapshot => ({
+              objectId: rowString(row, "object_id"),
+              objectCreatedAtMs: rowNumber(row, "object_created_at_ms"),
+              path: rowString(row, "path"),
+              ...(rowContentKind(row, "content_kind") === "binary"
+                ? { contentKind: "binary" as const }
+                : {}),
+              blobSha256: rowString(row, "blob_sha256"),
+              byteLength: rowNumber(row, "byte_length"),
+              updatedAtMs: rowNumber(row, "updated_at_ms"),
+              latestMomentId: rowString(row, "latest_moment_id"),
+              metadata: metadataFromRow(row),
+            }),
+          );
+        journalLocalReplicationOp(txDb, {
+          workspaceId,
+          opKind: "version.create",
+          payload: {
+            versionId: version.id,
+            name: version.name,
+            kind: version.kind,
+            forkVersionId: version.forkPoint?.versionId,
+            forkMomentId: version.forkPoint?.momentId,
+            createdAtMs: version.createdAtMs,
+            forkSnapshots,
+          } satisfies VersionCreatePayload,
+          recordedAtMs: version.createdAtMs,
+        });
         await persistBarrier();
         return cloneVersion(version);
       });
@@ -3674,7 +4395,7 @@ function createVersionedTextStoreWithHooks(
                     m.metadata_summary, m.metadata_correlation_id, m.author_json,
                     m.payload_after_content_kind AS content_kind,
                     binary_after.byte_length AS binary_byte_length,
-                    m.moment_order
+                    m.moment_order, m.sync_record_only
              FROM moments m
              LEFT JOIN binary_blobs binary_after
                ON binary_after.sha256 = m.payload_after_blob_sha256
@@ -3703,6 +4424,9 @@ function createVersionedTextStoreWithHooks(
             metadata: metadataFromRow(row),
             ...(author !== undefined ? { author } : {}),
             momentOrder: rowNumber(row, "moment_order"),
+            // Divergent peer history stays VISIBLE on the timeline but is
+            // explicitly marked so the UI can render it as inert.
+            ...(Number(row.sync_record_only ?? 0) === 1 ? { syncRecordOnly: true } : {}),
           };
         });
         return cloneJson({
@@ -3725,7 +4449,165 @@ function createVersionedTextStoreWithHooks(
         const row = db()
           .prepare(momentSelectSql("WHERE m.workspace_id = ? AND m.moment_id = ?"))
           .get(workspaceId, input.momentId.trim());
-        return row ? cloneMoment(momentFromRow(row)) : null;
+        if (!row) return null;
+        const moment = cloneMoment(momentFromRow(row));
+        // Same marker as listMoments: divergent peer history reads back
+        // explicitly flagged, never as ordinary applied history.
+        return Number(row.sync_record_only ?? 0) === 1
+          ? { ...moment, syncRecordOnly: true }
+          : moment;
+      });
+    },
+
+    applyReplicationOp(input): Promise<SyncApplyResult> {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        if (input.workspaceId !== workspaceId || input.workspaceId !== input.workspaceId.trim()) {
+          throw new VersionedTextStoreError("invalid-workspace", "Workspace id is required.");
+        }
+        if (
+          typeof input.originId !== "string" ||
+          !input.originId ||
+          !Number.isInteger(input.originSeq) ||
+          input.originSeq < 0 ||
+          typeof input.recordedAtMs !== "number" ||
+          !Number.isFinite(input.recordedAtMs)
+        ) {
+          throw new VersionedTextStoreError("invalid-input", "Replication envelope is invalid.");
+        }
+        const txDb = db();
+        const ackedSeq = readReplicationAckedSeq(txDb, workspaceId, input.originId);
+        if (input.originSeq <= ackedSeq) return skippedApplyResult();
+        if (importedReplicationLogExists(txDb, input)) {
+          ackReplicationPeer(txDb, workspaceId, input.originId, input.originSeq);
+          return skippedApplyResult();
+        }
+        if (input.originSeq !== ackedSeq + 1) {
+          throw new VersionedTextStoreError(
+            "state-corrupt",
+            `Replication origin ${input.originId} has a gap before sequence ${input.originSeq}.`,
+          );
+        }
+
+        let conflictsOpened = 0;
+        let pendingConflictResolves = 0;
+        switch (input.opKind) {
+          case "workspace.init":
+            ensureWorkspaceRow(txDb, workspaceId, input.recordedAtMs, { journal: false });
+            break;
+          case "moment.append":
+            conflictsOpened = applyRemoteMomentAppend(txDb, workspaceId, input.payload);
+            break;
+          case "version.create":
+            insertVersionFromReplication(txDb, workspaceId, input.payload);
+            break;
+          case "conflict.open": {
+            const conflict = input.payload;
+            if (
+              !txDb
+                .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
+                .get(workspaceId, conflict.id)
+            ) {
+              insertConflictRow(txDb, conflict);
+              conflictsOpened = 1;
+            }
+            break;
+          }
+          case "conflict.resolve": {
+            const payload = input.payload;
+            const direct = txDb
+              .prepare(
+                `UPDATE conflicts
+                 SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
+                 WHERE workspace_id = ? AND conflict_id = ?`,
+              )
+              .run(
+                payload.status,
+                payload.chosenFrom,
+                payload.resolution,
+                payload.updatedAtMs,
+                workspaceId,
+                payload.conflictId,
+              );
+            if (direct.changes === 0) {
+              // Sync divergence conflicts are minted with independent local
+              // ids per side, so the peer's id may not exist here. Fall back
+              // to the MIRROR of the peer's conflict: same target version,
+              // current/incoming heads swapped. The peer resolving its
+              // "incoming" (our content) mirrors to keeping our "current" —
+              // choice and resolution flip sides accordingly.
+              const mirror =
+                payload.targetVersionId !== undefined
+                  ? txDb
+                      .prepare(
+                        `SELECT conflict_id FROM conflicts
+                         WHERE workspace_id = ? AND status = 'open'
+                           AND target_version_id = ?
+                           AND current_latest_moment_id IS ?
+                           AND incoming_latest_moment_id IS ?
+                         ORDER BY created_at_ms, conflict_id
+                         LIMIT 1`,
+                      )
+                      .get(
+                        workspaceId,
+                        payload.targetVersionId,
+                        payload.incomingLatestMomentId ?? null,
+                        payload.currentLatestMomentId ?? null,
+                      )
+                  : undefined;
+              if (mirror) {
+                const mirroredChosenFrom =
+                  payload.chosenFrom === "current"
+                    ? "incoming"
+                    : payload.chosenFrom === "incoming"
+                      ? "current"
+                      : "merged";
+                const mirroredResolution =
+                  payload.resolution === "applied-incoming"
+                    ? "kept-current"
+                    : payload.resolution === "kept-current"
+                      ? "applied-incoming"
+                      : payload.resolution;
+                txDb
+                  .prepare(
+                    `UPDATE conflicts
+                     SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
+                     WHERE workspace_id = ? AND conflict_id = ?`,
+                  )
+                  .run(
+                    payload.status,
+                    mirroredChosenFrom,
+                    mirroredResolution,
+                    payload.updatedAtMs,
+                    workspaceId,
+                    rowString(mirror, "conflict_id"),
+                  );
+              } else {
+                // No local match at all: journal + ack the op (idempotency
+                // and ordering must hold) but surface it — a peer's
+                // resolution is never silently swallowed.
+                pendingConflictResolves = 1;
+              }
+            }
+            break;
+          }
+          case "version.rename":
+          case "chat.channel.create":
+          case "chat.thread.create":
+          case "chat.thread.update":
+          case "chat.message.append":
+            throw new VersionedTextStoreError(
+              "invalid-input",
+              `Text store cannot apply replication op ${input.opKind}.`,
+            );
+          default:
+            throw new VersionedTextStoreError("invalid-input", "Replication op kind is invalid.");
+        }
+        journalImportedReplicationOp(txDb, input);
+        ackReplicationPeer(txDb, workspaceId, input.originId, input.originSeq);
+        await persistBarrier();
+        return appliedApplyResult(conflictsOpened, pendingConflictResolves);
       });
     },
 
@@ -4007,12 +4889,41 @@ function createVersionedTextStoreWithHooks(
           resolution = "applied-incoming";
           conflict.chosenFrom = "incoming";
           if (conflict.incoming.exists) {
+            const destinationPath = conflict.incoming.path;
+            if (destinationPath !== conflict.path) {
+              // Divergent MOVE: applying the incoming side lands at the
+              // incoming path — never a silent write back at the local path.
+              // A destination occupied by another object must be handled
+              // first (it has its own path-occupancy conflict from import):
+              // fail closed instead of clobbering the occupant.
+              const occupant = selectSnapshotByPath(
+                txDb,
+                workspaceId,
+                conflict.targetVersionId,
+                destinationPath,
+              );
+              if (occupant) {
+                throw new VersionedTextStoreError(
+                  "target-path-exists",
+                  `File ${destinationPath} already exists; resolve its path-occupancy conflict before applying this incoming state.`,
+                );
+              }
+              if (conflict.current.exists) {
+                deletion = deleteTextFileInDb({
+                  db: txDb,
+                  workspaceId,
+                  versionId: conflict.targetVersionId,
+                  path: conflict.path,
+                  metadata,
+                });
+              }
+            }
             write = isBinaryState(conflict.incoming)
               ? writeBinaryFileInDb({
                   db: txDb,
                   workspaceId,
                   versionId: conflict.targetVersionId,
-                  path: conflict.path,
+                  path: destinationPath,
                   bytes: readBinaryBlobFromDb(txDb, conflict.incoming.sha256 ?? ""),
                   metadata,
                 })
@@ -4020,7 +4931,7 @@ function createVersionedTextStoreWithHooks(
                   db: txDb,
                   workspaceId,
                   versionId: conflict.targetVersionId,
-                  path: conflict.path,
+                  path: destinationPath,
                   text: conflict.incoming.text ?? "",
                   metadata,
                 });
@@ -4073,6 +4984,30 @@ function createVersionedTextStoreWithHooks(
             workspaceId,
             conflict.id,
           );
+        journalLocalReplicationOp(txDb, {
+          workspaceId,
+          opKind: "conflict.resolve",
+          payload: {
+            conflictId: conflict.id,
+            status: conflict.status,
+            chosenFrom: conflict.chosenFrom,
+            resolution: conflict.resolution,
+            updatedAtMs: conflict.updatedAtMs,
+            // Matching context for peers whose MIRROR of this conflict has a
+            // different local id (sync divergence conflicts are minted
+            // independently per side): the peer matches its open conflict by
+            // swapped current/incoming heads.
+            targetVersionId: conflict.targetVersionId,
+            path: conflict.path,
+            ...(conflict.current.latestMomentId !== undefined
+              ? { currentLatestMomentId: conflict.current.latestMomentId }
+              : {}),
+            ...(conflict.incoming.latestMomentId !== undefined
+              ? { incomingLatestMomentId: conflict.incoming.latestMomentId }
+              : {}),
+          } satisfies ConflictResolvePayload,
+          recordedAtMs: conflict.updatedAtMs,
+        });
         await persistBarrier();
         return cloneJson({ kind: "resolved", conflict, write, delete: deletion });
       });
@@ -4160,6 +5095,16 @@ function createVersionedTextStoreWithHooks(
         };
         const object = requireFileObjectRow(txDb, workspaceId, before.objectId);
         insertMomentRow(txDb, moment);
+        journalLocalReplicationOp(txDb, {
+          workspaceId,
+          opKind: "moment.append",
+          payload: momentAppendPayload({
+            db: txDb,
+            moment,
+            objectCreatedAtMs: object.createdAtMs,
+          }),
+          recordedAtMs: moment.recordedAtMs,
+        });
         txDb
           .prepare(
             "DELETE FROM path_aliases WHERE workspace_id = ? AND version_id = ? AND path = ? AND object_id = ?",
@@ -4241,6 +5186,16 @@ function createVersionedTextStoreWithHooks(
             `Mutation moment ${mutationMomentId} was not found for ${path}.`,
           );
         }
+        if (Number(momentRow.sync_record_only ?? 0) === 1) {
+          // A record-only row is a PEER's divergent history: its preimage
+          // describes the peer's fork-point state, not this store's lineage.
+          // Rolling it back would rewrite/delete the LOCAL live snapshot from
+          // a state this store never materialized.
+          throw new VersionedTextStoreError(
+            "invalid-input",
+            `Moment ${mutationMomentId} is a sync record-only divergence record and cannot be rolled back.`,
+          );
+        }
         const moment = momentFromRow(momentRow);
         const momentOrder = rowNumber(momentRow, "moment_order");
         const before =
@@ -4295,6 +5250,7 @@ function createVersionedTextStoreWithHooks(
             .prepare(
               `SELECT 1 FROM moments
                WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND moment_order > ?
+                 AND (sync_record_only IS NULL OR sync_record_only = 0)
                LIMIT 1`,
             )
             .get(workspaceId, versionId, moment.objectId, momentOrder)
