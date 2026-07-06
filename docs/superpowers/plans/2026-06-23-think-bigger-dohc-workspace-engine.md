@@ -2078,11 +2078,17 @@ sparing-usage-only rule for lane merges): every lane PR passes a three-part
 pre-merge review — (1) orchestrator (fable) review with independent suite and
 E2E re-runs, (2) a CodeRabbit CLI review of the branch diff
 (`coderabbit review --base-commit <merge-base>`) with findings triaged under
-the CodeRabbit-loop rules (security/data-integrity findings fixed, rejections
-documented), and (3) a codex (gpt-5.5) review via the codex-review skill as an
-independent second-model perspective. Merge only after all three pass. The
-batched arc-gate CodeRabbit sweep remains on top. Checkpoint summary to the
-user between waves.
+the CodeRabbit-loop rules, and (3) a codex (gpt-5.5) review via the
+codex-review skill as an independent second-model perspective. Efficiency
+rules (user direction, 2026-07-06): the two model reviews run in PARALLEL
+with the orchestrator's verification, are timeboxed (~15 min — a late
+reviewer's findings fold into the arc gate instead of blocking), and triage
+is two-tier: critical/major security and data-integrity findings block the
+merge and are fixed immediately; minor/trivial findings are recorded and
+batched into the arc-gate sweep. One fix round per lane, no re-review loops
+unless a blocking fix was itself risky. Docs-only lanes need only the docs
+checker. The batched arc-gate CodeRabbit sweep remains on top. Checkpoint
+summary to the user between waves.
 
 ### PR 01 - Workspace Engine Contracts And Substrate
 
