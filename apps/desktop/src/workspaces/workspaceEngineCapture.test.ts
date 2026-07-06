@@ -281,6 +281,100 @@ describe("workspaceEngineCapture batch capture", () => {
     ]);
     expect(moments[1].summary).toBe("Stopped tracking non-text content");
   });
+
+  it("honors files policy tracked false without deleting prior moments", async () => {
+    const root = await tempRoot();
+    await write(root, "kept.md", "v1\n");
+    const engine = capture(root);
+    engine.captureBatch([{ path: "kept.md", operation: "update" }]);
+    await engine.flush();
+    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+      ["kept.md", "v1\n"],
+    ]);
+
+    await write(
+      root,
+      ".dohc/files.toml",
+      '[[rule]]\npath = "kept.md"\ntracked = false\n\n[[rule]]\npath = "new.md"\ntracked = false\n',
+    );
+    await write(root, "kept.md", "v2\n");
+    await write(root, "new.md", "new\n");
+    engine.captureBatch([
+      { path: "kept.md", operation: "update" },
+      { path: "new.md", operation: "update" },
+    ]);
+    await engine.stop();
+
+    expect(readEngineMoments(root).map((m) => [m.path, m.text])).toEqual([
+      ["kept.md", "v1\n"],
+    ]);
+  });
+
+  it("retires a policy-untracked path on the next reconcile pass without touching disk", async () => {
+    const root = await tempRoot();
+    await write(root, "kept.md", "v1\n");
+    const first = capture(root);
+    first.captureBatch([{ path: "kept.md", operation: "update" }]);
+    await first.stop();
+
+    // Policy lands while the engine is closed; the next session's startup
+    // reconciliation must retire the engine snapshot (never-stale rule) with
+    // an honest summary while leaving the disk file alone.
+    await write(root, ".dohc/files.toml", '[[rule]]\npath = "kept.md"\ntracked = false\n');
+    const second = capture(root);
+    second.start();
+    await second.stop();
+
+    const moments = readEngineMoments(root);
+    expect(moments.map((m) => [m.path, m.operation])).toEqual([
+      ["kept.md", "write"],
+      ["kept.md", "delete"],
+    ]);
+    expect(moments[1].summary).toBe("Stopped tracking by policy");
+    await expect(readFile(join(root, "kept.md"), "utf8")).resolves.toBe("v1\n");
+  });
+
+  it("surfaces malformed policy through onError without breaking other files", async () => {
+    const root = await tempRoot();
+    await write(root, ".dohc/files.toml", '[[rule]]\npath = "ignored.md"\nmode = true\n');
+    await write(root, "a.md", "alpha\n");
+    await write(root, "b.md", "beta\n");
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, {
+      onError: (context, error) => {
+        errors.push({ context, error });
+      },
+    });
+
+    engine.captureBatch([
+      { path: "a.md", operation: "update" },
+      { path: "b.md", operation: "update" },
+    ]);
+    await engine.stop();
+
+    expect(errors.some((entry) => entry.context.includes("policy validation"))).toBe(true);
+    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["a.md", "b.md"]);
+  });
+
+  it("refreshes policy files on the next capture pass without watcher invalidation", async () => {
+    const root = await tempRoot();
+    await write(root, "policy-target.md", "v1\n");
+    const engine = capture(root);
+    engine.captureBatch([{ path: "policy-target.md", operation: "update" }]);
+    await engine.flush();
+    expect(readEngineMoments(root).map((m) => m.text)).toEqual(["v1\n"]);
+
+    await write(
+      root,
+      ".dohc/files.toml",
+      '[[rule]]\npath = "policy-target.md"\ntracked = false\n',
+    );
+    await write(root, "policy-target.md", "v2\n");
+    engine.captureBatch([{ path: "policy-target.md", operation: "update" }]);
+    await engine.stop();
+
+    expect(readEngineMoments(root).map((m) => m.text)).toEqual(["v1\n"]);
+  });
 });
 
 describe("workspaceEngineCapture expected engine events", () => {

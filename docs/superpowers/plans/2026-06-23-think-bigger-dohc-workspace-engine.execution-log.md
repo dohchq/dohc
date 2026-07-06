@@ -14848,3 +14848,160 @@ Date completed: 2026-07-06
 - VersionMenu.refreshKey + VersionMergeDialog.onOutcome make version state
   externally drivable without staleness — any surface can now switch/merge
   and keep the selector honest.
+
+## PR WS-F - Effective Policy Resolver
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-wsf-policy
+Worktree: /home/ice/dev/dohc-wsf-policy
+Implementation workstream, if used: codex CLI (gpt-5.5) driven by a Claude
+lane (fable-5) per the codex-implementation skill; Claude reviewed the diff
+line-by-line, added smol-toml, and hand-fixed the items below
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+This is the plan's PR 04 adapted to the shipped engine: a path/file policy
+resolver over the engine that exists today — no actor permissions, sharing,
+chat/export projections, or object-family hooks yet (the contracts mapping
+table row was updated to say exactly that).
+
+- [x] Policy file parsing: `.dohc/files.toml` and `.dohc/visibility.toml`
+      as source-backed, engine-validated policy inputs (`writable` +
+      `policyValidated` per the projection vocabulary). Real TOML parsing
+      via smol-toml (pure JS, new workspace-engine dependency); strict
+      shape validation on top: exactly one top-level `rule` array of
+      tables, allowed keys only (`path`+`tracked`/`searchable` for
+      files.toml, `path`+`visibility`/`export` for visibility.toml),
+      correct types, validated globs. Any invalid rule, unknown key, or
+      syntax error rejects the WHOLE file with an errors list — never
+      partially applied.
+- [x] `resolveEffectivePolicy(input) -> EffectivePolicyResult` in
+      packages/workspace-engine/src/effectivePolicy.ts (pure, no fs):
+      answers tracked/versioned/searchable/visibility/export/captureOwned
+      plus the floor classification. Precedence: classifyEngineFilePath is
+      computed FIRST; an ignored (.dohc/.git/node_modules/.dohc-write-*)
+      or secret (.env patterns, decoded) floor returns a locked-down
+      result before policy rules are even consulted — policy files can
+      narrow (untrack/unsearch/hide) but can never widen. versioned and
+      captureOwned mirror post-policy tracked (no separate tiers exist in
+      this slice; documented inline).
+- [x] Glob subset (documented in a doc comment, rejected at validation):
+      slash-separated segments, no leading slash or `..`, at most one `*`
+      per segment (non-slash chars), `**` only as the final whole segment
+      matching strict descendants, bare `**` allowed. `?`, classes,
+      braces, negation, backslashes, mid-pattern `**` all reject with a
+      reason.
+- [x] Capture integration: workspaceEnginePolicyFile.ts reads both files
+      with the workspaceSettingsFile defensive pattern (lstat, symlink
+      refusal, regular-file check, size cap; absent = defaults, invalid =
+      errors + defaults). Refresh rule: `.dohc/**` is watcher-ignored so
+      policy edits never produce events — instead both files are re-read
+      fresh at the top of EVERY serialized capture/version task (batch
+      capture, reconcile, create/switch/compare/merge/resolve/restore/
+      rename), so a policy edit takes effect on the very next pass with no
+      cache invalidation. Malformed policy surfaces through the existing
+      onError hook ("workspace policy validation") and that pass runs with
+      floor-only defaults — other files keep capturing.
+- [x] Untracked semantics: live batch capture SKIPS policy-untracked
+      paths (edits stop producing moments; prior moments retained); the
+      next reconcile pass RETIRES a previously captured snapshot with an
+      honest "Stopped tracking by policy" delete moment (the same
+      never-stale-but-authoritative rule as content that stops being
+      engine-ownable text) while leaving the disk file untouched.
+      planMaterialization skips untracked paths on both sides so version
+      switches never write or delete them.
+- [x] Search integration: defaultFileVisibility in workspaceSearch.ts now
+      builds its baseline from resolveEffectivePolicy (floor-only — byte
+      identical behavior for workspaces without policy files); a search
+      test proves the injectable fileVisibility hook composed with
+      resolveEffectivePolicy honors `searchable = false` end to end.
+- [x] Package wiring: `./effectivePolicy` export map entry + index.ts
+      re-exports; contracts mapping-table row for
+      Phase0EffectivePolicyInput/Result updated honestly.
+
+### Security property verification (floors unoverridable)
+
+- Reviewed by Claude line-by-line: resolveEffectivePolicy computes the
+  floor first and returns the locked-down result (tracked/searchable
+  false, hidden, excluded) UNCONDITIONALLY when the floor is ignored or
+  secret — rules are never consulted in that branch, so no files.toml/
+  visibility.toml content can unhide secrets or grant access.
+- All four capture-side ownership checks (captureOnePath,
+  reconcileDiskIntoVersion, assertEngineWritablePath via materialize,
+  beginFileRename) route through the resolver; the only remaining
+  production consumers of the bare classifier are the resolver itself and
+  the engine index re-export.
+- Escalation-denied test proves the rule WOULD have applied (identical
+  glob shape flips behavior on a tracked-floor path) and that the same
+  rule has no effect on `.env`/`config/.env`/`.dohc/**` paths.
+- Enforcement is engine-side only: parsing a policy file grants nothing;
+  the resolver is consulted at use time by capture and search.
+
+### Tests / validation
+
+- workspace-engine: 247 passed (214 baseline + 32 effectivePolicy.test.ts
+  + 1 search seam test) — `pnpm --filter @dohc/workspace-engine test`.
+  Covers parser accept/reject tables (syntax, unknown top-level key,
+  non-array rule, missing path, unknown rule key, wrong types, invalid
+  globs, whole-file rejection on any bad rule), glob match/reject tables,
+  floor > policy > default precedence, later-rule-wins per explicitly-set
+  field only, escalation-denied, and a no-policy-file table asserting
+  resolver tracked === classifyEngineFilePath tracked for every floor
+  kind (unchanged-defaults proof).
+- desktop vitest: 877 passed (873 post-0N-2 baseline + 4:
+  capture honors tracked=false without deleting prior moments; reconcile
+  retires a policy-untracked path with "Stopped tracking by policy" and
+  disk untouched; malformed policy surfaces via onError while other files
+  still capture; policy-file edit honored by the very next captureBatch
+  with no restart) — `TMPDIR=/tmp pnpm --filter @dohc/desktop test`.
+- Typechecks clean: workspace-engine, workspace-contracts, desktop.
+- `git diff --check` clean; `node scripts/check-think-bigger-doc-links.mjs`
+  passes.
+- Rebased onto origin/main c2f6fcbe (post-0N-2) cleanly; all counts above
+  are from the rebased branch.
+
+### Hand-fixes after the codex round
+
+- codex's sandbox had no network (EAI_AGAIN), so it shipped a hand-rolled
+  TOML-subset parser; Claude added smol-toml@1.7.0 (additive-only
+  lockfile change) and replaced the private parser — a `.toml` file that
+  rejects valid TOML would lie about contracts; strictness now lives in
+  shape validation only. One test error-pattern updated to match
+  smol-toml's syntax-error message.
+- Made reconcile retirement of policy-untracked paths explicit with the
+  "Stopped tracking by policy" summary (was falling through to the
+  generic "no longer on disk" delete with a misleading pass summary) and
+  added the pinning test.
+- Updated the capture module's "what the engine owns" comment from the
+  bare classifier to the resolver + floor story.
+
+### Remaining risk
+
+- Live batch capture skips (does not retire) untracked paths, so a stale
+  engine snapshot can persist between a policy edit and the next
+  reconcile pass (startup or any version operation). Converges on every
+  pass; acceptable at alpha, revisit if search over engine snapshots
+  ships before desktop search reads policy files.
+- Engine-layer search default is floor-only by design (searchWorkspaceEngine
+  has no workspace-root fs access); the desktop search surface must read
+  `.dohc` policy the way capture does and pass rules through the
+  fileVisibility hook when it adopts engine search — the seam and its
+  test exist, the wiring is a later lane.
+- `visibility`/`export` results are resolved and tested but have no
+  consuming surface yet (exports/sharing are later PRs); only tracked/
+  searchable are enforced today.
+
+### What later lanes build on
+
+- resolveEffectivePolicy is the ONE path-policy seam: future export,
+  sharing, and status surfaces consume EffectivePolicyResult instead of
+  re-deriving path rules; actor/share/projection inputs extend
+  EffectivePolicyInput without touching the floor branch.
+- readWorkspaceEnginePolicy + the per-task fresh-read rule is the pattern
+  for any main-process consumer that needs policy (e.g. desktop search).
+- The parser's whole-file rejection + onError surfacing is the template
+  for future `.dohc` policy files (the allowlist can grow without new
+  partial-application hazards).

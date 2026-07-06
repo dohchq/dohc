@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./effectivePolicy": "./src/effectivePolicy.ts",
     "./linkedChatStore": "./src/linkedChatStore.ts",
     "./versioned-file-workspace": "./src/versionedFileWorkspace.ts",
     "./workspaceSearch": "./src/workspaceSearch.ts",
@@ -17,7 +18,8 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
-    "@dohc/workspace-history": "workspace:*"
+    "@dohc/workspace-history": "workspace:*",
+    "smol-toml": "^1.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
