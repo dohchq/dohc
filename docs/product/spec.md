@@ -64,9 +64,9 @@ lives in `apps/desktop`; the Cloud web client lives in `apps/web`.
 
 ## Stack
 
-TanStack Start + TanStack Router, React 19, Vite, Tailwind CSS v4,
-Convex (backend + agent), WorkOS AuthKit, Tiptap, Yjs, Hocuspocus, Vitest,
-Nitro.
+Electron, React 19, Vite, Tailwind CSS v4, SQLite (`node:sqlite`), Rust
+(workspace kernel), Tiptap, Yjs + Hocuspocus (opt-in cloud collab), WorkOS
+AuthKit (cloud auth), Vitest, Playwright.
 
 ## Invariants
 

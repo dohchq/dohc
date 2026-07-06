@@ -6,63 +6,50 @@
   `10.24.0` (`packageManager` is pinned in the root `package.json`).
   The sanitizer stack depends on packages that require Node `^20.19.0`,
   `^22.13.0`, or `>=24.0.0`; Node 18 is not supported.
-- A Convex deployment and a WorkOS AuthKit app (for auth).
+- Docker only if you run the opt-in cloud stack (Postgres, MinIO,
+  Hocuspocus).
 
-## Setup
+## Desktop (the product)
 
 ```bash
-cd /home/ice/dev/dohc
 pnpm install
-cp apps/app/.env.example apps/app/.env.local   # then fill in real values
+pnpm dev:desktop
 ```
 
-## Environment variables
-
-Set these in `apps/app/.env.local` (gitignored):
-
-| Variable                  | Purpose                                  |
-| ------------------------- | ---------------------------------------- |
-| `CONVEX_DEPLOYMENT`       | Convex deployment used by `convex dev`   |
-| `VITE_CONVEX_URL`         | Convex client URL                        |
-| `VITE_CONVEX_SITE_URL`    | Convex site URL                          |
-| `VITE_HOCUSPOCUS_URL`     | Hocuspocus WebSocket URL, usually `ws://127.0.0.1:1234` |
-| `WORKOS_CLIENT_ID`        | WorkOS AuthKit client id                 |
-| `WORKOS_API_KEY`          | WorkOS API key                           |
-| `WORKOS_REDIRECT_URI`     | e.g. `http://localhost:3000/api/auth/callback` |
-| `WORKOS_COOKIE_PASSWORD`  | 32+ char random string                   |
-| `ANTHROPIC_API_KEY`       | Only for the agent / live eval           |
-| `VITE_DOHC_INLINE_ATOMS`  | Optional feature flag                    |
-
-## Running
+No backend, no env file: workspaces are folders on disk and the workspace
+engine stores per-workspace state under `.dohc/engine/`. Useful loops:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d postgres hocuspocus
-pnpm dev        # vite (port 3000) + convex dev, from the root
+pnpm --filter @dohc/desktop test   # desktop unit suite
+pnpm test:desktop:e2e              # Playwright E2E (builds first)
+pnpm typecheck                     # repo-wide tsc --noEmit
 ```
 
-The app runs at http://localhost:3000.
+## Cloud stack (opt-in, retiring per audit Phase D)
 
-The v2 editor also needs matching Hocuspocus secrets in Convex env. For local
-dev using the compose defaults:
+Only needed for cloud sync/shares/collab development:
 
 ```bash
-pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_JWT_SECRET 'dev-jwt-secret-change-me-with-at-least-32-bytes'
-pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_ADMIN_URL 'http://127.0.0.1:1234'
-pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_ADMIN_TOKEN 'dev-admin-token-change-me'
+docker compose -f docker-compose.dev.yml up -d postgres minio hocuspocus
+pnpm dev:workspace-api
+pnpm dev            # apps/web dev server
 ```
 
-To test Convex-backed bootstrap instead of the dev allow-all ACL, also set the
-same `HOCUSPOCUS_CONVEX_SERVER_TOKEN` for Convex and the Hocuspocus process, and
-set `HOCUSPOCUS_CONVEX_URL` for Hocuspocus.
+Environment variables for the stack live in `.env.self-host.example` and
+`docker-compose.dev.yml` (Postgres, MinIO, `HOCUSPOCUS_*`, WorkOS for cloud
+auth, `SQLITE_WORKER_TOKEN`, `APP_TESTER_TOKEN`). See
+[`docs/self-hosting.md`](../self-hosting.md).
 
 ## Monorepo layout
 
 ```text
-apps/app              TanStack Start + Convex product app
-packages/brand        dohc mark, lockups, tokens, brand constants
-packages/config       shared TypeScript config
-docs                  product, brand, development, qa, security
+apps/desktop          Electron desktop app (local-first product)
+apps/web              web client for the opt-in cloud stack
+packages              workspace engine, contracts, core/fs/history/sync,
+                      MCP server, SDK, brand, performance
+services              Hocuspocus, workspace API, SQLite worker, agent sandbox
+crates                Rust workspace kernel
 ```
 
-Internal workspace packages ship raw TS source; the app transpiles them
-via `ssr.noExternal` in `apps/app/vite.config.ts`.
+Internal workspace packages ship raw TS source; consumers transpile them
+(electron-vite for the desktop, Vite `ssr.noExternal` for the web app).

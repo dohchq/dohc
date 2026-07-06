@@ -6,10 +6,12 @@ clear, traceable, and ready. Spoken "dock"; always written lowercase.
 ## Layout
 
 ```text
-apps/app              TanStack Start + Convex product app
-packages/brand        dohc mark, lockups, CSS tokens, brand constants
-packages/config       shared TypeScript config
-services              Hocuspocus, workspace API, SQLite worker, app tester
+apps/desktop          Electron desktop app (the product; local-first)
+apps/web              web client for the opt-in cloud stack
+packages              workspace engine, contracts, core/fs/history/sync,
+                      MCP server, SDK, brand, performance
+services              Hocuspocus, workspace API, SQLite worker, agent sandbox
+crates                Rust workspace kernel (supervised sidecar)
 docs                  product, brand, development, qa, security
 ```
 
@@ -17,36 +19,34 @@ docs                  product, brand, development, qa, security
 
 ```bash
 pnpm install
-cp apps/app/.env.example apps/app/.env.local   # fill in real values
-pnpm dev        # local Postgres + Hocuspocus sync, vite (:3000), Convex dev
+pnpm dev:desktop     # run the desktop app
 ```
 
-## Backend modes
+The desktop app is local-first: workspaces are folders on disk, and the
+workspace engine (per-workspace SQLite under `.dohc/engine/`) records
+history, versions, chats, and search with no backend.
 
-Convex remains the default backend during the migration. Postgres is the
-self-host/cloud candidate backend:
+## Cloud stack (opt-in)
+
+The Postgres-backed cloud stack serves opt-in sync/shares and is retiring in
+favor of engine-native sync (see
+[`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
+and [`docs/self-hosting.md`](docs/self-hosting.md)):
 
 ```bash
-DOHC_BACKEND=postgres VITE_DOHC_BACKEND=postgres pnpm dev:app
-pnpm check:self-host
+pnpm dev:postgres        # local Postgres + MinIO
+pnpm dev:workspace-api   # workspace API
+pnpm check:self-host     # validate the self-host compose/service matrix
+pnpm reset:postgres      # reset local Postgres dev data
 ```
-
-See [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
-and [`docs/self-hosting.md`](docs/self-hosting.md).
-
-## Reset dev data
-
-pnpm reset:dev --confirm WIPE_DEV_DATA --email you@example.com --delete-workos-orgs
 
 ## Commands
 
 ```bash
-pnpm typecheck   # tsc --noEmit across workspaces
-pnpm test        # vitest (incl. the brand no-legacy guard)
-pnpm build       # vite build (TanStack Start + Nitro)
-pnpm dev:sync    # start only local Postgres + Hocuspocus
-pnpm dev:app     # start only Vite + Convex dev
-pnpm check:self-host # validate the self-host compose/service matrix
+pnpm typecheck          # tsc --noEmit across workspaces
+pnpm test               # vitest across workspaces
+pnpm build              # build all packages/apps
+pnpm test:desktop:e2e   # desktop Playwright suite (builds first)
 ```
 
 ## Docs
@@ -64,12 +64,6 @@ pnpm check:self-host # validate the self-host compose/service matrix
 
 ## Stack
 
-TanStack Start + Router, React 19, Vite, Tailwind CSS v4, Convex, WorkOS
-AuthKit, Tiptap, Yjs, Hocuspocus, Vitest, Nitro.
-
-## Deployment
-
-The app targets `dohc.ai` (app at `app.dohc.ai`). Configure Convex and
-WorkOS AuthKit redirect URLs for the target host; keep `localhost`
-redirects for local dev. See `docs/development/local-dev.md` for the env
-contract.
+Electron, React 19, Vite, Tailwind CSS v4, Tiptap, SQLite (`node:sqlite`),
+Rust (workspace kernel), Yjs + Hocuspocus (cloud collab), WorkOS AuthKit
+(cloud auth), Vitest, Playwright.
