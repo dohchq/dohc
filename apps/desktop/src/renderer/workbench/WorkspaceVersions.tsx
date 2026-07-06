@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, FileText, Layers, Lock, RefreshCw } from "lucide-react";
+import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -957,6 +957,7 @@ function ConflictResolver(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [combined, setCombined] = useState<string | null>(null);
+  const isBinary = conflict.contentKind === "binary";
   const liveToken = useRef(0);
   useEffect(
     () => () => {
@@ -1000,18 +1001,35 @@ function ConflictResolver(props: {
       className="rounded border border-line bg-bg p-2"
     >
       <div className="flex items-center gap-1.5 pb-2">
-        <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
+        {isBinary ? (
+          <FileArchive size={12} aria-hidden className="shrink-0 text-subtle" />
+        ) : (
+          <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
+        )}
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
           {conflict.path}
         </span>
       </div>
+      {isBinary ? (
+        <div
+          data-testid="version-conflict-binary"
+          className="mb-2 rounded border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
+        >
+          Binary file. Main has{" "}
+          {conflict.currentBinary ? `${conflict.currentBinary.byteLength} bytes` : "no copy"};{" "}
+          {sourceName} has{" "}
+          {conflict.incomingBinary ? `${conflict.incomingBinary.byteLength} bytes` : "no copy"}.
+        </div>
+      ) : null}
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-1.5">
-          <ConflictSidePane
-            heading="On Main"
-            text={conflict.currentText}
-            missingNote="Main doesn't have this file."
-          />
+          {isBinary ? null : (
+            <ConflictSidePane
+              heading="On Main"
+              text={conflict.currentText}
+              missingNote="Main doesn't have this file."
+            />
+          )}
           <button
             type="button"
             data-testid="version-conflict-keep-current"
@@ -1023,11 +1041,13 @@ function ConflictResolver(props: {
           </button>
         </div>
         <div className="flex min-w-0 flex-col gap-1.5">
-          <ConflictSidePane
-            heading={`In ${sourceName}`}
-            text={conflict.incomingText}
-            missingNote={`${sourceName} removed this file.`}
-          />
+          {isBinary ? null : (
+            <ConflictSidePane
+              heading={`In ${sourceName}`}
+              text={conflict.incomingText}
+              missingNote={`${sourceName} removed this file.`}
+            />
+          )}
           <button
             type="button"
             data-testid="version-conflict-keep-incoming"
@@ -1039,7 +1059,7 @@ function ConflictResolver(props: {
           </button>
         </div>
       </div>
-      {combined === null ? (
+      {!isBinary && combined === null ? (
         <button
           type="button"
           data-testid="version-conflict-combine"
@@ -1051,7 +1071,7 @@ function ConflictResolver(props: {
         >
           Combine by hand instead…
         </button>
-      ) : (
+      ) : !isBinary ? (
         <div className="mt-2 flex flex-col gap-1.5">
           <label
             className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
@@ -1062,7 +1082,7 @@ function ConflictResolver(props: {
           <textarea
             id={`combined-${conflict.conflictId}`}
             data-testid="version-conflict-combined-input"
-            value={combined}
+            value={combined ?? ""}
             disabled={busy}
             rows={6}
             onChange={(event) => setCombined(event.target.value)}
@@ -1081,14 +1101,14 @@ function ConflictResolver(props: {
               type="button"
               data-testid="version-conflict-apply-combined"
               disabled={busy}
-              onClick={() => void resolve({ kind: "keep-combined", text: combined })}
+              onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
               className="h-7 cursor-pointer rounded bg-ink px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
             >
               Use this combined copy
             </button>
           </div>
         </div>
-      )}
+      ) : null}
       {error ? (
         <p role="alert" className="mb-0 mt-2 text-[11px] leading-4 text-danger">
           {error}
@@ -1224,6 +1244,8 @@ export function VersionComparePage(props: {
                 <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
                   {file.protected ? (
                     <Lock size={13} aria-hidden className="shrink-0 text-subtle" />
+                  ) : file.binary ? (
+                    <FileArchive size={13} aria-hidden className="shrink-0 text-subtle" />
                   ) : (
                     <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
                   )}
@@ -1245,6 +1267,18 @@ export function VersionComparePage(props: {
                     <span className="text-xs text-subtle">
                       This file follows the version, but its contents are never
                       shown in comparisons.
+                    </span>
+                  </div>
+                ) : file.binary ? (
+                  <div
+                    data-testid="version-compare-binary"
+                    className="flex flex-col items-center gap-1 px-4 py-8 text-center"
+                  >
+                    <FileArchive size={14} aria-hidden className="text-subtle" />
+                    <span className="text-sm text-muted">Binary file changed</span>
+                    <span className="text-xs text-subtle">
+                      This file follows the version byte-for-byte, but contents are
+                      not shown in text diffs.
                     </span>
                   </div>
                 ) : (

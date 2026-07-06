@@ -13,6 +13,7 @@ import { nativeTmpdir } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
@@ -75,6 +76,32 @@ function readEngineMoments(rootPath: string): EngineMomentRow[] {
   }
 }
 
+function readBinaryBlobRows(rootPath: string): Array<{ sha256: string; byteLength: number }> {
+  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
+    readOnly: true,
+  });
+  try {
+    return db
+      .prepare("SELECT sha256, byte_length AS byteLength FROM binary_blobs ORDER BY sha256")
+      .all() as Array<{ sha256: string; byteLength: number }>;
+  } finally {
+    db.close();
+  }
+}
+
+function readSnapshotKinds(rootPath: string): Array<{ path: string; contentKind: string }> {
+  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
+    readOnly: true,
+  });
+  try {
+    return db
+      .prepare("SELECT path, content_kind AS contentKind FROM snapshots ORDER BY path")
+      .all() as Array<{ path: string; contentKind: string }>;
+  } finally {
+    db.close();
+  }
+}
+
 async function write(root: string, path: string, contents: string | Uint8Array) {
   const absolute = join(root, path);
   await mkdir(dirname(absolute), { recursive: true });
@@ -119,6 +146,94 @@ function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown
 }
 
 describe("workspaceEngineCapture batch capture", () => {
+  it("captures an in-cap binary file as a binary moment", async () => {
+    const root = await tempRoot();
+    const pngLike = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    await write(root, "logo.png", pngLike);
+    const engine = capture(root, {});
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+
+    expect(readSnapshotKinds(root)).toEqual([{ path: "logo.png", contentKind: "binary" }]);
+    expect(readBinaryBlobRows(root)).toEqual([
+      {
+        sha256: createHash("sha256").update(pngLike).digest("hex"),
+        byteLength: pngLike.byteLength,
+      },
+    ]);
+    expect(readEngineMoments(root)).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("skips oversized binary content exactly like other untracked content", async () => {
+    const root = await tempRoot();
+    await write(root, "huge.png", new Uint8Array(MAX_ENGINE_CAPTURE_BINARY_BYTES + 1));
+    const engine = capture(root, {});
+    engine.captureBatch([{ path: "huge.png", operation: "update" }]);
+    await engine.flush();
+
+    expect(readEngineMoments(root)).toHaveLength(0);
+    expect(readBinaryBlobRows(root)).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("captures an over-text-cap invalid-UTF-8 text-media file as a binary moment", async () => {
+    const root = await tempRoot();
+    // 1 MiB of 0xFF: a text-suffixed path over the text cap that is binary
+    // in disguise (invalid UTF-8) and within the binary cap. The text cap
+    // must not retire it before the binary path can claim it.
+    const bytes = Buffer.alloc(1024 * 1024, 0xff);
+    await write(root, "blob.md", bytes);
+    const engine = capture(root, {});
+    engine.captureBatch([{ path: "blob.md", operation: "update" }]);
+    await engine.stop();
+
+    expect(readSnapshotKinds(root)).toEqual([{ path: "blob.md", contentKind: "binary" }]);
+    expect(readBinaryBlobRows(root)).toEqual([
+      {
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        byteLength: bytes.byteLength,
+      },
+    ]);
+    expect(readEngineMoments(root)).toHaveLength(1);
+  });
+
+  it("retires an over-text-cap valid-UTF-8 text file instead of demoting it to binary", async () => {
+    const root = await tempRoot();
+    await write(root, "big.md", "small\n");
+    const engine = capture(root, {});
+    engine.captureBatch([{ path: "big.md", operation: "update" }]);
+    await engine.flush();
+
+    // Genuine text over the text cap is untracked content (established
+    // behavior): the previously tracked path is retired, never stored as
+    // binary bytes.
+    await write(root, "big.md", "x".repeat(1024 * 1024));
+    engine.captureBatch([{ path: "big.md", operation: "update" }]);
+    await engine.stop();
+
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["big.md", "write"],
+      ["big.md", "delete"],
+    ]);
+    expect(readBinaryBlobRows(root)).toHaveLength(0);
+  });
+
+  it("does not record a duplicate moment for unchanged binary recapture", async () => {
+    const root = await tempRoot();
+    const bytes = Buffer.from([0, 1, 2, 255]);
+    await write(root, "logo.png", bytes);
+    const engine = capture(root, {});
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+
+    expect(readEngineMoments(root)).toHaveLength(1);
+    expect(readBinaryBlobRows(root)).toHaveLength(1);
+    await engine.stop();
+  });
+
   it("captures a settled write into the engine main version", async () => {
     const root = await tempRoot();
     await write(root, "notes/today.md", "# Today\n");
@@ -185,7 +300,7 @@ describe("workspaceEngineCapture batch capture", () => {
     ]);
   });
 
-  it("skips secret, ignored, binary, and oversized files entirely", async () => {
+  it("skips secret, ignored, and oversized files while capturing in-cap binary content", async () => {
     const root = await tempRoot();
     await write(root, ".env", "SECRET=1\n");
     await write(root, "config/.env", "SECRET=2\n");
@@ -209,7 +324,16 @@ describe("workspaceEngineCapture batch capture", () => {
     ]);
     await engine.stop();
 
-    expect(readEngineMoments(root).map((m) => m.path)).toEqual(["ok.md"]);
+    expect(readEngineMoments(root).map((m) => m.path)).toEqual([
+      "logo.png",
+      "not-utf8.md",
+      "ok.md",
+    ]);
+    expect(readSnapshotKinds(root)).toEqual([
+      { path: "logo.png", contentKind: "binary" },
+      { path: "not-utf8.md", contentKind: "binary" },
+      { path: "ok.md", contentKind: "text" },
+    ]);
   });
 
   // Symlink containment (CodeRabbit arc gate): the live watcher can emit a
@@ -263,7 +387,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(moments.some((m) => m.text.includes("outside secret"))).toBe(false);
   });
 
-  it("retires a tracked path that stops being engine-ownable text", async () => {
+  it("preserves identity when a tracked text path becomes in-cap binary content", async () => {
     const root = await tempRoot();
     await write(root, "data.md", "text at first\n");
     const engine = capture(root);
@@ -277,9 +401,31 @@ describe("workspaceEngineCapture batch capture", () => {
     const moments = readEngineMoments(root);
     expect(moments.map((m) => [m.path, m.operation])).toEqual([
       ["data.md", "write"],
-      ["data.md", "delete"],
+      ["data.md", "write"],
     ]);
-    expect(moments[1].summary).toBe("Stopped tracking non-text content");
+    // The transition is an honest moment, not a generic update.
+    expect(moments[1].summary).toBe("Became a binary file");
+    expect(readSnapshotKinds(root)).toEqual([{ path: "data.md", contentKind: "binary" }]);
+  });
+
+  it("records an honest moment when a binary path becomes text again", async () => {
+    const root = await tempRoot();
+    await write(root, "data.md", new Uint8Array([0x00, 0x01, 0x02, 0xff]));
+    const engine = capture(root);
+    engine.captureBatch([{ path: "data.md", operation: "update" }]);
+    await engine.flush();
+
+    await write(root, "data.md", "text again\n");
+    engine.captureBatch([{ path: "data.md", operation: "update" }]);
+    await engine.stop();
+
+    const moments = readEngineMoments(root);
+    expect(moments.map((m) => [m.path, m.operation])).toEqual([
+      ["data.md", "write"],
+      ["data.md", "write"],
+    ]);
+    expect(moments[1].summary).toBe("Became a text file");
+    expect(readSnapshotKinds(root)).toEqual([{ path: "data.md", contentKind: "text" }]);
   });
 
   it("honors files policy tracked false without deleting prior moments", async () => {

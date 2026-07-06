@@ -54,22 +54,36 @@ export async function compareVersionFiles(
     const target = targetByPath.get(path);
     const source = sourceByPath.get(path);
     if (target && source) {
-      if (target.text !== source.text) {
+      const targetKind = target.contentKind ?? "text";
+      const sourceKind = source.contentKind ?? "text";
+      const same =
+        targetKind === sourceKind &&
+        (targetKind === "binary" ? target.sha256 === source.sha256 : target.text === source.text);
+      if (!same) {
         changes.push({
           path,
           status: "modified",
-          currentText: target.text,
-          incomingText: source.text,
+          ...(targetKind === "binary" || sourceKind === "binary"
+            ? { binary: true }
+            : { currentText: target.text, incomingText: source.text }),
         });
       }
       continue;
     }
     if (source) {
-      changes.push({ path, status: "added", incomingText: source.text });
+      changes.push(
+        (source.contentKind ?? "text") === "binary"
+          ? { path, status: "added", binary: true }
+          : { path, status: "added", incomingText: source.text },
+      );
       continue;
     }
     if (target) {
-      changes.push({ path, status: "deleted", currentText: target.text });
+      changes.push(
+        (target.contentKind ?? "text") === "binary"
+          ? { path, status: "deleted", binary: true }
+          : { path, status: "deleted", currentText: target.text },
+      );
     }
   }
   return changes;

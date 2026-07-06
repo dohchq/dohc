@@ -92,7 +92,6 @@ import {
   TryInVersionStateResult,
   TryInWorkspaceVersionPayload,
   TryInWorkspaceVersionResult,
-  WorkspaceVersionConflict,
   WorkspaceVersionRecord,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
@@ -118,8 +117,6 @@ import {
   StartChannelThreadResult,
   MarkChatThreadReadPayload,
   MarkChatThreadReadResult,
-  EngineMomentRecord,
-  EngineMomentDetailRecord,
   ChatThreadRecord,
   ChatMessageRecord,
   OpenFileExternallyPayload,
@@ -212,10 +209,11 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
-import type {
-  WorkspaceEngineMomentDetail,
-  WorkspaceEngineMomentSummary,
-} from "./workspaces/workspaceEngineCapture";
+import {
+  engineMomentDetailForIpc,
+  engineMomentForIpc,
+  versionConflictForIpc,
+} from "./ipc/engineHistoryIpc";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
 import {
@@ -2070,26 +2068,6 @@ function registerIpcHandlers(): void {
     };
   }
 
-  function versionConflictForIpc(conflict: {
-    id: string;
-    path: string;
-    sourceVersionId: string;
-    targetVersionId: string;
-    current: { exists: boolean; text?: string };
-    incoming: { exists: boolean; text?: string };
-    base: { exists: boolean; text?: string };
-  }): WorkspaceVersionConflict {
-    return {
-      conflictId: conflict.id,
-      path: conflict.path,
-      sourceVersionId: conflict.sourceVersionId,
-      targetVersionId: conflict.targetVersionId,
-      currentText: conflict.current.exists ? (conflict.current.text ?? "") : null,
-      incomingText: conflict.incoming.exists ? (conflict.incoming.text ?? "") : null,
-      baseText: conflict.base.exists ? (conflict.base.text ?? "") : null,
-    };
-  }
-
   ipcMain.handle(CHANNELS.listWorkspaceVersions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceFilesPayload.parse(payload);
@@ -2212,73 +2190,14 @@ function registerIpcHandlers(): void {
   // Engine history + linked Chats (PR 0M-5). Flagged workspaces read their
   // timeline from engine moments; every handler resolves the workspace via
   // requireWorkspace and rejects when the engine capture is not attached.
-  // The shared id/version/path/timestamp/metadata shape both engine-moment
-  // record formats are built from — one mapper so they can never drift.
+  // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
+  // unit-tested); main only injects the display-name rule below.
   // PR 0N-1: the SAME display-name rule the chat rail uses. AgentIntegration
   // stamps onBehalfOf "local" for the desktop's own user, which displays as
   // the cloud email (or "You" when signed out); any other onBehalfOf is
   // already a user-facing label and displays as-is.
   function agentAuthorDisplayName(author: NonNullable<VersionedTextMomentSummary["author"]>): string {
     return author.onBehalfOf === "local" ? localUserDisplayName() : author.onBehalfOf;
-  }
-
-  function engineMomentBaseForIpc(
-    moment: Pick<
-      WorkspaceEngineMomentSummary,
-      "id" | "versionId" | "path" | "recordedAtMs" | "operation" | "metadata" | "author"
-    >,
-  ) {
-    return {
-      id: moment.id,
-      versionId: moment.versionId,
-      path: moment.path,
-      recordedAtMs: moment.recordedAtMs,
-      operation: moment.operation,
-      origin: moment.metadata.origin,
-      ...(moment.author !== undefined
-        ? { agentAuthorName: agentAuthorDisplayName(moment.author) }
-        : {}),
-      ...(moment.metadata.summary !== undefined
-        ? { summary: moment.metadata.summary }
-        : {}),
-      ...(moment.metadata.correlationId !== undefined
-        ? { correlationId: moment.metadata.correlationId }
-        : {}),
-    };
-  }
-
-  function engineMomentForIpc(moment: WorkspaceEngineMomentSummary): EngineMomentRecord {
-    return {
-      ...engineMomentBaseForIpc(moment),
-      momentOrder: moment.momentOrder,
-      // Only stamped for PROTECTED (secret-backed) moments so ordinary rows
-      // stay byte-identical to the pre-PR-08 shape.
-      ...(moment.protected ? { protected: true } : {}),
-    };
-  }
-
-  function engineMomentDetailForIpc(
-    detail: WorkspaceEngineMomentDetail,
-  ): EngineMomentDetailRecord {
-    if (detail.protected) {
-      // Protected moments are metadata-only: no payload exists anywhere, so
-      // both text sides are null and the renderer shows "Contents are
-      // protected" in place of a diff.
-      return {
-        ...engineMomentBaseForIpc(detail.moment),
-        protected: true,
-        beforeText: null,
-        afterText: null,
-      };
-    }
-    const moment = detail.moment;
-    return {
-      ...engineMomentBaseForIpc(moment),
-      beforeText: moment.payload.before?.text ?? null,
-      // A delete moment stores the removed content as its payload; the diff
-      // page renders it as before -> nothing.
-      afterText: moment.operation === "delete" ? null : moment.payload.after.text,
-    };
   }
 
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
@@ -2315,7 +2234,9 @@ function registerIpcHandlers(): void {
         : {}),
     });
     return ListEngineMomentsResult.parse({
-      moments: page.moments.map(engineMomentForIpc),
+      moments: page.moments.map((moment) =>
+        engineMomentForIpc(moment, agentAuthorDisplayName),
+      ),
       nextBeforeMomentOrder: page.nextBeforeMomentOrder,
       latestMomentOrder: page.latestMomentOrder,
       activeVersionId: page.activeVersionId,
@@ -2331,7 +2252,7 @@ function registerIpcHandlers(): void {
     );
     const moment = await capture.readMoment(input.momentId);
     return ReadEngineMomentResult.parse({
-      moment: moment ? engineMomentDetailForIpc(moment) : null,
+      moment: moment ? engineMomentDetailForIpc(moment, agentAuthorDisplayName) : null,
     });
   });
 

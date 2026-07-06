@@ -16061,3 +16061,148 @@ or must Y.Doc-level state (suggestions, unexported marks) survive.
   flag before it lands.
 - `mergeMarkdown` stays a salvage edge (audit Phase B); Hocuspocus
   retires only at G2-C.
+
+## PR WS-G1 - Capped Binary/Asset Versioning On The Engine (Flag-Gate Closure)
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-wsg1-binary-assets
+Worktree: /home/ice/dev/dohc-wsg1-binary-assets
+Implementation workstream, if used: codex CLI (gpt-5.5) bulk implementation
+driven per skills/codex-implementation, one round (328k tokens); Claude
+(fable-5) reviewed the diff for byte-safety, fixed a duplicated DDL
+interpolation and a misindented rename moment, added the honest
+"Became a binary/text file" transition summaries plus a hostile-corpus
+reopen/hydration test, resolved the engineDbSchema rebase conflict across
+the WS-E chats merge, and ran all verification (including the Electron
+E2E codex's sandbox could not launch) independently.
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] SCHEMA (lazy additive, ENGINE_SCHEMA_VERSION stays 1): new
+      `binary_blobs` table (sha256 PK, byte_length, content BLOB NOT NULL)
+      beside the TEXT-typed `blobs`, plus nullable
+      `content_kind TEXT DEFAULT 'text'` columns on `snapshots`,
+      `fork_base_snapshots`, `moments` (payload_before/payload_after/before
+      sides — one moment can span a text<->binary transition), and
+      `conflicts` (base/current/incoming sides), added via the
+      author_json ensure-column pattern (idempotent ALTER, race-safe
+      re-check). `putBinaryBlob` also writes a `text=''` anchor row into
+      `blobs` so legacy `*_blob_sha256 -> blobs(sha256)` foreign keys stay
+      satisfiable; `putBlob` became an UPSERT so a later text write with
+      the same sha replaces the anchor with real text.
+- [x] CAP: `MAX_VERSIONED_BINARY_FILE_BYTES` = 5 MiB (engine boundary,
+      `file-too-large`) mirrored by `MAX_ENGINE_CAPTURE_BINARY_BYTES`
+      (capture classifier). Big enough for logos/screenshots/small PDFs —
+      the alpha's real asset shapes — while keeping engine.db growth and
+      switch materialization O(small) per write; oversized binaries keep
+      the pre-lane untracked-with-retirement behavior exactly.
+- [x] STORE: `writeBinaryFile`/`readBinaryFile`/`readBinaryBlob` mirror the
+      text shapes with content-kind discrimination; binary moments are
+      metadata-only (sha256 + byteLength, `text: ""` sentinel, never
+      content in a text field); no-op dedup is sha256-only; text<->binary
+      transitions on one path preserve the object_id (honest capture
+      summaries "Became a binary file" / "Became a text file").
+- [x] VERSIONS: switch/merge/restore materialize binary content byte-exact
+      through a new `EngineDiskWriter.writeBinaryFile` seam with
+      raw-byte-sha expected-event registration. DELIBERATE BEHAVIOR FLIP:
+      in-cap binaries now FOLLOW version switches (the 0M-4
+      "binary untouched byte-for-byte" test now asserts bytes swap per
+      version and back). Binary conflicts NEVER auto-merge: both-changed
+      opens a conflict whose sides are hash references; `apply-merged` is
+      rejected at the store for binary sides.
+- [x] IPC/UI: `WorkspaceVersionConflict` gains `contentKind` +
+      per-side `{ sha256, byteLength }` metadata (raw bytes never cross
+      IPC); the conflict panel renders a "Binary file" branch reusing the
+      existing keep-current/keep-incoming buttons with no combine
+      affordance; history rows show a kind icon + byte size; the diff
+      route shows a "Binary contents" placeholder; compare shows
+      "Binary file changed" metadata-only.
+- [x] SEARCH: binary snapshots are never FTS-indexed —
+      `upsertFileSearchIndex` deletes-then-skips for binary (covers
+      text->binary transition cleanup) and `ensureSearchIndexForVersion`
+      filters `content_kind='text'`; pinned by a unit test asserting an
+      empty `engine_search_files_fts`.
+- [x] 0P-A HANDOFF: two `TODO(0P-A)` journal-hook markers where binary
+      writes create blob/moment rows (versionedTextStore.ts putBinaryBlob
+      and insertMomentRow); journaling itself deliberately not implemented
+      here.
+
+### Files Changed
+
+- packages/workspace-engine/src/engineDbSchema.ts
+- packages/workspace-engine/src/versionedTextStore.ts
+- packages/workspace-engine/src/versionedTextStore.test.ts
+- packages/workspace-engine/src/versionCompare.ts
+- packages/workspace-engine/src/searchIndex.ts
+- packages/workspace-engine/src/index.ts
+- packages/workspace-contracts/src/engine.ts
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts
+- apps/desktop/src/workspaces/workspaceEngineCapture.test.ts
+- apps/desktop/src/workspaces/workspaceVersionOperations.test.ts
+- apps/desktop/src/ipc/bridgeContract.ts
+- apps/desktop/src/main.ts
+- apps/desktop/src/renderer/DesktopWorkspaceShell.tsx
+- apps/desktop/src/renderer/workbench/EngineHistory.tsx
+- apps/desktop/src/renderer/workbench/WorkspaceVersions.tsx
+- apps/desktop/e2e/workspace-versions.spec.ts
+- this execution log (this entry)
+
+### Tests Added
+
+- Engine: binary round-trip byte-exact, sha dedup, over-cap rejection,
+  text->binary identity preservation, both-changed binary conflict with
+  hash sides, FTS exclusion, hostile-corpus (NUL/invalid-UTF-8/lone
+  surrogate/BOM bytes) cold-reopen rehydration.
+- Capture: in-cap PNG-like fixture captured as a binary moment, oversized
+  skipped, unchanged-recapture no-op, both transition directions with
+  honest summaries (replaces the "retire on become-binary" test).
+- Versions: the 0M-4 switch test flipped to assert binaries follow the
+  switch byte-for-byte both ways; binary restore-to-prior-bytes test;
+  injected binary disk-writer failure path.
+- E2E (workspace-versions.spec.ts): binary asset switches byte-exactly,
+  both-changed png opens the binary conflict branch (no combine control),
+  keep-one-side resolves and materializes the kept bytes into Main.
+
+### Commands Run
+
+- `pnpm --filter @dohc/workspace-engine typecheck` / `test` — 316 passed
+  (baseline 309 + 7).
+- `pnpm --filter @dohc/desktop typecheck` / `test` — 916 passed
+  (baseline 911 + 5).
+- `pnpm --filter @dohc/mcp typecheck` / `test` — 77 passed (baseline).
+- `pnpm -r --if-present typecheck` — all 19 projects pass.
+- `npx playwright test e2e/workspace-versions.spec.ts` (real Electron) —
+  4 passed, including the new binary spec.
+- `node scripts/check-think-bigger-doc-links.mjs` — passed.
+
+### Decisions
+
+- Parallel BLOB table over widening `blobs`: `blobs.text NOT NULL` cannot
+  hold raw bytes without a schema-version bump or a nullable rewrite;
+  a sibling content-addressed table with content-kind discriminators is
+  purely additive and keeps the 0P sync story symmetric (binary_blobs
+  replicates exactly like blobs — content addressing stays idempotent).
+- Binary bytes never cross the IPC/zod boundary; the renderer only ever
+  sees sha256 + byteLength. No byte-diff UI anywhere, by design.
+- 5 MiB cap keeps parity with "capped, honest alpha" — oversized assets
+  keep the documented untracked/retirement path rather than a partial
+  promise.
+
+### Unresolved Findings / Open Questions
+
+- 0P-A must pick up the two TODO(0P-A) markers when the sync journal
+  lands on the binary write paths (merge reconciliation noted for that
+  lane).
+- The `blobs` anchor row (`text=''`) for binary shas is a compatibility
+  shim for legacy FK shapes; once a schema-version bump ever happens,
+  the FKs should be repointed and the shim dropped.
+
+### Follow-Up / Deletion Conditions
+
+- This closes the 0N-3 audit's "binary/asset versioning in the engine"
+  flag-default-on gate item once merged; WS-H (flag flip) may treat the
+  gate as satisfied for in-cap binaries with the oversized limitation
+  documented.

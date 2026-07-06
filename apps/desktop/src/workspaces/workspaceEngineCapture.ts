@@ -5,6 +5,7 @@ import {
   compareVersionFiles,
   createSecretFileStore,
   createVersionedTextStore,
+  MAX_VERSIONED_BINARY_FILE_BYTES,
   resolveEffectivePolicy,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
@@ -111,11 +112,12 @@ import {
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
+export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;
 
 export interface ExpectedEngineEvent {
   path: string;
   operation: "write" | "delete";
-  // sha256 of the written UTF-8 text; required for writes so a LATER user
+  // sha256 of the written UTF-8 text or raw binary bytes; required for writes so a LATER user
   // edit to the same path can never be swallowed by a stale registration.
   sha256?: string;
 }
@@ -146,6 +148,8 @@ export interface WorkspaceEngineMomentSummary {
   path: string;
   recordedAtMs: number;
   operation: "write" | "rename" | "delete";
+  contentKind?: "text" | "binary";
+  byteLength?: number;
   metadata: ActorNeutralWriteMetadata;
   author?: MomentAuthor;
   momentOrder: number;
@@ -301,6 +305,7 @@ export interface WorkspaceEngineCaptureOptions {
 
 export interface EngineDiskWriter {
   writeTextFile(absolutePath: string, text: string): Promise<void>;
+  writeBinaryFile(absolutePath: string, bytes: Uint8Array): Promise<void>;
   deletePath(absolutePath: string): Promise<void>;
 }
 
@@ -314,6 +319,10 @@ function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function sha256Bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 function pathBasename(path: string): string {
   const index = path.lastIndexOf("/");
   return index >= 0 ? path.slice(index + 1) : path;
@@ -324,6 +333,8 @@ type DiskTextState =
   | { kind: "absent" }
   // Engine-ownable UTF-8 text within the size cap.
   | { kind: "text"; text: string; sha256: string }
+  // Engine-ownable binary content within the binary cap.
+  | { kind: "binary"; bytes: Buffer; sha256: string; byteLength: number }
   // Present but not engine-ownable (binary, oversized, or non-UTF-8 text).
   | { kind: "untracked-content" }
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
@@ -343,14 +354,29 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     const info = await lstat(absolute);
     if (info.isSymbolicLink()) return { kind: "untracked-content" };
     if (!info.isFile()) return { kind: "untracked-content" };
-    if (!isTextMediaType(mediaTypeForPath(path), path)) return { kind: "untracked-content" };
-    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (!isTextMediaType(mediaTypeForPath(path), path)) {
+      if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+      const bytes = await readFile(absolute);
+      if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+      return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
+    }
+    // Text-media ordering (WS-G1 review fix): the BINARY cap decides
+    // readability here, because a text-suffixed path can be binary in
+    // disguise (invalid UTF-8) and the store accepts that as binary up to
+    // MAX_ENGINE_CAPTURE_BINARY_BYTES. Only content that genuinely IS text
+    // (round-trips through UTF-8) is held to the smaller text cap.
+    if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
     const text = bytes.toString("utf8");
     // The engine only stores text that round-trips through UTF-8; anything
-    // else is binary in disguise, not engine-ownable.
-    if (!Buffer.from(text, "utf8").equals(bytes)) return { kind: "untracked-content" };
+    // else is binary in disguise, not engine-ownable as text.
+    if (!Buffer.from(text, "utf8").equals(bytes)) {
+      return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
+    }
+    // Genuine text over the text cap stays untracked (established behavior —
+    // oversized text is neither snapshotted nor demoted to bytes).
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -391,6 +417,7 @@ async function readDiskSecretState(rootPath: string, path: string): Promise<Disk
 // floor instead of the tracked-path policy.
 type MaterializeOperation =
   | { kind: "write"; path: string; text: string; protected?: boolean }
+  | { kind: "write-binary"; path: string; bytes: Uint8Array }
   | { kind: "delete"; path: string; protected?: boolean };
 
 function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): boolean {
@@ -496,6 +523,14 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       await assertContainedDir(dir);
       await assertLeafNotSymlink(absolutePath);
       await writeFile(absolutePath, text, "utf8");
+    },
+    async writeBinaryFile(absolutePath, bytes) {
+      const dir = dirname(absolutePath);
+      await assertContainedNearestAncestor(dir);
+      await mkdir(dir, { recursive: true });
+      await assertContainedDir(dir);
+      await assertLeafNotSymlink(absolutePath);
+      await writeFile(absolutePath, bytes);
     },
     async deletePath(absolutePath) {
       await assertContainedDir(dirname(absolutePath));
@@ -683,7 +718,9 @@ export function createWorkspaceEngineCapture(
     engine: VersionedTextStore,
     versionId: string,
     path: string,
-    disk: { text: string; sha256: string },
+    disk:
+      | { kind: "text"; text: string; sha256: string }
+      | { kind: "binary"; bytes: Uint8Array; sha256: string; byteLength: number },
     metadata: ActorNeutralWriteMetadata,
     author?: MomentAuthor,
   ): Promise<boolean> {
@@ -691,13 +728,39 @@ export function createWorkspaceEngineCapture(
     // Content equality is the no-op rule: it keeps one engine record per
     // physical write across settle windows and makes reconciliation
     // idempotent.
-    if (current && current.text === disk.text) return false;
+    if (disk.kind === "binary") {
+      if (current?.contentKind === "binary" && current.sha256 === disk.sha256) return false;
+      // A tracked text file whose bytes stop round-tripping as UTF-8 keeps its
+      // object identity; the moment says so honestly instead of pretending it
+      // was an ordinary update (the pre-WS-G1 path retired the file here).
+      const becameBinary = current !== null && current.contentKind !== "binary";
+      await engine.writeBinaryFile({
+        workspaceId,
+        versionId,
+        path,
+        bytes: disk.bytes,
+        metadata: {
+          ...metadata,
+          summary:
+            metadata.summary ??
+            (becameBinary ? "Became a binary file" : `Updated ${pathBasename(path)}`),
+        },
+        ...(author !== undefined ? { author } : {}),
+      });
+      return true;
+    }
+    if (current && current.contentKind !== "binary" && current.text === disk.text) return false;
+    // The mirror transition: a binary-tracked path whose content is UTF-8
+    // text again continues as the same object with an honest moment.
+    const becameText = current?.contentKind === "binary";
     await engine.writeTextFile({
       workspaceId,
       versionId,
       path,
       text: disk.text,
-      metadata,
+      metadata: becameText
+        ? { ...metadata, summary: metadata.summary ?? "Became a text file" }
+        : metadata,
       ...(author !== undefined ? { author } : {}),
     });
     return true;
@@ -846,7 +909,7 @@ export function createWorkspaceEngineCapture(
       diskPaths.add(file.path);
       const disk = await readDiskTextState(rootPath, file.path);
       if (disk.kind === "unreadable") continue;
-      if (disk.kind === "text") {
+      if (disk.kind === "text" || disk.kind === "binary") {
         await writeIfChanged(engine, versionId, file.path, disk, metadata);
       } else {
         // absent (raced a delete) or no longer engine-ownable text.
@@ -912,13 +975,20 @@ export function createWorkspaceEngineCapture(
   ): Promise<void> {
     for (const operation of operations) {
       assertEngineWritablePath(operation.path, policy, {
-        ...(operation.protected ? { protected: true } : {}),
+        ...(operation.kind !== "write-binary" && operation.protected ? { protected: true } : {}),
       });
       const absolute = join(rootPath, operation.path);
       const cancel =
-        operation.kind === "write"
+        operation.kind === "write" || operation.kind === "write-binary"
           ? registerExpectedEngineEvents([
-              { path: operation.path, operation: "write", sha256: sha256Utf8(operation.text) },
+              {
+                path: operation.path,
+                operation: "write",
+                sha256:
+                  operation.kind === "write"
+                    ? sha256Utf8(operation.text)
+                    : sha256Bytes(operation.bytes),
+              },
             ])
           : registerExpectedEngineEvents([
               { path: operation.path, operation: "delete" },
@@ -926,6 +996,8 @@ export function createWorkspaceEngineCapture(
       try {
         if (operation.kind === "write") {
           await diskWriter.writeTextFile(absolute, operation.text);
+        } else if (operation.kind === "write-binary") {
+          await diskWriter.writeBinaryFile(absolute, operation.bytes);
         } else {
           await diskWriter.deletePath(absolute);
         }
@@ -942,8 +1014,9 @@ export function createWorkspaceEngineCapture(
   }
 
   // Diff a version's engine state against the CURRENT disk state and plan the
-  // disk mutations that make the folder show that version. Binary, secret,
-  // ignored, oversized, and transiently unreadable paths are never touched.
+  // disk mutations that make the folder show that version. In-cap binaries
+  // now follow versions; oversized, ignored, secret, and transiently
+  // unreadable paths are never touched.
   async function planMaterialization(
     engine: VersionedTextStore,
     targetVersionId: string,
@@ -959,9 +1032,20 @@ export function createWorkspaceEngineCapture(
     for (const file of targetFiles) {
       if (!policyTracksPath(file.path, policy)) continue;
       const disk = await readDiskTextState(rootPath, file.path);
-      // Never clobber content the engine does not own (binary-in-disguise,
-      // oversized) and never write over a transiently unreadable path.
+      // Never clobber content the engine does not own (oversized/symlinked)
+      // and never write over a transiently unreadable path.
       if (disk.kind === "untracked-content" || disk.kind === "unreadable") continue;
+      if (file.contentKind === "binary") {
+        if (disk.kind === "binary" && disk.sha256 === file.sha256) continue;
+        const bytes = await engine.readBinaryFile({
+          workspaceId,
+          versionId: targetVersionId,
+          path: file.path,
+        });
+        if (!bytes) continue;
+        operations.push({ kind: "write-binary", path: file.path, bytes });
+        continue;
+      }
       if (disk.kind === "text" && disk.text === file.text) continue;
       operations.push({ kind: "write", path: file.path, text: file.text });
     }
@@ -976,7 +1060,7 @@ export function createWorkspaceEngineCapture(
       if (targetPaths.has(file.path)) continue;
       if (!policyTracksPath(file.path, policy)) continue;
       const disk = await readDiskTextState(rootPath, file.path);
-      if (disk.kind !== "text") continue;
+      if (disk.kind !== "text" && disk.kind !== "binary") continue;
       operations.push({ kind: "delete", path: file.path });
     }
     return operations;
@@ -1027,6 +1111,24 @@ export function createWorkspaceEngineCapture(
       operations.push({ kind: "delete", path: stat.path, protected: true });
     }
     return operations;
+  }
+
+  async function materializeWriteForSnapshot(
+    engine: VersionedTextStore,
+    snapshot: { versionId: string; path: string; contentKind?: "text" | "binary"; text: string },
+  ): Promise<MaterializeOperation> {
+    if (snapshot.contentKind === "binary") {
+      const bytes = await engine.readBinaryFile({
+        workspaceId,
+        versionId: snapshot.versionId,
+        path: snapshot.path,
+      });
+      if (!bytes) {
+        throw new Error(`Binary content for ${snapshot.path} is no longer available.`);
+      }
+      return { kind: "write-binary", path: snapshot.path, bytes };
+    }
+    return { kind: "write", path: snapshot.path, text: snapshot.text };
   }
 
   async function versionsSnapshot(
@@ -1322,11 +1424,7 @@ export function createWorkspaceEngineCapture(
           }
           mergedFileCount += 1;
           if (result.operation === "write") {
-            materializations.push({
-              kind: "write",
-              path: change.path,
-              text: result.write.snapshot.text,
-            });
+            materializations.push(await materializeWriteForSnapshot(engine, result.write.snapshot));
           } else {
             materializations.push({ kind: "delete", path: change.path });
           }
@@ -1413,13 +1511,7 @@ export function createWorkspaceEngineCapture(
         if (result.conflict.targetVersionId === activeVersionId) {
           if (result.write) {
             await materialize(
-              [
-                {
-                  kind: "write",
-                  path: result.write.snapshot.path,
-                  text: result.write.snapshot.text,
-                },
-              ],
+              [await materializeWriteForSnapshot(engine, result.write.snapshot)],
               policy,
             );
           } else if (result.delete) {
@@ -1639,7 +1731,7 @@ export function createWorkspaceEngineCapture(
         }
         if (disk.kind === "untracked-content") {
           throw new Error(
-            `Only text files can be restored — ${path} is no longer a text file.`,
+            `Only engine-owned files can be restored — ${path} is no longer capturable.`,
           );
         }
         const saveMetadata: ActorNeutralWriteMetadata = {
@@ -1647,7 +1739,7 @@ export function createWorkspaceEngineCapture(
           summary: "Saved latest edits",
           correlationId,
         };
-        if (disk.kind === "text") {
+        if (disk.kind === "text" || disk.kind === "binary") {
           await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
         } else {
           // Confirmed absent: reconcile the deletion so engine and disk agree
@@ -1666,20 +1758,43 @@ export function createWorkspaceEngineCapture(
           path,
         });
         if (target) {
-          if (current && current.text === target.text) {
+          if (
+            current &&
+            (target.contentKind === "binary"
+              ? current.contentKind === "binary" && current.sha256 === target.sha256
+              : current.contentKind !== "binary" && current.text === target.text)
+          ) {
             // Already in the pre-moment state. Returning the SAME moment id
             // keeps undo a no-op (undoing an idempotent restore restores the
             // identical state again).
             return { restored: "text" as const, restoredMomentId: momentId, path };
           }
-          const result = await engine.writeTextFile({
-            workspaceId,
-            versionId: activeVersionId,
-            path,
-            text: target.text,
-            metadata,
-          });
-          await materialize([{ kind: "write", path, text: target.text }], policy);
+          const result =
+            target.contentKind === "binary"
+              ? await (async () => {
+                  const bytes = await engine.readBinaryBlob({
+                    workspaceId,
+                    sha256: target.sha256 ?? "",
+                  });
+                  if (!bytes) {
+                    throw new Error(`Binary content for ${path} is no longer available.`);
+                  }
+                  return engine.writeBinaryFile({
+                    workspaceId,
+                    versionId: activeVersionId,
+                    path,
+                    bytes,
+                    metadata,
+                  });
+                })()
+              : await engine.writeTextFile({
+                  workspaceId,
+                  versionId: activeVersionId,
+                  path,
+                  text: target.text,
+                  metadata,
+                });
+          await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);
           return {
             restored: "text" as const,
             restoredMomentId: result.moment.id,

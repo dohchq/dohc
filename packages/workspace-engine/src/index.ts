@@ -11,6 +11,7 @@ export {
   threadSnippetTitle,
 } from "./linkedChatStore";
 export {
+  MAX_VERSIONED_BINARY_FILE_BYTES,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
   createVersionedTextStore,

@@ -211,13 +211,15 @@ describe("switchVersion", () => {
     await engine.createVersion("Draft");
     await write(root, "plan.md", "draft text\n");
     await write(root, "draft-only.md", "only in draft\n");
+    const draftLogoBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
+    await writeBytes(root, "logo.png", draftLogoBytes);
     // The switch itself captures unsettled disk edits — no captureBatch here.
     const toMain = await engine.switchVersion("main");
     expect(toMain.activeVersionId).toBe("main");
     expect(await readText(root, "plan.md")).toBe("v1 text\n");
     expect(existsSync(join(root, "draft-only.md"))).toBe(false);
-    // Binary files are untouched by switching — byte-for-byte, not merely
-    // still present (a truncating/rewriting switch must fail this).
+    // WS-G1 behavior flip: in-cap binary files now follow the active version
+    // byte-for-byte instead of being left untouched by switching.
     expect(existsSync(join(root, "logo.png"))).toBe(true);
     expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(logoBytes);
 
@@ -226,6 +228,7 @@ describe("switchVersion", () => {
     expect(backToDraft.activeVersionId).toBe(draftId);
     expect(await readText(root, "plan.md")).toBe("draft text\n");
     expect(await readText(root, "draft-only.md")).toBe("only in draft\n");
+    expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(draftLogoBytes);
     await engine.stop();
   });
 
@@ -308,6 +311,13 @@ describe("switchVersion", () => {
         }
         await mkdir(dirname(absolutePath), { recursive: true });
         await writeFile(absolutePath, text, "utf8");
+      },
+      async writeBinaryFile(absolutePath, bytes) {
+        if (failOn && absolutePath.endsWith(failOn)) {
+          throw new Error("injected disk failure");
+        }
+        await mkdir(dirname(absolutePath), { recursive: true });
+        await writeFile(absolutePath, bytes);
       },
       async deletePath(absolutePath) {
         await rm(absolutePath, { force: true });
@@ -592,6 +602,32 @@ describe("mergeVersionIntoMain", () => {
     await expect(engine.mergeVersionIntoMain("main")).rejects.toThrow(
       /Only a named version/,
     );
+    await engine.stop();
+  });
+});
+
+describe("restoreFileToBeforeMoment", () => {
+  it("restores a binary file to prior bytes byte-exactly", async () => {
+    const root = await tempRoot();
+    const before = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+    const after = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
+    await writeBytes(root, "logo.png", before);
+    const engine = capture(root);
+    engine.start();
+    await engine.flush();
+    await writeBytes(root, "logo.png", after);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+
+    const page = await engine.listMoments({ limit: 10 });
+    const update = page.moments.find(
+      (moment) => moment.path === "logo.png" && moment.contentKind === "binary",
+    );
+    expect(update).toBeTruthy();
+    const restored = await engine.restoreFileToBeforeMoment(update!.id);
+
+    expect(restored.restored).toBe("text");
+    expect(Buffer.from(await readFile(join(root, "logo.png")))).toEqual(before);
     await engine.stop();
   });
 });

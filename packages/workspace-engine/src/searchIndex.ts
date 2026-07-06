@@ -111,6 +111,7 @@ export function upsertFileSearchIndex(input: {
     versionId: input.snapshot.versionId,
     objectId: input.snapshot.objectId,
   });
+  if (input.snapshot.contentKind === "binary") return;
   if (!pathIsSearchIndexed(input.rootDir, input.snapshot.path)) return;
   input.db
     .prepare(
@@ -250,10 +251,12 @@ export function ensureSearchIndexForVersion(input: {
          SELECT s.workspace_id, s.version_id, s.object_id, s.path, s.blob_sha256
          FROM snapshots s
          WHERE s.workspace_id = ? AND s.version_id = ?
+           AND COALESCE(s.content_kind, 'text') = 'text'
          UNION ALL
          SELECT fb.workspace_id, fb.version_id, fb.object_id, fb.path, fb.blob_sha256
          FROM fork_base_snapshots fb
          WHERE fb.workspace_id = ? AND fb.version_id = ?
+           AND COALESCE(fb.content_kind, 'text') = 'text'
            AND NOT EXISTS (
              SELECT 1 FROM snapshots s
              WHERE s.workspace_id = fb.workspace_id

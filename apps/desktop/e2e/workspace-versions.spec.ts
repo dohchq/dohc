@@ -74,9 +74,34 @@ function engineSnapshotText(
   });
 }
 
+function engineSnapshotBytes(
+  rootPath: string,
+  versionId: string,
+  path: string,
+): Buffer | null {
+  return withEngineDb(rootPath, (db) => {
+    const row = db
+      .prepare(
+        `SELECT bb.content AS content
+         FROM snapshots s JOIN binary_blobs bb ON bb.sha256 = s.blob_sha256
+         WHERE s.version_id = ? AND s.path = ?`,
+      )
+      .get(versionId, path);
+    return row ? Buffer.from(row.content as Uint8Array) : null;
+  });
+}
+
 async function readWorkspaceText(rootPath: string, path: string): Promise<string | null> {
   try {
     return await readFile(join(rootPath, path), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function readWorkspaceBytes(rootPath: string, path: string): Promise<Buffer | null> {
+  try {
+    return await readFile(join(rootPath, path));
   } catch {
     return null;
   }
@@ -275,6 +300,109 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
     await expect
       .poll(() => readWorkspaceText(temp.rootPath, "notes.md"), { timeout: 20_000 })
       .toBe("feature side\n");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("binary assets switch byte-exactly and binary conflicts resolve by side", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
+    const mainConflictBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
+    const draftConflictBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb]);
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainBytes }]);
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await expectActiveVersion(page, "Main");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 30_000 })
+      .toEqual(mainBytes);
+
+    await createVersionViaMenu(page, "Binary Draft");
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: draftBytes }]);
+    const draftId = engineVersionIdByName(temp.rootPath, "Binary Draft");
+    expect(draftId).not.toBeNull();
+
+    await switchVersionViaMenu(page, "Main");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(mainBytes);
+    await switchVersionViaMenu(page, "Binary Draft");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(draftBytes);
+
+    await switchVersionViaMenu(page, "Main");
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainConflictBytes }]);
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(mainConflictBytes);
+    await switchVersionViaMenu(page, "Binary Draft");
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: draftConflictBytes }]);
+
+    await openVersionMenu(page);
+    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-merge-confirm").click();
+    const conflict = page.locator(
+      '[data-testid="version-conflict"][data-conflict-path="logo.png"]',
+    );
+    await expect(conflict.getByTestId("version-conflict-binary")).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(conflict.getByTestId("version-conflict-combine")).toHaveCount(0);
+    await conflict.getByTestId("version-conflict-keep-incoming").click();
+    await expect(page.getByTestId("version-merge-status")).toHaveText(
+      /All conflicts are resolved/,
+      { timeout: 30_000 },
+    );
+    await page.getByTestId("version-merge-done").click();
+    await switchVersionViaMenu(page, "Main");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(draftConflictBytes);
+
+    // Second round resolves the OTHER way — "keep mine" must keep Main's
+    // bytes, guarding against both buttons being wired to the same side.
+    const mainKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xcc, 0x01]);
+    const draftKeepBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0x02]);
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: mainKeepBytes }]);
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(mainKeepBytes);
+    await switchVersionViaMenu(page, "Binary Draft");
+    await writeWorkspaceFiles(temp, [{ path: "logo.png", contents: draftKeepBytes }]);
+
+    await openVersionMenu(page);
+    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-merge-confirm").click();
+    const keepMineConflict = page.locator(
+      '[data-testid="version-conflict"][data-conflict-path="logo.png"]',
+    );
+    await expect(keepMineConflict.getByTestId("version-conflict-binary")).toBeVisible({
+      timeout: 30_000,
+    });
+    await keepMineConflict.getByTestId("version-conflict-keep-current").click();
+    await expect(page.getByTestId("version-merge-status")).toHaveText(
+      /All conflicts are resolved/,
+      { timeout: 30_000 },
+    );
+    await page.getByTestId("version-merge-done").click();
+
+    // Main's side won: its tip and folder hold mainKeepBytes, byte for byte.
+    expect(engineSnapshotBytes(temp.rootPath, "main", "logo.png")).toEqual(mainKeepBytes);
+    await switchVersionViaMenu(page, "Main");
+    await expect
+      .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
+      .toEqual(mainKeepBytes);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

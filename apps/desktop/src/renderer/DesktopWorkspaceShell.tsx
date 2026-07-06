@@ -3,6 +3,7 @@ import {
   CircleHelp,
   Cloud,
   ExternalLink,
+  FileArchive,
   FileText,
   History,
   Lock,
@@ -1000,14 +1001,21 @@ function EngineMomentDiffPage({
   // body shows "Contents are protected" instead. Restore still works (it
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
-  const before = isProtected ? undefined : (moment.beforeText ?? undefined);
-  const after = isProtected ? undefined : (moment.afterText ?? undefined);
-  const counts = isProtected ? null : changedLineCounts(before, after);
-  const createdFile = !isProtected && moment.beforeText === null;
+  const isBinary = moment.contentKind === "binary";
+  const before = isProtected || isBinary ? undefined : (moment.beforeText ?? undefined);
+  const after = isProtected || isBinary ? undefined : (moment.afterText ?? undefined);
+  const counts = isProtected || isBinary ? null : changedLineCounts(before, after);
+  // A null beforeText with beforeBinary set means the file EXISTED as binary
+  // before this moment (a binary->text transition), not that this change
+  // created it — restore brings the bytes back instead of removing the file.
+  const createdFile =
+    !isProtected && !isBinary && moment.beforeText === null && moment.beforeBinary === undefined;
   const restoreDetail = createdFile
     ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
     : isProtected
       ? "The protected file will be returned to how it was before this change. Its contents stay encrypted and are never shown."
+      : isBinary
+        ? "The binary file will be returned byte-for-byte to how it was before this change."
       : "The file will be returned to how it was before this change.";
   // Restoring a create moment REMOVES the file ("deleted"): no open-file
   // affordances for a file that is no longer in the folder (mirrors the
@@ -1160,6 +1168,8 @@ function EngineMomentDiffPage({
           <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
             {isProtected ? (
               <Lock size={13} aria-hidden className="shrink-0 text-subtle" />
+            ) : isBinary ? (
+              <FileArchive size={13} aria-hidden className="shrink-0 text-subtle" />
             ) : (
               <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
             )}
@@ -1182,6 +1192,18 @@ function EngineMomentDiffPage({
               <span className="text-xs text-subtle">
                 dohc versions this file encrypted and never shows its contents
                 in history, search, or comparisons.
+              </span>
+            </div>
+          ) : isBinary ? (
+            <div
+              data-testid="engine-diff-binary"
+              className="flex flex-col items-center gap-1 px-4 py-10 text-center"
+            >
+              <FileArchive size={16} aria-hidden className="text-subtle" />
+              <span className="text-sm text-muted">Binary contents</span>
+              <span className="text-xs text-subtle">
+                {moment.byteLength ?? 0} bytes are versioned byte-for-byte and
+                are not shown in text diffs.
               </span>
             </div>
           ) : (
