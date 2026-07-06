@@ -666,7 +666,7 @@ export function createWorkspaceEngineCapture(
     // Callers that must pin the disk listing to the START of their task
     // (before other per-task reads run) pass the scan in; everyone else
     // lets this function scan.
-    scannedFiles?: Awaited<ReturnType<typeof scanWorkspaceFiles>>,
+    scannedFiles?: readonly ReconcileScanFile[],
   ): Promise<void> {
     const scanned = scannedFiles ?? (await scanWorkspaceFilesForReconcile());
     const diskPaths = new Set<string>();
@@ -721,7 +721,8 @@ export function createWorkspaceEngineCapture(
     // Scan BEFORE the policy read: the pass reconciles the files present
     // when the task began; edits landing while this task's own per-task
     // reads run belong to the next serialized batch, not to this pass.
-    const scanned = await scanWorkspaceFiles(rootPath);
+    // Routed through the kernel-aware scan, which falls back to the TS path.
+    const scanned = await scanWorkspaceFilesForReconcile();
     const policy = await readPolicyForTask();
     await reconcileDiskIntoVersion(engine, versionId, policy, metadata, scanned);
   }
