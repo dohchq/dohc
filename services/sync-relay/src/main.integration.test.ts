@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -130,13 +131,21 @@ function prng(seed: number): () => number {
   };
 }
 
+// Pull and commit the fetch cursor, standing in for the desktop capture's
+// materialize-then-commit sequence (no disk materialization in these tests).
+async function pullAndCommit(input: Parameters<typeof pullWorkspaceFromRelay>[0]) {
+  const result = await pullWorkspaceFromRelay(input);
+  await result.commitFetchCursor();
+  return result;
+}
+
 async function syncQuiescent(baseUrl: string, a: string, b: string): Promise<void> {
   const relay = relayConnection(baseUrl);
   for (let index = 0; index < 4; index += 1) {
     const pushA = await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
     const pushB = await pushWorkspaceToRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
-    await pullWorkspaceFromRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
-    await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
+    await pullAndCommit({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
+    await pullAndCommit({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
     if (pushA.pushed === 0 && pushB.pushed === 0) return;
   }
   throw new Error("relay convergence did not quiesce");
@@ -455,7 +464,7 @@ describe("sync relay main process", () => {
         metadata: { origin: "api" },
       });
       await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
-      await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
+      await pullAndCommit({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
       await bStore.writeBinaryFile({
         workspaceId: WORKSPACE_ID,
         versionId: "main",
@@ -464,8 +473,8 @@ describe("sync relay main process", () => {
         metadata: { origin: "api" },
       });
       await pushWorkspaceToRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
-      await pullWorkspaceFromRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
-      await pullWorkspaceFromRelay({ rootDir: c, workspaceId: WORKSPACE_ID, relay });
+      await pullAndCommit({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
+      await pullAndCommit({ rootDir: c, workspaceId: WORKSPACE_ID, relay });
 
       await expect(
         aStore.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/a.md" }),
@@ -702,7 +711,7 @@ describe("sync relay main process", () => {
     }
     await expect(pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay })).rejects.toThrow(/network dropped/u);
     await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay });
-    await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay: relayConnection(baseUrl) });
+    await pullAndCommit({ rootDir: b, workspaceId: WORKSPACE_ID, relay: relayConnection(baseUrl) });
     const check = createVersionedTextStore(b);
     try {
       await expect(
@@ -715,5 +724,70 @@ describe("sync relay main process", () => {
     expect(fetched.map((op) => `${op.originId}:${op.originSeq}`).sort()).toEqual(
       [...new Set(fetched.map((op) => `${op.originId}:${op.originSeq}`))].sort(),
     );
+  });
+
+  // Gate finding: the transport must cap request bodies AT THE STREAM. A
+  // client streaming an oversized body is cut off mid-upload (413 and/or a
+  // destroyed socket) instead of being fully buffered, and the server stays
+  // healthy afterwards.
+  it("rejects an oversized streamed body before buffering it and stays healthy", async (context) => {
+    const relayRoot = await tempRoot("relay-stream-cap");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const claim = await postJson(baseUrl, "/sync/workspaces", { workspaceId: WORKSPACE_ID });
+    expect(claim.status).toBe(200);
+
+    const chunk = Buffer.alloc(1024 * 1024, 7);
+    const totalChunks = 48; // 48MB streamed; the cap is ~11MB.
+    const outcome = await new Promise<{ status: number | null; sentAll: boolean }>((resolve) => {
+      let sent = 0;
+      let settled = false;
+      const settle = (status: number | null) => {
+        if (settled) return;
+        settled = true;
+        resolve({ status, sentAll: sent >= totalChunks });
+      };
+      const clientRequest = httpRequest(
+        `${baseUrl}/sync/${encodeURIComponent(WORKSPACE_ID)}/blobs/${"0".repeat(64)}`,
+        { method: "PUT", headers: { authorization: `Bearer test:${USER_ID}` } },
+        (response) => {
+          response.resume();
+          settle(response.statusCode ?? null);
+        },
+      );
+      clientRequest.on("error", () => settle(null));
+      const writeMore = (): void => {
+        while (sent < totalChunks) {
+          sent += 1;
+          const canContinue = clientRequest.write(chunk);
+          if (!canContinue) {
+            clientRequest.once("drain", writeMore);
+            return;
+          }
+        }
+        clientRequest.end();
+      };
+      writeMore();
+    });
+
+    // The stream was cut off BEFORE the client could deliver the full body
+    // (pre-fix, the server buffered all 48MB and only then rejected).
+    expect(outcome.sentAll).toBe(false);
+    if (outcome.status !== null) expect(outcome.status).toBe(413);
+
+    // The server survived: still answering, and a normal-sized blob works.
+    const health = await fetch(`${baseUrl}/health`);
+    expect(health.status).toBe(200);
+    const smallBytes = Buffer.from("small blob after oversized rejection");
+    const put = await putBytes(baseUrl, `/sync/${WORKSPACE_ID}/blobs/${sha256(smallBytes)}`, smallBytes);
+    expect(put.status).toBe(200);
   });
 });

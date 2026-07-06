@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-api/auth/session";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 let roots: string[] = [];
@@ -260,5 +260,90 @@ describe("sync relay handler", () => {
         recordedAtMs: 42,
       },
     ]);
+  });
+
+  // Gate finding: a missing blob in an OWNED workspace must be
+  // distinguishable from a missing/foreign workspace so clients can degrade
+  // honestly instead of reporting the whole workspace unavailable. The
+  // isolation invariant is untouched: non-owners still get the fixed
+  // absent-workspace shape.
+  it("distinguishes a missing blob from a missing workspace, for owners only", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const missingSha = sha256("nowhere");
+
+    const ownedMiss = await h(request("a", `/sync/workspace-a/blobs/${missingSha}`, { method: "GET" }));
+    expect(ownedMiss.status).toBe(404);
+    expect(await json(ownedMiss)).toMatchObject({ ok: false, code: "blob_not_found" });
+
+    const absentWorkspace = await h(request("a", `/sync/workspace-absent/blobs/${missingSha}`, { method: "GET" }));
+    const intruder = await h(request("intruder", `/sync/workspace-a/blobs/${missingSha}`, { method: "GET" }));
+    expect(absentWorkspace.status).toBe(404);
+    expect(intruder.status).toBe(404);
+    const absentBody = await absentWorkspace.text();
+    expect(await intruder.text()).toBe(absentBody);
+    expect(absentBody).not.toContain("blob_not_found");
+  });
+
+  // Gate finding: unclassified errors (auth DB hiccup, unexpected SQLite
+  // failure) must become a generic 500 — never a crash, never a raw
+  // error.message leak.
+  it("returns a generic 500 when the auth backend fails, without leaking internals", async () => {
+    const storage = await testStorage();
+    const resolveActor: ResolveActor = () => {
+      throw new Error("connection terminated unexpectedly (pg pool internal detail)");
+    };
+    const h = createSyncRelayHandler({ storage, resolveActor, nowMs: () => 1234 });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" }));
+      expect(response.status).toBe(500);
+      const body = await json(response);
+      expect(body).toEqual({ ok: false, error: "internal error", code: "internal_error" });
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("returns a generic 500 when storage throws, without leaking internals", async () => {
+    const throwingStorage = new Proxy(
+      {},
+      {
+        get(_target, property) {
+          if (property === "workspaceIsOwnedBy") return () => true;
+          return () => {
+            throw new Error("SQLITE_CORRUPT: index sync_relay_log_secret_detail");
+          };
+        },
+      },
+    ) as SyncRelayStorage;
+    const h = handler(throwingStorage);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" }));
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      expect(text).not.toContain("SQLITE_CORRUPT");
+      expect(text).not.toContain("secret_detail");
+      expect(JSON.parse(text)).toMatchObject({ ok: false, error: "internal error" });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects a blob PUT above MAX_BLOB_BYTES with 413 and stores nothing", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const oversized = Buffer.alloc(MAX_BLOB_BYTES + 1, 7);
+    const oversizedSha = sha256(oversized);
+    const put = await h(
+      request("a", `/sync/workspace-a/blobs/${oversizedSha}`, { method: "PUT", body: oversized }),
+    );
+    expect(put.status).toBe(413);
+    const get = await h(request("a", `/sync/workspace-a/blobs/${oversizedSha}`, { method: "GET" }));
+    expect(get.status).toBe(404);
   });
 });

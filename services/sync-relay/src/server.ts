@@ -20,6 +20,12 @@ type SyncRelayRoute =
   | { route: "blob-have"; workspaceId: string }
   | { route: "log"; workspaceId: string };
 
+// Transport cap, deliberately LARGER than the engine's 5 MiB binary-file
+// limit (MAX_VERSIONED_BINARY_FILE_BYTES): text blobs need the headroom and
+// the relay never parses content, so it cannot tell text from binary.
+// Clients enforce the engine limit by referenced kind on hydrate
+// (workspace-engine syncApply) — an oversized BINARY blob a peer smuggles
+// under this cap is rejected client-side as a protocol violation.
 export const MAX_BLOB_BYTES = 10 * 1024 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
@@ -81,7 +87,11 @@ export function createSyncRelayHandler({
       if (route.route === "blob" && request.method === "GET") {
         assertSha256(route.sha256);
         const blob = storage.getBlob(route.workspaceId, route.sha256);
-        if (!blob) throw notFound();
+        // Distinct from the absent-workspace 404: the caller already proved
+        // ownership above, so this leaks nothing about other tenants, and
+        // sync clients must be able to tell missing content apart from an
+        // unavailable workspace.
+        if (!blob) throw blobNotFound();
         return new Response(arrayBufferForBytes(blob), {
           status: 200,
           headers: { "content-type": "application/octet-stream" },
@@ -275,28 +285,41 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function errorResponse(error: unknown): Response {
-  const message = error instanceof Error ? error.message : "internal error";
+  // Classified errors carry an intentional 4xx statusCode: our own typed
+  // HttpError/SyncRelayConflictError, plus duck-typed auth errors from
+  // workspace-api (UnauthorizedError). Everything else is UNEXPECTED
+  // (SQLite failures, auth-DB hiccups): log it server-side and answer with a
+  // generic 500 — never echo error.message, which can leak internals.
+  const duckStatus =
+    typeof error === "object" && error && "statusCode" in error
+      ? Number((error as { statusCode?: unknown }).statusCode)
+      : undefined;
+  const classified =
+    error instanceof HttpError ||
+    error instanceof SyncRelayConflictError ||
+    (Number.isInteger(duckStatus) && duckStatus! >= 400 && duckStatus! <= 499);
+  if (!classified) {
+    console.error("[sync-relay] unhandled error", error);
+    return jsonResponse({ ok: false, error: "internal error", code: "internal_error" }, 500);
+  }
   const status =
-    error instanceof HttpError
+    error instanceof HttpError || error instanceof SyncRelayConflictError
       ? error.statusCode
-      : error instanceof SyncRelayConflictError
-        ? error.statusCode
-        : typeof error === "object" && error && "statusCode" in error
-          ? Number((error as { statusCode?: unknown }).statusCode)
-          : undefined;
+      : duckStatus!;
   const code =
     error instanceof HttpError || error instanceof SyncRelayConflictError
       ? error.code
       : typeof error === "object" && error && "code" in error
         ? String((error as { code?: unknown }).code)
         : undefined;
+  const message = error instanceof Error ? error.message : "request failed";
   return jsonResponse(
     {
       ok: false,
-      error: status === 404 ? "not found" : message,
+      error: message,
       ...(code ? { code } : {}),
     },
-    status && Number.isInteger(status) ? status : 400,
+    status,
   );
 }
 
@@ -316,6 +339,10 @@ function badRequest(message: string): HttpError {
 
 function notFound(): HttpError {
   return new HttpError(404, "not_found", "not found");
+}
+
+function blobNotFound(): HttpError {
+  return new HttpError(404, "blob_not_found", "blob not found");
 }
 
 function methodNotAllowed(): HttpError {

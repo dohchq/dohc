@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
-import { createSyncRelayHandler } from "./server";
+import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { openSyncRelayStorage } from "./storage";
 
 const requestedPort = process.env.SYNC_RELAY_PORT === undefined ? 1788 : Number(process.env.SYNC_RELAY_PORT);
@@ -43,6 +43,13 @@ const resolveActor: ResolveActor = testAuthSeam
       pool = new Pool({
         connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
       });
+      // pg pools emit 'error' for idle-client failures (Postgres restart,
+      // network partition). Without a listener that is an uncaught 'error'
+      // event and takes the whole relay process down; with one, only the
+      // in-flight requests fail (as a 5xx via the handler's error path).
+      pool.on("error", (error) => {
+        console.error("[sync-relay] postgres pool error", error);
+      });
       const auth = createWorkspaceAuth({
         pool,
         baseURL: process.env.SYNC_RELAY_AUTH_BASE_URL ?? `http://localhost:${requestedPort || 1788}`,
@@ -74,10 +81,42 @@ const fetchHandler = async (request: Request): Promise<Response> => {
 // routes (it only calls auth.api.getSession), so it does not need that
 // adapter — and blob uploads must not depend on a client remembering to set
 // a content-type header.
+// Stream-level body cap: reject oversized uploads AS THEY ARRIVE, before
+// anything is fully buffered — a multi-GB body must never accumulate in
+// memory waiting for the handler's MAX_BLOB_BYTES check. Small headroom over
+// the blob cap so a maximal valid blob PUT still passes.
+const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
+
 const server = createServer((request, response) => {
   const chunks: Buffer[] = [];
-  request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+  let received = 0;
+  let rejected = false;
+  // An aborted upload emits 'error' on the request stream; without a
+  // listener that is an uncaught error that crashes the process.
+  request.on("error", () => {
+    rejected = true;
+    response.destroy();
+  });
+  request.on("data", (chunk: Buffer) => {
+    if (rejected) return;
+    received += chunk.length;
+    if (received > MAX_BODY_BYTES) {
+      rejected = true;
+      chunks.length = 0;
+      response.statusCode = 413;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("connection", "close");
+      // Flush the 413 for well-behaved clients, then destroy the socket so
+      // the sender cannot keep streaming.
+      response.end(JSON.stringify({ ok: false, error: "payload too large", code: "payload_too_large" }), () => {
+        request.destroy();
+      });
+      return;
+    }
+    chunks.push(Buffer.from(chunk));
+  });
   request.on("end", () => {
+    if (rejected) return;
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const webRequest = new Request(url, {
       method: request.method,

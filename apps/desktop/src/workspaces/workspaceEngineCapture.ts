@@ -269,9 +269,17 @@ export interface WorkspaceEngineCapture {
   // version operations. The task owns engine push/pull; returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
-  runRelaySync<T extends { fastForwardedPaths: readonly RelayMaterializedPath[] }>(
-    task: () => Promise<T>,
-  ): Promise<T>;
+  // Data-safety contract: the pull's relay fetch cursor commits ONLY after
+  // materialization succeeds — runRelaySync invokes the result's
+  // commitFetchCursor once every fast-forwarded path is safely on disk, so a
+  // failed materialization leaves the cursor behind and the next pass
+  // retries the same ops instead of permanently skipping them.
+  runRelaySync<
+    T extends {
+      fastForwardedPaths: readonly RelayMaterializedPath[];
+      commitFetchCursor?: () => Promise<void>;
+    },
+  >(task: () => Promise<T>): Promise<T>;
   // Resolves when everything enqueued so far has been captured (tests).
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -1963,27 +1971,34 @@ export function createWorkspaceEngineCapture(
 
     runRelaySync(task) {
       return enqueueResult("relay sync", async () => {
-        const policy = await readPolicyForTask();
-        const engine = await engineStore();
         const result = await task();
         const changed = result.fastForwardedPaths;
-        if (changed.length === 0) return result;
-        const activeVersionId = await activeVersionIdOf(engine);
-        const materializations: MaterializeOperation[] = [];
-        for (const change of changed) {
-          if (change.operation === "delete") {
-            materializations.push({ kind: "delete", path: change.path });
-            continue;
+        if (changed.length > 0) {
+          // Policy/engine reads only when there is disk work: a quiescent
+          // relay tick must not pay for policy I/O it never uses.
+          const policy = await readPolicyForTask();
+          const engine = await engineStore();
+          const activeVersionId = await activeVersionIdOf(engine);
+          const materializations: MaterializeOperation[] = [];
+          for (const change of changed) {
+            if (change.operation === "delete") {
+              materializations.push({ kind: "delete", path: change.path });
+              continue;
+            }
+            const snapshot = await engine.readTextFile({
+              workspaceId,
+              versionId: activeVersionId,
+              path: change.path,
+            });
+            if (!snapshot) continue;
+            materializations.push(await materializeWriteForSnapshot(engine, snapshot));
           }
-          const snapshot = await engine.readTextFile({
-            workspaceId,
-            versionId: activeVersionId,
-            path: change.path,
-          });
-          if (!snapshot) continue;
-          materializations.push(await materializeWriteForSnapshot(engine, snapshot));
+          await materialize(materializations, policy);
         }
-        await materialize(materializations, policy);
+        // Only NOW is the pulled state durable on disk — commit the relay
+        // fetch cursor. A throw above leaves the cursor behind so the next
+        // pass re-fetches and retries the materialization.
+        await result.commitFetchCursor?.();
         return result;
       });
     },

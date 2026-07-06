@@ -38,6 +38,15 @@ export interface PullWorkspaceFromRelayResult {
   conflictsOpened: number;
   pendingConflictResolves: number;
   fastForwardedPaths: RelayMaterializedPath[];
+  // The relay cursor this pull reached. NOT persisted by the pull itself:
+  // the caller must invoke commitFetchCursor() only after fastForwardedPaths
+  // has been materialized to disk. A crash or materialization failure before
+  // the commit leaves the cursor behind, so the next pass re-fetches and
+  // re-reports the owed disk work instead of permanently skipping remote
+  // ops (which would let a later disk reconciliation overwrite pulled engine
+  // state with stale disk content).
+  nextCursor: number;
+  commitFetchCursor: () => Promise<void>;
 }
 
 export interface PushWorkspaceToRelayResult {
@@ -63,6 +72,28 @@ export class RelayConflictError extends Error {
   constructor(message = "Relay rejected the operation batch.") {
     super(message);
     this.name = "RelayConflictError";
+  }
+}
+
+// The relay log for THIS origin disagrees with the local journal (the relay
+// is ahead of local reality, or holds the same origin seq with different
+// content). That means the local engine.db was restored/cloned from an older
+// snapshot — pushing must fail closed rather than silently drop local ops.
+// Recovering via an origin reset is 0P-C follow-up work.
+export class RelayOriginDivergedError extends Error {
+  constructor(message = "Relay log for this origin diverged from the local journal.") {
+    super(message);
+    this.name = "RelayOriginDivergedError";
+  }
+}
+
+// The relay served the workspace but is missing a blob the log references —
+// distinct from the fixed absent-workspace 404 so sync can degrade honestly
+// instead of reporting the whole workspace unavailable.
+export class RelayBlobMissingError extends Error {
+  constructor(message = "Relay is missing a referenced blob.") {
+    super(message);
+    this.name = "RelayBlobMissingError";
   }
 }
 
@@ -101,12 +132,15 @@ async function requestRelay(
   relay: SyncRelayConnection,
   path: string,
   init: RequestInit = {},
+  options: { mapNotFound?: (response: Response) => Promise<Error> } = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${relay.token}`);
   const response = await relayFetch(relay)(relayUrl(relay, path), { ...init, headers });
   if (response.status === 401) throw new RelayUnauthorizedError();
-  if (response.status === 404) throw new RelayWorkspaceUnavailableError();
+  if (response.status === 404) {
+    throw options.mapNotFound ? await options.mapNotFound(response) : new RelayWorkspaceUnavailableError();
+  }
   return response;
 }
 
@@ -296,6 +330,21 @@ function readOpsAboveCursor(
     .map(rowToOp);
 }
 
+function readLocalMaxOriginSeq(
+  db: EngineSqliteDb,
+  workspaceId: WorkspaceId,
+  originId: string,
+): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(MAX(origin_seq), -1) AS max_seq
+       FROM replication_log
+       WHERE workspace_id = ? AND origin_id = ?`,
+    )
+    .get(workspaceId, originId);
+  return Number(row?.max_seq ?? -1);
+}
+
 export async function pushWorkspaceToRelay(
   input: SyncRelayInput,
 ): Promise<PushWorkspaceToRelayResult> {
@@ -313,6 +362,20 @@ export async function pushWorkspaceToRelay(
     let pushed = 0;
     const originsPushed: string[] = [];
     for (const originId of originIds) {
+      // pushed_seq must NEVER advance past the local journal's max for this
+      // origin: a relay that is ahead of local reality (or that holds a
+      // local seq with different content) means the local engine.db was
+      // restored/cloned from an older snapshot. Advancing the cursor anyway
+      // would silently mark local ops as pushed forever — fail closed
+      // instead (origin reset recovery is 0P-C follow-up).
+      const localMax = readLocalMaxOriginSeq(db, input.workspaceId, originId);
+      const divergedError = (relayMax: number): RelayOriginDivergedError =>
+        new RelayOriginDivergedError(
+          `Relay log for origin ${originId} diverged from the local journal ` +
+            `(relay max seq ${relayMax}, local max seq ${localMax}). The local ` +
+            "engine.db looks restored or cloned from an older snapshot; refusing " +
+            "to push. Recovering requires an origin reset (0P-C).",
+        );
       let cursor = readPushedSeq(db, input.workspaceId, originId);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const ops = readOpsAboveCursor(db, input.workspaceId, originId, cursor);
@@ -320,13 +383,20 @@ export async function pushWorkspaceToRelay(
         await uploadMissingBlobs(db, input.relay, input.workspaceId, ops);
         try {
           const result = await appendOriginOps(input.relay, input.workspaceId, originId, ops);
+          if (result.currentMaxOriginSeq > localMax) throw divergedError(result.currentMaxOriginSeq);
           writePushedSeq(db, input.workspaceId, originId, result.currentMaxOriginSeq);
           pushed += result.inserted;
           originsPushed.push(originId);
           break;
         } catch (error) {
           if (!(error instanceof RelayConflictError) || attempt > 0) throw error;
-          cursor = await probeOrigin(input.relay, input.workspaceId, originId);
+          const probed = await probeOrigin(input.relay, input.workspaceId, originId);
+          // A 409 is only recoverable when the relay is BEHIND our cursor
+          // (relay-side data loss): rewind and re-send. A 409 with the relay
+          // at/above our cursor means it already holds these seqs with
+          // DIFFERENT content — same-origin divergence, fail closed.
+          if (probed > localMax || probed >= cursor) throw divergedError(probed);
+          cursor = probed;
           writePushedSeq(db, input.workspaceId, originId, cursor);
         }
       }
@@ -355,7 +425,28 @@ async function fetchRelayBlob(
   sha: string,
   kind: "text" | "binary",
 ): Promise<string | Uint8Array> {
-  const response = await requestRelay(relay, `/sync/${encodeURIComponent(workspaceId)}/blobs/${sha}`);
+  const response = await requestRelay(
+    relay,
+    `/sync/${encodeURIComponent(workspaceId)}/blobs/${sha}`,
+    {},
+    {
+      // The relay distinguishes a missing blob in an owned workspace
+      // (code "blob_not_found") from the fixed absent-workspace 404. Map the
+      // former to its own error so sync degrades honestly instead of
+      // reporting the whole workspace unavailable.
+      mapNotFound: async (notFoundResponse) => {
+        const body = (await notFoundResponse.json().catch(() => null)) as {
+          code?: unknown;
+        } | null;
+        if (body?.code === "blob_not_found") {
+          return new RelayBlobMissingError(
+            `Relay is missing blob ${sha} referenced by the workspace log.`,
+          );
+        }
+        return new RelayWorkspaceUnavailableError();
+      },
+    },
+  );
   if (!response.ok) throw new Error(`Relay blob download failed (${response.status})`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (sha256Hex(bytes) !== sha) {
@@ -422,6 +513,14 @@ export async function pullWorkspaceFromRelay(
 ): Promise<PullWorkspaceFromRelayResult> {
   const initialDb = openEngineDb(input.rootDir);
   const since = readFetchCursor(initialDb, input.workspaceId);
+  // The LOCAL origin id (null on a pull-only replica that never journaled).
+  // Own-origin ops pulled back from the relay never owe disk work; remote
+  // ops always might (see the retry note below).
+  const localOriginRow = initialDb
+    .prepare("SELECT origin_id FROM sync_identity WHERE workspace_id = ?")
+    .get(input.workspaceId);
+  const localOriginId =
+    typeof localOriginRow?.origin_id === "string" ? localOriginRow.origin_id : null;
   initialDb.close();
 
   let cursor = since;
@@ -443,9 +542,22 @@ export async function pullWorkspaceFromRelay(
       } as SyncReplicationEnvelope);
     }
     fetched += page.ops.length;
+    // Forward-progress guard: a buggy or malicious relay claiming hasMore
+    // without advancing the cursor must abort the pass, not spin forever.
+    if (page.hasMore && page.nextCursor <= cursor) {
+      throw new Error("Relay log pagination did not advance; aborting pull.");
+    }
     cursor = page.nextCursor;
     if (!page.hasMore) break;
   }
+  const commitFetchCursor = async (): Promise<void> => {
+    const db = openEngineDb(input.rootDir);
+    try {
+      writeFetchCursor(db, input.workspaceId, cursor);
+    } finally {
+      db.close();
+    }
+  };
   if (ops.length === 0) {
     return {
       fetched,
@@ -454,6 +566,8 @@ export async function pullWorkspaceFromRelay(
       conflictsOpened: 0,
       pendingConflictResolves: 0,
       fastForwardedPaths: [],
+      nextCursor: cursor,
+      commitFetchCursor,
     };
   }
 
@@ -482,13 +596,30 @@ export async function pullWorkspaceFromRelay(
     );
   }
 
-  const finalDb = openEngineDb(input.rootDir);
-  try {
-    writeFetchCursor(finalDb, input.workspaceId, cursor);
-  } finally {
-    finalDb.close();
+  // Retry safety for the cursor-commit contract: ops below the un-committed
+  // cursor are re-fetched after a failed materialization, but their re-apply
+  // is an idempotent SKIP — the before/after diff alone would silently drop
+  // the still-owed disk work. Re-report every skipped REMOTE-origin write
+  // path whose active snapshot exists; materialization writes the engine's
+  // own active content under expected-event suppression, so a redundant
+  // write is a harmless no-op. Own-origin echoes stay excluded (disk already
+  // led the engine for those). Deletes intentionally ride the diff only:
+  // reporting a delete for a path a skipped op merely REFERENCES (e.g. a
+  // rename's before path that never existed here) could remove an untracked
+  // user file.
+  const { skippedOps, ...applyCounts } = result;
+  const reported = new Set(fastForwardedPaths.map((entry) => entry.path));
+  const skippedRemotePaths = candidateMaterializationPaths(
+    skippedOps.filter((op) => op.originId !== localOriginId),
+  );
+  for (const path of skippedRemotePaths) {
+    if (reported.has(path)) continue;
+    const snapshot = after.get(path) ?? null;
+    if (!snapshot) continue;
+    fastForwardedPaths.push({ path, operation: "write", contentKind: snapshot.contentKind });
   }
-  return { fetched, ...result, fastForwardedPaths };
+
+  return { fetched, ...applyCounts, fastForwardedPaths, nextCursor: cursor, commitFetchCursor };
 }
 
 export async function claimRelayWorkspace(input: {

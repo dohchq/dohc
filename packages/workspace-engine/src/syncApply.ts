@@ -9,6 +9,7 @@ import {
 } from "./engineDbSchema";
 import { createLinkedChatStore } from "./linkedChatStore";
 import {
+  MAX_VERSIONED_BINARY_FILE_BYTES,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
   createVersionedTextStore,
@@ -47,6 +48,10 @@ export interface ApplySyncQueuesResult {
   // mirrored heads); journaled and acked but surfaced, never silently
   // swallowed.
   pendingConflictResolves: number;
+  // Ops whose apply was an idempotent skip (already journaled). The relay
+  // pull uses these to re-report disk work owed by a previous pass whose
+  // materialization failed before the fetch cursor committed.
+  skippedOps: SyncReplicationEnvelope[];
 }
 
 export function corruptSyncPayload(message: string): VersionedTextStoreError {
@@ -176,7 +181,25 @@ export function hydrateTextBlob(db: EngineSqliteDb, sha: string, text: string): 
   throw corruptSyncPayload(`Existing blob ${sha} does not match the sync bundle content.`);
 }
 
+// The engine refuses to WRITE binaries above MAX_VERSIONED_BINARY_FILE_BYTES
+// (5 MiB), so no honest peer can ever ship one. The relay's transport cap
+// (MAX_BLOB_BYTES, 10 MB) is deliberately larger — headroom for text blobs —
+// which means an authenticated client could push an oversized binary the
+// relay would store. Enforce the ENGINE limit here, by referenced kind,
+// before any insertion: hydrating such a blob would create local state the
+// engine itself forbids. Fails closed as a protocol violation.
+export function assertBinaryBlobWithinEngineLimit(sha: string, bytes: Uint8Array): void {
+  if (bytes.byteLength > MAX_VERSIONED_BINARY_FILE_BYTES) {
+    throw new VersionedTextStoreError(
+      "file-too-large",
+      `Sync binary blob ${sha} is ${bytes.byteLength} bytes and exceeds the ` +
+        `${MAX_VERSIONED_BINARY_FILE_BYTES}-byte engine limit; rejecting the protocol violation.`,
+    );
+  }
+}
+
 export function hydrateBinaryBlob(db: EngineSqliteDb, sha: string, bytes: Uint8Array): void {
+  assertBinaryBlobWithinEngineLimit(sha, bytes);
   if (sha256Hex(bytes) !== sha) {
     throw corruptSyncPayload(`Sync binary blob ${sha} does not match its content hash.`);
   }
@@ -207,37 +230,45 @@ export async function applySyncQueues(
 ): Promise<ApplySyncQueuesResult> {
   const db = openEngineDb(input.rootDir);
   try {
+    const textHashes = new Set<string>();
+    const binaryHashes = new Set<string>();
+    for (const queue of input.queues) {
+      for (const op of queue) {
+        const refs = collectBlobHashesFromOp(op);
+        for (const sha of refs.text) textHashes.add(sha);
+        for (const sha of refs.binary) binaryHashes.add(sha);
+      }
+    }
+    // Materialize missing blob bytes BEFORE taking the write transaction:
+    // blobSource may be network-backed (the relay path), and BEGIN IMMEDIATE
+    // must never hold the engine write lock across a fetch — that starves
+    // concurrent local writers into the 5s busy_timeout. Hydration below is
+    // synchronous; INSERT OR IGNORE + content verification inside the
+    // transaction keeps a racing writer safe.
+    const fetchedText = new Map<string, string>();
+    const fetchedBinary = new Map<string, Uint8Array>();
+    for (const sha of textHashes) {
+      if (db.prepare("SELECT 1 FROM blobs WHERE sha256 = ?").get(sha)) continue;
+      const text = await input.blobSource(sha, "text");
+      if (typeof text !== "string") {
+        throw corruptSyncPayload(`Sync blob ${sha} was not text content.`);
+      }
+      fetchedText.set(sha, text);
+    }
+    for (const sha of binaryHashes) {
+      if (db.prepare("SELECT 1 FROM binary_blobs WHERE sha256 = ?").get(sha)) continue;
+      const bytes = await input.blobSource(sha, "binary");
+      if (typeof bytes === "string") {
+        throw corruptSyncPayload(`Sync binary blob ${sha} was not binary content.`);
+      }
+      // Fail closed at the transport edge, before anything is staged.
+      assertBinaryBlobWithinEngineLimit(sha, bytes);
+      fetchedBinary.set(sha, bytes);
+    }
     db.exec("BEGIN IMMEDIATE");
     try {
-      const textHashes = new Set<string>();
-      const binaryHashes = new Set<string>();
-      for (const queue of input.queues) {
-        for (const op of queue) {
-          const refs = collectBlobHashesFromOp(op);
-          for (const sha of refs.text) textHashes.add(sha);
-          for (const sha of refs.binary) binaryHashes.add(sha);
-        }
-      }
-      for (const sha of textHashes) {
-        const existing = db.prepare("SELECT 1 FROM blobs WHERE sha256 = ?").get(sha);
-        if (!existing) {
-          const text = await input.blobSource(sha, "text");
-          if (typeof text !== "string") {
-            throw corruptSyncPayload(`Sync blob ${sha} was not text content.`);
-          }
-          hydrateTextBlob(db, sha, text);
-        }
-      }
-      for (const sha of binaryHashes) {
-        const existing = db.prepare("SELECT 1 FROM binary_blobs WHERE sha256 = ?").get(sha);
-        if (!existing) {
-          const bytes = await input.blobSource(sha, "binary");
-          if (typeof bytes === "string") {
-            throw corruptSyncPayload(`Sync binary blob ${sha} was not binary content.`);
-          }
-          hydrateBinaryBlob(db, sha, bytes);
-        }
-      }
+      for (const [sha, text] of fetchedText) hydrateTextBlob(db, sha, text);
+      for (const [sha, bytes] of fetchedBinary) hydrateBinaryBlob(db, sha, bytes);
       for (const queue of input.queues) {
         for (const op of queue) {
           const refs = collectBlobHashesFromOp(op);
@@ -271,6 +302,7 @@ export async function applySyncQueues(
     let skipped = 0;
     let conflictsOpened = 0;
     let pendingConflictResolves = 0;
+    const skippedOps: SyncReplicationEnvelope[] = [];
     for (;;) {
       const op = popNextMergedOp(input.queues);
       if (!op) break;
@@ -282,13 +314,14 @@ export async function applySyncQueues(
           : await versions.applyReplicationOp(op);
       if (result.status === "skipped") {
         skipped += 1;
+        skippedOps.push(op);
       } else {
         applied += 1;
         conflictsOpened += result.conflictsOpened;
         pendingConflictResolves += result.pendingConflictResolves ?? 0;
       }
     }
-    return { applied, skipped, conflictsOpened, pendingConflictResolves };
+    return { applied, skipped, conflictsOpened, pendingConflictResolves, skippedOps };
   } finally {
     await chats.close();
     await versions.close();

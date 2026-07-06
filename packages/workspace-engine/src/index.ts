@@ -33,7 +33,9 @@ export {
   nextOriginSeq,
 } from "./syncReplication";
 export {
+  RelayBlobMissingError,
   RelayConflictError,
+  RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayWorkspaceUnavailableError,
   claimRelayWorkspace,

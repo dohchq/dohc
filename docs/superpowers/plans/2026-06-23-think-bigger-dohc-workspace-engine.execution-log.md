@@ -16770,10 +16770,15 @@ Round 2 — engine client + desktop loop:
   ONE 409 recovery via empty-batch probe then fail closed. Pull = page
   `GET log?since=<persisted fetch cursor>`, hydrate missing blobs via
   GET with MANDATORY client-side sha256 re-verification, apply through
-  syncApply, THEN persist the fetch cursor (crash between apply and
-  cursor write re-fetches; apply is idempotent). Typed
+  syncApply; the fetch cursor is returned as `nextCursor` +
+  `commitFetchCursor()` and committed by the desktop capture only AFTER
+  disk materialization succeeds (gate fix 1 below — crash or
+  materialization failure before the commit re-fetches; apply is
+  idempotent and retry re-reports the owed disk work). Typed
   RelayUnauthorizedError (401) / RelayWorkspaceUnavailableError (404) /
-  RelayConflictError (409). Tokens never in URLs or logs.
+  RelayConflictError (409) / RelayOriginDivergedError (restored or
+  cloned engine.db) / RelayBlobMissingError (relay lost a blob). Tokens
+  never in URLs or logs.
 - [x] CURSOR PERSISTENCE IN ENGINE.DB (the 0P-A handoff item this lane
   owns): lazy-additive `sync_relay_cursors(workspace_id,
   relay_fetch_cursor)` + `sync_relay_push_state(workspace_id,
@@ -16925,10 +16930,10 @@ node scripts/check-self-host.mjs            # same 3 pre-existing misses as main
 - Machine: AMD Ryzen 9 7950X, WSL2, node v25.2.1. sync-relay suite
   ~10s (5 child-process integration specs incl. the 10-iteration fuzz
   at ~2.4s); desktop suite 905 tests ~16s wall; engine 345 in ~35s.
-- Blob hydration currently runs inside the apply-side BEGIN IMMEDIATE
-  transaction, holding the write lock across network GETs. Bounded by
-  capture-chain serialization on desktop; still a follow-up candidate
-  (hydrate-then-begin) if pulls ever contend with local writes.
+- Blob hydration originally ran inside the apply-side BEGIN IMMEDIATE
+  transaction, holding the write lock across network GETs. Fixed in the
+  gate round below (fetch-then-begin: blobs are fetched before the
+  transaction opens and hydrated synchronously inside it).
 
 ### Migration Notes
 
@@ -16975,3 +16980,121 @@ node scripts/check-self-host.mjs            # same 3 pre-existing misses as main
 - Relay GC/quotas: append-only at alpha per the design's Risk 2.
 - Multi-page pulls hold the full fetched backlog in memory before
   apply; fine for text-first alpha, revisit with blob-heavy workspaces.
+
+### 0P-B Gate Fix Round (codex + CodeRabbit findings, one commit)
+
+Tests-first: every behavior fix below landed with a failing repro
+before the fix (the two data-safety Highs' repros are called out).
+
+1. Cursor-before-materialization (codex HIGH, data safety): the pull
+   committed the relay fetch cursor before the desktop materialized
+   pulled state to disk — a failed materialization permanently skipped
+   the remote op, and a later disk reconciliation could overwrite
+   pulled engine state with stale disk. Now `pullWorkspaceFromRelay`
+   returns `nextCursor` + `commitFetchCursor()` and never persists the
+   cursor itself; the capture's `runRelaySync` commits ONLY after
+   `materialize()` succeeds. Retry passes re-report owed disk work:
+   `applySyncQueues` returns its idempotently-skipped ops and the pull
+   re-emits write entries for skipped REMOTE-origin paths whose active
+   snapshot exists (own-origin echoes stay excluded; deletes ride the
+   snapshot diff only, so a merely-referenced path can never delete an
+   untracked user file). Repro (failed pre-fix): pull without commit →
+   cursor was already 2; retry pull reported no disk work. Capture-side
+   repro: directory squatting on the target path → materialization
+   throws → commit spy must not run; unblocked retry materializes then
+   commits; quiescent pass still commits.
+2. Oversized binary blob hydration (codex HIGH, data safety): the
+   engine forbids binaries > MAX_VERSIONED_BINARY_FILE_BYTES (5 MiB)
+   locally, but the relay's 10MB MAX_BLOB_BYTES (text headroom —
+   split now documented in server.ts) let an authenticated peer ship a
+   binary blob peers would hydrate. `hydrateBinaryBlob` (shared by
+   relay pull AND bundle import) now enforces the engine limit by
+   referenced kind BEFORE insertion, failing closed as a typed
+   file-too-large protocol violation; the pull path also asserts at the
+   transport edge before staging. Repro (failed pre-fix): 5MiB+1 blob
+   in a relay log → hydrated into binary_blobs, then died on an
+   incidental apply error instead of an honest rejection.
+3. 409 recovery / same-origin divergence (codex MEDIUM):
+   `pushWorkspaceToRelay` now never advances pushed_seq past the local
+   journal's max for an origin. A relay AHEAD of local reality (append
+   result or probe above local max) or a 409 with the probe at/above
+   the push cursor (same seq, different content) is a restored/cloned
+   engine.db → typed RelayOriginDivergedError, fail closed (origin
+   reset recovery recorded as 0P-C follow-up). The one legitimate
+   recovery — relay BEHIND the cursor after relay-side data loss —
+   still rewinds and retries once. Repros (failed pre-fix): restored
+   older DB resolved silently with pushed_seq advanced past local max;
+   post-restore divergent write was silently dropped.
+4. Unbounded request buffering (CodeRabbit CRITICAL): main.ts now caps
+   bodies AT THE STREAM (MAX_BLOB_BYTES + 1MB headroom) — oversized
+   uploads get a flushed 413 then a destroyed socket mid-stream, and
+   the request stream has an error listener (aborted uploads no longer
+   crash the process). Integration-proven with a 48MB streamed PUT:
+   the client cannot deliver the full body, and the server stays
+   healthy (health + normal blob PUT succeed after).
+5. pg.Pool error listener (CodeRabbit CRITICAL): idle-client pool
+   errors are logged instead of crashing the relay; an auth-backend
+   failure surfaces as a generic 5xx (unit test with a throwing
+   resolveActor).
+6. Pagination forward-progress guard (CodeRabbit MAJOR): a relay page
+   claiming hasMore without advancing nextCursor aborts the pull with
+   an error. Pre-fix repro spun a vitest worker at 96% CPU for six
+   minutes before being killed.
+7. Blob-miss vs workspace-miss (CodeRabbit MAJOR): the relay returns a
+   distinct 404 code `blob_not_found` for a missing blob in an OWNED
+   workspace (absent/foreign workspaces keep the byte-identical fixed
+   404, adversarially re-asserted); the client maps it to typed
+   RelayBlobMissingError instead of RelayWorkspaceUnavailableError.
+8. Write lock across blob fetches (CodeRabbit MAJOR): applySyncQueues
+   fetches missing blobs BEFORE `BEGIN IMMEDIATE` and hydrates
+   synchronously inside the transaction. Repro (failed pre-fix): a
+   BEGIN IMMEDIATE probe connection inside the blob fetch hook hit
+   "database is locked"; now it succeeds.
+9. relaySyncEngine over-mock (CodeRabbit MAJOR): the loop tests now
+   mock only the transport (vi.mock of push/pull) while the capture
+   stub executes the REAL callback and the commit contract; new wiring
+   test asserts push-then-pull order, exact inputs, commitFetchCursor
+   invocation, and conflictsOpened folding into conflictCount.
+10. Error-message leak (CodeRabbit MAJOR): unclassified errors (no
+    intentional 4xx statusCode) now log server-side and answer a
+    generic `{error:"internal error"}` 500 — error.message passthrough
+    only for typed HttpError/Conflict and duck-typed 4xx auth errors.
+
+Recorded for the arc-gate sweep (NOT fixed here — CodeRabbit
+minors/trivials):
+
+- main.ts:11 hardcoded default Postgres URL fallback instead of
+  failing fast when POSTGRES_URL is unset outside dev/test.
+- main.ts:10 no validation of SYNC_RELAY_PORT (NaN → obscure listen
+  error).
+- syncRelay.test.ts: no regression test for claiming a workspace
+  already owned by another user (FakeRelay implements the check).
+- syncRelay.test.ts: no coverage for irrecoverable conflict after
+  retry exhaustion or unclaimed-workspace push/pull errors (the
+  divergence tests added here cover the adjacent fail-closed paths).
+- storage.ts missingBlobs: N+1 point queries (up to 2,000 sequential
+  SELECTs) instead of one batched IN query.
+- storage.ts appendLogBatch: re-queries MAX(origin_seq) per op instead
+  of tracking it locally.
+- scripts/build.mjs: no sourcemap for the bundled service.
+- workspaceEngineCapture.test.ts: relay materialization coverage lacks
+  a binary fast-forward case and a missing-snapshot silent-skip case.
+- workspaceActivity.ts:214: engine-opted-out workspaces get the
+  generic signed-in-session error from enableCloud (and cloudEnableSync
+  marks the workspace remote before the check).
+- (fixed incidentally by fix 1's restructure) capture runRelaySync ran
+  policy/engine reads before the quiescent early return.
+- server.test.ts 413 regression gap: covered here by the new
+  handler-level 413 test + the streamed integration test.
+
+Verification (all green, unsandboxed):
+
+```bash
+pnpm --filter @dohc/workspace-engine test   # 352 passed (345 + 7 new)
+pnpm --filter @dohc/sync-relay test         # 19 passed (14 + 5 new, none skipped)
+pnpm --filter @dohc/desktop test            # 907 passed (905 + capture test, relay loop 4→5)
+pnpm --filter @dohc/workspace-api test      # 76 passed
+pnpm typecheck                              # clean repo-wide
+git diff --check                            # clean
+node scripts/check-think-bigger-doc-links.mjs
+```

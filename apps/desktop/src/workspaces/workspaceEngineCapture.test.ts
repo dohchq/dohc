@@ -684,6 +684,56 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     await engine.stop();
     expect(readEngineMoments(root)).toHaveLength(momentsBefore);
   });
+
+  // Data-safety gate finding: the relay fetch cursor must only commit AFTER
+  // the pulled state is safely on disk. A failed materialization leaves the
+  // cursor un-advanced so the next pass retries the same ops.
+  it("commits the relay fetch cursor only after disk materialization succeeds", async () => {
+    const root = await tempRoot();
+    const engine = capture(root);
+    const store = createVersionedTextStore(root);
+    await store.ensureMainVersion({ workspaceId: "engine-capture-test" });
+    await store.writeTextFile({
+      workspaceId: "engine-capture-test",
+      versionId: "main",
+      path: "notes/remote.md",
+      text: "remote machine wrote this\n",
+      metadata: { origin: "sync", summary: "remote write" },
+    });
+    await store.close();
+
+    // Block materialization: a directory squats on the file path.
+    await mkdir(join(root, "notes/remote.md"), { recursive: true });
+    const commit = vi.fn(async () => {});
+    const pullResult = () => ({
+      fastForwardedPaths: [
+        { path: "notes/remote.md", operation: "write" as const, contentKind: "text" as const },
+      ],
+      commitFetchCursor: commit,
+    });
+    await expect(engine.runRelaySync(async () => pullResult())).rejects.toThrow(
+      /Could not update notes\/remote\.md/u,
+    );
+    expect(commit).not.toHaveBeenCalled();
+
+    // Unblock the path: the retry pass materializes and THEN commits.
+    await rm(join(root, "notes/remote.md"), { recursive: true, force: true });
+    await engine.runRelaySync(async () => pullResult());
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(root, "notes/remote.md"), "utf8")).toBe(
+      "remote machine wrote this\n",
+    );
+
+    // A quiescent pass (chat-only or own-origin ops) still commits: cursor
+    // progress must not depend on file materialization work existing.
+    const quiescentCommit = vi.fn(async () => {});
+    await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [],
+      commitFetchCursor: quiescentCommit,
+    }));
+    await engine.stop();
+    expect(quiescentCommit).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("workspaceEngineCapture startup reconciliation", () => {
