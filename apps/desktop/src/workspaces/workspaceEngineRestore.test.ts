@@ -62,8 +62,10 @@ describe("engine history reads", () => {
     expect(page.nextBeforeMomentOrder).toBeNull();
 
     const detail = await engine.readMoment(page.moments[0].id);
-    expect(detail?.payload.before?.text).toBe("first\n");
-    expect(detail?.payload.after.text).toBe("second\n");
+    expect(detail?.protected).toBe(false);
+    const payload = detail?.protected === false ? detail.moment.payload : undefined;
+    expect(payload?.before?.text).toBe("first\n");
+    expect(payload?.after.text).toBe("second\n");
     await engine.stop();
   });
 
@@ -142,7 +144,8 @@ describe("engine restore", () => {
     expect(moments[1].metadata.summary).toBe("Saved latest edits");
     expect(moments[0].metadata.correlationId).toBe(moments[1].metadata.correlationId);
     const saved = await engine.readMoment(moments[1].id);
-    expect(saved?.payload.after.text).toBe("uncaptured newest\n");
+    const savedPayload = saved?.protected === false ? saved.moment.payload : undefined;
+    expect(savedPayload?.after.text).toBe("uncaptured newest\n");
     await engine.stop();
   });
 

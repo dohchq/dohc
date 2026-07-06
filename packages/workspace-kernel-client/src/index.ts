@@ -150,8 +150,15 @@ export class WorkspaceKernelClient {
   private disposed = false;
   private restartFailures = 0;
   private restarting: Promise<void> | null = null;
+  // NOT a constructor parameter property: the desktop main process loads
+  // this package as raw .ts through Node's strip-only type stripping, which
+  // rejects TS parameter properties (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX) and
+  // crashes Electron at startup (found by the PR 08 E2E run).
+  private readonly options: WorkspaceKernelClientOptions;
 
-  constructor(private readonly options: WorkspaceKernelClientOptions) {}
+  constructor(options: WorkspaceKernelClientOptions) {
+    this.options = options;
+  }
 
   async handshake(options?: KernelCallOptions): Promise<KernelHandshakeResult> {
     return this.request<KernelHandshakeResult>("kernel.handshake", {}, options);

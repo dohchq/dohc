@@ -58,13 +58,18 @@ async function seededStores() {
     text: "Launch plan\n\nThe alpha keyword lives here.\n",
     metadata: { origin: "local-file", summary: "seed plan" },
   });
-  await versions.writeTextFile({
-    workspaceId: "workspace-a",
-    versionId: main.id,
-    path: ".env",
-    text: "ALPHA_SECRET=do-not-index\n",
-    metadata: { origin: "local-file", summary: "seed secret" },
-  });
+  // PR 08: the text store's write gate now refuses secret paths outright, so
+  // plaintext .env content can never be seeded here in the first place (the
+  // secret store tests cover secret-content search denial end to end).
+  await expect(
+    versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: ".env",
+      text: "ALPHA_SECRET=do-not-index\n",
+      metadata: { origin: "local-file", summary: "seed secret" },
+    }),
+  ).rejects.toMatchObject({ code: "invalid-path" });
   const thread = await chats.createThread({
     workspaceId: "workspace-a",
     title: "Plan discussion",

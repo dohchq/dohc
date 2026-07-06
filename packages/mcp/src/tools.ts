@@ -29,6 +29,7 @@ import {
 } from "@dohc/workspace-core";
 import {
   LinkedChatStoreError,
+  classifyEngineFilePath,
   createLinkedChatStore,
   createVersionedTextStore,
   type ChatMessage,
@@ -626,6 +627,17 @@ export async function listWorkspaceFiles(
   return { ok: true as const, root: root.normalized, entries };
 }
 
+// Secret-backed files (PR 08, plan agent-access default = DENY): dohc-
+// controlled agent surfaces never share secret file contents. The floor is
+// the same classifyEngineFilePath rule the engine enforces everywhere —
+// policy files can never unmark it.
+const SECRET_READ_DENIED_REASON =
+  "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
+
+function isSecretWorkspacePath(normalizedPath: string): boolean {
+  return classifyEngineFilePath(normalizedPath).kind === "secret";
+}
+
 export async function readWorkspaceFile(
   ctx: ToolContext,
   args: {
@@ -637,6 +649,9 @@ export async function readWorkspaceFile(
 ) {
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  if (isSecretWorkspacePath(resolved.normalized)) {
+    return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+  }
   try {
     const maxBytes = Math.min(
       HARD_READ_MAX_BYTES,
@@ -801,6 +816,13 @@ export async function searchWorkspaceFiles(
   }
 
   async function searchFile(absolute: string, relativePath: string): Promise<boolean> {
+    // Secret floor (PR 08): never search protected files — neither their
+    // contents nor a path hit that would carry a preview. The skip is
+    // reported honestly instead of silently vanishing.
+    if (isSecretWorkspacePath(relativePath)) {
+      skipped.push({ path: relativePath, reason: "protected file (secret contents are never searched)" });
+      return true;
+    }
     const info = await stat(absolute);
     const mediaType = mediaTypeForPath(relativePath) ?? "application/octet-stream";
 

@@ -77,6 +77,37 @@ describe("buildRipgrepArgs", () => {
       expect(args.indexOf(builtIn), `${builtIn} after user globs`).toBeGreaterThan(exclude);
     }
   });
+
+  it("always excludes secret-classified .env paths, case-insensitively, after user globs (PR 08)", () => {
+    const args = buildRipgrepArgs({ query: "x", includeGlob: "*.env" });
+    const include = args.indexOf("*.env");
+    for (const glob of ["!**/*.env", "!**/.env/**"]) {
+      const at = args.indexOf(glob);
+      expect(at, `${glob} present`).toBeGreaterThan(0);
+      // --iglob: the secret floor lowercases, so .ENV must exclude too.
+      expect(args[at - 1]).toBe("--iglob");
+      // After the user's include glob: last-match-wins keeps the floor
+      // authoritative even against an explicit include of *.env.
+      expect(at).toBeGreaterThan(include);
+    }
+  });
+});
+
+describe("toSearchEntries secret floor backstop", () => {
+  it("drops matches on secret-classified paths even if globs were out-voted", () => {
+    for (const path of [".env", "config/prod.env", "apps/site/.ENV", "secrets%2eenv"]) {
+      const data = parseRipgrepLine(
+        matchEvent({ path, lineText: "API_KEY=super-secret\n" }),
+      );
+      expect(data, path).not.toBeNull();
+      expect(toSearchEntries(data ?? {}), path).toEqual([]);
+    }
+    // Non-secret lookalikes still match ("environment.md" is not .env).
+    const ordinary = parseRipgrepLine(
+      matchEvent({ path: "environment.md", lineText: "hello needle world\n" }),
+    );
+    expect(toSearchEntries(ordinary ?? {})).toHaveLength(1);
+  });
 });
 
 function matchEvent(overrides: {

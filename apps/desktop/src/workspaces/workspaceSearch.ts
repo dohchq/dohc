@@ -1,4 +1,5 @@
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
+import { classifyEngineFilePath } from "@dohc/workspace-engine";
 import { spawn } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -88,6 +89,11 @@ export function buildRipgrepArgs(request: WorkspaceSearchRequest): string[] {
   // Built-in exclusions LAST (after every user glob): last-match-wins keeps
   // them authoritative no matter what the user typed.
   args.push("-g", "!**/.dohc/**", "-g", "!**/.git/**", "-g", "!**/node_modules/**");
+  // Secret floor (PR 08): `.env`-style paths never surface search snippets —
+  // the same classifyEngineFilePath floor the engine enforces, expressed as
+  // rg globs (case-insensitive to match the floor's lowercase rule) plus the
+  // toSearchEntries backstop below. Over-exclusion is the safe direction.
+  args.push("--iglob", "!**/*.env", "--iglob", "!**/.env/**");
   args.push("--", request.query);
   return args;
 }
@@ -155,6 +161,9 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   // rejects these today, and this stays near rg parsing because include globs
   // can out-vote CLI exclusions (last-match-wins).
   if (hasIgnoredSegment(validated.normalized)) return [];
+  // Secret-floor backstop (PR 08): even if a user include glob out-votes the
+  // CLI exclusions, a secret-classified path never crosses to the renderer.
+  if (classifyEngineFilePath(validated.normalized).kind === "secret") return [];
   const submatches = Array.isArray(data.submatches) ? data.submatches : [];
   const line = rawLine.replace(/\r?\n$/, "");
   const lineBytes = Buffer.from(line, "utf8");

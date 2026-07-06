@@ -5,6 +5,7 @@ import {
   ExternalLink,
   FileText,
   History,
+  Lock,
   Maximize2,
   PanelRight,
   RefreshCw,
@@ -990,13 +991,19 @@ function EngineMomentDiffPage({
     );
   }
 
-  const before = moment.beforeText ?? undefined;
-  const after = moment.afterText ?? undefined;
-  const counts = changedLineCounts(before, after);
-  const createdFile = moment.beforeText === null;
+  // Secret-backed file moment (PR 08): metadata-only — no diff exists, the
+  // body shows "Contents are protected" instead. Restore still works (it
+  // rides the encrypted path end to end).
+  const isProtected = moment.protected === true;
+  const before = isProtected ? undefined : (moment.beforeText ?? undefined);
+  const after = isProtected ? undefined : (moment.afterText ?? undefined);
+  const counts = isProtected ? null : changedLineCounts(before, after);
+  const createdFile = !isProtected && moment.beforeText === null;
   const restoreDetail = createdFile
     ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
-    : "The file will be returned to how it was before this change.";
+    : isProtected
+      ? "The protected file will be returned to how it was before this change. Its contents stay encrypted and are never shown."
+      : "The file will be returned to how it was before this change.";
   // Restoring a create moment REMOVES the file ("deleted"): no open-file
   // affordances for a file that is no longer in the folder (mirrors the
   // legacy HistoryDiffPage guard).
@@ -1146,7 +1153,11 @@ function EngineMomentDiffPage({
       <div className="min-h-0 overflow-auto overflow-x-hidden p-4">
         <section className="overflow-hidden rounded border border-line bg-bg shadow-sm">
           <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
-            <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
+            {isProtected ? (
+              <Lock size={13} aria-hidden className="shrink-0 text-subtle" />
+            ) : (
+              <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
+            )}
             <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
               {moment.path}
             </span>
@@ -1156,7 +1167,21 @@ function EngineMomentDiffPage({
               </span>
             ) : null}
           </div>
-          <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
+          {isProtected ? (
+            <div
+              data-testid="engine-diff-protected"
+              className="flex flex-col items-center gap-1 px-4 py-10 text-center"
+            >
+              <Lock size={16} aria-hidden className="text-subtle" />
+              <span className="text-sm text-muted">Contents are protected</span>
+              <span className="text-xs text-subtle">
+                dohc versions this file encrypted and never shows its contents
+                in history, search, or comparisons.
+              </span>
+            </div>
+          ) : (
+            <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
+          )}
         </section>
       </div>
       {confirmRestoreOpen ? (

@@ -15340,3 +15340,245 @@ only or docker-compose self-host from day one.
 - 0P-A opens the implementation arc; legacy `packages/workspace-sync` +
   `cloudSyncEngine.ts` retire when 0P-B replaces the desktop loop
   (audit Phase C/D).
+
+## PR WS-C - Secret-Backed Files (PR 08 On The Shipped Engine)
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/think-bigger-wsc-secrets
+Worktree: /home/ice/dev/dohc-wsc-secrets
+Implementation workstream, if used: single Claude lane (fable-5),
+tests-first with adversarial tests as first-class deliverables
+(security-critical lane).
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+- [x] Engine secret store (`packages/workspace-engine/src/secretFileStore.ts`):
+      secret-classified paths (the WS-F floor classifier decides; policy can
+      never unmark) version as AES-256-GCM ciphertext in the SAME engine.db
+      (additive `secret_files` / `secret_fork_bases` / `secret_moments`
+      tables, lazy-upgrade pattern like `active_versions`). Random 96-bit IV
+      per write, auth tag stored, AAD binds workspace+path so ciphertext rows
+      cannot be spliced across files. Moments are METADATA-ONLY by
+      construction: `SecretFileMoment` has no content field at all; the
+      encrypted after-state rides the moment solely to power restore.
+- [x] Key custody DECISION: per-workspace data key in
+      `<root>/.dohc/engine/secret.key` (0600 file, 0700 dir, exclusive-create
+      settles first-write races, format-versioned `dohc-secret-key-v1:`
+      prefix). The cloudCredentialStore pattern was READ and judged not
+      cleanly reusable: it is an Electron-safeStorage-sealed file in the
+      per-install app-data dir, not a keytar service entry — reusing it would
+      (a) drag Electron main-process APIs into @dohc/workspace-engine (which
+      must run under vitest/MCP/headless Node), (b) bind per-workspace engine
+      data to a per-install app credential, and (c) still degrade to
+      plaintext-on-disk on Linux/WSL without a secret service — the same
+      boundary as a 0600 key file. The versioned format allows an
+      OS-keychain wrap later without migration. Documented downgrade note:
+      a same-user local process can read the key file — and can equally read
+      the materialized plaintext .env beside it; dohc never claims
+      per-process enforcement after plaintext materialization (Refined
+      Default 8). The encryption's job is keeping secrets out of dohc's
+      durable/derived/replicated surfaces. Fail-closed rules: malformed key
+      file is NEVER regenerated over; tamper/wrong-key surfaces as
+      decrypt-failed, never garbage plaintext.
+- [x] Plaintext-store floor: versionedTextStore.writeTextFile and
+      renameTextFile(toPath) now REJECT secret-classified paths
+      (invalid-path), so plaintext secrets are structurally unable to enter
+      snapshots/moments/blobs. classifyEngineFilePath moved to a leaf module
+      (`enginePathFloor.ts`, re-exported from workspaceSearch) so both stores
+      enforce the same floor without import cycles.
+- [x] Capture (apps/desktop workspaceEngineCapture): secret paths stop being
+      skipped — live batches and reconcile passes capture them into the
+      encrypted store with metadata-only moments ("Updated .env"), content-
+      equality no-op coalescing, retire-on-delete, and expected-event
+      consumption. Attribution stays actor-neutral (no author on protected
+      moments).
+- [x] Versions: createVersion forks secret tips (verbatim ciphertext copy +
+      fork-base rows); switchVersion materializes target secrets to disk and
+      removes previous-only ones (never clobbering non-text/unreadable disk
+      state); compareVersions appends `{path, status, protected: true}`
+      entries with NO texts; mergeVersionIntoMain merges secrets whole-file,
+      fork-base-aware, incoming-wins, NEVER a conflict record (conflict
+      records carry side texts) — the target's prior state stays one
+      protected moment back, restorable. Restore rides the encrypted path
+      end-to-end (prior ciphertext copies forward; forward history).
+- [x] Materialization boundary: `materializeSecretFile` is the SINGLE
+      plaintext accessor, used only by dohc's own disk flows (switch/merge/
+      restore — the file was already plaintext on disk, same trust boundary).
+      Engine-side `assertEngineWritablePath` refuses protected content on
+      non-secret paths and secret paths through the text flow.
+- [x] Search: engine search cannot reach secret content (floor is checked
+      BEFORE caller policy; secret store is not a search surface); desktop
+      ripgrep search adds always-on `--iglob !**/*.env` / `!**/.env/**`
+      after user globs plus a classifyEngineFilePath backstop in
+      toSearchEntries.
+- [x] MCP/agent access = DENY by default (plan agent-access default):
+      dohc_read_file refuses secret paths with a clear reason;
+      dohc_search_files never searches them and reports the skip honestly.
+- [x] UI (minimal per lane scope): history rows show a lock
+      (engine-moment-lock) and protected moments' diff page shows "Contents
+      are protected" (no diff body, restore still available); the version
+      compare page shows "Protected file changed" without contents.
+- [x] IPC: EngineMomentRecord/EngineMomentDetailRecord and
+      WorkspaceVersionFileChange gain optional `protected`; listMoments
+      interleaves protected moments into text-timeline pages by a half-open
+      time window keyed on the text cursor (no duplication/loss across
+      pages — unit-tested).
+
+### Files Changed
+
+- packages/workspace-contracts/src/engine.ts (+SecretFileStore contract,
+  VersionFileChange.protected), src/index.ts
+- packages/workspace-engine/src/secretFileStore.ts (new),
+  enginePathFloor.ts (new), engineDbSchema.ts (secret tables DDL),
+  versionedTextStore.ts (secret floor gate), workspaceSearch.ts
+  (classifier moved/re-exported), effectivePolicy.ts (import), index.ts
+- packages/workspace-engine/src/secretFileStore.test.ts (new),
+  workspaceSearch.test.ts, phase0Proof.test.ts (write-gate updates)
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts (secret capture/
+  versions/merge/restore/timeline), workspaceSearch.ts (iglobs + backstop)
+- apps/desktop/src/workspaces/workspaceEngineSecretCapture.test.ts (new),
+  workspaceSearch.test.ts, workspaceEngineRestore.test.ts (detail union)
+- apps/desktop/src/ipc/bridgeContract.ts, src/main.ts (protected mapping,
+  moment detail union)
+- apps/desktop/src/renderer/workbench/EngineHistory.tsx (lock row),
+  WorkspaceVersions.tsx (protected compare row),
+  DesktopWorkspaceShell.tsx (protected diff page),
+  ProtectedSecretUi.test.tsx (new)
+- apps/desktop/e2e/workspace-secret-env.spec.ts (new)
+- packages/mcp/src/tools.ts (read denial + search skip), tools.test.ts
+- packages/workspace-kernel-client/src/index.ts (unblocking fix, see Live
+  Blockers)
+
+### Tests Added Or Updated
+
+- Engine: 29 new tests (secretFileStore.test.ts + floor updates) —
+  encrypt/decrypt round trip; ADVERSARIAL raw engine.db+WAL+SHM byte scan
+  for the plaintext marker (utf8, utf16le, and base64-of-plaintext forms);
+  fresh IV per write; tampered ciphertext -> decrypt-failed; cross-path
+  ciphertext splice -> decrypt-failed (AAD); wrong key -> decrypt-failed;
+  key file created 0600 on first capture, reused across instances,
+  malformed key fails closed WITHOUT regeneration, missing-key-with-data
+  fails closed; metadata-only serialization sweep over every non-
+  materialize method (enumerates the real API surface so a new accessor
+  fails the test); non-secret paths refused; percent-encoded .env
+  normalized; size cap + UTF-8 round-trip; unknown version fails closed;
+  no-op suppression; fork copies tips; compare metadata-only incl.
+  re-encrypted-identical-is-same; merge incoming-wins with restorable
+  history; fork-base rule (Main's post-fork .env never deleted/overwritten
+  by merge); delete merge; restore round trips incl. create-moment
+  removal; text-store secret write/rename rejection; search denial with a
+  malicious always-searchable policy and with a fake store returning a
+  .env snapshot (floor beats policy).
+- Desktop: 12 new tests — capture .env -> encrypted + metadata-only +
+  no text-store entry + db byte scan; live batch coalescing + delete
+  retire; switch round trips (.env follows versions; expected events
+  suppress re-capture); version-without-.env removes/restores on switch;
+  compareVersions protected entries without texts; merge into active Main
+  materializes and never records conflicts; capture-level protected
+  restore; paged timeline interleave with no duplication/loss; ripgrep
+  iglob shape (case-insensitive, after user globs) + toSearchEntries
+  secret backstop; EngineHistoryView lock row; VersionComparePage
+  "Protected file changed" with no contents.
+- MCP: 2 new tests — read denial (.env, config/prod.env, percent-encoded)
+  with the marker absent from the denial payload while ordinary
+  "environment.md" still reads; search skips .env with an honest skip
+  reason and path-mode never lists it.
+- E2E: workspace-secret-env.spec.ts — flagged workspace, live .env edit
+  -> locked protected moment ("Updated .env") -> diff page shows
+  "Contents are protected" with zero diff body and no secret text ->
+  secrets follow create/switch across versions on disk -> compare shows
+  the protected row -> search for the secret value finds nothing while
+  ordinary text still matches -> raw engine.db bytes contain no plaintext.
+
+### Commands Run
+
+- pnpm --filter @dohc/workspace-contracts typecheck (pass)
+- pnpm --filter @dohc/workspace-engine typecheck + test: 276 passed
+  (baseline 247 + 29 new)
+- pnpm --filter @dohc/desktop typecheck + test: 890 passed (baseline 878
+  + 12 new)
+- pnpm --filter @dohc/mcp typecheck + test: 72 passed (baseline 70 + 2)
+- pnpm --filter @dohc/workspace-kernel-client typecheck (pass)
+- pnpm --filter @dohc/desktop build + xvfb-run playwright: full desktop
+  E2E suite (see E2E section)
+- node scripts/check-think-bigger-doc-links.mjs (pass)
+
+### E2E / Visual / Manual QA
+
+- workspace-secret-env.spec.ts passes under xvfb-run (headless WSL; no
+  display server, recorded per the desktop plan's xvfb note).
+- Full desktop E2E suite run on the branch after the kernel-client fix
+  (results recorded in Remaining Risk if any spec is unrelated-flaky).
+
+### Live Blockers And Overrides
+
+- BLOCKER FOUND AND FIXED (out-of-lane, 3-line): every desktop E2E spec on
+  post-Wave-1 main fails at Electron startup — WS-I's
+  packages/workspace-kernel-client/src/index.ts used a TS constructor
+  parameter property, and the desktop main process loads workspace
+  packages as raw .ts through Node's strip-only type stripping
+  (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX -> main-process crash before the
+  first window). Converted to an explicit field assignment with a comment
+  pinning the constraint. Without this the lane's required E2E could not
+  run at all.
+- TOOLING ANOMALY (security note): while writing secretFileStore.ts, the
+  written file contained an extra dead-SQL block (a no-op SELECT with an
+  embedded NUL byte) that was not part of the intended code. It was
+  detected by `file` reporting binary content, removed, and the final
+  file was re-reviewed line-by-line. Treat as a tool glitch; flagged here
+  for transparency in a security-critical lane.
+
+### Security / Privacy Notes
+
+- The honest boundary, stated plainly: once dohc materializes .env
+  plaintext into the workspace folder (version switch/merge/restore — the
+  same trust boundary as the file already sitting on disk), OS-level file
+  access applies. dohc does NOT claim per-process enforcement for
+  arbitrary local processes after materialization, and the data key lives
+  beside the data it protects (0600 key file; see custody decision).
+  What the encryption DOES guarantee: no plaintext (and nothing derived
+  from it except byte length) in engine.db or any dohc durable/derived
+  surface — history, diffs, search, comparisons, chats, MCP tool output —
+  each backed by an adversarial test, most centrally the raw
+  engine.db+WAL byte scans for a known plaintext marker.
+- Metadata IS visible by design: the path (".env"), operation, byte
+  length, and timestamps. Anything beyond that is a boundary violation.
+- Secrets never produce conflict records because conflict records carry
+  side texts; merge is whole-file incoming-wins with the target's prior
+  state kept one protected (encrypted) moment back — preserve-both-sides
+  via history, documented in code.
+- Agent access policy: DENY by default everywhere (MCP read/search;
+  engine APIs return metadata only; no chats on secret files since they
+  have no text-store object id). Allow/ask tiers are future PR 08+ work.
+
+### Remaining Risk
+
+- Legacy (unflagged) surfaces are out of this lane's scope: the legacy
+  .dohc/history recorder and its MCP list/read-change tools existed
+  before this lane; WS-F-era exclusions govern them. The desktop ripgrep
+  exclusions added here protect flagged AND unflagged search alike.
+- Renaming .env -> notes.md re-classifies by path: the file's content
+  (still on disk, user-initiated) becomes ordinary tracked text going
+  forward. Path-based classification is the documented model.
+- The rg glob `!**/*.env` also prunes a directory literally named
+  `foo.env` (over-exclusion; safe direction).
+- Key loss = protected history loss (the disk .env remains). A crash
+  during first key creation can leave a truncated key file which fails
+  closed; recovery is manual (delete key + secret rows). Acceptable for
+  alpha; revisit with the OS-keychain wrap.
+- Secret timeline is read whole per history page (unpaginated at the
+  store level) — fine while .env edits are rare; revisit if protected
+  moments ever become high-volume.
+
+### Follow-Up / Deletion Conditions
+
+- Layer an OS-keychain wrap over the key file (format is versioned for
+  it) when an Electron-side custody seam is worth the coupling.
+- Extend agent access policy to allow/ask/explicit tiers (plan PR 08
+  tests name them) and env injection for dohc-managed launches.
+- Export surfaces do not exist yet; when PR 11-era export lands, its
+  redact/exclude behavior must consume the same floor and add its own
+  adversarial byte-scan tests.

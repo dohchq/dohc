@@ -1,11 +1,15 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
+  classifyEngineFilePath,
   compareVersionFiles,
+  createSecretFileStore,
   createVersionedTextStore,
   resolveEffectivePolicy,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type SecretFileMoment,
+  type SecretFileStore,
   type VersionFileChange,
   type VersionRecord,
   type VersionedTextConflictRecord,
@@ -132,14 +136,38 @@ export interface WorkspaceVersionMergeResult {
   conflicts: VersionedTextConflictRecord[];
 }
 
+// One timeline row for the history UI: text moments and PROTECTED (secret)
+// moments share this shape. Protected rows are metadata-only by construction
+// (SecretFileMoment has no content field) and carry no objectId/author.
+export interface WorkspaceEngineMomentSummary {
+  id: string;
+  versionId: string;
+  objectId?: string;
+  path: string;
+  recordedAtMs: number;
+  operation: "write" | "rename" | "delete";
+  metadata: ActorNeutralWriteMetadata;
+  author?: MomentAuthor;
+  momentOrder: number;
+  protected: boolean;
+}
+
 // One page of the ACTIVE version's timeline (the folder shows the active
-// version, so its history is what the history UI shows).
+// version, so its history is what the history UI shows). Secret moments are
+// interleaved by recording time; pagination stays keyed on the TEXT
+// timeline's momentOrder (see listMoments for the window rule).
 export interface WorkspaceEngineMomentPage {
-  moments: VersionedTextMomentSummary[];
+  moments: WorkspaceEngineMomentSummary[];
   nextBeforeMomentOrder: number | null;
   latestMomentOrder: number;
   activeVersionId: string;
 }
+
+// The diff page's payload: a text moment carries its full before/after
+// payload; a protected moment is metadata-only ("Contents are protected").
+export type WorkspaceEngineMomentDetail =
+  | { protected: false; moment: VersionedTextMoment }
+  | { protected: true; moment: SecretFileMoment };
 
 export interface WorkspaceEngineRestoreResult {
   // "text" wrote the pre-moment snapshot back; "deleted" removed a file the
@@ -210,7 +238,7 @@ export interface WorkspaceEngineCapture {
     limit?: number;
     beforeMomentOrder?: number;
   }): Promise<WorkspaceEngineMomentPage>;
-  readMoment(momentId: string): Promise<VersionedTextMoment | null>;
+  readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
   // Engine restore (PR 0M-5): returns the file to its state BEFORE the given
   // moment. Runs on the capture chain; records a forward "Restored <file>"
   // moment (history is never rewritten) and materializes the result to disk
@@ -241,6 +269,9 @@ export interface WorkspaceEngineCaptureOptions {
   rootPath: string;
   // Injectable for tests; defaults to the workspace's .dohc/engine store.
   store?: VersionedTextStore;
+  // Injectable for tests; defaults to the workspace's encrypted secret store
+  // (PR 08) sharing the same engine.db.
+  secretStore?: SecretFileStore;
   now?: () => number;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
@@ -283,6 +314,11 @@ function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function pathBasename(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index >= 0 ? path.slice(index + 1) : path;
+}
+
 type DiskTextState =
   // Confirmed absent (ENOENT/ENOTDIR): the engine file, if any, was deleted.
   | { kind: "absent" }
@@ -323,11 +359,39 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
   }
 }
 
+// Like readDiskTextState but for secret-classified paths: `.env` has no text
+// media type, so the media-type heuristic is skipped — any regular file whose
+// bytes round-trip through UTF-8 within the size cap is capturable secret
+// text. Everything else mirrors the text rules (symlink refusal, size cap,
+// confirmed-absent vs transiently-unreadable).
+async function readDiskSecretState(rootPath: string, path: string): Promise<DiskTextState> {
+  const absolute = join(rootPath, path);
+  try {
+    const info = await lstat(absolute);
+    if (info.isSymbolicLink()) return { kind: "untracked-content" };
+    if (!info.isFile()) return { kind: "untracked-content" };
+    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    const bytes = await readFile(absolute);
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    const text = bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(bytes)) return { kind: "untracked-content" };
+    return { kind: "text", text, sha256: sha256Utf8(text) };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" };
+    return { kind: "unreadable" };
+  }
+}
+
 // A disk mutation the engine performs when materializing a version's text
 // files (switch, merge into the active version, conflict resolution).
+// `protected: true` marks a secret-backed file: its plaintext exists only in
+// this in-memory operation on its way to the workspace folder (the single
+// authorized materialization boundary) and is validated against the secret
+// floor instead of the tracked-path policy.
 type MaterializeOperation =
-  | { kind: "write"; path: string; text: string }
-  | { kind: "delete"; path: string };
+  | { kind: "write"; path: string; text: string; protected?: boolean }
+  | { kind: "delete"; path: string; protected?: boolean };
 
 function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): boolean {
   return resolveEffectivePolicy({
@@ -337,13 +401,32 @@ function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): 
   }).tracked;
 }
 
+// The secret floor decides which paths the encrypted driver owns. Policy is
+// deliberately NOT consulted: the floor can never be unmarked by .dohc files.
+function isSecretPath(path: string): boolean {
+  return classifyEngineFilePath(path).kind === "secret";
+}
+
 function assertEngineWritablePath(
   path: string,
   policy: WorkspaceEnginePolicySnapshot,
+  options: { protected?: boolean } = {},
 ): void {
   const check = validateUserWritePath(path);
   if (!check.ok || check.normalized !== path) {
     throw new Error(`Engine refused to write unsafe workspace path: ${path}`);
+  }
+  if (options.protected) {
+    // A protected materialization may only ever land on a secret-classified
+    // path — plaintext from the secret store can never be redirected to an
+    // ordinary (searchable, exportable, text-captured) location.
+    if (!isSecretPath(path)) {
+      throw new Error(`Engine refused to write protected content to a non-secret path: ${path}`);
+    }
+    return;
+  }
+  if (isSecretPath(path)) {
+    throw new Error(`Engine refused to write secret path through the text flow: ${path}`);
   }
   if (!policyTracksPath(path, policy)) {
     throw new Error(`Engine refused to write non-engine-owned path: ${path}`);
@@ -439,8 +522,16 @@ export function createWorkspaceEngineCapture(
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
   let store: VersionedTextStore | null = options.store ?? null;
+  let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
+
+  // The encrypted secret store (PR 08) shares engine.db; opened lazily so
+  // workspaces without secret files never touch the key path.
+  function secretStoreFor(): SecretFileStore {
+    secretStore ??= createSecretFileStore(rootPath);
+    return secretStore;
+  }
 
   async function scanWorkspaceFilesForReconcile(): Promise<ReconcileScanFile[]> {
     if (process.env.DOHC_KERNEL_SIDECAR !== "1") {
@@ -612,6 +703,42 @@ export function createWorkspaceEngineCapture(
     return true;
   }
 
+  // Secret-path capture (PR 08): the file's on-disk plaintext goes INTO the
+  // encrypted store; the recorded moment is metadata-only ("Updated .env" —
+  // never content, never diffs). Attribution is deliberately actor-neutral:
+  // secret moments never carry an author. The store's content-equality no-op
+  // rule keeps one moment per real change, same as text capture.
+  async function captureSecretPath(
+    versionId: string,
+    path: string,
+    metadata: ActorNeutralWriteMetadata,
+  ): Promise<void> {
+    const secrets = secretStoreFor();
+    const disk = await readDiskSecretState(rootPath, path);
+    if (disk.kind === "unreadable") return;
+    if (disk.kind === "text") {
+      if (consumeExpectedEvent("write", path, disk.sha256)) return;
+      await secrets.writeSecretFile({
+        workspaceId,
+        versionId,
+        path,
+        text: disk.text,
+        metadata: { ...metadata, summary: `Updated ${pathBasename(path)}` },
+      });
+      return;
+    }
+    // Confirmed absent, or no longer capturable UTF-8 text: retire it so the
+    // protected state never goes stale-but-authoritative (the delete no-ops
+    // when nothing was tracked).
+    if (disk.kind === "absent" && consumeExpectedEvent("delete", path)) return;
+    await secrets.deleteSecretFile({
+      workspaceId,
+      versionId,
+      path,
+      metadata: { ...metadata, summary: `Deleted ${pathBasename(path)}` },
+    });
+  }
+
   async function captureOnePath(
     engine: VersionedTextStore,
     versionId: string,
@@ -620,6 +747,13 @@ export function createWorkspaceEngineCapture(
     metadata: ActorNeutralWriteMetadata,
     author?: MomentAuthor,
   ): Promise<void> {
+    // The secret floor outranks policy: secret paths route to the encrypted
+    // driver and never reach the plaintext text store (which would refuse
+    // them anyway — the store has its own gate).
+    if (isSecretPath(event.path)) {
+      await captureSecretPath(versionId, event.path, metadata);
+      return;
+    }
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
@@ -670,7 +804,31 @@ export function createWorkspaceEngineCapture(
   ): Promise<void> {
     const scanned = scannedFiles ?? (await scanWorkspaceFilesForReconcile());
     const diskPaths = new Set<string>();
+    // Secret paths reconcile into the ENCRYPTED store (PR 08): capture the
+    // current disk plaintext (metadata-only moments), and retire entries
+    // whose files vanished. Transiently unreadable secrets are left alone.
+    const secretDiskPaths = new Set<string>();
+    const secretUnreadablePaths = new Set<string>();
     for (const file of scanned) {
+      if (isSecretPath(file.path)) {
+        const disk = await readDiskSecretState(rootPath, file.path);
+        if (disk.kind === "unreadable") {
+          secretUnreadablePaths.add(file.path);
+          continue;
+        }
+        if (disk.kind === "text") {
+          secretDiskPaths.add(file.path);
+          await secretStoreFor().writeSecretFile({
+            workspaceId,
+            versionId,
+            path: file.path,
+            text: disk.text,
+            metadata: { ...metadata, summary: `Updated ${pathBasename(file.path)}` },
+          });
+        }
+        // absent/untracked-content fall through to the retire pass below.
+        continue;
+      }
       if (!policyTracksPath(file.path, policy)) {
         // A path .dohc/files.toml stopped tracking is RETIRED from engine
         // state on the next reconcile pass — the same never-stale-but-
@@ -702,6 +860,22 @@ export function createWorkspaceEngineCapture(
     for (const snapshot of tracked) {
       if (diskPaths.has(snapshot.path)) continue;
       await deleteIfTracked(engine, versionId, snapshot.path, metadata);
+    }
+    // Same rule for the encrypted store: protected files deleted while dohc
+    // was closed retire from the secret state (metadata-only moment).
+    const trackedSecrets = await secretStoreFor().listSecretFiles({
+      workspaceId,
+      versionId,
+    });
+    for (const stat of trackedSecrets) {
+      if (secretDiskPaths.has(stat.path)) continue;
+      if (secretUnreadablePaths.has(stat.path)) continue;
+      await secretStoreFor().deleteSecretFile({
+        workspaceId,
+        versionId,
+        path: stat.path,
+        metadata: { ...metadata, summary: `Deleted ${pathBasename(stat.path)}` },
+      });
     }
   }
 
@@ -737,7 +911,9 @@ export function createWorkspaceEngineCapture(
     policy: WorkspaceEnginePolicySnapshot,
   ): Promise<void> {
     for (const operation of operations) {
-      assertEngineWritablePath(operation.path, policy);
+      assertEngineWritablePath(operation.path, policy, {
+        ...(operation.protected ? { protected: true } : {}),
+      });
       const absolute = join(rootPath, operation.path);
       const cancel =
         operation.kind === "write"
@@ -802,6 +978,53 @@ export function createWorkspaceEngineCapture(
       const disk = await readDiskTextState(rootPath, file.path);
       if (disk.kind !== "text") continue;
       operations.push({ kind: "delete", path: file.path });
+    }
+    return operations;
+  }
+
+  // The secret half of a version switch (PR 08): protected files follow the
+  // version. Plaintext is produced here through the store's SINGLE authorized
+  // materialization accessor, held only in the in-memory operation list on
+  // its way to the workspace folder, and every write/delete registers an
+  // expected engine event. A pre-existing non-text/unreadable file at a
+  // secret path is never clobbered (same never-clobber rule as text).
+  async function planSecretMaterialization(
+    targetVersionId: string,
+    previousVersionId: string,
+  ): Promise<MaterializeOperation[]> {
+    const secrets = secretStoreFor();
+    const operations: MaterializeOperation[] = [];
+    const targetSecrets = await secrets.listSecretFiles({
+      workspaceId,
+      versionId: targetVersionId,
+    });
+    const targetPaths = new Set(targetSecrets.map((stat) => stat.path));
+    for (const stat of targetSecrets) {
+      const disk = await readDiskSecretState(rootPath, stat.path);
+      if (disk.kind === "untracked-content" || disk.kind === "unreadable") continue;
+      const materialized = await secrets.materializeSecretFile({
+        workspaceId,
+        versionId: targetVersionId,
+        path: stat.path,
+      });
+      if (!materialized.present) continue;
+      if (disk.kind === "text" && disk.text === materialized.text) continue;
+      operations.push({
+        kind: "write",
+        path: stat.path,
+        text: materialized.text,
+        protected: true,
+      });
+    }
+    const previousSecrets = await secrets.listSecretFiles({
+      workspaceId,
+      versionId: previousVersionId,
+    });
+    for (const stat of previousSecrets) {
+      if (targetPaths.has(stat.path)) continue;
+      const disk = await readDiskSecretState(rootPath, stat.path);
+      if (disk.kind !== "text") continue;
+      operations.push({ kind: "delete", path: stat.path, protected: true });
     }
     return operations;
   }
@@ -906,6 +1129,14 @@ export function createWorkspaceEngineCapture(
           name,
           fromVersionId,
         });
+        // Secrets follow versions (PR 08): the fork starts with an identical
+        // ENCRYPTED copy of the source version's secret files (ciphertext
+        // copy — no plaintext involved).
+        await secretStoreFor().forkVersion({
+          workspaceId,
+          fromVersionId,
+          toVersionId: version.id,
+        });
         // Create-and-switch: the fork is content-identical to the disk, so no
         // materialization is needed.
         await engine.setActiveVersion({ workspaceId, versionId: version.id });
@@ -937,12 +1168,11 @@ export function createWorkspaceEngineCapture(
             correlationId,
           },
         );
-        const operations = await planMaterialization(
-          engine,
-          versionId,
-          fromVersionId,
-          policy,
-        );
+        const operations = [
+          ...(await planMaterialization(engine, versionId, fromVersionId, policy)),
+          // Secrets follow the switch through the encrypted path.
+          ...(await planSecretMaterialization(versionId, fromVersionId)),
+        ];
         // Record the destination BEFORE rewriting the disk (see the module
         // note on crash ordering): recovery always reconciles disk state into
         // the version recorded as active.
@@ -988,11 +1218,28 @@ export function createWorkspaceEngineCapture(
             correlationId: `version-compare-${randomUUID()}`,
           },
         );
-        return compareVersionFiles(engine, {
+        const textChanges = await compareVersionFiles(engine, {
           workspaceId,
           sourceVersionId,
           targetVersionId,
         });
+        // Protected rows (PR 08): secret files report path + status ONLY —
+        // "Protected file changed", never contents, never diffs.
+        const secretChanges = await secretStoreFor().compareSecretFileVersions({
+          workspaceId,
+          targetVersionId,
+          sourceVersionId,
+        });
+        return [
+          ...textChanges,
+          ...secretChanges.map(
+            (change): VersionFileChange => ({
+              path: change.path,
+              status: change.status,
+              protected: true,
+            }),
+          ),
+        ].sort((a, b) => a.path.localeCompare(b.path));
       });
     },
 
@@ -1084,6 +1331,53 @@ export function createWorkspaceEngineCapture(
             materializations.push({ kind: "delete", path: change.path });
           }
         }
+        // Secret files merge through the encrypted path (PR 08): whole-file,
+        // fork-base-aware, and NEVER a conflict record (conflict records
+        // carry side texts, which protected contents must never ride). When
+        // the source changed a secret since its fork, the source side wins
+        // and Main's previous state stays one protected moment back in
+        // history — restorable, so nothing is lost.
+        const secrets = secretStoreFor();
+        const secretChanges = await secrets.compareSecretFileVersions({
+          workspaceId,
+          targetVersionId: ENGINE_MAIN_VERSION_ID,
+          sourceVersionId,
+        });
+        for (const change of secretChanges) {
+          const applied = await secrets.applySecretFileFromVersion({
+            workspaceId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            sourceVersionId,
+            path: change.path,
+            metadata: {
+              origin: "api",
+              summary: `Updated ${pathBasename(change.path)} from version "${source.name}"`,
+              correlationId,
+            },
+          });
+          if (!applied.changed) {
+            unchangedFileCount += 1;
+            continue;
+          }
+          mergedFileCount += 1;
+          if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
+            const materialized = await secrets.materializeSecretFile({
+              workspaceId,
+              versionId: ENGINE_MAIN_VERSION_ID,
+              path: change.path,
+            });
+            materializations.push(
+              materialized.present
+                ? {
+                    kind: "write",
+                    path: change.path,
+                    text: materialized.text,
+                    protected: true,
+                  }
+                : { kind: "delete", path: change.path, protected: true },
+            );
+          }
+        }
         // The folder shows the active version; only a merge into the active
         // version changes what is on disk.
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
@@ -1155,13 +1449,75 @@ export function createWorkspaceEngineCapture(
           ? { beforeMomentOrder: input.beforeMomentOrder }
           : {}),
       });
-      return { ...page, activeVersionId };
+      const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
+        (moment) => ({ ...moment, protected: false }),
+      );
+      // Interleave PROTECTED (secret) moments by recording time (PR 08).
+      // Pagination stays keyed on the text timeline's momentOrder; each page
+      // carries the secret moments recorded inside its half-open time window
+      // [oldest-text-moment, previous-page-cursor-moment) so pages never
+      // duplicate or drop a protected row. The secret timeline is short by
+      // nature (.env edits are rare), so it is read whole per page.
+      let upperMs = Number.POSITIVE_INFINITY;
+      if (input.beforeMomentOrder !== undefined) {
+        // The cursor is the previous page's oldest text moment; its
+        // timestamp bounds this page's window from above (exclusive).
+        const cursorPage = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          limit: 1,
+          beforeMomentOrder: input.beforeMomentOrder + 1,
+        });
+        upperMs = cursorPage.moments[0]?.recordedAtMs ?? Number.POSITIVE_INFINITY;
+      }
+      const lowerMs =
+        page.nextBeforeMomentOrder === null
+          ? Number.NEGATIVE_INFINITY
+          : (page.moments[page.moments.length - 1]?.recordedAtMs ??
+            Number.NEGATIVE_INFINITY);
+      const secretMoments = await secretStoreFor().listSecretMoments({
+        workspaceId,
+        versionId: activeVersionId,
+      });
+      const protectedInWindow: WorkspaceEngineMomentSummary[] = secretMoments
+        .filter(
+          (moment) => moment.recordedAtMs >= lowerMs && moment.recordedAtMs < upperMs,
+        )
+        .map((moment) => ({
+          id: moment.id,
+          versionId: moment.versionId,
+          path: moment.path,
+          recordedAtMs: moment.recordedAtMs,
+          operation: moment.operation,
+          metadata: moment.metadata,
+          momentOrder: moment.momentOrder,
+          protected: true,
+        }));
+      // Merge newest-first; ties keep text before protected (stable).
+      const merged = [...textMoments, ...protectedInWindow].sort(
+        (a, b) => b.recordedAtMs - a.recordedAtMs,
+      );
+      return {
+        moments: merged,
+        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+        latestMomentOrder: page.latestMomentOrder,
+        activeVersionId,
+      };
     },
 
     async readMoment(momentId) {
       await chain;
       const engine = await engineStore();
-      return engine.getMoment({ workspaceId, momentId });
+      const moment = await engine.getMoment({ workspaceId, momentId });
+      if (moment) return { protected: false, moment };
+      // Protected moments live in the secret store; the detail is
+      // metadata-only ("Contents are protected" — no payload exists at all).
+      const secretMoment = await secretStoreFor().getSecretMoment({
+        workspaceId,
+        momentId,
+      });
+      if (secretMoment) return { protected: true, moment: secretMoment };
+      return null;
     },
 
     restoreFileToBeforeMoment(momentId) {
@@ -1171,7 +1527,88 @@ export function createWorkspaceEngineCapture(
         const activeVersionId = await activeVersionIdOf(engine);
         const moment = await engine.getMoment({ workspaceId, momentId });
         if (!moment) {
-          throw new Error("This history moment is no longer available.");
+          // Protected restore (PR 08): the whole round trip stays encrypted —
+          // the store copies the prior CIPHERTEXT forward, and plaintext only
+          // appears for the final authorized disk materialization.
+          const secrets = secretStoreFor();
+          const secretMoment = await secrets.getSecretMoment({ workspaceId, momentId });
+          if (!secretMoment) {
+            throw new Error("This history moment is no longer available.");
+          }
+          if (secretMoment.versionId !== activeVersionId) {
+            throw new Error(
+              "This moment belongs to a different version. Switch to that version to restore it.",
+            );
+          }
+          const secretPath = secretMoment.path;
+          const secretCorrelationId = `restore-${randomUUID()}`;
+          // Capture the file's latest disk state first so a restore can never
+          // destroy an edit the store has not recorded yet.
+          const disk = await readDiskSecretState(rootPath, secretPath);
+          if (disk.kind === "unreadable") {
+            throw new Error(`Could not read the current ${secretPath} on disk.`);
+          }
+          if (disk.kind === "untracked-content") {
+            throw new Error(
+              `Only text files can be restored — ${secretPath} is no longer a text file.`,
+            );
+          }
+          if (disk.kind === "text") {
+            await secrets.writeSecretFile({
+              workspaceId,
+              versionId: activeVersionId,
+              path: secretPath,
+              text: disk.text,
+              metadata: {
+                origin: "local-file",
+                summary: "Saved latest edits",
+                correlationId: secretCorrelationId,
+              },
+            });
+          } else {
+            await secrets.deleteSecretFile({
+              workspaceId,
+              versionId: activeVersionId,
+              path: secretPath,
+              metadata: {
+                origin: "local-file",
+                summary: "Saved latest edits",
+                correlationId: secretCorrelationId,
+              },
+            });
+          }
+          const result = await secrets.restoreSecretFileToBeforeMoment({
+            workspaceId,
+            momentId,
+            metadata: {
+              origin: "restore",
+              summary: `Restored ${pathBasename(secretPath)}`,
+              correlationId: secretCorrelationId,
+            },
+          });
+          const materialized = await secrets.materializeSecretFile({
+            workspaceId,
+            versionId: activeVersionId,
+            path: secretPath,
+          });
+          await materialize(
+            [
+              materialized.present
+                ? {
+                    kind: "write",
+                    path: secretPath,
+                    text: materialized.text,
+                    protected: true,
+                  }
+                : { kind: "delete", path: secretPath, protected: true },
+            ],
+            policy,
+          );
+          return {
+            restored: result.restored,
+            restoredMomentId: result.restoredMomentId,
+            path: secretPath,
+          };
         }
         if (moment.versionId !== activeVersionId) {
           throw new Error(
@@ -1351,11 +1788,14 @@ export function createWorkspaceEngineCapture(
       // batch) still runs; only NEW work is refused.
       stopped = true;
       await chain;
-      // Release the SQLite handle for the store THIS capture created, so
+      // Release the SQLite handles for the stores THIS capture created, so
       // repeated workspace switches never accumulate handles/WAL locks. An
       // injected store belongs to its creator and is left open.
       if (!options.store && store) {
         await store.close().catch(() => undefined);
+      }
+      if (!options.secretStore && secretStore) {
+        await secretStore.close().catch(() => undefined);
       }
     },
   };

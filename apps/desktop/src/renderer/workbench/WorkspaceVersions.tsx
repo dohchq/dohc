@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, FileText, Layers, RefreshCw } from "lucide-react";
+import { Bot, Check, ChevronDown, FileText, Layers, Lock, RefreshCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -1222,7 +1222,11 @@ export function VersionComparePage(props: {
                 className="overflow-hidden rounded border border-line bg-bg shadow-sm"
               >
                 <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
-                  <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
+                  {file.protected ? (
+                    <Lock size={13} aria-hidden className="shrink-0 text-subtle" />
+                  ) : (
+                    <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
+                  )}
                   <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
                     {file.path}
                   </span>
@@ -1230,9 +1234,24 @@ export function VersionComparePage(props: {
                     {changeStatusLabel(file.status)}
                   </span>
                 </div>
-                <UnifiedDiffLines
-                  lines={buildUnifiedDiffLines(file.currentText, file.incomingText, 800)}
-                />
+                {file.protected ? (
+                  // Secret-backed file (PR 08): the comparison is metadata-only.
+                  <div
+                    data-testid="version-compare-protected"
+                    className="flex flex-col items-center gap-1 px-4 py-8 text-center"
+                  >
+                    <Lock size={14} aria-hidden className="text-subtle" />
+                    <span className="text-sm text-muted">Protected file changed</span>
+                    <span className="text-xs text-subtle">
+                      This file follows the version, but its contents are never
+                      shown in comparisons.
+                    </span>
+                  </div>
+                ) : (
+                  <UnifiedDiffLines
+                    lines={buildUnifiedDiffLines(file.currentText, file.incomingText, 800)}
+                  />
+                )}
               </section>
             ))}
           </div>

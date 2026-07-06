@@ -54,6 +54,64 @@ const ACTIVE_VERSIONS_DDL = `
   )
 `;
 
+// Secret-backed files (PR 08) are the same lazy additive upgrade pattern:
+// stores created before the secret driver gain the tables on open, and a
+// missing table simply reads as "no secret files yet". NOT in
+// REQUIRED_ENGINE_TABLES for that reason.
+//
+// SECURITY INVARIANT: these tables hold AES-256-GCM ciphertext (base64) and
+// metadata ONLY. There is no plaintext column, no plaintext digest column,
+// and moments carry no content payload beyond the encrypted after-state used
+// for restore. Any schema change that would add plaintext here is a secret
+// boundary violation.
+const SECRET_TABLES_DDL = `
+  CREATE TABLE IF NOT EXISTS secret_files (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    iv_base64 TEXT NOT NULL,
+    auth_tag_base64 TEXT NOT NULL,
+    ciphertext_base64 TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    updated_at_ms REAL NOT NULL,
+    latest_moment_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path)
+  );
+  CREATE TABLE IF NOT EXISTS secret_fork_bases (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    iv_base64 TEXT NOT NULL,
+    auth_tag_base64 TEXT NOT NULL,
+    ciphertext_base64 TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path)
+  );
+  CREATE TABLE IF NOT EXISTS secret_moments (
+    workspace_id TEXT NOT NULL,
+    moment_order INTEGER NOT NULL,
+    moment_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    recorded_at_ms REAL NOT NULL,
+    operation TEXT NOT NULL,
+    metadata_origin TEXT NOT NULL,
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    after_present INTEGER NOT NULL,
+    after_iv_base64 TEXT,
+    after_auth_tag_base64 TEXT,
+    after_ciphertext_base64 TEXT,
+    after_byte_length INTEGER,
+    PRIMARY KEY (workspace_id, moment_id),
+    UNIQUE (workspace_id, moment_order)
+  );
+  CREATE INDEX IF NOT EXISTS idx_secret_moments_version_order
+    ON secret_moments(workspace_id, version_id, moment_order);
+  CREATE INDEX IF NOT EXISTS idx_secret_moments_path_order
+    ON secret_moments(workspace_id, version_id, path, moment_order)
+`;
+
 // moments.author_json is a lazy additive upgrade (PR 0N-1, same pattern as
 // active_versions): a nullable column added on open, no schema-version bump.
 // Safe because it is additive-nullable both ways — older readers select named
@@ -102,6 +160,7 @@ export function initializeOrValidateEngineSchema(
   if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corrupt();
   assertRequiredEngineTables(db, corrupt);
   db.exec(ACTIVE_VERSIONS_DDL);
+  db.exec(SECRET_TABLES_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
 }
 
@@ -320,6 +379,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         FOREIGN KEY (workspace_id, thread_id) REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
       );
       ${ACTIVE_VERSIONS_DDL};
+      ${SECRET_TABLES_DDL};
       CREATE INDEX IF NOT EXISTS idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX IF NOT EXISTS idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
       CREATE INDEX IF NOT EXISTS idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);
