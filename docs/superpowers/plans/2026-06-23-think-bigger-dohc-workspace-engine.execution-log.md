@@ -15989,3 +15989,75 @@ Simplifications (each deliberate, single-user alpha):
   follow-up could route channel threads to the Chats view instead.
 - Channel rename/archive/delete not built; slug uniqueness means a deleted
   name cannot be reused until deletion exists.
+
+## PR WS-G2 - Rich-Doc Collaboration Design (Flag-Gate Closure)
+
+Status: design doc landed on branch (docs only, no product code)
+Branch: codex/think-bigger-wsg2-collab-design
+Worktree: /home/ice/dev/dohc-wsg2-collab-design
+Implementation workstream, if used: none (single Claude lane, design only)
+PR Link: (pending)
+Date started: 2026-07-06
+Date completed: 2026-07-06
+
+### Scope
+
+Docs-only lane: answer the last flag-default-on gate from the 0N-3 audit
+— live rich-doc collab (Hocuspocus/Y.Doc) re-homed on the engine or
+explicitly decoupled — with a design note grounded in verified code. No
+engine, desktop, or server code changed.
+
+### Files Changed
+
+- docs/superpowers/plans/2026-07-06-think-bigger-wsg2-collab-design.md
+  (new)
+- docs/superpowers/plans/2026-06-23-think-bigger-docs.manifest.json
+  (added the new doc)
+- this execution log (this entry)
+
+### Commands Run
+
+- `node scripts/check-think-bigger-doc-links.mjs` — passed (10 files).
+
+### Decisions
+
+- Architecture: **decouple-and-defer** (candidate (a)) — the engine flag
+  defaults on with collab left on the legacy Hocuspocus path for shared
+  cloud workspaces only; the Y.Doc engine content driver (candidate (b))
+  is the committed re-home shape for the team wave, replicating Y.Doc
+  updates as ops over the 0P multi-origin log; full re-home now
+  (candidate (c)) rejected as wrong-order for a single-user alpha.
+- Verified in code that the decoupling already exists: `collabToken`
+  (main.ts:1892) fails closed to `available:false` for anything but a
+  shared cloud workspace with matching credentials; the solo editor
+  never constructs a Y.Doc (yjs is dynamically imported only after a
+  token grant, useCollabDoc.ts:181-184; MarkdownEditor loads the
+  Collaboration extension only when `collab?.ydoc` exists); nothing in
+  packages/workspace-engine references Yjs/Hocuspocus; collab
+  materializations already flow through writeWorkspaceText into engine
+  capture as ordinary moments.
+- Coexistence contract: one canonical source per doc at any instant
+  (file when closed, live CRDT when a session is open); engine restore
+  into a live session is an external edit through reconcileExternalEdit;
+  the future (a)->(b) handoff happens only at a closed-session boundary,
+  seeding the driver from the settled file (never the Hocuspocus update
+  log), preserving both sides on projection mismatch.
+- Milestones: G2-A pins the decoupling with tests and closes the audit
+  gate item (unblocks WS-H); G2-B ships the Y.Doc driver (team wave,
+  depends 0P-A); G2-C replicates updates via the multi-origin log and
+  retires Hocuspocus per audit Phase D salvage.
+
+### Unresolved Findings / Open Questions
+
+For the user (also in the design doc): (1) at flag flip, keep cloud
+co-editing available on the legacy stack or ship it dark to accelerate
+Phase D; (2) is markdown fidelity sufficient across the driver handoff,
+or must Y.Doc-level state (suggestions, unexported marks) survive.
+
+### Follow-Up / Deletion Conditions
+
+- G2-A (tests + gate-item checkoff) is the implementation follow-up
+  that actually closes the 0N-3 collab gate; WS-H should not flip the
+  flag before it lands.
+- `mergeMarkdown` stays a salvage edge (audit Phase B); Hocuspocus
+  retires only at G2-C.
