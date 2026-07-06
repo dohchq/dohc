@@ -89,6 +89,9 @@ import {
   ListWorkspaceVersionConflictsResult,
   ResolveWorkspaceVersionConflictPayload,
   ResolveWorkspaceVersionConflictResult,
+  TryInVersionStateResult,
+  TryInWorkspaceVersionPayload,
+  TryInWorkspaceVersionResult,
   WorkspaceVersionConflict,
   WorkspaceVersionRecord,
   ListEngineMomentsPayload,
@@ -199,6 +202,7 @@ import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
+import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   buildOutputSiteRoot,
   entryRelativeToSite,
@@ -897,6 +901,58 @@ const agentIntegration = createAgentIntegration({
   rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
   setAgentRun: (workspaceId, run) => activity.setAgentRun(workspaceId, run),
   home: stateDir(),
+  // Every terminal run path funnels through endAgentRun (driver
+  // turn-completed via AgentSessionManager, panel Stop, the endAgentRun IPC)
+  // — the try-in-version review card listens on that single seam.
+  // tryInVersionSessions is initialized just below, before any run can end.
+  onRunEnded: ({ workspaceId, runId, status }) =>
+    tryInVersionSessions.handleRunEnded(workspaceId, runId, status),
+});
+// "Try it in a version" (PR 0N-2): one gesture composing EXISTING operations
+// — fork-and-switch on the engine capture chain, then a dohc-tracked run —
+// and a review state when the run ends. Resolution of the capture mirrors
+// requireEngineCapture (workspace identity from the registry, engine flag
+// gate); unflagged workspaces reject with the same product message.
+const tryInVersionSessions = createTryInVersionSessions({
+  operationsFor: async (workspaceId) => {
+    desktopMarks.mark("try-in-version-ops-start");
+    const workspace = requireWorkspace(workspaceId);
+    await activity.open(workspace);
+    const capture = activity.engineCaptureFor(workspace.workspaceId);
+    if (!capture) {
+      throw new Error("Versions are not enabled for this workspace.");
+    }
+    desktopMarks.measureSince("try-in-version-ops", "try-in-version-ops-start");
+    return capture;
+  },
+  startRun: async (workspaceId, task, driverId) => {
+    desktopMarks.mark("try-in-version-run-start-begin");
+    if (driverId) {
+      // The agent panel's session path: the driver does the work and the run
+      // id comes from the session (startSession starts the run through
+      // AgentIntegration, so 0N-1 attribution applies identically).
+      const sessions = await agentSessionManager();
+      const snapshot = await sessions.startSession({
+        workspaceId,
+        driverId,
+        prompt: task,
+      });
+      const session = snapshot.session;
+      if (!session?.runId || session.status === "failed") {
+        throw new Error(session?.lastError ?? "The agent could not start.");
+      }
+      return { id: session.runId };
+    }
+    // No driver: a bare dohc-tracked run — the user's own agent tool does the
+    // work in the folder and dohc attributes what it changes.
+    const run = await agentIntegration.startAgentRun(workspaceId);
+    desktopMarks.measureSince(
+      "try-in-version-run-start",
+      "try-in-version-run-start-begin",
+    );
+    return run;
+  },
+  onStateChanged: () => notifyRenderer(),
 });
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
@@ -2071,6 +2127,41 @@ function registerIpcHandlers(): void {
       });
     },
   );
+
+  // "Try it in a version" (PR 0N-2). The gesture handler double-gates on the
+  // engine flag (requireVersionOperations here, and the manager's own
+  // operationsFor) so an unflagged workspace rejects before anything runs.
+  ipcMain.handle(CHANNELS.tryInWorkspaceVersion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = TryInWorkspaceVersionPayload.parse(payload);
+    await requireVersionOperations(input.workspaceId);
+    desktopMarks.mark("try-in-version-start");
+    const result = await tryInVersionSessions.start(
+      input.workspaceId,
+      input.task,
+      input.driverId,
+    );
+    // Gesture latency evidence (create+switch+run-start, excluding any agent
+    // process startup on the bare-run path), read via the test-gated marks.
+    desktopMarks.measureSince("try-in-version-gesture", "try-in-version-start");
+    return TryInWorkspaceVersionResult.parse(result);
+  });
+
+  ipcMain.handle(CHANNELS.getTryInVersionState, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    return TryInVersionStateResult.parse({
+      state: tryInVersionSessions.snapshot(input.workspaceId),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.dismissTryInVersionReview, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    tryInVersionSessions.dismiss(input.workspaceId);
+  });
 
   // Engine history + linked Chats (PR 0M-5). Flagged workspaces read their
   // timeline from engine moments; every handler resolves the workspace via

@@ -53,6 +53,15 @@ export interface AgentIntegrationOptions {
   agentId?: string;
   onBehalfOf?: string;
   now?: () => number;
+  // PR 0N-2: fired after a KNOWN run's terminal status is durably recorded.
+  // endAgentRun is the single funnel every terminal path goes through
+  // (AgentSessionManager finalizeRun, the panel's Stop, the endAgentRun IPC),
+  // so run-completion consumers (the try-in-version review card) hook here.
+  onRunEnded?: (input: {
+    workspaceId: string;
+    runId: string;
+    status: "complete" | "failed";
+  }) => void;
 }
 
 const RUNS_FILE = "agent-runs.json";
@@ -185,15 +194,22 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         s.mcp = null;
       }
     }
-    await serialize(s, async () => {
+    const recorded = await serialize(s, async () => {
       const runs = await readRuns(root);
       const record = runs.find((r) => r.id === runId);
-      if (record) {
-        record.status = status;
-        record.endedAt = now();
-        await writeRuns(root, runs);
-      }
+      if (!record) return false;
+      record.status = status;
+      record.endedAt = now();
+      await writeRuns(root, runs);
+      return true;
     });
+    if (recorded) {
+      try {
+        options.onRunEnded?.({ workspaceId, runId, status });
+      } catch (error) {
+        console.error("[desktop] onRunEnded hook failed", error);
+      }
+    }
   }
 
   async function getAgentRunStatus(workspaceId: string): Promise<AgentRunStatus> {

@@ -129,6 +129,25 @@ describe("AgentIntegration", () => {
     });
   });
 
+  // PR 0N-2: endAgentRun is the single funnel every terminal run path goes
+  // through (driver turn-completed, panel Stop, the endAgentRun IPC), so the
+  // try-in-version review card listens HERE, not on each caller.
+  it("notifies onRunEnded when a known run ends, and never for an unknown run id", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const ended: Array<{ workspaceId: string; runId: string; status: string }> = [];
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, run) => setSlot(run),
+        onRunEnded: (input) => ended.push(input),
+      });
+      const run = await integration.startAgentRun("ws");
+      await integration.endAgentRun("ws", "no-such-run", "complete");
+      expect(ended).toEqual([]);
+      await integration.endAgentRun("ws", run.id, "failed");
+      expect(ended).toEqual([{ workspaceId: "ws", runId: run.id, status: "failed" }]);
+    });
+  });
+
   it("throws for an unknown workspace and never writes a record", async () => {
     const integration = createAgentIntegration({
       rootFor: () => null,

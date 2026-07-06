@@ -32,6 +32,7 @@ import type {
   EngineMomentRecord,
   FileChangeSnapshot,
   SyncStatusResult,
+  TryInVersionRunState,
   WorkbenchMenuCommand,
   WorkspaceFileEntry,
   WorkspaceSummary,
@@ -78,6 +79,10 @@ import {
   VersionComparePage,
   VersionMenu,
 } from "./workbench/WorkspaceVersions";
+import {
+  TryInVersionBanner,
+  TryInVersionReviewCard,
+} from "./workbench/TryInVersion";
 import {
   activateTab,
   closeTab,
@@ -1845,6 +1850,10 @@ export function DesktopWorkspaceShell(props: {
   // Right rail content for flagged workspaces: History timeline or the
   // active file's Chats. Runtime-only — not persisted.
   const [railView, setRailView] = useState<"history" | "chats">("history");
+  // "Try it in a version" (PR 0N-2): the workspace's live try session —
+  // running banner or the run's review card. Refreshed with history (the
+  // manager pings the same workspace-activity channel on every transition).
+  const [tryState, setTryState] = useState<TryInVersionRunState | null>(null);
 
   const refreshHistory = useCallback(async () => {
     if (engineEnabled) {
@@ -1852,10 +1861,11 @@ export function DesktopWorkspaceShell(props: {
       // response can never overwrite newer moments or move
       // latestMomentOrder backward (shared with loadMoreEngineHistory).
       const token = ++engineHistoryToken.current;
-      const [page, status, agent] = await Promise.all([
+      const [page, status, agent, trySession] = await Promise.all([
         bridge().listEngineMoments({ workspaceId, limit: 200 }),
         bridge().getSyncStatus({ workspaceId }),
         bridge().getAgentRunStatus({ workspaceId }),
+        bridge().getTryInVersionState({ workspaceId }),
       ]);
       if (token !== engineHistoryToken.current) return;
       // A refresh returns to the newest page; older pages reload on demand.
@@ -1869,6 +1879,7 @@ export function DesktopWorkspaceShell(props: {
       });
       setSyncStatus(status);
       setAgentActive(agent.activeRun !== null);
+      setTryState(trySession.state);
       return;
     }
     const [history, status, agent] = await Promise.all([
@@ -2794,6 +2805,10 @@ export function DesktopWorkspaceShell(props: {
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
                   onError={(message) => setShellError(message)}
+                  // versionEpoch bumps whenever ANY surface changed version
+                  // state (the 0N-2 review card switches back to Main outside
+                  // this menu) — the selector re-reads instead of going stale.
+                  refreshKey={versionEpoch}
                 />
               </div>
             </div>
@@ -2808,6 +2823,29 @@ export function DesktopWorkspaceShell(props: {
               onMove={moveFileTab}
             />
           )}
+          {/* "Try it in a version" (PR 0N-2): honest run status while the
+              agent works, then the review card when the run ends. Flagged
+              workspaces only (tryState never exists otherwise). */}
+          {versionsEnabled && tryState?.status === "running" ? (
+            <TryInVersionBanner
+              task={tryState.task}
+              versionName={tryState.versionName}
+              onWatch={() =>
+                mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }))
+              }
+            />
+          ) : null}
+          {versionsEnabled && tryState?.status === "review" ? (
+            <TryInVersionReviewCard
+              workspaceId={workspaceId}
+              state={tryState}
+              activeTabDirty={activeTabDirty}
+              flushActiveDraft={flushActiveDraft}
+              onOpenCompare={openVersionCompareTab}
+              onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
+              onDismissed={() => setTryState(null)}
+            />
+          ) : null}
           <div
             className="flex min-h-0 flex-1 flex-col"
             onContextMenu={(event) => {
