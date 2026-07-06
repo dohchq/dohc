@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
@@ -26,10 +26,13 @@ function basename(path: string): string {
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
 export function engineMomentSummary(
-  moment: Pick<EngineMomentRecord, "summary" | "operation" | "path">,
+  moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
 ): string {
   if (moment.summary) return moment.summary;
   if (moment.operation === "delete") return `Deleted ${basename(moment.path)}`;
+  if (moment.contentKind === "binary") {
+    return `Updated ${basename(moment.path)} (${moment.byteLength ?? 0} bytes)`;
+  }
   return `Edited ${basename(moment.path)}`;
 }
 
@@ -184,6 +187,13 @@ function MomentRow(props: {
             size={12}
             aria-hidden
             data-testid="engine-moment-lock"
+            className="mt-0.5 shrink-0 text-subtle"
+          />
+        ) : moment.contentKind === "binary" ? (
+          <FileArchive
+            size={12}
+            aria-hidden
+            data-testid="engine-moment-binary"
             className="mt-0.5 shrink-0 text-subtle"
           />
         ) : moment.origin === "restore" ? (

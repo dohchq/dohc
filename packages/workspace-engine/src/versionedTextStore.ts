@@ -21,6 +21,7 @@ import type {
   VersionedTextConflictResolution,
   VersionedTextConflictStatus,
   VersionedTextDeleteResult,
+  VersionedFileContentKind,
   VersionedTextFileState,
   VersionedTextMergeResult,
   VersionedTextMoment,
@@ -55,6 +56,7 @@ import {
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_WRITE_METADATA_FIELD_BYTES = 16 * 1024;
 
 export type {
@@ -76,6 +78,7 @@ export type {
   VersionedTextConflictResolution,
   VersionedTextConflictStatus,
   VersionedTextDeleteResult,
+  VersionedFileContentKind,
   VersionedTextFileState,
   VersionedTextMergeResult,
   VersionedTextMoment,
@@ -355,6 +358,13 @@ function cloneSnapshot(snapshot: TextFileSnapshot): TextFileSnapshot {
     objectId: snapshot.objectId,
     versionId: snapshot.versionId,
     path: snapshot.path,
+    ...(isBinarySnapshot(snapshot) ? { contentKind: "binary" as const } : {}),
+    ...(isBinarySnapshot(snapshot) && snapshot.sha256 !== undefined
+      ? { sha256: snapshot.sha256 }
+      : {}),
+    ...(isBinarySnapshot(snapshot) && snapshot.byteLength !== undefined
+      ? { byteLength: snapshot.byteLength }
+      : {}),
     text: snapshot.text,
     updatedAtMs: snapshot.updatedAtMs,
     latestMomentId: snapshot.latestMomentId,
@@ -381,11 +391,22 @@ function cloneMoment(moment: VersionedTextMoment): VersionedTextMoment {
 }
 
 function cloneMomentPayload(payload: VersionedTextMomentPayload): VersionedTextMomentPayload {
+  const clonePayloadSnapshot = (
+    snapshot: VersionedTextMomentPayloadSnapshot,
+  ): VersionedTextMomentPayloadSnapshot => ({
+    path: snapshot.path,
+    ...(snapshot.contentKind === "binary" ? { contentKind: "binary" as const } : {}),
+    ...(snapshot.contentKind === "binary" && snapshot.sha256 !== undefined
+      ? { sha256: snapshot.sha256 }
+      : {}),
+    ...(snapshot.contentKind === "binary" && snapshot.byteLength !== undefined
+      ? { byteLength: snapshot.byteLength }
+      : {}),
+    text: snapshot.text,
+  });
   return {
-    before: payload.before
-      ? { path: payload.before.path, text: payload.before.text }
-      : null,
-    after: { path: payload.after.path, text: payload.after.text },
+    before: payload.before ? clonePayloadSnapshot(payload.before) : null,
+    after: clonePayloadSnapshot(payload.after),
   };
 }
 
@@ -1060,6 +1081,30 @@ function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function sha256Bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function snapshotContentKind(
+  snapshot: Pick<TextFileSnapshot, "contentKind">,
+): VersionedFileContentKind {
+  return snapshot.contentKind ?? "text";
+}
+
+function fileStateContentKind(
+  state: Pick<VersionedTextFileState, "contentKind">,
+): VersionedFileContentKind {
+  return state.contentKind ?? "text";
+}
+
+function isBinarySnapshot(snapshot: Pick<TextFileSnapshot, "contentKind">): boolean {
+  return snapshotContentKind(snapshot) === "binary";
+}
+
+function isBinaryState(state: Pick<VersionedTextFileState, "contentKind">): boolean {
+  return fileStateContentKind(state) === "binary";
+}
+
 function rowString(row: Record<string, unknown>, key: string): string {
   const value = row[key];
   if (typeof value !== "string") throw corruptStore();
@@ -1077,6 +1122,29 @@ function rowNumber(row: Record<string, unknown>, key: string): number {
   const value = row[key];
   if (typeof value !== "number" || !Number.isFinite(value)) throw corruptStore();
   return value;
+}
+
+function rowBuffer(row: Record<string, unknown>, key: string): Buffer {
+  const value = row[key];
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  throw corruptStore();
+}
+
+function readBinaryBlobFromDb(db: SqliteDb, sha256: string): Buffer {
+  const row = db.prepare("SELECT content FROM binary_blobs WHERE sha256 = ?").get(sha256);
+  if (!row) throw corruptStore();
+  return rowBuffer(row, "content");
+}
+
+function rowContentKind(
+  row: Record<string, unknown>,
+  key: string,
+): VersionedFileContentKind {
+  const value = row[key];
+  if (value === null || value === undefined) return "text";
+  if (value === "text" || value === "binary") return value;
+  throw corruptStore();
 }
 
 function metadataFromRow(
@@ -1100,23 +1168,66 @@ function metadataValues(metadata: ActorNeutralWriteMetadata): [string, string | 
 
 function putBlob(db: SqliteDb, text: string): string {
   const sha256 = sha256Text(text);
-  db.prepare("INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, ?)").run(
+  db.prepare(
+    `INSERT INTO blobs (sha256, byte_length, text) VALUES (?, ?, ?)
+     ON CONFLICT(sha256) DO UPDATE SET
+       byte_length = excluded.byte_length,
+       text = excluded.text`,
+  ).run(sha256, Buffer.byteLength(text, "utf8"), text);
+  return sha256;
+}
+
+function putBinaryBlob(db: SqliteDb, bytes: Uint8Array): string {
+  const content = Buffer.from(bytes);
+  const sha256 = sha256Bytes(content);
+  // TODO(0P-A): binary writes need the sync journal hook here too.
+  db.prepare("INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)").run(
     sha256,
-    Buffer.byteLength(text, "utf8"),
-    text,
+    content.byteLength,
+    content,
+  );
+  // Existing databases still have foreign keys from *_blob_sha256 to blobs.
+  // This row is a compatibility anchor only; binary bytes remain solely in
+  // binary_blobs and text reads are gated by content_kind.
+  db.prepare("INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?, ?, '')").run(
+    sha256,
+    content.byteLength,
   );
   return sha256;
 }
 
+
 function snapshotFromRow(row: Record<string, unknown>): TextFileSnapshot {
+  const contentKind = rowContentKind(row, "content_kind");
+  const byteLength = rowNumber(row, "byte_length");
+  const sha256 = rowString(row, "blob_sha256");
   return {
     objectId: rowString(row, "object_id"),
     versionId: rowString(row, "version_id"),
     path: rowString(row, "path"),
-    text: rowString(row, "text"),
+    contentKind,
+    sha256,
+    byteLength,
+    text: contentKind === "text" ? rowString(row, "text") : "",
     updatedAtMs: rowNumber(row, "updated_at_ms"),
     latestMomentId: rowString(row, "latest_moment_id"),
     metadata: metadataFromRow(row),
+  };
+}
+
+function payloadSnapshotFromRow(
+  row: Record<string, unknown>,
+  prefix: "payload_before" | "payload_after",
+): VersionedTextMomentPayloadSnapshot {
+  const contentKind = rowContentKind(row, `${prefix}_content_kind`);
+  const sha256 = rowString(row, `${prefix}_blob_sha256`);
+  const byteLength = rowNumber(row, `${prefix}_byte_length`);
+  return {
+    path: rowString(row, `${prefix}_path`),
+    contentKind,
+    sha256,
+    byteLength,
+    text: contentKind === "text" ? rowString(row, `${prefix}_text`) : "",
   };
 }
 
@@ -1131,7 +1242,10 @@ function momentFromRow(row: Record<string, unknown>): VersionedTextMoment {
             objectId: rowString(row, "before_object_id"),
             versionId: rowString(row, "before_version_id"),
             path: rowString(row, "before_path"),
-            text: rowString(row, "before_text"),
+            contentKind: rowContentKind(row, "before_content_kind"),
+            sha256: rowString(row, "before_blob_sha256"),
+            byteLength: rowNumber(row, "before_byte_length"),
+            text: rowContentKind(row, "before_content_kind") === "text" ? rowString(row, "before_text") : "",
             updatedAtMs: rowNumber(row, "before_updated_at_ms"),
             latestMomentId: rowString(row, "before_latest_moment_id"),
             metadata: metadataFromRow(row, "before_metadata_"),
@@ -1147,13 +1261,8 @@ function momentFromRow(row: Record<string, unknown>): VersionedTextMoment {
     recordedAtMs: rowNumber(row, "recorded_at_ms"),
     operation: rowString(row, "operation") as VersionedTextMoment["operation"],
     payload: {
-      before: payloadBeforePath
-        ? { path: payloadBeforePath, text: rowString(row, "payload_before_text") }
-        : null,
-      after: {
-        path: rowString(row, "payload_after_path"),
-        text: rowString(row, "payload_after_text"),
-      },
+      before: payloadBeforePath ? payloadSnapshotFromRow(row, "payload_before") : null,
+      after: payloadSnapshotFromRow(row, "payload_after"),
     },
     metadata: metadataFromRow(row),
     ...(author !== undefined ? { author } : {}),
@@ -1164,12 +1273,33 @@ function momentFromRow(row: Record<string, unknown>): VersionedTextMoment {
 function momentSelectSql(where: string): string {
   return `SELECT m.*,
                  before_payload.text AS payload_before_text,
+                 before_binary.byte_length AS payload_before_binary_byte_length,
+                 COALESCE(before_payload.byte_length, before_binary.byte_length) AS payload_before_byte_length,
                  after_payload.text AS payload_after_text,
-                 before_blob.text AS before_text
+                 after_binary.byte_length AS payload_after_binary_byte_length,
+                 COALESCE(after_payload.byte_length, after_binary.byte_length) AS payload_after_byte_length,
+                 before_blob.text AS before_text,
+                 before_binary_blob.byte_length AS before_binary_byte_length,
+                 COALESCE(before_blob.byte_length, before_binary_blob.byte_length) AS before_byte_length
           FROM moments m
-          LEFT JOIN blobs before_payload ON before_payload.sha256 = m.payload_before_blob_sha256
-          JOIN blobs after_payload ON after_payload.sha256 = m.payload_after_blob_sha256
-          LEFT JOIN blobs before_blob ON before_blob.sha256 = m.before_blob_sha256
+          LEFT JOIN blobs before_payload
+            ON before_payload.sha256 = m.payload_before_blob_sha256
+           AND COALESCE(m.payload_before_content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs before_binary
+            ON before_binary.sha256 = m.payload_before_blob_sha256
+           AND COALESCE(m.payload_before_content_kind, 'text') = 'binary'
+          LEFT JOIN blobs after_payload
+            ON after_payload.sha256 = m.payload_after_blob_sha256
+           AND COALESCE(m.payload_after_content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs after_binary
+            ON after_binary.sha256 = m.payload_after_blob_sha256
+           AND COALESCE(m.payload_after_content_kind, 'text') = 'binary'
+          LEFT JOIN blobs before_blob
+            ON before_blob.sha256 = m.before_blob_sha256
+           AND COALESCE(m.before_content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs before_binary_blob
+            ON before_binary_blob.sha256 = m.before_blob_sha256
+           AND COALESCE(m.before_content_kind, 'text') = 'binary'
           ${where}`;
 }
 
@@ -1179,11 +1309,15 @@ function fileStateFromConflictRow(
 ): VersionedTextFileState {
   const path = rowString(row, `${prefix}_path`);
   if (Number(row[`${prefix}_exists`]) !== 1) return { exists: false, path };
+  const contentKind = rowContentKind(row, `${prefix}_content_kind`);
   return {
     exists: true,
     path,
     objectId: rowString(row, `${prefix}_object_id`),
-    text: rowString(row, `${prefix}_text`),
+    contentKind,
+    sha256: rowString(row, `${prefix}_blob_sha256`),
+    byteLength: rowNumber(row, `${prefix}_byte_length`),
+    text: contentKind === "text" ? rowString(row, `${prefix}_text`) : "",
     updatedAtMs: rowNumber(row, `${prefix}_updated_at_ms`),
     latestMomentId: rowString(row, `${prefix}_latest_moment_id`),
     metadata: metadataFromRow(row, `${prefix}_metadata_`),
@@ -1260,9 +1394,14 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
 
     for (const row of db
       .prepare(
-        `SELECT s.*, b.text
+        `SELECT s.*, b.text, COALESCE(b.byte_length, bb.byte_length) AS byte_length
          FROM snapshots s
-         JOIN blobs b ON b.sha256 = s.blob_sha256
+         LEFT JOIN blobs b
+           ON b.sha256 = s.blob_sha256
+          AND COALESCE(s.content_kind, 'text') = 'text'
+         LEFT JOIN binary_blobs bb
+           ON bb.sha256 = s.blob_sha256
+          AND COALESCE(s.content_kind, 'text') = 'binary'
          ORDER BY s.workspace_id, s.version_id, s.path`,
       )
       .all()) {
@@ -1276,9 +1415,14 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
 
     for (const row of db
       .prepare(
-        `SELECT s.*, b.text
+        `SELECT s.*, b.text, COALESCE(b.byte_length, bb.byte_length) AS byte_length
          FROM fork_base_snapshots s
-         JOIN blobs b ON b.sha256 = s.blob_sha256
+         LEFT JOIN blobs b
+           ON b.sha256 = s.blob_sha256
+          AND COALESCE(s.content_kind, 'text') = 'text'
+         LEFT JOIN binary_blobs bb
+           ON bb.sha256 = s.blob_sha256
+          AND COALESCE(s.content_kind, 'text') = 'binary'
          ORDER BY s.workspace_id, s.version_id, s.path`,
       )
       .all()) {
@@ -1292,70 +1436,17 @@ function loadStateFromDatabase(db: SqliteDb): PersistedVersionedTextState {
 
     for (const row of db
       .prepare(
-        `SELECT m.*,
-                before_payload.text AS payload_before_text,
-                after_payload.text AS payload_after_text,
-                before_blob.text AS before_text
-         FROM moments m
-         LEFT JOIN blobs before_payload ON before_payload.sha256 = m.payload_before_blob_sha256
-         JOIN blobs after_payload ON after_payload.sha256 = m.payload_after_blob_sha256
-         LEFT JOIN blobs before_blob ON before_blob.sha256 = m.before_blob_sha256
-         ORDER BY m.workspace_id, m.moment_order`,
+        momentSelectSql("ORDER BY m.workspace_id, m.moment_order"),
       )
       .all()) {
       const workspace = state.workspaces[rowString(row, "workspace_id")];
       if (!workspace) throw corruptStore();
-      const beforePresent = Number(row.before_present);
-      const before =
-        beforePresent === 0
-          ? undefined
-          : beforePresent === 1
-            ? null
-            : {
-                objectId: rowString(row, "before_object_id"),
-                versionId: rowString(row, "before_version_id"),
-                path: rowString(row, "before_path"),
-                text: rowString(row, "before_text"),
-                updatedAtMs: rowNumber(row, "before_updated_at_ms"),
-                latestMomentId: rowString(row, "before_latest_moment_id"),
-                metadata: metadataFromRow(row, "before_metadata_"),
-              };
-      const payloadBeforePath = rowOptionalString(row, "payload_before_path");
-      const author = momentAuthorFromRow(row);
-      workspace.moments.push({
-        id: rowString(row, "moment_id"),
-        workspaceId: rowString(row, "workspace_id"),
-        versionId: rowString(row, "version_id"),
-        objectId: rowString(row, "object_id"),
-        path: rowString(row, "path"),
-        recordedAtMs: rowNumber(row, "recorded_at_ms"),
-        operation: rowString(row, "operation") as VersionedTextMoment["operation"],
-        payload: {
-          before: payloadBeforePath
-            ? { path: payloadBeforePath, text: rowString(row, "payload_before_text") }
-            : null,
-          after: {
-            path: rowString(row, "payload_after_path"),
-            text: rowString(row, "payload_after_text"),
-          },
-        },
-        metadata: metadataFromRow(row),
-        ...(author !== undefined ? { author } : {}),
-        ...(beforePresent === 0 ? {} : { before }),
-      });
+      workspace.moments.push(momentFromRow(row));
     }
 
     for (const row of db
       .prepare(
-        `SELECT c.*,
-                base_blob.text AS base_text,
-                current_blob.text AS current_text,
-                incoming_blob.text AS incoming_text
-         FROM conflicts c
-         LEFT JOIN blobs base_blob ON base_blob.sha256 = c.base_blob_sha256
-         LEFT JOIN blobs current_blob ON current_blob.sha256 = c.current_blob_sha256
-         LEFT JOIN blobs incoming_blob ON incoming_blob.sha256 = c.incoming_blob_sha256
-         ORDER BY c.workspace_id, c.created_at_ms, c.conflict_id`,
+        conflictSelectSql("ORDER BY c.workspace_id, c.created_at_ms, c.conflict_id"),
       )
       .all()) {
       const workspace = state.workspaces[rowString(row, "workspace_id")];
@@ -1396,6 +1487,7 @@ function insertConflictFileState(
   string,
   string | null,
   string | null,
+  string | null,
   number | null,
   string | null,
   string | null,
@@ -1403,14 +1495,17 @@ function insertConflictFileState(
   string | null,
 ] {
   if (!state.exists) {
-    return [0, state.path, null, null, null, null, null, null, null];
+    return [0, state.path, null, null, null, null, null, null, null, null];
   }
   const metadata = state.metadata ?? { origin: "unknown" as const };
+  const contentKind = fileStateContentKind(state);
+  if (contentKind === "binary" && !state.sha256) throw corruptStore();
   return [
     1,
     state.path,
     state.objectId ?? null,
-    putBlob(db, state.text ?? ""),
+    contentKind,
+    contentKind === "binary" ? state.sha256 ?? "" : putBlob(db, state.text ?? ""),
     state.updatedAtMs ?? null,
     state.latestMomentId ?? null,
     ...metadataValues(metadata),
@@ -1560,6 +1655,19 @@ function normalizeWriteText(text: string): string {
     );
   }
   return text;
+}
+
+function normalizeWriteBinaryBytes(bytes: Uint8Array): Buffer {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new VersionedTextStoreError("invalid-input", "Binary file content is required.");
+  }
+  if (bytes.byteLength > MAX_VERSIONED_BINARY_FILE_BYTES) {
+    throw new VersionedTextStoreError(
+      "file-too-large",
+      `Binary file content exceeds ${MAX_VERSIONED_BINARY_FILE_BYTES} bytes.`,
+    );
+  }
+  return Buffer.from(bytes);
 }
 
 function normalizeWriteMetadata(metadata: ActorNeutralWriteMetadata): ActorNeutralWriteMetadata {
@@ -1967,6 +2075,9 @@ function fileStateFromSnapshot(
     exists: true,
     path: snapshot.path,
     objectId: snapshot.objectId,
+    contentKind: snapshotContentKind(snapshot),
+    ...(snapshot.sha256 !== undefined ? { sha256: snapshot.sha256 } : {}),
+    ...(snapshot.byteLength !== undefined ? { byteLength: snapshot.byteLength } : {}),
     text: snapshot.text,
     updatedAtMs: snapshot.updatedAtMs,
     latestMomentId: snapshot.latestMomentId,
@@ -1977,6 +2088,8 @@ function fileStateFromSnapshot(
 function fileStatesEqual(a: VersionedTextFileState, b: VersionedTextFileState): boolean {
   if (a.exists !== b.exists) return false;
   if (!a.exists && !b.exists) return true;
+  if (fileStateContentKind(a) !== fileStateContentKind(b)) return false;
+  if (isBinaryState(a)) return a.sha256 === b.sha256;
   return a.text === b.text;
 }
 
@@ -2019,6 +2132,34 @@ function createMoment(input: {
   };
 }
 
+function payloadFromSnapshot(snapshot: TextFileSnapshot): VersionedTextMomentPayloadSnapshot {
+  return {
+    path: snapshot.path,
+    contentKind: snapshotContentKind(snapshot),
+    ...(snapshot.sha256 !== undefined ? { sha256: snapshot.sha256 } : {}),
+    ...(snapshot.byteLength !== undefined ? { byteLength: snapshot.byteLength } : {}),
+    text: snapshot.text,
+  };
+}
+
+function textPayload(path: string, text: string): VersionedTextMomentPayloadSnapshot {
+  return { path, text };
+}
+
+function binaryPayload(input: {
+  path: string;
+  sha256: string;
+  byteLength: number;
+}): VersionedTextMomentPayloadSnapshot {
+  return {
+    path: input.path,
+    contentKind: "binary",
+    sha256: input.sha256,
+    byteLength: input.byteLength,
+    text: "",
+  };
+}
+
 function versionFromRow(row: Record<string, unknown>): VersionRecord {
   const forkVersionId = rowOptionalString(row, "fork_version_id");
   return {
@@ -2048,6 +2189,18 @@ function objectFromRow(row: Record<string, unknown>): FileObjectRecord {
   };
 }
 
+function snapshotSelectSql(table: "snapshots" | "fork_base_snapshots", where: string): string {
+  return `SELECT s.*, b.text, COALESCE(b.byte_length, bb.byte_length) AS byte_length
+          FROM ${table} s
+          LEFT JOIN blobs b
+            ON b.sha256 = s.blob_sha256
+           AND COALESCE(s.content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs bb
+            ON bb.sha256 = s.blob_sha256
+           AND COALESCE(s.content_kind, 'text') = 'binary'
+          ${where}`;
+}
+
 function selectSnapshotByObject(
   db: SqliteDb,
   workspaceId: WorkspaceId,
@@ -2056,10 +2209,10 @@ function selectSnapshotByObject(
 ): TextFileSnapshot | null {
   const row = db
     .prepare(
-      `SELECT s.*, b.text
-       FROM snapshots s
-       JOIN blobs b ON b.sha256 = s.blob_sha256
-       WHERE s.workspace_id = ? AND s.version_id = ? AND s.object_id = ?`,
+      snapshotSelectSql(
+        "snapshots",
+        "WHERE s.workspace_id = ? AND s.version_id = ? AND s.object_id = ?",
+      ),
     )
     .get(workspaceId, versionId, objectId);
   return row ? snapshotFromRow(row) : null;
@@ -2073,13 +2226,18 @@ function selectSnapshotByPath(
 ): TextFileSnapshot | null {
   const aliased = db
     .prepare(
-      `SELECT s.*, b.text
+      `SELECT s.*, b.text, COALESCE(b.byte_length, bb.byte_length) AS byte_length
        FROM path_aliases a
        JOIN snapshots s
          ON s.workspace_id = a.workspace_id
         AND s.version_id = a.version_id
         AND s.object_id = a.object_id
-       JOIN blobs b ON b.sha256 = s.blob_sha256
+       LEFT JOIN blobs b
+         ON b.sha256 = s.blob_sha256
+        AND COALESCE(s.content_kind, 'text') = 'text'
+       LEFT JOIN binary_blobs bb
+         ON bb.sha256 = s.blob_sha256
+        AND COALESCE(s.content_kind, 'text') = 'binary'
        WHERE a.workspace_id = ? AND a.version_id = ? AND a.path = ?`,
     )
     .get(workspaceId, versionId, path);
@@ -2090,11 +2248,11 @@ function selectSnapshotByPath(
   }
   const fallback = db
     .prepare(
-      `SELECT s.*, b.text
-       FROM snapshots s
-       JOIN blobs b ON b.sha256 = s.blob_sha256
-       WHERE s.workspace_id = ? AND s.version_id = ? AND s.path = ?
-       LIMIT 2`,
+      snapshotSelectSql(
+        "snapshots",
+        `WHERE s.workspace_id = ? AND s.version_id = ? AND s.path = ?
+         LIMIT 2`,
+      ),
     )
     .all(workspaceId, versionId, path);
   if (fallback.length > 1) throw corruptStore();
@@ -2109,11 +2267,11 @@ function selectForkBaseSnapshotByPath(
 ): TextFileSnapshot | null {
   const rows = db
     .prepare(
-      `SELECT s.*, b.text
-       FROM fork_base_snapshots s
-       JOIN blobs b ON b.sha256 = s.blob_sha256
-       WHERE s.workspace_id = ? AND s.version_id = ? AND s.path = ?
-       LIMIT 2`,
+      snapshotSelectSql(
+        "fork_base_snapshots",
+        `WHERE s.workspace_id = ? AND s.version_id = ? AND s.path = ?
+         LIMIT 2`,
+      ),
     )
     .all(workspaceId, versionId, path);
   if (rows.length > 1) throw corruptStore();
@@ -2187,14 +2345,22 @@ function insertOrReplaceSnapshot(
   versionId: VersionId,
   snapshot: TextFileSnapshot,
 ): void {
-  const blobSha256 = putBlob(db, snapshot.text);
+  const contentKind = snapshotContentKind(snapshot);
+  const blobSha256 =
+    contentKind === "binary"
+      ? (() => {
+          if (!snapshot.sha256) throw corruptStore();
+          return snapshot.sha256;
+        })()
+      : putBlob(db, snapshot.text);
   db.prepare(
     `INSERT INTO ${table} (
-      workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+      workspace_id, version_id, object_id, path, content_kind, blob_sha256, updated_at_ms,
       latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
       path = excluded.path,
+      content_kind = excluded.content_kind,
       blob_sha256 = excluded.blob_sha256,
       updated_at_ms = excluded.updated_at_ms,
       latest_moment_id = excluded.latest_moment_id,
@@ -2206,6 +2372,7 @@ function insertOrReplaceSnapshot(
     versionId,
     snapshot.objectId,
     snapshot.path,
+    contentKind,
     blobSha256,
     snapshot.updatedAtMs,
     snapshot.latestMomentId,
@@ -2221,20 +2388,45 @@ function nextMomentOrder(db: SqliteDb, workspaceId: WorkspaceId): number {
 }
 
 function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
-  const payloadBeforeSha = moment.payload.before ? putBlob(db, moment.payload.before.text) : null;
-  const payloadAfterSha = putBlob(db, moment.payload.after.text);
+  const payloadBeforeKind = moment.payload.before?.contentKind ?? "text";
+  const payloadAfterKind = moment.payload.after.contentKind ?? "text";
+  const payloadBeforeSha = moment.payload.before
+    ? payloadBeforeKind === "binary"
+      ? moment.payload.before.sha256
+      : putBlob(db, moment.payload.before.text)
+    : null;
+  const payloadAfterSha =
+    payloadAfterKind === "binary"
+      ? moment.payload.after.sha256
+      : putBlob(db, moment.payload.after.text);
   const beforePresent = moment.before === undefined ? 0 : moment.before === null ? 1 : 2;
-  const beforeSha = moment.before && moment.before !== null ? putBlob(db, moment.before.text) : null;
+  const beforeKind =
+    moment.before && moment.before !== null ? snapshotContentKind(moment.before) : "text";
+  const beforeSha =
+    moment.before && moment.before !== null
+      ? beforeKind === "binary"
+        ? moment.before.sha256
+        : putBlob(db, moment.before.text)
+      : null;
+  if (
+    (payloadBeforeKind === "binary" && !payloadBeforeSha) ||
+    (payloadAfterKind === "binary" && !payloadAfterSha) ||
+    (beforeKind === "binary" && !beforeSha)
+  ) {
+    throw corruptStore();
+  }
+  // TODO(0P-A): binary writes need the sync journal hook here too.
   db.prepare(
     `INSERT INTO moments (
       workspace_id, moment_order, moment_id, version_id, object_id, path,
-      recorded_at_ms, operation, payload_before_path, payload_before_blob_sha256,
-      payload_after_path, payload_after_blob_sha256, metadata_origin,
+      recorded_at_ms, operation, payload_before_path, payload_before_content_kind,
+      payload_before_blob_sha256, payload_after_path, payload_after_content_kind,
+      payload_after_blob_sha256, metadata_origin,
       metadata_summary, metadata_correlation_id, before_present, before_object_id,
-      before_version_id, before_path, before_blob_sha256, before_updated_at_ms,
+      before_version_id, before_path, before_content_kind, before_blob_sha256, before_updated_at_ms,
       before_latest_moment_id, before_metadata_origin, before_metadata_summary,
       before_metadata_correlation_id, author_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     moment.workspaceId,
     nextMomentOrder(db, moment.workspaceId),
@@ -2245,14 +2437,17 @@ function insertMomentRow(db: SqliteDb, moment: VersionedTextMoment): void {
     moment.recordedAtMs,
     moment.operation,
     moment.payload.before?.path ?? null,
+    moment.payload.before ? payloadBeforeKind : null,
     payloadBeforeSha,
     moment.payload.after.path,
+    payloadAfterKind,
     payloadAfterSha,
     ...metadataValues(moment.metadata),
     beforePresent,
     moment.before && moment.before !== null ? moment.before.objectId : null,
     moment.before && moment.before !== null ? moment.before.versionId : null,
     moment.before && moment.before !== null ? moment.before.path : null,
+    moment.before && moment.before !== null ? beforeKind : null,
     beforeSha,
     moment.before && moment.before !== null ? moment.before.updatedAtMs : null,
     moment.before && moment.before !== null ? moment.before.latestMomentId : null,
@@ -2279,15 +2474,15 @@ function insertConflictRow(db: SqliteDb, conflict: VersionedTextConflictRecord):
       workspace_id, conflict_id, path, target_version_id, source_version_id,
       created_at_ms, updated_at_ms, status, chosen_from, resolution,
       metadata_origin, metadata_summary, metadata_correlation_id,
-      base_exists, base_path, base_object_id, base_blob_sha256, base_updated_at_ms,
+      base_exists, base_path, base_object_id, base_content_kind, base_blob_sha256, base_updated_at_ms,
       base_latest_moment_id, base_metadata_origin, base_metadata_summary,
       base_metadata_correlation_id, current_exists, current_path, current_object_id,
-      current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
+      current_content_kind, current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
       current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
-      incoming_exists, incoming_path, incoming_object_id, incoming_blob_sha256,
+      incoming_exists, incoming_path, incoming_object_id, incoming_content_kind, incoming_blob_sha256,
       incoming_updated_at_ms, incoming_latest_moment_id, incoming_metadata_origin,
       incoming_metadata_summary, incoming_metadata_correlation_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     conflict.workspaceId,
     conflict.id,
@@ -2330,12 +2525,30 @@ function conflictFromRow(row: Record<string, unknown>): VersionedTextConflictRec
 function conflictSelectSql(where: string): string {
   return `SELECT c.*,
                  base_blob.text AS base_text,
+                 COALESCE(base_blob.byte_length, base_binary.byte_length) AS base_byte_length,
                  current_blob.text AS current_text,
+                 COALESCE(current_blob.byte_length, current_binary.byte_length) AS current_byte_length,
                  incoming_blob.text AS incoming_text
+                 , COALESCE(incoming_blob.byte_length, incoming_binary.byte_length) AS incoming_byte_length
           FROM conflicts c
-          LEFT JOIN blobs base_blob ON base_blob.sha256 = c.base_blob_sha256
-          LEFT JOIN blobs current_blob ON current_blob.sha256 = c.current_blob_sha256
-          LEFT JOIN blobs incoming_blob ON incoming_blob.sha256 = c.incoming_blob_sha256
+          LEFT JOIN blobs base_blob
+            ON base_blob.sha256 = c.base_blob_sha256
+           AND COALESCE(c.base_content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs base_binary
+            ON base_binary.sha256 = c.base_blob_sha256
+           AND COALESCE(c.base_content_kind, 'text') = 'binary'
+          LEFT JOIN blobs current_blob
+            ON current_blob.sha256 = c.current_blob_sha256
+           AND COALESCE(c.current_content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs current_binary
+            ON current_binary.sha256 = c.current_blob_sha256
+           AND COALESCE(c.current_content_kind, 'text') = 'binary'
+          LEFT JOIN blobs incoming_blob
+            ON incoming_blob.sha256 = c.incoming_blob_sha256
+           AND COALESCE(c.incoming_content_kind, 'text') = 'text'
+          LEFT JOIN binary_blobs incoming_binary
+            ON incoming_binary.sha256 = c.incoming_blob_sha256
+           AND COALESCE(c.incoming_content_kind, 'text') = 'binary'
           ${where}`;
 }
 
@@ -2708,8 +2921,8 @@ function createVersionedTextStoreWithHooks(
       recordedAtMs,
       operation: "write",
       payload: {
-        before: before ? { path: before.path, text: before.text } : null,
-        after: { path: input.path, text: input.text },
+        before: before ? payloadFromSnapshot(before) : null,
+        after: textPayload(input.path, input.text),
       },
       metadata: input.metadata,
       before,
@@ -2771,8 +2984,8 @@ function createVersionedTextStoreWithHooks(
       recordedAtMs,
       operation: "delete",
       payload: {
-        before: { path: before.path, text: before.text },
-        after: { path: before.path, text: before.text },
+        before: payloadFromSnapshot(before),
+        after: payloadFromSnapshot(before),
       },
       metadata: input.metadata,
       before,
@@ -2927,8 +3140,8 @@ function createVersionedTextStoreWithHooks(
       recordedAtMs,
       operation: "write",
       payload: {
-        before: before ? { path: before.path, text: before.text } : null,
-        after: { path: input.path, text: input.text },
+        before: before ? payloadFromSnapshot(before) : null,
+        after: textPayload(input.path, input.text),
       },
       metadata: input.metadata,
       ...(input.author !== undefined ? { author: input.author } : {}),
@@ -2938,6 +3151,9 @@ function createVersionedTextStoreWithHooks(
       objectId: object.id,
       versionId: input.versionId,
       path: input.path,
+      contentKind: "text",
+      sha256: sha256Text(input.text),
+      byteLength: Buffer.byteLength(input.text, "utf8"),
       text: input.text,
       updatedAtMs: recordedAtMs,
       latestMomentId: moment.id,
@@ -3003,8 +3219,8 @@ function createVersionedTextStoreWithHooks(
       recordedAtMs,
       operation: "delete",
       payload: {
-        before: { path: before.path, text: before.text },
-        after: { path: before.path, text: before.text },
+        before: payloadFromSnapshot(before),
+        after: payloadFromSnapshot(before),
       },
       metadata: input.metadata,
       ...(input.author !== undefined ? { author: input.author } : {}),
@@ -3028,6 +3244,105 @@ function createVersionedTextStoreWithHooks(
     });
 
     return { object, before: cloneSnapshot(before), moment: cloneMoment(moment) };
+  }
+
+  function writeBinaryFileInDb(input: {
+    db: SqliteDb;
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    bytes: Uint8Array;
+    metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
+    momentId?: VersionedTextMomentId;
+  }): VersionedTextWriteResult {
+    requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
+    const bytes = normalizeWriteBinaryBytes(input.bytes);
+    const sha256 = putBinaryBlob(input.db, bytes);
+    const before = selectSnapshotByPath(input.db, input.workspaceId, input.versionId, input.path);
+    const recordedAtMs = readNowMs();
+    let object: FileObjectRecord;
+
+    if (before) {
+      object = requireFileObjectRow(input.db, input.workspaceId, before.objectId);
+    } else {
+      const objectId = createGeneratedId("object");
+      const existing = input.db
+        .prepare("SELECT workspace_id FROM file_objects WHERE object_id = ?")
+        .get(objectId);
+      if (existing) rejectDuplicateId("object", objectId);
+      object = { id: objectId, workspaceId: input.workspaceId, createdAtMs: recordedAtMs };
+      input.db
+        .prepare("INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)")
+        .run(input.workspaceId, object.id, object.createdAtMs);
+    }
+
+    const momentId =
+      input.momentId === undefined
+        ? createGeneratedId("moment")
+        : normalizeGeneratedId("moment", input.momentId);
+    if (
+      input.db
+        .prepare("SELECT 1 FROM moments WHERE workspace_id = ? AND moment_id = ?")
+        .get(input.workspaceId, momentId)
+    ) {
+      rejectDuplicateId("moment", momentId);
+    }
+    const afterPayload = binaryPayload({
+      path: input.path,
+      sha256,
+      byteLength: bytes.byteLength,
+    });
+    const moment = createMoment({
+      id: momentId,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId: object.id,
+      path: input.path,
+      recordedAtMs,
+      operation: "write",
+      payload: {
+        before: before ? payloadFromSnapshot(before) : null,
+        after: afterPayload,
+      },
+      metadata: input.metadata,
+      ...(input.author !== undefined ? { author: input.author } : {}),
+      before,
+    });
+    const snapshot: TextFileSnapshot = {
+      objectId: object.id,
+      versionId: input.versionId,
+      path: input.path,
+      contentKind: "binary",
+      sha256,
+      byteLength: bytes.byteLength,
+      text: "",
+      updatedAtMs: recordedAtMs,
+      latestMomentId: moment.id,
+      metadata: pickWriteMetadata(input.metadata),
+    };
+
+    insertMomentRow(input.db, moment);
+    insertOrReplaceSnapshot(input.db, "snapshots", input.workspaceId, input.versionId, snapshot);
+    input.db
+      .prepare(
+        `INSERT INTO path_aliases (workspace_id, version_id, path, object_id)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET object_id = excluded.object_id`,
+      )
+      .run(input.workspaceId, input.versionId, input.path, object.id);
+    deleteFileSearchIndex({
+      db: input.db,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId: object.id,
+    });
+
+    return {
+      object: cloneFileObject(object),
+      snapshot: cloneSnapshot(snapshot),
+      moment: cloneMoment(moment),
+    };
   }
 
   function recordTextConflictInDb(input: {
@@ -3261,10 +3576,10 @@ function createVersionedTextStoreWithHooks(
         txDb
           .prepare(
             `INSERT INTO snapshots (
-              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+              workspace_id, version_id, object_id, path, content_kind, blob_sha256, updated_at_ms,
               latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
             )
-            SELECT workspace_id, ?, object_id, path, blob_sha256, updated_at_ms,
+            SELECT workspace_id, ?, object_id, path, content_kind, blob_sha256, updated_at_ms,
                    latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
             FROM snapshots
             WHERE workspace_id = ? AND version_id = ?`,
@@ -3281,10 +3596,10 @@ function createVersionedTextStoreWithHooks(
         txDb
           .prepare(
             `INSERT INTO fork_base_snapshots (
-              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+              workspace_id, version_id, object_id, path, content_kind, blob_sha256, updated_at_ms,
               latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
             )
-            SELECT workspace_id, ?, object_id, path, blob_sha256, updated_at_ms,
+            SELECT workspace_id, ?, object_id, path, content_kind, blob_sha256, updated_at_ms,
                    latest_moment_id, metadata_origin, metadata_summary, metadata_correlation_id
             FROM snapshots
             WHERE workspace_id = ? AND version_id = ?`,
@@ -3357,8 +3672,13 @@ function createVersionedTextStoreWithHooks(
             `SELECT m.moment_id, m.workspace_id, m.version_id, m.object_id, m.path,
                     m.recorded_at_ms, m.operation, m.metadata_origin,
                     m.metadata_summary, m.metadata_correlation_id, m.author_json,
+                    m.payload_after_content_kind AS content_kind,
+                    binary_after.byte_length AS binary_byte_length,
                     m.moment_order
              FROM moments m
+             LEFT JOIN binary_blobs binary_after
+               ON binary_after.sha256 = m.payload_after_blob_sha256
+              AND COALESCE(m.payload_after_content_kind, 'text') = 'binary'
              WHERE ${pageConditions.join(" AND ")}
              ORDER BY m.moment_order DESC
              LIMIT ?`,
@@ -3376,6 +3696,10 @@ function createVersionedTextStoreWithHooks(
             path: rowString(row, "path"),
             recordedAtMs: rowNumber(row, "recorded_at_ms"),
             operation: rowString(row, "operation") as VersionedTextMomentSummary["operation"],
+            contentKind: rowContentKind(row, "content_kind"),
+            ...(rowContentKind(row, "content_kind") === "binary"
+              ? { byteLength: rowNumber(row, "binary_byte_length") }
+              : {}),
             metadata: metadataFromRow(row),
             ...(author !== undefined ? { author } : {}),
             momentOrder: rowNumber(row, "moment_order"),
@@ -3427,6 +3751,59 @@ function createVersionedTextStoreWithHooks(
         });
         await persistBarrier();
         return result;
+      });
+    },
+
+    writeBinaryFile(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const path = normalizePlaintextStorablePath(input.path);
+        const bytes = normalizeWriteBinaryBytes(input.bytes);
+        const metadata = normalizeWriteMetadata(input.metadata);
+        const author = normalizeMomentAuthor(input.author);
+        await beforeWriteMutation();
+        const result = writeBinaryFileInDb({
+          db: db(),
+          workspaceId,
+          versionId,
+          path,
+          bytes,
+          metadata,
+          ...(author !== undefined ? { author } : {}),
+          momentId: input.momentId,
+        });
+        await persistBarrier();
+        return result;
+      });
+    },
+
+    readBinaryFile(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const path = normalizeWritePath(input.path);
+        requireWorkspaceVersionRow(db(), workspaceId, versionId);
+        const snapshot = selectSnapshotByPath(db(), workspaceId, versionId, path);
+        if (!snapshot || !isBinarySnapshot(snapshot) || !snapshot.sha256) return null;
+        const row = db()
+          .prepare("SELECT content FROM binary_blobs WHERE sha256 = ?")
+          .get(snapshot.sha256);
+        return row ? rowBuffer(row, "content") : null;
+      });
+    },
+
+    readBinaryBlob(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        normalizeWorkspaceId(input.workspaceId);
+        assertPersistedNormalizedString(input.sha256);
+        const row = db()
+          .prepare("SELECT content FROM binary_blobs WHERE sha256 = ?")
+          .get(input.sha256);
+        return row ? rowBuffer(row, "content") : null;
       });
     },
 
@@ -3493,14 +3870,23 @@ function createVersionedTextStoreWithHooks(
 
         if (fileStatesEqual(comparison.current, comparison.base)) {
           if (comparison.incoming.exists) {
-            const write = writeTextFileInDb({
-              db: txDb,
-              workspaceId,
-              versionId: targetVersionId,
-              path,
-              text: comparison.incoming.text ?? "",
-              metadata,
-            });
+            const write = isBinaryState(comparison.incoming)
+              ? writeBinaryFileInDb({
+                  db: txDb,
+                  workspaceId,
+                  versionId: targetVersionId,
+                  path,
+                  bytes: readBinaryBlobFromDb(txDb, comparison.incoming.sha256 ?? ""),
+                  metadata,
+                })
+              : writeTextFileInDb({
+                  db: txDb,
+                  workspaceId,
+                  versionId: targetVersionId,
+                  path,
+                  text: comparison.incoming.text ?? "",
+                  metadata,
+                });
             await persistBarrier();
             return cloneJson({ kind: "merged", operation: "write", comparison, write });
           }
@@ -3523,7 +3909,10 @@ function createVersionedTextStoreWithHooks(
         if (
           comparison.base.exists &&
           comparison.current.exists &&
-          comparison.incoming.exists
+          comparison.incoming.exists &&
+          !isBinaryState(comparison.base) &&
+          !isBinaryState(comparison.current) &&
+          !isBinaryState(comparison.incoming)
         ) {
           const merged = mergeMarkdown({
             base: comparison.base.text ?? "",
@@ -3618,14 +4007,23 @@ function createVersionedTextStoreWithHooks(
           resolution = "applied-incoming";
           conflict.chosenFrom = "incoming";
           if (conflict.incoming.exists) {
-            write = writeTextFileInDb({
-              db: txDb,
-              workspaceId,
-              versionId: conflict.targetVersionId,
-              path: conflict.path,
-              text: conflict.incoming.text ?? "",
-              metadata,
-            });
+            write = isBinaryState(conflict.incoming)
+              ? writeBinaryFileInDb({
+                  db: txDb,
+                  workspaceId,
+                  versionId: conflict.targetVersionId,
+                  path: conflict.path,
+                  bytes: readBinaryBlobFromDb(txDb, conflict.incoming.sha256 ?? ""),
+                  metadata,
+                })
+              : writeTextFileInDb({
+                  db: txDb,
+                  workspaceId,
+                  versionId: conflict.targetVersionId,
+                  path: conflict.path,
+                  text: conflict.incoming.text ?? "",
+                  metadata,
+                });
           } else if (conflict.current.exists) {
             deletion = deleteTextFileInDb({
               db: txDb,
@@ -3636,6 +4034,16 @@ function createVersionedTextStoreWithHooks(
             });
           }
         } else if (input.resolution.kind === "apply-merged") {
+          if (
+            isBinaryState(conflict.base) ||
+            isBinaryState(conflict.current) ||
+            isBinaryState(conflict.incoming)
+          ) {
+            throw new VersionedTextStoreError(
+              "invalid-input",
+              "Binary conflicts cannot be resolved with combined text.",
+            );
+          }
           resolution = "applied-merged";
           conflict.chosenFrom = "merged";
           write = writeTextFileInDb({
@@ -3678,11 +4086,11 @@ function createVersionedTextStoreWithHooks(
         requireWorkspaceVersionRow(db(), workspaceId, versionId);
         return db()
           .prepare(
-            `SELECT s.*, b.text
-             FROM snapshots s
-             JOIN blobs b ON b.sha256 = s.blob_sha256
-             WHERE s.workspace_id = ? AND s.version_id = ?
-             ORDER BY s.path`,
+            snapshotSelectSql(
+              "snapshots",
+              `WHERE s.workspace_id = ? AND s.version_id = ?
+               ORDER BY s.path`,
+            ),
           )
           .all(workspaceId, versionId)
           .map(snapshotFromRow)
@@ -3737,8 +4145,8 @@ function createVersionedTextStoreWithHooks(
           recordedAtMs,
           operation: "rename",
           payload: {
-            before: { path: before.path, text: before.text },
-            after: { path: toPath, text: before.text },
+            before: payloadFromSnapshot(before),
+            after: { ...payloadFromSnapshot(before), path: toPath },
           },
           metadata,
           before,

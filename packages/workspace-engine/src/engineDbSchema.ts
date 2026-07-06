@@ -54,6 +54,19 @@ const ACTIVE_VERSIONS_DDL = `
   )
 `;
 
+// Binary-backed file contents are a lazy additive upgrade (WS-G1): the
+// existing `blobs.text NOT NULL` table remains the text store of record, and
+// in-cap binary bytes live here keyed by the same sha256 convention. The
+// content-kind columns below decide which blob table a snapshot/moment/
+// conflict sha points at; older rows default to text.
+const BINARY_BLOBS_DDL = `
+  CREATE TABLE IF NOT EXISTS binary_blobs (
+    sha256 TEXT PRIMARY KEY,
+    byte_length INTEGER NOT NULL,
+    content BLOB NOT NULL
+  )
+`;
+
 // Secret-backed files (PR 08) are the same lazy additive upgrade pattern:
 // stores created before the secret driver gain the tables on open, and a
 // missing table simply reads as "no secret files yet". NOT in
@@ -223,6 +236,42 @@ function ensureMomentsAuthorColumn(
   }
 }
 
+function ensureNullableColumn(
+  db: EngineSqliteDb,
+  table: string,
+  column: string,
+  definition: string,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  const hasColumn = () =>
+    db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all()
+      .some((row) => String(row.name) === column);
+  if (hasColumn()) return;
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (error) {
+    // Same first-open race posture as author_json: re-check the schema state
+    // instead of parsing driver-specific duplicate-column messages.
+    if (!hasColumn()) throw corrupt(error);
+  }
+}
+
+function ensureBinaryContentKindColumns(
+  db: EngineSqliteDb,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  ensureNullableColumn(db, "snapshots", "content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "fork_base_snapshots", "content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "moments", "payload_before_content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "moments", "payload_after_content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "moments", "before_content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "conflicts", "base_content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "conflicts", "current_content_kind", "TEXT DEFAULT 'text'", corrupt);
+  ensureNullableColumn(db, "conflicts", "incoming_content_kind", "TEXT DEFAULT 'text'", corrupt);
+}
+
 function listUserTables(db: EngineSqliteDb): string[] {
   return db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
@@ -246,11 +295,13 @@ export function initializeOrValidateEngineSchema(
   if (Number(version?.version) !== ENGINE_SCHEMA_VERSION) throw corrupt();
   assertRequiredEngineTables(db, corrupt);
   db.exec(ACTIVE_VERSIONS_DDL);
+  db.exec(BINARY_BLOBS_DDL);
   db.exec(SECRET_TABLES_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
   ensureChatThreadsChannelColumn(db, corrupt);
+  ensureBinaryContentKindColumns(db, corrupt);
 }
 
 export function assertRequiredEngineTables(
@@ -297,6 +348,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         byte_length INTEGER NOT NULL,
         text TEXT NOT NULL
       );
+      ${BINARY_BLOBS_DDL};
       CREATE TABLE IF NOT EXISTS versioned_workspaces (
         workspace_id TEXT PRIMARY KEY,
         main_version_id TEXT NOT NULL
@@ -334,6 +386,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         version_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         path TEXT NOT NULL,
+        content_kind TEXT DEFAULT 'text',
         blob_sha256 TEXT NOT NULL,
         updated_at_ms REAL NOT NULL,
         latest_moment_id TEXT NOT NULL,
@@ -350,6 +403,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         version_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         path TEXT NOT NULL,
+        content_kind TEXT DEFAULT 'text',
         blob_sha256 TEXT NOT NULL,
         updated_at_ms REAL NOT NULL,
         latest_moment_id TEXT NOT NULL,
@@ -371,8 +425,10 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         recorded_at_ms REAL NOT NULL,
         operation TEXT NOT NULL,
         payload_before_path TEXT,
+        payload_before_content_kind TEXT DEFAULT 'text',
         payload_before_blob_sha256 TEXT,
         payload_after_path TEXT NOT NULL,
+        payload_after_content_kind TEXT DEFAULT 'text',
         payload_after_blob_sha256 TEXT NOT NULL,
         metadata_origin TEXT NOT NULL,
         metadata_summary TEXT,
@@ -381,6 +437,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         before_object_id TEXT,
         before_version_id TEXT,
         before_path TEXT,
+        before_content_kind TEXT DEFAULT 'text',
         before_blob_sha256 TEXT,
         before_updated_at_ms REAL,
         before_latest_moment_id TEXT,
@@ -413,6 +470,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         base_exists INTEGER NOT NULL,
         base_path TEXT NOT NULL,
         base_object_id TEXT,
+        base_content_kind TEXT DEFAULT 'text',
         base_blob_sha256 TEXT,
         base_updated_at_ms REAL,
         base_latest_moment_id TEXT,
@@ -422,6 +480,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         current_exists INTEGER NOT NULL,
         current_path TEXT NOT NULL,
         current_object_id TEXT,
+        current_content_kind TEXT DEFAULT 'text',
         current_blob_sha256 TEXT,
         current_updated_at_ms REAL,
         current_latest_moment_id TEXT,
@@ -431,6 +490,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         incoming_exists INTEGER NOT NULL,
         incoming_path TEXT NOT NULL,
         incoming_object_id TEXT,
+        incoming_content_kind TEXT DEFAULT 'text',
         incoming_blob_sha256 TEXT,
         incoming_updated_at_ms REAL,
         incoming_latest_moment_id TEXT,

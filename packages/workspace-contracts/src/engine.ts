@@ -39,6 +39,7 @@ export type VersionedTextStoreErrorCode =
   | "conflict-not-found"
   | "conflict-stale-target"
   | "duplicate-id"
+  | "file-too-large"
   | "file-not-found"
   | "fork-base-not-found"
   | "invalid-generated-id"
@@ -106,11 +107,15 @@ export interface AgentMomentAuthor {
 }
 
 export type MomentAuthor = AgentMomentAuthor;
+export type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
   objectId: WorkspaceObjectId;
   versionId: VersionId;
   path: string;
+  contentKind?: VersionedFileContentKind;
+  sha256?: string;
+  byteLength?: number;
   text: string;
   updatedAtMs: number;
   latestMomentId: VersionedTextMomentId;
@@ -121,6 +126,9 @@ export interface VersionedTextFileState {
   exists: boolean;
   path: string;
   objectId?: WorkspaceObjectId;
+  contentKind?: VersionedFileContentKind;
+  sha256?: string;
+  byteLength?: number;
   text?: string;
   updatedAtMs?: number;
   latestMomentId?: VersionedTextMomentId;
@@ -226,6 +234,8 @@ export interface VersionedTextMomentSummary {
   path: string;
   recordedAtMs: number;
   operation: "write" | "rename" | "delete";
+  contentKind?: VersionedFileContentKind;
+  byteLength?: number;
   metadata: ActorNeutralWriteMetadata;
   // Present only when a dohc-tracked agent run authored this moment.
   author?: MomentAuthor;
@@ -245,6 +255,9 @@ export interface VersionedTextMomentPage {
 
 export interface VersionedTextMomentPayloadSnapshot {
   path: string;
+  contentKind?: VersionedFileContentKind;
+  sha256?: string;
+  byteLength?: number;
   text: string;
 }
 
@@ -332,6 +345,24 @@ export interface VersionedTextStore {
     author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
+  writeBinaryFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    bytes: Uint8Array;
+    metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
+    momentId?: VersionedTextMomentId;
+  }): Promise<VersionedTextWriteResult>;
+  readBinaryFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+  }): Promise<Uint8Array | null>;
+  readBinaryBlob(input: {
+    workspaceId: WorkspaceId;
+    sha256: string;
+  }): Promise<Uint8Array | null>;
   readTextFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -800,6 +831,9 @@ export interface VersionFileChange {
   // metadata-only — protected contents never ride a comparison, so
   // currentText/incomingText are always absent when this is set.
   protected?: boolean;
+  // Binary file content is versioned byte-exactly, but comparisons are
+  // metadata-only: no raw bytes and no text-shaped body ride this surface.
+  binary?: boolean;
 }
 
 // --- Secret-backed files (PR 08) -------------------------------------------

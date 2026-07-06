@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  MAX_VERSIONED_BINARY_FILE_BYTES,
   MAX_VERSIONED_TEXT_FILE_BYTES,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   VersionedTextStoreError,
@@ -131,6 +133,10 @@ function rawCorrupt(sql: string, ...params: unknown[]): void {
   });
 }
 
+function sha256Bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 function momentOperations(workspaceId = "workspace-a"): string[] {
   return rawRows(
     "SELECT operation FROM moments WHERE workspace_id = ? ORDER BY moment_order",
@@ -178,6 +184,201 @@ const unsafeWorkspacePaths = [
 ];
 
 describe("versioned text store", () => {
+  it("stores and reads in-cap binary files byte-exactly without text conversion", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const bytes = Buffer.from([0x89, 0x50, 0x00, 0xff, 0xfe, 0x41]);
+    const result = await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "logo.png",
+      bytes,
+      metadata: localFileWrite,
+    });
+
+    expect(result.snapshot).toMatchObject({
+      path: "logo.png",
+      contentKind: "binary",
+      sha256: sha256Bytes(bytes),
+      byteLength: bytes.byteLength,
+      text: "",
+    });
+    await expect(
+      store.readBinaryFile({ workspaceId: "workspace-a", versionId: "main", path: "logo.png" }),
+    ).resolves.toEqual(bytes);
+    expect(rawRows("SELECT sha256, byte_length, content FROM binary_blobs")).toHaveLength(1);
+    await store.close();
+  });
+
+  it("deduplicates identical binary bytes by sha256", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const bytes = Buffer.from([0, 1, 2, 3, 255]);
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "a.bin",
+      bytes,
+      metadata: localFileWrite,
+    });
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "b.bin",
+      bytes,
+      metadata: localFileWrite,
+    });
+    expect(rawRows("SELECT sha256 FROM binary_blobs")).toHaveLength(1);
+    await store.close();
+  });
+
+  it("rejects over-cap binary writes at the store boundary", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await expectStoreError(
+      store.writeBinaryFile({
+        workspaceId: "workspace-a",
+        versionId: "main",
+        path: "large.bin",
+        bytes: new Uint8Array(MAX_VERSIONED_BINARY_FILE_BYTES + 1),
+        metadata: localFileWrite,
+      }),
+      "file-too-large",
+    );
+    expect(rawRows("SELECT sha256 FROM binary_blobs")).toHaveLength(0);
+    await store.close();
+  });
+
+  it("preserves object identity across text to binary transitions", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const text = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "asset.dat",
+      text: "plain\n",
+      metadata: localFileWrite,
+    });
+    const binary = await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "asset.dat",
+      bytes: Buffer.from([0, 255, 1]),
+      metadata: localFileWrite,
+    });
+    expect(binary.object.id).toBe(text.object.id);
+    expect(binary.moment.before?.objectId).toBe(text.object.id);
+    expect(binary.moment.payload.before?.contentKind ?? "text").toBe("text");
+    expect(binary.moment.payload.after.contentKind).toBe("binary");
+    await store.close();
+  });
+
+  it("opens a binary conflict with hash-backed sides when both versions change", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "logo.png",
+      bytes: Buffer.from([1, 1, 1]),
+      metadata: localFileWrite,
+    });
+    const draft = await store.createNamedVersion({
+      workspaceId: "workspace-a",
+      name: "Draft",
+      fromVersionId: "main",
+    });
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "logo.png",
+      bytes: Buffer.from([2, 2, 2]),
+      metadata: localFileWrite,
+    });
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: draft.id,
+      path: "logo.png",
+      bytes: Buffer.from([3, 3, 3]),
+      metadata: localFileWrite,
+    });
+    const result = await store.mergeTextFileFromVersion({
+      workspaceId: "workspace-a",
+      targetVersionId: "main",
+      sourceVersionId: draft.id,
+      path: "logo.png",
+      metadata: apiWrite,
+    });
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
+      expect(result.conflict.current.contentKind).toBe("binary");
+      expect(result.conflict.incoming.contentKind).toBe("binary");
+      expect(result.conflict.current.sha256).toBe(sha256Bytes(Buffer.from([2, 2, 2])));
+      expect(result.conflict.incoming.sha256).toBe(sha256Bytes(Buffer.from([3, 3, 3])));
+    }
+    await store.close();
+  });
+
+  it("never writes binary content into the file search FTS table", async () => {
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "logo.png",
+      bytes: Buffer.from([0x89, 0x50, 0xff]),
+      metadata: localFileWrite,
+    });
+    await store.ensureSearchIndex?.({ workspaceId: "workspace-a", versionId: "main" });
+    expect(rawRows("SELECT path, text FROM engine_search_files_fts")).toEqual([]);
+    await store.close();
+  });
+
+  it("rehydrates binary snapshots, moments, and transitions byte-exactly on reopen", async () => {
+    // Deliberately hostile corpus: NUL bytes, invalid UTF-8 continuations,
+    // a CESU-8-style lone surrogate, and BOM-ish markers. None of these may
+    // survive a text-encoding round trip, so byte equality after a cold
+    // reopen proves no UTF-8 conversion ever touched the binary path.
+    const corpus = Buffer.from([
+      0x00, 0x01, 0x80, 0xbf, 0xc0, 0xc1, 0xed, 0xa0, 0x80, 0xfe, 0xff, 0xf5,
+      0x00, 0xff, 0xfe, 0x00, 0x00, 0xd8, 0x00,
+    ]);
+    const store = storeWithDeterministicIds();
+    await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "asset.dat",
+      text: "text first\n",
+      metadata: localFileWrite,
+    });
+    await store.writeBinaryFile({
+      workspaceId: "workspace-a",
+      versionId: "main",
+      path: "asset.dat",
+      bytes: corpus,
+      metadata: localFileWrite,
+    });
+    await store.close();
+
+    const reloaded = createVersionedTextStore(root);
+    await expect(
+      reloaded.readBinaryFile({ workspaceId: "workspace-a", versionId: "main", path: "asset.dat" }),
+    ).resolves.toEqual(corpus);
+    const page = await reloaded.listMoments({ workspaceId: "workspace-a", versionId: "main", limit: 10 });
+    const binaryMoment = page.moments.find((moment) => moment.contentKind === "binary");
+    expect(binaryMoment).toMatchObject({ path: "asset.dat", byteLength: corpus.byteLength });
+    const files = await reloaded.listTextFiles({ workspaceId: "workspace-a", versionId: "main" });
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({
+      path: "asset.dat",
+      contentKind: "binary",
+      byteLength: corpus.byteLength,
+      text: "",
+    });
+    await reloaded.close();
+  });
+
   it("creates Main and a named version with isolated text for the same file", async () => {
     const store = storeWithDeterministicIds();
     const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });

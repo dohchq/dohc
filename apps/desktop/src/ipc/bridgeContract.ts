@@ -556,6 +556,8 @@ export const EngineMomentRecord = z.object({
   // Secret-backed file moment (PR 08): metadata-only by construction — the
   // row renders with a lock and its diff page shows "Contents are protected".
   protected: z.boolean().optional(),
+  contentKind: z.enum(["text", "binary"]).optional(),
+  byteLength: z.number().int().nonnegative().optional(),
 });
 export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
@@ -582,15 +584,28 @@ export const ReadEngineMomentPayload = z.object({
 });
 export type ReadEngineMomentPayload = z.infer<typeof ReadEngineMomentPayload>;
 
+// One payload side of a moment whose content is binary: presented as bytes
+// (byteLength, plus the content hash when the store recorded one) — a binary
+// side never serves text.
+const ENGINE_MOMENT_BINARY_SIDE = z.object({
+  byteLength: z.number().int().nonnegative(),
+  sha256: z.string().min(1).max(128).optional(),
+});
+
 export const EngineMomentDetailRecord = EngineMomentRecord.omit({
   momentOrder: true,
 }).extend({
-  // null before-text = the moment created the file; delete moments carry the
-  // removed content as beforeText and null afterText. PROTECTED moments are
+  // null before-text = the moment created the file OR the before side is
+  // binary (then beforeBinary is set); delete moments carry the removed
+  // content as beforeText and null afterText. PROTECTED moments are
   // metadata-only: both sides are always null and the page renders
-  // "Contents are protected" instead of a diff.
+  // "Contents are protected" / "Binary contents" instead of a diff.
   beforeText: MOMENT_TEXT.nullable(),
   afterText: MOMENT_TEXT.nullable(),
+  // Per-side content kinds (WS-G1): a text/binary transition moment has one
+  // text side and one binary side; each side presents by its own kind.
+  beforeBinary: ENGINE_MOMENT_BINARY_SIDE.optional(),
+  afterBinary: ENGINE_MOMENT_BINARY_SIDE.optional(),
 });
 export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
 
@@ -848,6 +863,8 @@ export const WorkspaceVersionFileChange = z.object({
   // Secret-backed file (PR 08): the compare view renders "Protected file
   // changed" — both text sides are always absent when this is set.
   protected: z.boolean().optional(),
+  // Binary files are byte-versioned but comparison is metadata-only.
+  binary: z.boolean().optional(),
 });
 export type WorkspaceVersionFileChange = z.infer<typeof WorkspaceVersionFileChange>;
 
@@ -871,11 +888,24 @@ export const WorkspaceVersionConflict = z.object({
   path: PATH_STRING,
   sourceVersionId: VERSION_ID,
   targetVersionId: VERSION_ID,
+  contentKind: z.enum(["text", "binary"]).default("text"),
   // null means "no file on that side" (added on one side, deleted on the
   // other). Raw texts only — the UI renders sides, never conflict markers.
   currentText: VERSION_TEXT.nullable(),
   incomingText: VERSION_TEXT.nullable(),
   baseText: VERSION_TEXT.nullable(),
+  currentBinary: z
+    .object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1).max(128) })
+    .nullable()
+    .optional(),
+  incomingBinary: z
+    .object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1).max(128) })
+    .nullable()
+    .optional(),
+  baseBinary: z
+    .object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1).max(128) })
+    .nullable()
+    .optional(),
 });
 export type WorkspaceVersionConflict = z.infer<typeof WorkspaceVersionConflict>;
 
