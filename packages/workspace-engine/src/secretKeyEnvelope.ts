@@ -17,7 +17,20 @@ export class SecretKeyEnvelopeError extends Error {
   constructor(cause?: unknown) {
     super("Workspace secret key envelope could not be unwrapped.");
     this.name = "SecretKeyEnvelopeError";
-    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+    // The raw cause (JSON.parse SyntaxError text, OpenSSL error codes, scrypt
+    // failures) stays debug-internal: it is deliberately NOT the standard
+    // `cause` property and NOT enumerable, so structured clone across the IPC
+    // boundary, JSON serialization, and object spread all produce a shape that
+    // is identical for every failure mode. Nothing distinguishable about WHY
+    // an unwrap failed may reach the renderer or a server.
+    if (cause !== undefined) {
+      Object.defineProperty(this, "debugCause", {
+        value: cause,
+        enumerable: false,
+        writable: false,
+        configurable: true,
+      });
+    }
   }
 }
 

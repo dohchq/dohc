@@ -6,11 +6,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLinkedChatStore } from "./linkedChatStore";
 import {
+  MAX_SECRET_FILE_BYTES,
   createSecretFileStore,
   installWorkspaceDataKey,
   readWorkspaceDataKeyForEnrollment,
 } from "./secretFileStore";
 import { applySyncQueues } from "./syncApply";
+import type { SyncReplicationEnvelope } from "./syncReplication";
 import { exportSyncBundle, importSyncBundle } from "./syncFolder";
 import { VERSIONED_TEXT_STORE_RELATIVE_PATH, createVersionedTextStore } from "./versionedTextStore";
 import { searchWorkspaceEngine } from "./workspaceSearch";
@@ -194,6 +196,23 @@ function prng(seed: number): () => number {
     state = (state * 1664525 + 1013904223) >>> 0;
     return state / 0x100000000;
   };
+}
+
+// Read/patch/rewrite the (single-origin) ops file of an exported bundle —
+// the tamper hook for poison-op tests.
+async function readBundleOps(
+  bundle: string,
+): Promise<{ file: string; ops: Array<Record<string, unknown>> }> {
+  const file = join(bundle, "ops", (await readdir(join(bundle, "ops")))[0]!);
+  const ops = (await readFile(file, "utf8"))
+    .split(/\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { file, ops };
+}
+
+async function writeBundleOps(file: string, ops: Array<Record<string, unknown>>): Promise<void> {
+  await writeFile(file, `${ops.map((op) => JSON.stringify(op)).join("\n")}\n`, "utf8");
 }
 
 async function syncBothWays(a: string, b: string, label: string): Promise<void> {
@@ -1109,6 +1128,232 @@ describe("sync folder replication", () => {
     } finally {
       await imported.close();
     }
+  });
+
+  // Gate finding (0P-D): secret ciphertext rides the 5 MiB binary-blob
+  // transport while secrets cap at 1 MiB plaintext, and GCM here is
+  // length-preserving (tag + IV travel separately), so the actual blob must
+  // equal the declared byteLength exactly and stay under the secret cap.
+  it("rejects secret ciphertext whose bytes mismatch the declared byteLength", async () => {
+    const a = await tempRoot("sync-secret-lenmismatch-a");
+    const b = await tempRoot("sync-secret-lenmismatch-b");
+    const bundle = await tempRoot("sync-secret-lenmismatch-bundle");
+    const versions = createVersionedTextStore(a);
+    const secrets = createSecretFileStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "LENGTH_POISON=1\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    const { file, ops } = await readBundleOps(bundle);
+    const put = ops.find((op) => op.opKind === "secret.file.put");
+    if (!put || !put.payload || typeof put.payload !== "object") throw new Error("expected put op");
+    const payload = put.payload as Record<string, unknown>;
+    // Declared byteLength passes the standalone range check (integer, under
+    // the cap) but disagrees with the actual ciphertext bytes by one.
+    payload.byteLength = Number(payload.byteLength) - 1;
+    await writeBundleOps(file, ops);
+
+    await expect(
+      importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" }),
+      ).resolves.toEqual([]);
+    } finally {
+      await imported.close();
+    }
+  });
+
+  it("rejects a secret ciphertext blob smuggled in above the 1 MiB secret cap", async () => {
+    const a = await tempRoot("sync-secret-oversize-a");
+    const b = await tempRoot("sync-secret-oversize-b");
+    const bundle = await tempRoot("sync-secret-oversize-bundle");
+    const versions = createVersionedTextStore(a);
+    const secrets = createSecretFileStore(a);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "OVERSIZE_POISON=1\n",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle });
+    // A blob above the secret plaintext cap but under the binary transport
+    // cap (5 MiB) — the transport accepts it, the secret store must not.
+    const oversized = Buffer.alloc(MAX_SECRET_FILE_BYTES + 1, 0x41);
+    const oversizedSha = createHash("sha256").update(oversized).digest("hex");
+    await writeFile(join(bundle, "blobs-bin", oversizedSha), oversized);
+    const { file, ops } = await readBundleOps(bundle);
+    const put = ops.find((op) => op.opKind === "secret.file.put");
+    if (!put || !put.payload || typeof put.payload !== "object") throw new Error("expected put op");
+    (put.payload as Record<string, unknown>).ciphertextSha256 = oversizedSha;
+    await writeBundleOps(file, ops);
+
+    await expect(
+      importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+    const imported = createSecretFileStore(b);
+    try {
+      await expect(
+        imported.listSecretFiles({ workspaceId: WORKSPACE_ID, versionId: "main" }),
+      ).resolves.toEqual([]);
+    } finally {
+      await imported.close();
+    }
+  });
+
+  // Gate finding (0P-D): an imported secret.version.fork must be verified
+  // against the importer's own sealed source tips for fromVersionId — a
+  // poison fork that swaps sealed rows between paths is rejected and the
+  // destination version survives untouched (no partial wipe).
+  it("rejects a poison secret fork with swapped rows and keeps the destination intact", async () => {
+    const a = await tempRoot("sync-secret-poisonfork-a");
+    const b = await tempRoot("sync-secret-poisonfork-b");
+    const versions = createVersionedTextStore(a, { createId: createIdFactory("text-") });
+    const secrets = createSecretFileStore(a, { createId: createIdFactory("secret-") });
+    let versionId = "";
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "FORK_A=short\n",
+        metadata: { origin: "local-file" },
+      });
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "prod.env",
+        text: "FORK_B=deliberately-longer-content\n",
+        metadata: { origin: "local-file" },
+      });
+      versionId = (
+        await versions.createNamedVersion({
+          workspaceId: WORKSPACE_ID,
+          name: "Staging",
+          fromVersionId: "main",
+        })
+      ).id;
+      await secrets.forkVersion({
+        workspaceId: WORKSPACE_ID,
+        fromVersionId: "main",
+        toVersionId: versionId,
+      });
+    } finally {
+      await secrets.close();
+      await versions.close();
+    }
+    const key = await readWorkspaceDataKeyForEnrollment(a, WORKSPACE_ID);
+    if (!key) throw new Error("expected protected key");
+    await installWorkspaceDataKey(b, key);
+    // First round: the legitimate fork lands on b.
+    const bundle1 = await tempRoot("sync-secret-poisonfork-bundle1");
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle1 });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle1 });
+    const destinationBefore = secretCipherRows(b, versionId);
+    const forkBasesBefore = secretForkBaseRows(b, versionId);
+    expect(destinationBefore).toHaveLength(2);
+
+    // Second round: a re-forks after an update; the bundle op is poisoned by
+    // swapping the sealed tuples between the two paths (each still a REAL
+    // ciphertext the importer holds — only the path binding lies).
+    const update = createSecretFileStore(a, { createId: createIdFactory("secret2-") });
+    try {
+      await update.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: "FORK_A=updated\n",
+        metadata: { origin: "local-file" },
+      });
+      await update.forkVersion({
+        workspaceId: WORKSPACE_ID,
+        fromVersionId: "main",
+        toVersionId: versionId,
+      });
+    } finally {
+      await update.close();
+    }
+    const bundle2 = await tempRoot("sync-secret-poisonfork-bundle2");
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: bundle2 });
+    const { file, ops } = await readBundleOps(bundle2);
+    const forks = ops.filter((op) => op.opKind === "secret.version.fork");
+    const poisoned = forks[forks.length - 1];
+    if (!poisoned) throw new Error("expected a second fork op");
+    const rows = (poisoned.payload as { rows: Array<Record<string, unknown>> }).rows;
+    expect(rows).toHaveLength(2);
+    const sealedFields = ["ivBase64", "authTagBase64", "ciphertextSha256", "byteLength"] as const;
+    for (const field of sealedFields) {
+      const swap = rows[0]![field];
+      rows[0]![field] = rows[1]![field];
+      rows[1]![field] = swap;
+    }
+    await writeBundleOps(file, ops);
+
+    await expect(
+      importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: bundle2 }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+    // Destination version intact: the poison fork neither wiped nor replaced
+    // the previously replicated rows.
+    expect(secretCipherRows(b, versionId)).toEqual(destinationBefore);
+    expect(secretForkBaseRows(b, versionId)).toEqual(forkBasesBefore);
+    const check = createSecretFileStore(b);
+    try {
+      await expect(
+        check.materializeSecretFile({ workspaceId: WORKSPACE_ID, versionId, path: ".env" }),
+      ).resolves.toEqual({ present: true, text: "FORK_A=short\n" });
+    } finally {
+      await check.close();
+    }
+  });
+
+  // Gate finding (0P-D): a fork op without rows must be an honest rejection
+  // at the payload boundary, not a TypeError inside blob-ref collection.
+  it("rejects a secret fork op with missing rows without crashing", async () => {
+    const root = await tempRoot("sync-secret-norows");
+    const versions = createVersionedTextStore(root);
+    try {
+      await versions.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    } finally {
+      await versions.close();
+    }
+    const malformed = {
+      workspaceId: WORKSPACE_ID,
+      originId: "poison-origin",
+      originSeq: 0,
+      opKind: "secret.version.fork",
+      payload: { toVersionId: "staging", fromVersionId: "main" },
+      recordedAtMs: 1234,
+    } as unknown as SyncReplicationEnvelope;
+    await expect(
+      applySyncQueues({
+        rootDir: root,
+        workspaceId: WORKSPACE_ID,
+        queues: [[malformed]],
+        blobSource: async () => {
+          throw new Error("no blobs should be fetched for a rowless fork");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
   });
 
   it("rebuilds file and chat FTS surfaces after import", async () => {

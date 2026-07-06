@@ -707,6 +707,31 @@ function ciphertextBlobBySha(txDb: SqliteDb, sha: string): Buffer {
   return bytes;
 }
 
+// Secret ciphertext refs ride the shared binary-blob transport, whose cap
+// (5 MiB, MAX_VERSIONED_BINARY_FILE_BYTES) is far above the secret plaintext
+// cap (1 MiB). AES-256-GCM here is length-preserving — the 16-byte auth tag
+// and 12-byte IV travel in their own payload fields — so the honest GCM
+// overhead allowance is exactly ZERO bytes: ciphertext length must equal the
+// declared plaintext byteLength, which normalizeSecretByteLength already caps
+// at MAX_SECRET_FILE_BYTES. Enforce both before any moment/tip/fork-base
+// insert so a poison op cannot park a 5 MiB blob behind a small declaration
+// (or a short blob behind a large one).
+function secretCiphertextBlobBySha(
+  txDb: SqliteDb,
+  sha: string,
+  declaredByteLength: number,
+): Buffer {
+  const bytes = ciphertextBlobBySha(txDb, sha);
+  if (bytes.byteLength > MAX_SECRET_FILE_BYTES || bytes.byteLength !== declaredByteLength) {
+    throw new SecretFileStoreError(
+      "invalid-input",
+      `Secret ciphertext blob ${sha} is ${bytes.byteLength} bytes but the payload declares ` +
+        `${declaredByteLength}; rejecting the replication op.`,
+    );
+  }
+  return bytes;
+}
+
 function journalSecretFileMoment(
   txDb: SqliteDb,
   input: {
@@ -1033,7 +1058,7 @@ export function createSecretFileStore(
             );
             const ciphertextSha256 = normalizeCiphertextSha256(payload.ciphertextSha256);
             const byteLength = normalizeSecretByteLength(payload.byteLength);
-            const ciphertext = ciphertextBlobBySha(txDb, ciphertextSha256);
+            const ciphertext = secretCiphertextBlobBySha(txDb, ciphertextSha256, byteLength);
             const after = {
               ivBase64,
               authTagBase64,
@@ -1093,6 +1118,56 @@ export function createSecretFileStore(
                 "Fork source and destination versions must differ.",
               );
             }
+            // No-key-safe fork verification: the importer cannot decrypt
+            // anything, but it CAN insist that every fork row is byte-equal to
+            // its own sealed source tip at the same path for fromVersionId
+            // (ciphertext hash + IV + auth tag + length), with no extra and no
+            // missing rows. A poison fork that swaps rows between paths, drops
+            // a path, or invents one is rejected before the destination wipe
+            // below — and the whole apply runs inside one transaction, so a
+            // later failure also rolls the wipe back. Honest residual: under
+            // cross-origin clock skew a legitimate fork could disagree with
+            // the importer's converged source tips and be rejected; that fails
+            // the pull loudly (fail closed), never corrupts state.
+            const sourceRows = txDb
+              .prepare(
+                `SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length
+                 FROM secret_files WHERE workspace_id = ? AND version_id = ?`,
+              )
+              .all(workspaceId, fromVersionId);
+            const sourceByPath = new Map(
+              sourceRows.map((row) => [stringValue(row.path), row]),
+            );
+            const forkRejected = (reason: string): SecretFileStoreError =>
+              new SecretFileStoreError(
+                "invalid-input",
+                `Secret fork payload does not match the local sealed source state ` +
+                  `for version ${fromVersionId}: ${reason}.`,
+              );
+            if (payload.rows.length !== sourceByPath.size) {
+              throw forkRejected(
+                `payload has ${payload.rows.length} rows, source has ${sourceByPath.size}`,
+              );
+            }
+            const seenPaths = new Set<string>();
+            for (const row of payload.rows) {
+              if (seenPaths.has(row.path)) throw forkRejected(`duplicate path ${row.path}`);
+              seenPaths.add(row.path);
+              const source = sourceByPath.get(row.path);
+              if (!source) throw forkRejected(`no source row for path ${row.path}`);
+              const sourceCiphertext = Buffer.from(
+                stringValue(source.ciphertext_base64),
+                "base64",
+              );
+              if (
+                source.iv_base64 !== row.ivBase64 ||
+                source.auth_tag_base64 !== row.authTagBase64 ||
+                sha256Bytes(sourceCiphertext) !== row.ciphertextSha256 ||
+                numberValue(source.byte_length) !== row.byteLength
+              ) {
+                throw forkRejected(`sealed content mismatch at path ${row.path}`);
+              }
+            }
             txDb
               .prepare(
                 "DELETE FROM secret_files WHERE workspace_id = ? AND version_id = ?",
@@ -1104,9 +1179,11 @@ export function createSecretFileStore(
               )
               .run(workspaceId, toVersionId);
             for (const row of payload.rows) {
-              const ciphertextBase64 = ciphertextBlobBySha(txDb, row.ciphertextSha256).toString(
-                "base64",
-              );
+              const ciphertextBase64 = secretCiphertextBlobBySha(
+                txDb,
+                row.ciphertextSha256,
+                row.byteLength,
+              ).toString("base64");
               txDb
                 .prepare(
                   `INSERT INTO secret_files (

@@ -138,7 +138,10 @@ export function collectBlobHashesFromOp(op: SyncReplicationEnvelope): OpBlobRefs
   } else if (op.opKind === "secret.file.put") {
     push(op.payload.ciphertextSha256, "binary");
   } else if (op.opKind === "secret.version.fork") {
-    for (const row of op.payload.rows) {
+    // Guard like version.create's forkSnapshots above: a malformed remote op
+    // without rows must reach the store's fail-closed payload validation, not
+    // crash here at the transport edge with a TypeError.
+    for (const row of op.payload.rows ?? []) {
       push(row.ciphertextSha256, "binary");
     }
   }

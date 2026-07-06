@@ -126,20 +126,36 @@ export function createSyncRelayHandler({
         } catch {
           throw badRequest("key envelope must be a JSON object");
         }
-        storage.putKeyEnvelope({
+        // Create-only on first write; CAS via If-Match (sha256 of the envelope
+        // being replaced) thereafter. A stale or absent precondition is a 409,
+        // never a silent overwrite — the envelope is the only recovery path
+        // for the wrapped workspace key. Replaced envelopes are retained in
+        // the history table by storage.putKeyEnvelope.
+        const result = storage.putKeyEnvelope({
           workspaceId: route.workspaceId,
           envelopeJson,
           updatedAtMs: nowMs(),
+          expectedSha256: parseIfMatchSha256(request.headers.get("if-match")),
         });
-        return jsonResponse({ ok: true, workspaceId: route.workspaceId });
+        return jsonResponse(
+          { ok: true, workspaceId: route.workspaceId, sha256: result.sha256 },
+          200,
+          { etag: `"${result.sha256}"` },
+        );
       }
 
       if (route.route === "keys" && request.method === "GET") {
-        const envelopeJson = storage.getKeyEnvelope(route.workspaceId);
-        if (!envelopeJson) throw keyEnvelopeNotFound();
-        return new Response(envelopeJson, {
+        const envelope = storage.getKeyEnvelope(route.workspaceId);
+        if (!envelope) throw keyEnvelopeNotFound();
+        return new Response(envelope.envelopeJson, {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            // Current fingerprint + write time so clients can detect that the
+            // envelope they enrolled with has been replaced.
+            etag: `"${envelope.sha256}"`,
+            "x-key-envelope-updated-at-ms": String(envelope.updatedAtMs),
+          },
         });
       }
 
@@ -302,6 +318,19 @@ function assertSha256(value: string): void {
   if (!SHA256_HEX.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
 }
 
+// If-Match for PUT /keys: absent means create-only; otherwise a (optionally
+// quoted) sha256 of the envelope the caller intends to replace. Wildcard and
+// weak validators are refused — an unconditional overwrite is exactly the
+// write this endpoint exists to prevent.
+function parseIfMatchSha256(header: string | null): string | null {
+  if (header === null) return null;
+  const value = header.trim().replace(/^"(.*)"$/u, "$1");
+  if (!SHA256_HEX.test(value)) {
+    throw badRequest("if-match must be the sha256 of the current key envelope");
+  }
+  return value;
+}
+
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -310,10 +339,10 @@ function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 

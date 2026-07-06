@@ -89,9 +89,14 @@ describe("secret key envelope", () => {
     ).rejects.toMatchObject({ code: "unwrap-failed" });
   });
 
-  it("wrong passphrase fails closed and writes no local key file", async () => {
+  // Honest scope note (gate fix): unwrapWorkspaceDataKey has no filesystem
+  // side effects at all, so there is no "target root" to assert about here.
+  // What this test locks is that a failed unwrap yields no key material and
+  // leaves the SOURCE workspace fully usable. The enrollment-side property
+  // ("a failed unwrap can never install a key") lives at
+  // installWorkspaceDataKey and is locked by the dedicated test below.
+  it("wrong passphrase fails closed and the source workspace stays usable", async () => {
     const source = await tempRoot("envelope-source");
-    const target = await tempRoot("envelope-target");
     const key = await createProtectedWorkspace(source);
     const { envelopeJson } = await wrapWorkspaceDataKey({
       dataKey: key,
@@ -105,9 +110,6 @@ describe("secret key envelope", () => {
         workspaceId: WORKSPACE_ID,
       }),
     ).rejects.toMatchObject({ code: "unwrap-failed" });
-    await expect(access(join(target, SECRET_KEY_RELATIVE_PATH))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
     const reopened = createSecretFileStore(source);
     try {
       await expect(
@@ -119,6 +121,96 @@ describe("secret key envelope", () => {
       ).resolves.toEqual({ present: true, text: "TOKEN=envelope-secret\n" });
     } finally {
       await reopened.close();
+    }
+  });
+
+  // The enrollment boundary itself: even if a broken caller shoved
+  // failed-unwrap garbage at installWorkspaceDataKey, it validates BEFORE
+  // touching the filesystem (the ENOENT check below is meaningful — this
+  // function targets that root) and never overwrites an existing different
+  // key.
+  it("installWorkspaceDataKey rejects non-key material before writing and never overwrites a different key", async () => {
+    const target = await tempRoot("install-target");
+    for (const junk of [Buffer.alloc(0), randomBytes(16), randomBytes(64)]) {
+      await expect(installWorkspaceDataKey(target, junk)).rejects.toMatchObject({
+        code: "key-corrupt",
+      });
+    }
+    await expect(access(join(target, SECRET_KEY_RELATIVE_PATH))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    const keyA = randomBytes(32);
+    const keyB = randomBytes(32);
+    await installWorkspaceDataKey(target, keyA);
+    const installed = await readFile(join(target, SECRET_KEY_RELATIVE_PATH), "utf8");
+    // Same key re-installs idempotently; a DIFFERENT key is refused and the
+    // original stays in place.
+    await installWorkspaceDataKey(target, keyA);
+    await expect(installWorkspaceDataKey(target, keyB)).rejects.toMatchObject({
+      code: "key-corrupt",
+    });
+    await expect(readFile(join(target, SECRET_KEY_RELATIVE_PATH), "utf8")).resolves.toBe(
+      installed,
+    );
+  });
+
+  // Gate fix (0P-D): raw causes (SyntaxError text, OpenSSL codes, scrypt
+  // errors) must stay debug-internal — every public failure mode has one
+  // indistinguishable shape across serialization boundaries.
+  it("public error shape is uniform across malformed-JSON, base64, GCM, and KDF failures", async () => {
+    const key = randomBytes(32);
+    const { envelopeJson } = await wrapWorkspaceDataKey({
+      dataKey: key,
+      passphrase: "uniform passphrase",
+      workspaceId: WORKSPACE_ID,
+    });
+    const withBadBase64 = { ...(JSON.parse(envelopeJson) as Record<string, unknown>) };
+    withBadBase64.saltBase64 = "!!not-base64!!";
+    const withBadTag = { ...(JSON.parse(envelopeJson) as Record<string, string>) };
+    const tagBytes = Buffer.from(withBadTag.authTagBase64!, "base64");
+    tagBytes[0] = (tagBytes[0] ?? 0) ^ 0xff;
+    withBadTag.authTagBase64 = tagBytes.toString("base64");
+
+    const attempts = [
+      // malformed JSON
+      { envelopeJson: "{ not json", passphrase: "uniform passphrase" },
+      // malformed base64 field
+      { envelopeJson: JSON.stringify(withBadBase64), passphrase: "uniform passphrase" },
+      // GCM auth failure
+      { envelopeJson: JSON.stringify(withBadTag), passphrase: "uniform passphrase" },
+      // KDF input failure
+      { envelopeJson, passphrase: "" },
+    ];
+    const shapes: Array<Record<string, unknown>> = [];
+    for (const attempt of attempts) {
+      const error = await unwrapWorkspaceDataKey({
+        ...attempt,
+        workspaceId: WORKSPACE_ID,
+      }).then(
+        () => {
+          throw new Error("expected the unwrap to fail");
+        },
+        (thrown: unknown) => thrown as Error & { code?: string },
+      );
+      shapes.push({
+        name: error.name,
+        message: error.message,
+        code: error.code,
+        enumerableKeys: Object.keys(error),
+        hasStandardCause: "cause" in error,
+        json: JSON.stringify(error),
+      });
+    }
+    for (const shape of shapes) {
+      expect(shape).toEqual({
+        name: "SecretKeyEnvelopeError",
+        message: "Workspace secret key envelope could not be unwrapped.",
+        code: "unwrap-failed",
+        enumerableKeys: ["code", "name"],
+        hasStandardCause: false,
+        json: '{"code":"unwrap-failed","name":"SecretKeyEnvelopeError"}',
+      });
     }
   });
 

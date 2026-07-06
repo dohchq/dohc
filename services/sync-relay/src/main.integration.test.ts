@@ -625,15 +625,21 @@ describe("sync relay main process", () => {
       }
       throw error;
     }
-    const bodies: Buffer[] = [];
+    const requestBodies: Buffer[] = [];
+    const responseBodies: Buffer[] = [];
     const capturingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const body = init?.body;
       if (body) {
-        if (typeof body === "string") bodies.push(Buffer.from(body, "utf8"));
-        else if (body instanceof Uint8Array) bodies.push(Buffer.from(body));
-        else if (body instanceof ArrayBuffer) bodies.push(Buffer.from(body));
+        if (typeof body === "string") requestBodies.push(Buffer.from(body, "utf8"));
+        else if (body instanceof Uint8Array) requestBodies.push(Buffer.from(body));
+        else if (body instanceof ArrayBuffer) requestBodies.push(Buffer.from(body));
       }
-      return fetch(input, init);
+      const response = await fetch(input, init);
+      // Byte-walk RESPONSE bodies too (gate fix): the pull direction returns
+      // ops and blobs and must be exactly as plaintext- and key-free as the
+      // push direction. clone() so the caller still gets a readable body.
+      responseBodies.push(Buffer.from(await response.clone().arrayBuffer()));
+      return response;
     }) as typeof fetch;
     const relay = relayConnection(baseUrl, capturingFetch);
     await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay });
@@ -670,6 +676,15 @@ describe("sync relay main process", () => {
     const keyBase64 = keyFile.trim().slice("dohc-secret-key-v1:".length);
     const rawKey = Buffer.from(keyBase64, "base64");
     await pushWorkspaceToRelay({ rootDir: root, workspaceId: WORKSPACE_ID, relay });
+    // Pull into a second machine through the SAME capturing transport so the
+    // response corpus contains the ops/blobs the relay serves back.
+    const pullRoot = await tempRoot("secret-b");
+    const pulled = await pullWorkspaceFromRelay({
+      rootDir: pullRoot,
+      workspaceId: WORKSPACE_ID,
+      relay,
+    });
+    await pulled.commitFetchCursor();
     // The relay runs WAL mode: fresh writes live in relay.sqlite-wal until a
     // checkpoint, so an absence assertion over the main file alone could
     // trivially false-pass. Walk db + WAL + shm together, and prove the walk
@@ -691,10 +706,17 @@ describe("sync relay main process", () => {
     expect(relayBytes.includes(Buffer.from(marker))).toBe(false);
     expect(relayBytes.includes(Buffer.from(keyBase64))).toBe(false);
     expect(relayBytes.includes(rawKey)).toBe(false);
-    const capturedBytes = Buffer.concat(bodies);
-    expect(capturedBytes.includes(Buffer.from("workspace.init"))).toBe(true);
-    expect(capturedBytes.includes(Buffer.from("secret.file.put"))).toBe(true);
-    for (const body of bodies) {
+    // Positive controls on BOTH directions: the walk sees real op content in
+    // the requests (push) and in the responses (pull), so the negative
+    // assertions below cannot false-pass over an empty corpus.
+    const requestBytes = Buffer.concat(requestBodies);
+    const responseBytes = Buffer.concat(responseBodies);
+    expect(requestBytes.includes(Buffer.from("workspace.init"))).toBe(true);
+    expect(requestBytes.includes(Buffer.from("secret.file.put"))).toBe(true);
+    expect(responseBytes.includes(Buffer.from("secret.file.put"))).toBe(true);
+    expect(responseBytes.includes(Buffer.from("secret.file.delete"))).toBe(true);
+    expect(responseBytes.includes(Buffer.from(".env"))).toBe(true);
+    for (const body of [...requestBodies, ...responseBodies]) {
       expect(body.includes(Buffer.from(marker))).toBe(false);
       expect(body.includes(Buffer.from(keyBase64))).toBe(false);
       expect(body.includes(rawKey)).toBe(false);

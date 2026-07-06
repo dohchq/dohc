@@ -17603,3 +17603,90 @@ git diff --check
   SQLite BINARY collation used by the rank `ORDER BY`; replaced with raw
   code-unit comparison so the deterministic tie-break is identical on every
   machine and inside SQL.
+
+### Gate Fix Round (2026-07-07, Claude lane driver)
+
+Rebased onto main 5f755435 (post 0P-C: syncApply/syncRelay/syncReplication
+reshaped, CloudLogin gained the sync-code block). Conflicts in six files were
+all both-sides-additive (imports/exports, CloudLogin JSX blocks, this log);
+no semantic collisions. Post-rebase baselines matched (engine 373, desktop
+944, relay 22, MCP 76) before any fix landed.
+
+Findings fixed tests-first (each guard was then temporarily neutered to
+prove its test fails against the pre-fix behavior — all four poison tests,
+the error-shape test, and the CAS test reproduce the original bugs):
+
+- Codex M1 (secretFileStore): secret ciphertext refs ride the 5 MiB
+  binary-blob transport while secrets cap at 1 MiB plaintext, and the actual
+  blob length was never checked against the declared byteLength. GCM here is
+  length-preserving (tag + IV travel in their own fields), so the honest
+  overhead allowance is exactly zero: `secretCiphertextBlobBySha` now
+  enforces `bytes.byteLength === declared` AND `<= MAX_SECRET_FILE_BYTES`
+  before any moment/tip/fork-base insert. Tests: length-mismatched poison op
+  and a 1 MiB + 1 blob smuggled under the 5 MiB transport cap both reject
+  with invalid-input, secret rows unpoisoned.
+- Codex M2 (secretFileStore): imported secret.version.fork wiped destination
+  rows then trusted payload rows blindly. No-key-safe minimum implemented:
+  every fork row must byte-match the importer's own sealed source tip at the
+  same path for fromVersionId (ciphertext sha + IV + auth tag + length);
+  extra, missing, and duplicate rows reject; verification runs BEFORE the
+  destination wipe and the whole apply is one transaction (no partial wipe).
+  Honest residual: under cross-origin clock skew a legitimate fork can
+  disagree with the importer's converged source tips and be rejected — fails
+  the pull loudly, never corrupts state. Test: poison fork with swapped
+  sealed rows rejected, previously replicated destination rows intact.
+- Codex M3 + CR major (sync-relay PUT /keys): was a plain upsert — any
+  authenticated stale writer could silently clobber the only recovery copy
+  of the wrapped workspace key. Now create-only on first write and CAS
+  thereafter (If-Match: sha256 of the envelope being replaced; byte-identical
+  re-PUT stays idempotent). Replaced envelopes are RETAINED in
+  sync_relay_key_envelope_history (envelope, sha, replacedAtMs, successor
+  sha) — a lockout from a bad replacement stays recoverable server-side. GET
+  exposes the current fingerprint (ETag) + x-key-envelope-updated-at-ms so
+  clients can detect replacement. Engine uploadKeyEnvelope tries create,
+  then reads the fingerprint and CAS-replaces (bounded retries — legitimate
+  for the enroll path, which only runs while holding the data key), failing
+  loudly with RelayConflictError if the envelope keeps moving. Tests:
+  stale CAS 409, one winner in an enroll race, history retained
+  byte-for-byte, client create→CAS replace, client loses a perpetual race
+  loudly without clobbering.
+- Codex L4 (secretKeyEnvelope): raw unwrap causes (SyntaxError text, OpenSSL
+  codes) rode the standard `cause` property, which structured clone carries
+  across IPC. Causes are now a non-enumerable debug-internal property; the
+  public shape (name/message/code/enumerable keys/JSON) is identical across
+  malformed-JSON, base64, GCM, and KDF failures — locked by test.
+- Codex L5 (main.integration): the ciphertext-only byte-walk now captures
+  RESPONSE bodies too (clone().arrayBuffer()), pulls into a second machine
+  through the same capturing transport, and asserts positive controls on
+  both directions before the negative marker/key assertions.
+- CR major (syncApply): `op.payload.rows ?? []` guard in
+  collectBlobHashesFromOp — a rowless fork op now reaches the store's
+  fail-closed payload validation (invalid-input) instead of throwing a raw
+  TypeError at the transport edge. Test locks the honest rejection.
+- CR major (secretKeyEnvelope.test): the "writes no local key file"
+  assertion was tautological (nothing ever targeted that root). Deleted
+  honestly with a scope note; the enrollment-side property is now locked
+  where it lives: installWorkspaceDataKey validates BEFORE touching the
+  filesystem (meaningful ENOENT assertion), re-installs the same key
+  idempotently, and never overwrites a different existing key.
+
+Recorded minors (deliberately NOT fixed this round; listed for the arc
+gate): syncFolder.test restore uses `updated.moment?.id ?? ""` instead of
+asserting the moment id; CloudLogin passphrase UX is driven by regex over
+main-process error strings (wants a structured IPC error code);
+no minimum passphrase length floor in main.ts wrap path;
+secretKeyEnvelope wrapWorkspaceDataKey length-check throws before the
+zeroing finally and wrap errors are not normalized like unwrap;
+secretKeyEnvelope.test manual-fallback test has a dead .catch() setup
+branch; CloudLogin.test lacks the unlock-failure-path regression test;
+syncApply's finally closes the three stores sequentially (a throwing close
+leaks the rest); workspace-contracts secret payloads carry no key id for
+future rotation (intentional single-key MVP deferral, confirm at rotation
+time). The "future-dated log entry" finding resolved itself (dates are
+accurate as of this round); the "second-PUT overwrite regression test"
+finding is superseded by the CAS suite.
+
+Verification (all green, unsandboxed): engine 381 (373 + 8), desktop 944,
+relay 23 (22 + 1, all 8 HTTP integration tests executed live including the
+two-machine passphrase round-trip and the two-direction byte-walk), MCP 76,
+repo-wide typecheck, git diff --check, docs link checker.
