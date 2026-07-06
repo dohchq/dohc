@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLinkedChatStore, linkedChatProjectionPath } from "./linkedChatStore";
 import { createVersionedTextStore } from "./versionedTextStore";
+import { resolveEffectivePolicy, type FilesPolicyRule } from "./effectivePolicy";
 import { classifyEngineFilePath, searchWorkspaceEngine } from "./workspaceSearch";
 
 let root: string;
@@ -135,6 +136,35 @@ describe("workspace engine search", () => {
           file.path === "docs/plan.md"
             ? { searchable: false, reason: "permission-denied" }
             : { searchable: true },
+      },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ surface: "chat" });
+  });
+
+  it("honors resolver-backed files policy searchable false at the search seam", async () => {
+    const { chats, main, versions } = await seededStores();
+    const filesPolicy: FilesPolicyRule[] = [
+      { path: "docs/**", searchable: false },
+    ];
+
+    const results = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "alpha",
+      versions,
+      chats,
+      policy: {
+        fileVisibility: (file) => {
+          const policy = resolveEffectivePolicy({ path: file.path, filesPolicy });
+          return policy.searchable
+            ? { searchable: true }
+            : {
+                searchable: false,
+                reason: policy.floor === "tracked" ? "permission-denied" : policy.floor,
+              };
+        },
       },
     });
 

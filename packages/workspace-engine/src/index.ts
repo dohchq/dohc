@@ -86,6 +86,21 @@ export {
   classifyEngineFilePath,
   searchWorkspaceEngine,
 } from "./workspaceSearch";
+export {
+  parseFilesPolicy,
+  parseVisibilityPolicy,
+  policyGlobMatches,
+  resolveEffectivePolicy,
+  validatePolicyGlob,
+} from "./effectivePolicy";
+export type {
+  EffectivePolicyInput,
+  EffectivePolicyResult,
+  FilesPolicyRule,
+  PolicyGlobValidation,
+  PolicyParseResult,
+  VisibilityPolicyRule,
+} from "./effectivePolicy";
 export type {
   EngineFilePathClassification,
   SearchSurface,

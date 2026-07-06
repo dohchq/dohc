@@ -19,6 +19,7 @@ import type {
   VersionId,
   WorkspaceId,
 } from "./versionedTextStore";
+import { resolveEffectivePolicy } from "./effectivePolicy";
 
 export const WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS = 180;
 
@@ -59,9 +60,12 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
 }
 
 function defaultFileVisibility(file: TextFileSnapshot): SearchVisibility {
-  const classification = classifyEngineFilePath(file.path);
-  if (classification.kind === "tracked") return { searchable: true };
-  return { searchable: false, reason: classification.kind };
+  const policy = resolveEffectivePolicy({ path: file.path });
+  if (policy.searchable) return { searchable: true };
+  return {
+    searchable: false,
+    reason: policy.floor === "secret" ? "secret" : "ignored",
+  };
 }
 
 function defaultChatVisibility(_thread: ChatThread): SearchVisibility {

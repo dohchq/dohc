@@ -14,7 +14,7 @@
  * | ThreadMessage | ChatMessage | renamed | Engine ships messages under the chat-specific name. |
  * | WorkspaceLinkRef | LinkedChatFileRef | partial | Only the chat-file link case is implemented; a general link-ref vocabulary is not implemented. |
  * | VersionRef | Not implemented | not implemented | The engine currently uses plain version ids (VersionId) plus ad hoc fork-related fields where needed. |
- * | Phase0EffectivePolicyInput / Phase0EffectivePolicyResult | WorkspaceSearchPolicy + classifyEngineFilePath | partial | Covers the search/capture visibility surface only, not a general effective-policy hook. |
+ * | Phase0EffectivePolicyInput / Phase0EffectivePolicyResult | resolveEffectivePolicy + EffectivePolicyResult (from @dohc/workspace-engine) | partial | Covers path/file policy plus search/capture ownership only; actor permissions, sharing, chat-export, and object-family inputs are not implemented yet. |
  * | WorkspaceEvent / DurabilityEvent | Not implemented | not implemented | The engine coalesces writes directly into moments (VersionedTextMoment) instead of emitting a separate durability/event log. |
  *
  * Ownership notes:
