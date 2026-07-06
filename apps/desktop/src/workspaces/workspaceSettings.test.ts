@@ -55,9 +55,11 @@ describe("workspace settings model", () => {
     ).toBe(true);
   });
 
-  it("parses a pre-experimental settings shape without resetting it", () => {
+  it("parses a pre-experimental settings shape without resetting it — and it opens ON THE ENGINE", () => {
     // Files written before the experimental group existed: the strict schema
     // must default the new group instead of silently resetting everything.
+    // WS-H1 flag flip: an absent experimental key now reads as engine ON —
+    // an old settings file with no experimental group opens flagged.
     const oldShape = {
       version: 1,
       agents: { mcpAutoStart: true, defaultDriverId: "claude", defaultModel: null },
@@ -66,18 +68,40 @@ describe("workspace settings model", () => {
     };
     expect(parseWorkspaceSettings(oldShape)).toEqual({
       ...oldShape,
-      experimental: { workspaceEngineAlpha: false },
+      experimental: { workspaceEngineAlpha: true },
     });
   });
 
-  it("merges and round-trips the workspace engine alpha flag", () => {
-    const enabled = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
-      experimental: { workspaceEngineAlpha: true },
+  it("WS-H1 flag flip: the engine defaults ON everywhere absent, and explicit false still opts out", () => {
+    // The single-source default: the schema group default, the canonical
+    // DEFAULT_WORKSPACE_SETTINGS, and a from-nothing parse must all agree ON.
+    expect(DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha).toBe(true);
+    expect(parseWorkspaceSettings(null).experimental.workspaceEngineAlpha).toBe(true);
+    expect(
+      parseWorkspaceSettings({
+        version: 1,
+        agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+        sites: { defaultPreviewMode: "auto" },
+        privacy: { confirmExternalLinks: true },
+      }).experimental.workspaceEngineAlpha,
+    ).toBe(true);
+    // The escape hatch: an explicit false is preserved, never coerced on.
+    const optedOut = parseWorkspaceSettings({
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      experimental: { workspaceEngineAlpha: false },
     });
-    expect(enabled.experimental.workspaceEngineAlpha).toBe(true);
-    expect(enabled.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
-    expect(workspaceSettingsModified(enabled)).toBe(true);
-    expect(parseWorkspaceSettings(enabled)).toEqual(enabled);
+    expect(optedOut.experimental.workspaceEngineAlpha).toBe(false);
+    expect(workspaceSettingsModified(optedOut)).toBe(true);
+  });
+
+  it("merges and round-trips the workspace engine opt-out", () => {
+    const optedOut = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
+      experimental: { workspaceEngineAlpha: false },
+    });
+    expect(optedOut.experimental.workspaceEngineAlpha).toBe(false);
+    expect(optedOut.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
+    expect(workspaceSettingsModified(optedOut)).toBe(true);
+    expect(parseWorkspaceSettings(optedOut)).toEqual(optedOut);
   });
 });
 
@@ -116,13 +140,29 @@ describe("workspace settings file store", () => {
         privacy: { confirmExternalLinks: true },
       }),
     );
-    expect(await readWorkspaceSettingsFile(root)).toEqual({
+    const result = await readWorkspaceSettingsFile(root);
+    expect(result).toEqual({
       settings: {
         ...DEFAULT_WORKSPACE_SETTINGS,
         agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, mcpAutoStart: true },
       },
       source: "stored",
     });
+    // WS-H1 flag-flip regression: this pre-experimental on-disk file has no
+    // experimental key, and it must OPEN FLAGGED (engine on) — the exact
+    // cold-adoption read engineCaptureGate performs at workspace open.
+    expect(result.settings.experimental.workspaceEngineAlpha).toBe(true);
+  });
+
+  it("an on-disk explicit opt-out (workspaceEngineAlpha: false) survives the default-on flip", async () => {
+    const root = await tempRoot();
+    await writeWorkspaceSettingsFile(root, {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      experimental: { workspaceEngineAlpha: false },
+    });
+    const result = await readWorkspaceSettingsFile(root);
+    expect(result.source).toBe("stored");
+    expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
   });
 
   it("corrupt, unsupported, and oversized files recover to defaults", async () => {

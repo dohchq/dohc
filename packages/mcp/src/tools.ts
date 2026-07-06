@@ -288,12 +288,14 @@ async function readFileWindowWithDigest(
   }
 }
 
-// PR 0N-1: is this workspace on the workspace-engine alpha? MCP reads the
-// SAME per-workspace settings file the desktop reads
-// (.dohc/settings.local.json, workspaceSettingsFile.ts) with the same
-// defensive posture: symlinks refused, size-capped, any read/parse failure
-// reads as OFF (legacy behavior byte-for-byte). Cheap enough to read per
-// mutating call — the flag can flip between desktop opens.
+// PR 0N-1: is this workspace on the workspace engine? MCP reads the SAME
+// per-workspace settings file the desktop reads (.dohc/settings.local.json,
+// workspaceSettingsFile.ts) and mirrors its resolution rule. WS-H1 flag
+// flip: the engine is the DEFAULT — an absent key, a missing file, or any
+// refused/failed read (symlink, oversized, parse error) resolves ON, exactly
+// like the desktop's schema default; only an explicit
+// `workspaceEngineAlpha: false` opts the workspace out. Cheap enough to read
+// per mutating call — the flag can flip between desktop opens.
 const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
 export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolean> {
@@ -305,15 +307,15 @@ export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolea
       !stats.isFile() ||
       stats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES
     ) {
-      return false;
+      return true;
     }
-    if (!(await isWithinRealRoot(ctx.root, path))) return false;
+    if (!(await isWithinRealRoot(ctx.root, path))) return true;
     const raw = JSON.parse(await readFile(path, "utf8")) as {
       experimental?: { workspaceEngineAlpha?: unknown };
     };
-    return raw?.experimental?.workspaceEngineAlpha === true;
+    return raw?.experimental?.workspaceEngineAlpha !== false;
   } catch {
-    return false;
+    return true;
   }
 }
 

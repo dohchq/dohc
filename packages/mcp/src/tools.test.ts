@@ -73,6 +73,24 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   }
 }
 
+
+// WS-H1 flag flip: the engine is the default, so tests that pin the LEGACY
+// change-set recording path (kept only for explicitly opted-out workspaces
+// until retirement Phase C deletes it) must seed the opt-out first.
+async function seedLegacyOptOut(ctx: ToolContext): Promise<void> {
+  await mkdir(join(ctx.root, ".dohc"), { recursive: true });
+  await writeFile(
+    join(ctx.root, ".dohc", "settings.local.json"),
+    `${JSON.stringify({
+      version: 1,
+      agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+      sites: { defaultPreviewMode: "auto" },
+      privacy: { confirmExternalLinks: true },
+      experimental: { workspaceEngineAlpha: false },
+    }, null, 2)}\n`,
+  );
+}
+
 async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
@@ -485,6 +503,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("sync_cloud pulls remote files and records visible sync history", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await bindCloudWorkspace(ctx);
       const server = fakeCloudServer();
       server.set("notes/remote.md", "from cloud\n");
@@ -559,6 +578,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("writes, reads, and lists arbitrary visible files while recording sync-visible history", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       const written = await writeWorkspaceFile(ctx, {
         path: "docs/report.html",
         content: "<h1>I ate 10 apples</h1>\n",
@@ -605,6 +625,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("refuses mutating tools before disk changes when durable history is unsupported", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
       await mkdir(join(ctx.root, "drafts"), { recursive: true });
       await writeFile(join(ctx.root, "drafts/todo.txt"), "move me\n");
@@ -686,6 +707,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("reads ephemeral watcher history when durable history is unsupported", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await withProcessPlatform("darwin", async () => {
         const store = createChangeSetStore(ctx.root, { ephemeralIfUnsupported: true });
         const set = addFileChanges(
@@ -730,6 +752,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   itDurableHistory("retries stale history timestamps during concurrent writes", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       const now = vi.spyOn(Date, "now").mockReturnValue(1234);
       try {
         await expect(
@@ -910,6 +933,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("lists and reads MCP-recorded change sets for collaboration-aware agents", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       const write = await writeWorkspaceFile(ctx, {
         path: "notes/plan.txt",
         content: "draft\n",
@@ -1014,6 +1038,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("moves paths and deletes recoverably while recording history", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
       const moved = await moveWorkspacePath(ctx, {
         fromPath: "drafts/todo.txt",
@@ -1068,6 +1093,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   itDurableHistory("retains move/delete mutations if the history record cannot be written", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
       await rm(join(ctx.root, ".dohc", "history", "index.json"), { force: true });
       await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
@@ -1098,6 +1124,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   itDurableHistory("retains write/create/import mutations if the history record cannot be written", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
       await writeFile(join(ctx.root, "existing.txt"), "before\n");
       await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
@@ -1189,6 +1216,7 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("create_site scaffolds a normal website and records history", async () => {
     await withWorkspace(async (ctx) => {
+      await seedLegacyOptOut(ctx);
       const result = await createSite(ctx, { path: "finance/ledger", title: "Ledger" });
       expect(result).toMatchObject({ ok: true, siteRoot: "finance/ledger" });
       if (!result.ok) return;

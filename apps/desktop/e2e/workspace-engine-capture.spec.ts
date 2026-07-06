@@ -156,11 +156,17 @@ test("flagged workspace captures live edits and reconciles closed-period edits i
   }
 });
 
-test("unflagged workspace never grows an engine store", async () => {
+// WS-H1 flag flip: "unflagged" now means EXPLICITLY OPTED OUT — the default
+// (no settings file, or a settings file with no experimental key) is engine
+// ON. The opt-out escape hatch must keep working: no engine store may appear.
+test("explicitly opted-out workspace never grows an engine store", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: false },
+    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
 
@@ -169,16 +175,66 @@ test("unflagged workspace never grows an engine store", async () => {
     ]);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "notes/plain.md");
 
-    // Legacy history records the change...
-    const legacyIndex = join(temp.rootPath, ".dohc", "history");
-    const { readdir } = await import("node:fs/promises");
-    await expect
-      .poll(async () => (await readdir(legacyIndex).catch(() => [])).length)
-      .toBeGreaterThan(0);
-
-    // ...but no engine store appears for an unflagged workspace.
+    // The edit is visible to the app (listed above); no engine store appears
+    // for an opted-out workspace.
     const { existsSync } = await import("node:fs");
     expect(existsSync(join(temp.rootPath, ".dohc", "engine", "engine.db"))).toBe(false);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// WS-H1 cold adoption: a previously-unflagged workspace (no settings file at
+// all — the shape every pre-flip workspace has) opens ON THE ENGINE, and the
+// startup reconciliation pass captures the existing tree as the engine's
+// initial state. Legacy .dohc/history stays on disk as a read-only relic —
+// engine history starts from adoption; the legacy records are NOT migrated
+// (User Decision 6: replacement, not migration).
+test("cold adoption: a workspace with existing files and legacy history opens flagged and reconciles into the engine", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    // Existing user content from the pre-engine era...
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/adopted.md", contents: "# Adopted\n\nWritten before the flip.\n" },
+      { path: "docs/deep/nested.md", contents: "# Nested\n\nAlso here first.\n" },
+    ]);
+    // ...and a legacy history relic a real pre-flip workspace would carry.
+    const legacyDir = join(temp.rootPath, ".dohc", "history");
+    const { mkdir, writeFile, readFile, readdir } = await import("node:fs/promises");
+    await mkdir(legacyDir, { recursive: true });
+    const legacyRecordPath = join(legacyDir, "legacy-relic.json");
+    const legacyRecord = JSON.stringify({ id: "legacy-1", summary: "pre-flip edit" });
+    await writeFile(legacyRecordPath, legacyRecord);
+
+    // NO settings file: the absent experimental key must read as engine ON.
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+
+    // Startup reconciliation captures the whole existing tree as the
+    // engine's initial state.
+    await expect
+      .poll(
+        () =>
+          engineMomentsOrEmpty(temp.rootPath).filter(
+            (moment) =>
+              (moment.path === "notes/adopted.md" ||
+                moment.path === "docs/deep/nested.md") &&
+              moment.operation === "write",
+          ).length,
+        { timeout: 30_000 },
+      )
+      .toBe(2);
+    const adopted = readEngineMoments(temp.rootPath).find(
+      (moment) => moment.path === "notes/adopted.md",
+    );
+    expect(adopted?.text).toBe("# Adopted\n\nWritten before the flip.\n");
+
+    // The legacy relic is untouched (read-only relic, not migrated, not
+    // deleted) and no new legacy records were written.
+    expect(await readFile(legacyRecordPath, "utf8")).toBe(legacyRecord);
+    expect(await readdir(legacyDir)).toEqual(["legacy-relic.json"]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

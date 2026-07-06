@@ -85,11 +85,17 @@ test("flagged workspace shows engine moments and restores a file end-to-end", as
   }
 });
 
-test("unflagged workspace keeps the legacy history timeline", async () => {
+// WS-H1 flag flip: "unflagged" means explicitly opted out. The legacy
+// timeline it renders retires with Phase C; this pins the pre-retirement
+// escape-hatch behavior.
+test("explicitly opted-out workspace keeps the legacy history timeline", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: false },
+    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;

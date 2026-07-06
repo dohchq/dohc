@@ -97,29 +97,32 @@ afterEach(() => {
 });
 
 describe("isWorkspaceEngineFlagged", () => {
-  it("reads the desktop's per-workspace settings file, failing closed", async () => {
+  it("reads the desktop's per-workspace settings file — the engine is the default, explicit false opts out", async () => {
     await withWorkspace(async (ctx) => {
-      expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
+      // WS-H1 flag flip: no settings file at all resolves ON.
+      expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
       await seedEngineFlag(ctx, false);
       expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
       await seedEngineFlag(ctx, true);
       expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
-      // Broken JSON reads as OFF, never a crash.
+      // Broken JSON reads as the DEFAULT (engine on), never a crash — the
+      // same recovery the desktop's settings reader performs.
       await writeFile(join(ctx.root, ".dohc", "settings.local.json"), "{nope");
-      expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
+      expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
     });
   });
 
-  it("refuses a symlinked settings file", async () => {
+  it("refuses a symlinked settings file (a planted symlink cannot opt a workspace out)", async () => {
     await withWorkspace(async (ctx) => {
       const outside = join(ctx.home, "planted-settings.json");
       await writeFile(
         outside,
-        JSON.stringify({ experimental: { workspaceEngineAlpha: true } }),
+        JSON.stringify({ experimental: { workspaceEngineAlpha: false } }),
       );
       await mkdir(join(ctx.root, ".dohc"), { recursive: true });
       await symlink(outside, join(ctx.root, ".dohc", "settings.local.json"));
-      expect(await isWorkspaceEngineFlagged(ctx)).toBe(false);
+      // The symlinked file is ignored; the workspace resolves to the default.
+      expect(await isWorkspaceEngineFlagged(ctx)).toBe(true);
     });
   });
 });
@@ -145,8 +148,9 @@ describe("mutating tools on a flagged workspace", () => {
     });
   });
 
-  it("unflagged workspaces keep legacy recording exactly as before", async () => {
+  it("explicitly opted-out workspaces keep legacy recording (until retirement Phase C)", async () => {
     await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx, false);
       const write = await writeWorkspaceFile(ctx, {
         path: "notes/plan.md",
         content: "# Plan\n",
@@ -160,17 +164,27 @@ describe("mutating tools on a flagged workspace", () => {
 });
 
 describe("linked chat tools", () => {
-  it("refuse when the workspace engine flag is absent or off", async () => {
+  it("refuse when the workspace engine flag is explicitly off (absent now reads as on)", async () => {
     await withWorkspace(async (ctx) => {
       const expected = { ok: false, reason: expect.stringContaining("not enabled") };
+      await seedEngineFlag(ctx, false);
       expect(await listFileChats(ctx, { path: "notes/agenda.md" })).toMatchObject(expected);
       expect(await readChat(ctx, { threadId: "thread-1" })).toMatchObject(expected);
       expect(
         await replyToChat(ctx, { threadId: "thread-1", body: "hello" }),
       ).toMatchObject(expected);
+    });
+  });
 
-      await seedEngineFlag(ctx, false);
-      expect(await listFileChats(ctx, { path: "notes/agenda.md" })).toMatchObject(expected);
+  it("an absent flag reads as engine ON — chats fall through to the identity check, not a flag refusal", async () => {
+    await withWorkspace(async (ctx) => {
+      // WS-H1 flag flip: no settings file means the engine default applies,
+      // so the tool proceeds past the flag gate and refuses on the missing
+      // workspace manifest instead.
+      expect(await listFileChats(ctx, { path: "notes/agenda.md" })).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("manifest"),
+      });
     });
   });
 
@@ -295,14 +309,9 @@ describe("linked chat tools", () => {
 });
 
 describe("channel tools (PR 12/13 slice)", () => {
-  it("refuse when the workspace engine flag is absent or off", async () => {
+  it("refuse when the workspace engine flag is explicitly off (absent now reads as on)", async () => {
     await withWorkspace(async (ctx) => {
       const expected = { ok: false, reason: expect.stringContaining("not enabled") };
-      expect(await listChannels(ctx)).toMatchObject(expected);
-      expect(
-        await startChannelChat(ctx, { channel: "general", body: "hello" }),
-      ).toMatchObject(expected);
-
       await seedEngineFlag(ctx, false);
       expect(await listChannels(ctx)).toMatchObject(expected);
       expect(

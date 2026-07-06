@@ -180,9 +180,19 @@ function makeBridge(
       settings: DEFAULT_USER_SETTINGS,
       source: "stored" as const,
     })),
+    // WS-H1 flag flip: DEFAULT_WORKSPACE_SETTINGS is now engine-ON. This
+    // suite was written against the legacy history surface (HistoryView,
+    // change sets, history diff tabs), so it pins the EXPLICIT OPT-OUT
+    // workspace until retirement Phase C deletes that surface.
     getWorkspaceSettings: vi.fn(async () => ({
-      settings: DEFAULT_WORKSPACE_SETTINGS,
-      source: "default" as const,
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: {
+          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+          workspaceEngineAlpha: false,
+        },
+      },
+      source: "stored" as const,
     })),
     setWorkspaceSettings: vi.fn(
       async (payload: { settings: typeof DEFAULT_WORKSPACE_SETTINGS }) => ({
