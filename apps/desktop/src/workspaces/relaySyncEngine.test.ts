@@ -33,6 +33,7 @@ function pullResult(
     skipped: 0,
     conflictsOpened: 0,
     pendingConflictResolves: 0,
+    pendingResolves: [],
     fastForwardedPaths: [],
     nextCursor: 0,
     commitFetchCursor: vi.fn(async () => {}),
@@ -238,11 +239,183 @@ describe("relaySyncEngine", () => {
 
   it("counts unmatched remote conflict resolutions instead of swallowing them", async () => {
     pullMock.mockImplementationOnce(async () =>
-      pullResult({ pendingConflictResolves: 1 }),
+      pullResult({
+        pendingConflictResolves: 1,
+        pendingResolves: [
+          { remoteConflictId: "peer-conflict-1", localConflictId: null, path: "x.md" },
+        ],
+      }),
     );
     const sync = engine({ capture: capture() });
     await sync.start();
     expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
+  });
+
+  // 0P-C gate fix: unmatchedRemoteResolves is a LIFECYCLED set of pending
+  // resolve identities, not a session-sticky monotone counter. The same
+  // remote resolution re-reported across passes never double-counts, and it
+  // clears when its local conflict closes (local resolution or a later sync
+  // pass converging it).
+  it("clears a pending remote resolve once its local conflict is no longer open", async () => {
+    let openConflictIds: string[] = ["conflict-local-1"];
+    pullMock
+      .mockImplementationOnce(async () =>
+        pullResult({
+          pendingConflictResolves: 1,
+          pendingResolves: [
+            {
+              remoteConflictId: "peer-conflict-1",
+              localConflictId: "conflict-local-1",
+              path: "notes/x.md",
+            },
+          ],
+        }),
+      )
+      .mockImplementationOnce(async () =>
+        // The peer retries the same resolve on the next pass (idempotent
+        // re-report): identity dedupe keeps the count at 1, not 2.
+        pullResult({
+          pendingConflictResolves: 1,
+          pendingResolves: [
+            {
+              remoteConflictId: "peer-conflict-1",
+              localConflictId: "conflict-local-1",
+              path: "notes/x.md",
+            },
+          ],
+        }),
+      )
+      .mockImplementation(async () => pullResult());
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      remoteWorkspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      listOpenConflictIds: async () => openConflictIds,
+      debounceMs: 100,
+      nowMs: () => 12345,
+    });
+    await sync.start();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
+    expect(sync.snapshot().conflictCount).toBe(1);
+
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
+
+    // The user resolves the conflict locally (or a later pull converges it):
+    // the next pass drops the pending resolve along with the conflict.
+    openConflictIds = [];
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(0);
+    expect(sync.snapshot().conflictCount).toBe(0);
+  });
+
+  it("a pending resolve that matched no local conflict persists until explicitly dismissed", async () => {
+    const changes = vi.fn();
+    pullMock
+      .mockImplementationOnce(async () =>
+        pullResult({
+          pendingConflictResolves: 1,
+          pendingResolves: [
+            { remoteConflictId: "peer-orphan-1", localConflictId: null, path: "gone.md" },
+          ],
+        }),
+      )
+      .mockImplementation(async () => pullResult());
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      remoteWorkspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: changes,
+      listOpenConflictIds: async () => [],
+      debounceMs: 100,
+      nowMs: () => 12345,
+    });
+    await sync.start();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
+
+    // No local conflict can ever clear it — later passes keep it visible.
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.runAllTimersAsync();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
+
+    // The explicit dismissal is the release valve.
+    const changesBefore = changes.mock.calls.length;
+    sync.dismissUnmatchedResolves();
+    expect(sync.snapshot().unmatchedRemoteResolves).toBe(0);
+    expect(changes.mock.calls.length).toBeGreaterThan(changesBefore);
+    // Dismissing an empty set is a no-op (no notify spam).
+    sync.dismissUnmatchedResolves();
+    expect(changes.mock.calls.length).toBe(changesBefore + 1);
+  });
+
+  // 0P-C gate fix (High): a joining machine must NEVER append ops to the
+  // relay before its first successful pull — pushing first could seed
+  // boilerplate into the remote workspace or mint conflicts against it.
+  it("join bootstrap pulls before any push and only pushes after the first successful pull", async () => {
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      remoteWorkspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      joinBootstrap: true,
+      debounceMs: 100,
+      nowMs: () => 12345,
+    });
+    await sync.start();
+    // First pass: pull only. The relay log is untouched by this machine.
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).not.toHaveBeenCalled();
+
+    // After the bootstrap pull succeeded, the follow-up pass reconciles
+    // normally (push then pull).
+    await vi.runAllTimersAsync();
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(pushMock.mock.invocationCallOrder[0]!).toBeGreaterThan(
+      pullMock.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a failed bootstrap pull keeps the engine pull-only until a pull succeeds", async () => {
+    let fail = true;
+    pullMock.mockImplementation(async () => {
+      if (fail) throw new Error("offline");
+      return pullResult();
+    });
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      remoteWorkspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      joinBootstrap: true,
+      debounceMs: 100,
+      initialBackoffMs: 500,
+      maxBackoffMs: 2000,
+      nowMs: () => 12345,
+    });
+    await expect(sync.start()).rejects.toThrow("offline");
+    expect(pushMock).not.toHaveBeenCalled();
+
+    // Backoff retry while still offline: STILL no push.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).not.toHaveBeenCalled();
+
+    // Once a pull finally succeeds, normal push/reconcile resumes.
+    fail = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.runAllTimersAsync();
+    expect(pushMock).toHaveBeenCalledTimes(1);
   });
 
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {

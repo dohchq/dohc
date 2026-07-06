@@ -1058,6 +1058,15 @@ export const CloudJoinWorkspacePayload = z.object({
 });
 export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload>;
 
+// Explicit dismissal of the "a choice made on another machine needs a look"
+// notice (0P-C gate fix): clears the workspace engine's pending remote-
+// resolve set. The notice otherwise clears itself when the referenced
+// conflict is resolved locally or converged by a later sync pass.
+export const DismissSyncReviewNoticePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type DismissSyncReviewNoticePayload = z.infer<typeof DismissSyncReviewNoticePayload>;
+
 export const CloudJoinWorkspaceResult = z.object({
   workspace: WorkspaceSummary,
   // Set when the workspace was added but its first sync did not finish —
@@ -1676,6 +1685,7 @@ export interface DohcDesktopBridge {
   cloudJoinWorkspace(
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
+  dismissSyncReviewNotice(payload: DismissSyncReviewNoticePayload): Promise<void>;
   listWorkspaceShares(
     payload: ListWorkspaceSharesPayload,
   ): Promise<ListWorkspaceSharesResult>;

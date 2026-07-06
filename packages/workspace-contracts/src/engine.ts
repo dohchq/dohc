@@ -376,6 +376,25 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>;
 
 /**
+ * Identity of a peer's conflict.resolve that could not be applied here
+ * (0P-C gate fix): carried alongside the pendingConflictResolves count so
+ * the surfacing layer can LIFECYCLE the notice instead of accumulating a
+ * sticky counter — it clears when the referenced local conflict is later
+ * resolved (locally or by sync convergence) or on explicit dismissal.
+ */
+export interface PendingConflictResolve {
+  // The peer-side conflict id from the resolve payload: a stable identity
+  // for deduping the same op across retries/re-imports.
+  remoteConflictId: VersionedTextConflictId;
+  // The LOCAL open conflict the resolve matched by mirrored heads but could
+  // not safely apply to (live state moved on); null when nothing local
+  // matched at all.
+  localConflictId: VersionedTextConflictId | null;
+  // The affected path when known (conflict row path, else the payload's).
+  path: string | null;
+}
+
+/**
  * Outcome of applying one replicated op. A single status discriminant keeps
  * illegal states unrepresentable: a skipped op can never report opened
  * conflicts, and callers branch on one field instead of two booleans.
@@ -389,6 +408,8 @@ export type SyncApplyResult =
       // future reconciliation pass — but surfaced so import results never
       // silently swallow a peer's resolution.
       pendingConflictResolves?: number;
+      // Identities for the count above (same length when present).
+      pendingResolves?: PendingConflictResolve[];
     }
   | { status: "skipped"; conflictsOpened: 0 };
 

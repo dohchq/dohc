@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
+  PendingConflictResolve as PendingConflictResolveType,
   SyncApplyResult,
   SyncReplicationOpKind,
   WorkspaceId,
@@ -15,6 +16,7 @@ export type {
   ChatThreadCreatePayload,
   ConflictResolvePayload,
   MomentAppendPayload,
+  PendingConflictResolve,
   SyncApplyResult,
   SyncMomentBeforePresence,
   SyncReplicationEnvelope,
@@ -135,11 +137,16 @@ export function skippedApplyResult(): SyncApplyResult {
 
 export function appliedApplyResult(
   conflictsOpened = 0,
-  pendingConflictResolves = 0,
+  pendingResolves: PendingConflictResolveType[] = [],
 ): SyncApplyResult {
   return {
     status: "applied",
     conflictsOpened,
-    ...(pendingConflictResolves > 0 ? { pendingConflictResolves } : {}),
+    // Count and identities travel together (0P-C gate fix): the count keeps
+    // existing consumers working; the identities let the surfacing layer
+    // lifecycle the "needs a look" state instead of accumulating forever.
+    ...(pendingResolves.length > 0
+      ? { pendingConflictResolves: pendingResolves.length, pendingResolves }
+      : {}),
   };
 }

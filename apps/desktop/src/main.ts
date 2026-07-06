@@ -45,6 +45,7 @@ import {
   CloudLoginStartResult,
   CloudStatusPayload,
   CloudStatusResult,
+  DismissSyncReviewNoticePayload,
   CollabTokenPayload,
   CollabTokenResult,
   CreateDataFragmentPayload,
@@ -177,12 +178,16 @@ import {
   rememberChromeTheme,
   titleBarOverlayOptions,
 } from "./window/createMainWindow";
-import { createWorkspaceFolder } from "./workspaces/createWorkspaceFolder";
+import {
+  createWorkspaceFolder,
+  resetFailedJoinFolder,
+} from "./workspaces/createWorkspaceFolder";
 import {
   effectiveHome,
   findWorkspace,
   listWorkspaces,
   registerWorkspace,
+  removeWorkspace,
   setWorkspaceRemote,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
@@ -900,6 +905,7 @@ function testSyncTimingOverrides(): {
 function engineForWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   capture: WorkspaceEngineCapture | null,
+  engineOptions: { joinBootstrap?: boolean } = {},
 ) {
   const remote = findWorkspace(workspace.workspaceId)?.remote;
   if (!remote || !cachedCredentials) return null;
@@ -917,8 +923,13 @@ function engineForWorkspace(
     capture,
     onChange: notifyRenderer,
     // Post-pass open-conflict truth: pulled peer resolutions and local
-    // resolutions both clear the status-bar/notice conflict state.
-    countOpenConflicts: async () => (await capture.listOpenConflicts()).length,
+    // resolutions both clear the status-bar/notice conflict state, and the
+    // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
+    listOpenConflictIds: async () =>
+      (await capture.listOpenConflicts()).map((conflict) => conflict.id),
+    // A freshly joined workspace's engine is pull-first: no push before the
+    // first successful pull (0P-C gate fix).
+    ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
     ...testSyncTimingOverrides(),
   });
 }
@@ -1898,38 +1909,63 @@ function registerIpcHandlers(): void {
     }
 
     desktopMarks.mark("workspace-join-start");
+    // Join bootstrap (0P-C gate fix): identity/metadata only — no starter
+    // files. The synced workspace's real content arrives with the first
+    // pull; anything seeded here could be captured by reconciliation and
+    // pushed INTO the remote workspace before that pull.
     const created = await createWorkspaceFolder({
       rootPath,
       kind: "personal",
       workspaceId: parsed.workspaceId,
+      bootstrap: "join",
     });
     const summary = WorkspaceSummary.parse(created);
     registerWorkspace(created);
     refreshNativeWorkspaceSurfaces();
-    // Open first (watcher + engine capture on an empty folder), THEN bind the
-    // remote and enable sync so the first pull materializes files, history,
-    // and chats through the capture chain before this handler resolves.
-    await activity.open(created);
-    setWorkspaceRemote(created.workspaceId, {
-      serverUrl: credentials.serverUrl,
-      remoteWorkspaceId: parsed.workspaceId,
-    });
-    let warning: string | undefined;
     try {
-      await activity.enableCloud(created);
+      // Open first (watcher + engine capture on an empty folder), THEN bind
+      // the remote and enable sync. joinBootstrap makes the engine PULL-FIRST:
+      // its start() is the first pull (materialize + cursor commit), and no
+      // push can reach the relay before that pull succeeds — a fresh join can
+      // never seed boilerplate into the remote or conflict against it.
+      await activity.open(created);
+      setWorkspaceRemote(created.workspaceId, {
+        serverUrl: credentials.serverUrl,
+        remoteWorkspaceId: parsed.workspaceId,
+      });
+      await activity.enableCloud(created, { joinBootstrap: true });
     } catch (error) {
-      // The workspace exists and is bound to the relay; sync retries when it
-      // is reopened. Say so instead of failing a join that mostly worked.
-      console.error(`[desktop] first sync after join failed for ${rootPath}:`, error);
-      warning =
-        "The workspace was added, but the first sync didn't finish. It will keep trying — check your connection.";
+      // Failed-first-pull contract (0P-C gate fix, documented choice): roll
+      // the ENTIRE join back — engine/watcher/capture, registry entry, and
+      // the folder contents this attempt created — instead of leaving a
+      // half-joined workspace whose next launch would push before ever
+      // having pulled. Everything removed still lives on the relay; the
+      // user retries with the same code and the same (empty again) folder.
+      console.error(`[desktop] join rollback for ${rootPath}:`, error);
+      await activity.close(created.workspaceId).catch(() => undefined);
+      try {
+        removeWorkspace(created.workspaceId);
+      } catch {}
+      await resetFailedJoinFolder(rootPath).catch(() => undefined);
+      refreshNativeWorkspaceSurfaces();
+      notifyRenderer();
+      throw new Error(
+        "Couldn't download the workspace. Nothing was added on this machine — check your connection and try again.",
+      );
     }
     desktopMarks.measureSince("workspace-join", "workspace-join-start");
     notifyRenderer();
-    return CloudJoinWorkspaceResult.parse({
-      workspace: summary,
-      ...(warning ? { warning } : {}),
-    });
+    return CloudJoinWorkspaceResult.parse({ workspace: summary });
+  });
+
+  // Explicit dismissal of the "a choice made on another machine needs a
+  // look" notice (0P-C gate fix): the pending remote-resolve set otherwise
+  // clears itself when the referenced conflict resolves or converges.
+  ipcMain.handle(CHANNELS.dismissSyncReviewNotice, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = DismissSyncReviewNoticePayload.parse(payload);
+    activity.dismissUnmatchedRemoteResolves(input.workspaceId);
+    notifyRenderer();
   });
 
   ipcMain.handle(CHANNELS.listWorkspaceShares, async (event, payload) => {

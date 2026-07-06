@@ -35,13 +35,23 @@ function isValidWorkspaceId(value: string): boolean {
   );
 }
 
-function isValidRelayUrl(value: string): boolean {
-  if (value.length === 0 || value.length > MAX_RELAY_URL_LENGTH) return false;
+// Canonical relay identity, or null when the value is not an acceptable
+// relay URL (0P-C gate fix). Beyond scheme/length checks this REJECTS
+// credentials, query strings, and fragments outright: buildSyncCode would
+// otherwise expose secrets in a copyable/screenshot-readable code,
+// parseSyncCode would accept them from pasted input, and relayUrlsMatch is
+// an authz gate that must compare relay identities, not secret carriers.
+function normalizeRelayUrl(value: string): string | null {
+  const raw = value.trim();
+  if (raw.length === 0 || raw.length > MAX_RELAY_URL_LENGTH) return null;
   try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    url.pathname = url.pathname.replace(/\/+$/u, "");
+    return url.toString().replace(/\/$/u, "");
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -49,8 +59,8 @@ export function buildSyncCode(parts: SyncCodeParts): string {
   if (!isValidWorkspaceId(parts.workspaceId)) {
     throw new Error("Workspace id cannot be encoded as a sync code.");
   }
-  const relayUrl = parts.relayUrl.trim().replace(/\/+$/u, "");
-  if (!isValidRelayUrl(relayUrl)) {
+  const relayUrl = normalizeRelayUrl(parts.relayUrl);
+  if (relayUrl === null) {
     throw new Error("Relay URL cannot be encoded as a sync code.");
   }
   return `${SYNC_CODE_PREFIX}:${parts.workspaceId}:${relayUrl}`;
@@ -65,16 +75,17 @@ export function parseSyncCode(code: string): SyncCodeParts | null {
   const separator = rest.indexOf(":");
   if (separator <= 0) return null;
   const workspaceId = rest.slice(0, separator);
-  const relayUrl = rest.slice(separator + 1).replace(/\/+$/u, "");
-  if (!isValidWorkspaceId(workspaceId) || !isValidRelayUrl(relayUrl)) return null;
+  const relayUrl = normalizeRelayUrl(rest.slice(separator + 1));
+  if (!isValidWorkspaceId(workspaceId) || relayUrl === null) return null;
   return { workspaceId, relayUrl };
 }
 
-// Trailing-slash-insensitive relay compare (mirrors main.ts's
-// normalizeServerUrl posture): the token only ever goes to the relay the
-// user signed in with, so equality here is a security gate, not cosmetics.
+// Canonical relay-identity compare: the token only ever goes to the relay
+// the user signed in with, so equality here is a security gate, not
+// cosmetics. Either side failing canonicalization (credentials, query,
+// fragment, non-http(s)) can never "match".
 export function relayUrlsMatch(left: string, right: string): boolean {
-  return (
-    left.trim().replace(/\/+$/u, "") === right.trim().replace(/\/+$/u, "")
-  );
+  const normalizedLeft = normalizeRelayUrl(left);
+  const normalizedRight = normalizeRelayUrl(right);
+  return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }

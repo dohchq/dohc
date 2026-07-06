@@ -1,4 +1,5 @@
 import type {
+  PendingConflictResolve,
   SyncReplicationEnvelope,
   SyncReplicationOpKind,
   TextFileSnapshot,
@@ -37,6 +38,10 @@ export interface PullWorkspaceFromRelayResult {
   skipped: number;
   conflictsOpened: number;
   pendingConflictResolves: number;
+  // Identities behind pendingConflictResolves (0P-C gate fix): the sync
+  // engine tracks these so its "a choice needs a look" notice clears when
+  // the referenced conflict is later resolved, instead of accumulating.
+  pendingResolves: PendingConflictResolve[];
   fastForwardedPaths: RelayMaterializedPath[];
   // The relay cursor this pull reached. NOT persisted by the pull itself:
   // the caller must invoke commitFetchCursor() only after fastForwardedPaths
@@ -594,6 +599,7 @@ export async function pullWorkspaceFromRelay(
       skipped: 0,
       conflictsOpened: 0,
       pendingConflictResolves: 0,
+      pendingResolves: [],
       fastForwardedPaths: [],
       nextCursor: cursor,
       commitFetchCursor,

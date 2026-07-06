@@ -29,6 +29,9 @@ type Notice = {
     onClick: () => void;
     disabled?: boolean;
   };
+  // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
+  // row. Only notices whose underlying state has a real ack path expose it.
+  onDismiss?: () => void;
   Icon: typeof Bell;
 };
 
@@ -48,6 +51,9 @@ export function NoticeCenter(props: {
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
+  // Dismisses the sync-review notice (0P-C gate fix): clears the engine's
+  // pending remote-resolve set after the user has taken their look.
+  onDismissSyncReview?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
@@ -175,6 +181,10 @@ export function NoticeCenter(props: {
         title: "A choice made on another machine needs a look",
         body: "Another machine chose what to keep for a file that has changed here since. Your local copy stays as it is — check History if something looks off.",
         action: { label: "Open History", onClick: props.onOpenHistory },
+        // Live state, not a forever-notice: it clears by itself when the
+        // affected conflict resolves, and the X lets the user acknowledge a
+        // resolve that matched nothing local.
+        ...(props.onDismissSyncReview ? { onDismiss: props.onDismissSyncReview } : {}),
         Icon: AlertTriangle,
       });
     }
@@ -253,6 +263,7 @@ export function NoticeCenter(props: {
     props.onOpenAgent,
     props.onOpenConflicts,
     props.onOpenHistory,
+    props.onDismissSyncReview,
     props.syncStatus,
     installPending,
     installUpdate,
@@ -351,6 +362,17 @@ export function NoticeCenter(props: {
                           className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
                         >
                           {notice.action.label}
+                        </button>
+                      ) : null}
+                      {notice.onDismiss ? (
+                        <button
+                          type="button"
+                          data-testid={`notice-${notice.id}-dismiss`}
+                          aria-label="Dismiss notice"
+                          onClick={() => notice.onDismiss?.()}
+                          className={`${notice.action ? "" : "ml-auto "}grid size-4 shrink-0 place-items-center rounded text-subtle hover:text-ink`}
+                        >
+                          <X size={11} aria-hidden />
                         </button>
                       ) : null}
                     </div>

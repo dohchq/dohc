@@ -44,9 +44,12 @@ export interface WorkspaceActivityOptions {
   cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean };
   // Builds a sync engine for a workspace when it is enabled AND connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
+  // The options (joinBootstrap) ride through from enableCloud so a freshly
+  // JOINED workspace's engine can be built pull-first (0P-C gate fix).
   engineFor?: (
     workspace: CreatedWorkspace,
     capture: WorkspaceEngineCapture | null,
+    engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
   // Builds the watcher->engine capture for a workspace; null (explicit
   // engine opt-out) leaves the workspace with NO history recorder. Called
@@ -211,11 +214,18 @@ export function createWorkspaceActivity(
 
   // Enable-sync path: build the engine now (registry remote was just set) and
   // wait for first contact so the caller can surface immediate failures.
-  async function enableCloud(workspace: CreatedWorkspace): Promise<void> {
+  // joinBootstrap builds a pull-first engine for a freshly JOINED workspace:
+  // its start() is the first pull, and no push can happen before that pull
+  // succeeds (0P-C gate fix) — so a start() failure here means "nothing
+  // arrived yet" and the join handler can roll the whole join back cleanly.
+  async function enableCloud(
+    workspace: CreatedWorkspace,
+    engineOptions: { joinBootstrap?: boolean } = {},
+  ): Promise<void> {
     const entry = watched.get(workspace.workspaceId);
     if (!entry) throw new Error(`Workspace is not open: ${workspace.workspaceId}`);
     if (entry.engine) return;
-    const engine = options.engineFor?.(workspace, entry.capture) ?? null;
+    const engine = options.engineFor?.(workspace, entry.capture, engineOptions) ?? null;
     if (!engine) throw new Error("Cloud sync requires a signed-in dohc Cloud session");
     entry.engine = engine;
     try {
@@ -229,6 +239,25 @@ export function createWorkspaceActivity(
       throw error;
     }
     notify();
+  }
+
+  // Failed-join rollback (0P-C gate fix): stop and forget ONE workspace —
+  // watcher, engine, and capture — so the join handler can remove its
+  // folder/registry state without tearing down every other workspace.
+  async function close(workspaceId: string): Promise<void> {
+    const entry = watched.get(workspaceId);
+    if (!entry) return;
+    watched.delete(workspaceId);
+    await Promise.all([entry.handle.stop(), entry.engine?.stop() ?? Promise.resolve()]);
+    await (entry.capture?.stop() ?? Promise.resolve());
+    notify();
+  }
+
+  // Explicit dismissal of the "a choice made on another machine needs a
+  // look" notice: clears the engine's pending remote-resolve set (0P-C gate
+  // fix — the set otherwise clears itself when the matched conflict closes).
+  function dismissUnmatchedRemoteResolves(workspaceId: string): void {
+    watched.get(workspaceId)?.engine?.dismissUnmatchedResolves();
   }
 
   // After a login completes, attach engines to already-open cloud-enabled
@@ -324,7 +353,9 @@ export function createWorkspaceActivity(
 
   return {
     open,
+    close,
     enableCloud,
+    dismissUnmatchedRemoteResolves,
     reconcileCloud,
     stopEngines,
     getStatus,

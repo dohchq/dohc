@@ -52,6 +52,7 @@ export type {
   SyncRelayInput,
 } from "./syncRelay";
 export type {
+  PendingConflictResolve,
   SyncApplyResult,
   SyncReplicationEnvelope,
   SyncReplicationOpKind,

@@ -82,6 +82,19 @@ describe("registry store", () => {
     expect(() => future.list()).toThrow(/newer than supported|refusing to overwrite/i);
   });
 
+  it("remove unregisters a workspace and tolerates unknown ids (failed-join rollback)", () => {
+    store.register(personal);
+    store.remove("ws-1");
+    expect(store.find("ws-1")).toBeNull();
+    expect(store.list()).toHaveLength(0);
+    // Unknown/already-removed ids are a no-op, never a throw.
+    store.remove("ws-1");
+    store.remove("ws-never-registered");
+    // The same root can be re-attached after removal (join retry).
+    store.register(personal);
+    expect(store.find("ws-1")?.rootPath).toBe(personal.rootPath);
+  });
+
   it("refuses to overwrite a corrupt registry instead of collapsing it to empty", async () => {
     await writeFile(registryPath, "{ this is not json");
     const corrupt = createRegistryStore(registryPath);

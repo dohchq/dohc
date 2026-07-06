@@ -64,6 +64,7 @@ import {
   skippedApplyResult,
   type ConflictResolvePayload,
   type MomentAppendPayload,
+  type PendingConflictResolve,
   type VersionCreateForkSnapshot,
   type VersionCreatePayload,
 } from "./syncReplication";
@@ -1249,6 +1250,12 @@ function selectBlobText(db: SqliteDb, sha256: string): string | null {
 function requireBlobText(db: SqliteDb, sha256: string): string {
   const text = selectBlobText(db, sha256);
   if (text === null) throw corruptStore();
+  // Content-addressed reads verify the address (0P-C gate fix). A row whose
+  // text does not hash to its key is either a poisoned store or — the sync
+  // kind-confusion case — a binary blob's compatibility ANCHOR (text = "")
+  // being misread as text. Fail closed: adopting empty text under a
+  // mismatched sha would silently corrupt replicated state.
+  if (sha256Text(text) !== sha256) throw corruptStore();
   return text;
 }
 
@@ -2344,6 +2351,27 @@ function fileStatesEqual(a: VersionedTextFileState, b: VersionedTextFileState): 
   if (fileStateContentKind(a) !== fileStateContentKind(b)) return false;
   if (isBinaryState(a)) return a.sha256 === b.sha256;
   return a.text === b.text;
+}
+
+// Exact live-state check for mirrored resolves (0P-C gate fix): beyond
+// content, the LIVE snapshot must still be the precise state the conflict
+// row recorded — same path, same object identity, and same latest moment id.
+// Content-only equality would let a peer's resolution act on a lineage that
+// moved on locally (e.g. edited then reverted to the same bytes, or a
+// different object that now occupies the path).
+function liveStateMatchesConflictCurrent(
+  live: VersionedTextFileState,
+  recorded: VersionedTextFileState,
+): boolean {
+  if (live.exists !== recorded.exists) return false;
+  if (!live.exists && !recorded.exists) return true;
+  return (
+    live.path === recorded.path &&
+    live.objectId === recorded.objectId &&
+    live.latestMomentId === recorded.latestMomentId &&
+    fileStateContentKind(live) === fileStateContentKind(recorded) &&
+    (isBinaryState(live) ? live.sha256 === recorded.sha256 : live.text === recorded.text)
+  );
 }
 
 function comparisonStatus(input: {
@@ -4092,17 +4120,33 @@ function createVersionedTextStoreWithHooks(
     workspaceId: WorkspaceId,
     conflict: VersionedTextConflictRecord,
   ): boolean {
+    const incoming = conflict.incoming;
+    // Divergent-move refusal comes FIRST — before ANY equality shortcut
+    // (0P-C gate fix). When the incoming side lives at a DIFFERENT path,
+    // "same bytes" is not convergence: closing the conflict would leave the
+    // two machines holding the file at different paths forever with no open
+    // conflict anywhere. Applying here would also change a path the pull's
+    // materialization diff never inspects, leaving disk stale. Surfacing for
+    // local review is the honest move.
+    if (incoming.exists && incoming.path !== conflict.path) return false;
     const live = fileStateFromSnapshot(
       conflict.path,
       selectSnapshotByPath(db, workspaceId, conflict.targetVersionId, conflict.path),
     );
-    if (!fileStatesEqual(live, conflict.current)) return false;
+    // Exact live-state guard (0P-C gate fix): the conflict row must describe
+    // the CURRENT head — same path, object id, latest moment id, content
+    // kind, and bytes. Byte-equality alone is not enough: a lineage that
+    // moved on after the conflict opened (even with bytes later reverted) or
+    // a different object now occupying the path is newer local work and must
+    // never be overwritten.
+    if (!liveStateMatchesConflictCurrent(live, conflict.current)) return false;
+    // Auto-close WITHOUT writing only on FULL convergence: same path
+    // (guaranteed above) and identical live content on both sides.
     if (fileStatesEqual(conflict.current, conflict.incoming)) return true;
     const metadata: ActorNeutralWriteMetadata = {
       origin: "sync",
       summary: "Applied the copy chosen on another machine",
     };
-    const incoming = conflict.incoming;
     if (!incoming.exists) {
       if (conflict.current.exists) {
         deleteTextFileInDb({
@@ -4115,12 +4159,6 @@ function createVersionedTextStoreWithHooks(
       }
       return true;
     }
-    // Divergent-move resolutions (the incoming side lives at a DIFFERENT
-    // path) stay a local decision: applying here would change a path the
-    // pull's materialization diff never inspects, leaving disk stale. Rare
-    // enough that surfacing the conflict for local review is the honest
-    // move.
-    if (incoming.path !== conflict.path) return false;
     if (isBinaryState(incoming)) {
       const sha = incoming.sha256 ?? "";
       if (!sha || !db.prepare("SELECT 1 FROM binary_blobs WHERE sha256 = ?").get(sha)) {
@@ -4597,7 +4635,7 @@ function createVersionedTextStoreWithHooks(
         }
 
         let conflictsOpened = 0;
-        let pendingConflictResolves = 0;
+        const pendingResolves: PendingConflictResolve[] = [];
         switch (input.opKind) {
           case "workspace.init":
             ensureWorkspaceRow(txDb, workspaceId, input.recordedAtMs, { journal: false });
@@ -4705,13 +4743,25 @@ function createVersionedTextStoreWithHooks(
                       mirror.id,
                     );
                 } else {
-                  pendingConflictResolves = 1;
+                  // Carry the LOCAL conflict identity out with the pending
+                  // count so the surfacing layer can clear its notice when
+                  // this conflict is later resolved (locally or by a
+                  // subsequent sync pass) instead of accumulating forever.
+                  pendingResolves.push({
+                    remoteConflictId: payload.conflictId,
+                    localConflictId: mirror.id,
+                    path: mirror.path,
+                  });
                 }
               } else {
                 // No local match at all: journal + ack the op (idempotency
                 // and ordering must hold) but surface it — a peer's
                 // resolution is never silently swallowed.
-                pendingConflictResolves = 1;
+                pendingResolves.push({
+                  remoteConflictId: payload.conflictId,
+                  localConflictId: null,
+                  path: payload.path ?? null,
+                });
               }
             }
             break;
@@ -4731,7 +4781,7 @@ function createVersionedTextStoreWithHooks(
         journalImportedReplicationOp(txDb, input);
         ackReplicationPeer(txDb, workspaceId, input.originId, input.originSeq);
         await persistBarrier();
-        return appliedApplyResult(conflictsOpened, pendingConflictResolves);
+        return appliedApplyResult(conflictsOpened, pendingResolves);
       });
     },
 

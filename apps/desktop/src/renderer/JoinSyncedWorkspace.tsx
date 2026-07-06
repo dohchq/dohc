@@ -34,6 +34,11 @@ export function JoinSyncedWorkspace(props: {
   const [warning, setWarning] = useState<string | null>(null);
   const joinedRef = useRef<Workspace | null>(null);
   const sessionRef = useRef(0);
+  // Guards the async join against unmount (0P-C gate fix): if the parent
+  // swaps this view away while cloudJoinWorkspace is in flight, the resolved
+  // promise must not navigate the app into the joined workspace the user
+  // just backed out of (nor call setState on an unmounted component).
+  const cancelledRef = useRef(false);
 
   function checkSession() {
     const session = sessionRef.current + 1;
@@ -54,9 +59,11 @@ export function JoinSyncedWorkspace(props: {
   }
 
   useEffect(() => {
+    cancelledRef.current = false;
     checkSession();
     return () => {
       sessionRef.current += 1;
+      cancelledRef.current = true;
     };
     // Session check runs once on mount; CloudLogin's onConnected re-runs it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -76,6 +83,9 @@ export function JoinSyncedWorkspace(props: {
         syncCode: code.trim(),
         rootPath: folder,
       });
+      // Unmounted mid-join: ignore the handler's result gracefully — the
+      // user backed out, so never navigate them into the workspace.
+      if (cancelledRef.current) return;
       if (result.warning) {
         // The workspace was added but its first sync didn't finish. Say so
         // and let the user open it deliberately instead of vanishing the
@@ -86,9 +96,10 @@ export function JoinSyncedWorkspace(props: {
       }
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
+      if (cancelledRef.current) return;
       setError(joinErrorMessage(cause));
     } finally {
-      setJoining(false);
+      if (!cancelledRef.current) setJoining(false);
     }
   }
 
@@ -101,14 +112,22 @@ export function JoinSyncedWorkspace(props: {
       className="flex w-105 flex-col gap-3 rounded-lg border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          aria-label="Back"
-          onClick={props.onBack}
-          className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-        >
-          <ArrowLeft size={13} aria-hidden />
-        </button>
+        {warning === null ? (
+          // Gated while a join is in flight (the request cannot be
+          // cancelled) and GONE once the workspace exists (warning state):
+          // the workspace was durably created, so "back as if nothing
+          // happened" would strand an invisible registration — the only
+          // honest affordance left is "Open workspace" below.
+          <button
+            type="button"
+            aria-label="Back"
+            disabled={joining}
+            onClick={props.onBack}
+            className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:opacity-50"
+          >
+            <ArrowLeft size={13} aria-hidden />
+          </button>
+        ) : null}
         <h2 className="m-0 text-sm font-semibold">Join a synced workspace</h2>
       </div>
 
@@ -188,7 +207,8 @@ export function JoinSyncedWorkspace(props: {
       {warning !== null ? (
         <>
           <p data-testid="join-warning" className="m-0 text-xs leading-relaxed text-warning">
-            {warning}
+            {warning} The workspace was already added on this machine, so the
+            only way forward is to open it.
           </p>
           <button
             type="button"

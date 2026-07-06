@@ -7,7 +7,7 @@ import {
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CreatedWorkspace {
@@ -74,6 +74,23 @@ function assertSharedWithMeFolder(existing: Stats): void {
   }
 }
 
+// Rolls a FAILED join back to an empty folder (0P-C gate fix). The join
+// handler verified the folder was EMPTY before creating anything, so every
+// entry inside it was produced by this join attempt — identity scaffolding
+// (.dohc, shared-with-me), the engine store, and any partially materialized
+// pull output (all of which still lives on the relay). Removing them restores
+// the pre-join state so a retry sees an empty folder again; leaving them
+// would strand a half-joined workspace the empty-folder check then rejects.
+export async function resetFailedJoinFolder(rootPath: string): Promise<void> {
+  const entries = await readdir(rootPath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  });
+  for (const entry of entries) {
+    await rm(join(rootPath, entry), { recursive: true, force: true });
+  }
+}
+
 export async function createWorkspaceFolder(input: {
   rootPath: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
@@ -83,6 +100,12 @@ export async function createWorkspaceFolder(input: {
   // already a dohc workspace (an existing manifest's identity always wins —
   // silently rebinding it would sever history and sync).
   workspaceId?: string;
+  // "join" creates identity/metadata ONLY — no starter user files (0P-C gate
+  // fix). The joined workspace's real files arrive with the first pull;
+  // seeding .context/me.md here would let reconciliation capture boilerplate
+  // that then pushes into the remote workspace or conflicts with its own
+  // copy. Default ("create") keeps the fresh-workspace starter content.
+  bootstrap?: "create" | "join";
 }): Promise<CreatedWorkspace> {
   const folderCheck = validateAttachedFolder(input.rootPath);
   if (!folderCheck.ok) {
@@ -136,7 +159,6 @@ export async function createWorkspaceFolder(input: {
   });
 
   await mkdir(join(input.rootPath, ".dohc"), { recursive: true });
-  await mkdir(join(input.rootPath, ".context"), { recursive: true });
   // wx: manifest is absent (inspectManifest returned "absent"); never clobber
   // an unexpected file that appeared between the check and the write.
   await writeFile(
@@ -144,13 +166,16 @@ export async function createWorkspaceFolder(input: {
     `${JSON.stringify(manifest, null, 2)}\n`,
     { flag: "wx" },
   );
-  await writeFile(join(input.rootPath, ".context", "me.md"), FIRST_CONTEXT, {
-    flag: "wx",
-  }).catch((error: unknown) => {
-    // An existing me.md is the user's; never overwrite it. Real failures
-    // (permissions, disk) must still surface.
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  });
+  if (input.bootstrap !== "join") {
+    await mkdir(join(input.rootPath, ".context"), { recursive: true });
+    await writeFile(join(input.rootPath, ".context", "me.md"), FIRST_CONTEXT, {
+      flag: "wx",
+    }).catch((error: unknown) => {
+      // An existing me.md is the user's; never overwrite it. Real failures
+      // (permissions, disk) must still surface.
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
+  }
 
   return {
     workspaceId: manifest.workspaceId,

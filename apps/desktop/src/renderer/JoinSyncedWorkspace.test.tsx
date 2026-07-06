@@ -120,6 +120,54 @@ describe("JoinSyncedWorkspace", () => {
     );
   });
 
+  // 0P-C gate fixes: the in-flight join cannot be backed out of silently,
+  // and a created-but-warned workspace only offers "Open workspace".
+  it("disables Back while a join is in flight and ignores a resolve after unmount", async () => {
+    const user = userEvent.setup();
+    const onReady = vi.fn();
+    let resolveJoin!: (value: { workspace: typeof JOINED }) => void;
+    bridgeMock.cloudJoinWorkspace.mockImplementationOnce(
+      () =>
+        new Promise<{ workspace: typeof JOINED }>((resolve) => {
+          resolveJoin = resolve;
+        }),
+    );
+    const { unmount } = render(
+      <JoinSyncedWorkspace onWorkspaceReady={onReady} onBack={() => {}} />,
+    );
+    await fillJoinForm(user);
+    const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
+    expect(back.disabled).toBe(false);
+    await user.click(screen.getByTestId("join-workspace-start"));
+    await waitFor(() => expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalled());
+    expect(back.disabled).toBe(true);
+
+    // The parent swaps the view away mid-request (e.g. first-run state
+    // change): the stale resolution must NOT navigate into the workspace.
+    unmount();
+    resolveJoin({ workspace: JOINED });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("removes Back once the workspace exists (warning state) — only Open workspace remains", async () => {
+    const user = userEvent.setup();
+    const onReady = vi.fn();
+    bridgeMock.cloudJoinWorkspace.mockResolvedValueOnce({
+      workspace: JOINED,
+      warning: "The workspace was added, but the first sync didn't finish.",
+    });
+    render(<JoinSyncedWorkspace onWorkspaceReady={onReady} onBack={() => {}} />);
+    await fillJoinForm(user);
+    await user.click(screen.getByTestId("join-workspace-start"));
+    await screen.findByTestId("join-warning");
+    // The workspace is durably created: "back as if nothing happened" is a
+    // lie, so the affordance is gone and Open workspace is the way forward.
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+    expect(screen.getByTestId("join-open-anyway")).toBeTruthy();
+  });
+
   it("gates on sign-in and unlocks after the embedded login completes", async () => {
     const user = userEvent.setup();
     bridgeMock.cloudStatus

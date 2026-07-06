@@ -342,6 +342,24 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
     );
 
+    // 0P-C gate fix: the join is PULL-FIRST and seeds no starter files, so
+    // it can never push boilerplate INTO the shared workspace. The relay log
+    // carries no `.context/me.md` op, and the ORIGINAL machine's next pull
+    // converges without conflicts or a boilerplate me.md.
+    const relayLog = (await (
+      await fetch(
+        `${relay.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?since=0&limit=500`,
+        { headers: { authorization: `Bearer ${TOKEN}` } },
+      )
+    ).json()) as { ops: Array<{ payload?: { path?: string } }> };
+    const loggedPaths = relayLog.ops
+      .map((op) => op.payload?.path)
+      .filter((path): path is string => typeof path === "string");
+    expect(loggedPaths).not.toContain(".context/me.md");
+    const pullBack = await pullAndCommit(machine1, workspaceId, relay.baseUrl);
+    expect(pullBack.conflictsOpened).toBe(0);
+    expect(await engineText(machine1, workspaceId, ".context/me.md")).toBeNull();
+
     // Full history came along (both roadmap moments, not just latest state).
     // In perf runs the first history page is bulk files, so assert on the
     // newest seeded path instead.
