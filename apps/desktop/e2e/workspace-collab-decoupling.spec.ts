@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { engineMomentsOrEmpty, ydocUpdateCount } from "./helpers/engineDb";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -19,66 +19,10 @@ import {
 // loads, editing lands on the .md and in engine.db as ydoc.update ops, with ZERO
 // collab-server involvement: no WebSocket is ever opened and the collabToken IPC
 // refuses a non-shared workspace. The former HocuspocusProvider path is no
-// longer instantiated by the editor (G2-C-3 removes its remaining code).
-const requireModule = createRequire(import.meta.url);
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): {
-      all(...params: unknown[]): Array<Record<string, unknown>>;
-      get(...params: unknown[]): Record<string, unknown> | undefined;
-    };
-    close(): void;
-  };
-};
-
-interface EngineMoment {
-  path: string;
-  operation: string;
-  text: string;
-}
-
-function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
-  try {
-    const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-      readOnly: true,
-    });
-    try {
-      return db
-        .prepare(
-          `SELECT m.path AS path, m.operation AS operation, b.text AS text
-           FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-           ORDER BY m.moment_order`,
-        )
-        .all() as unknown as EngineMoment[];
-    } finally {
-      db.close();
-    }
-  } catch {
-    // engine.db may not exist yet while the app is still opening.
-    return [];
-  }
-}
-
-function ydocUpdateCount(rootPath: string): number {
-  try {
-    const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
-      readOnly: true,
-    });
-    try {
-      const row = db.prepare("SELECT COUNT(*) AS n FROM ydoc_updates").get() as
-        | { n: number }
-        | undefined;
-      return Number(row?.n ?? 0);
-    } finally {
-      db.close();
-    }
-  } catch {
-    return 0;
-  }
-}
+// longer instantiated by the editor (G2-C-3 removes its remaining code). The
+// engine.db SQLite readers (engineMomentsOrEmpty / ydocUpdateCount) are shared
+// with workspace-engine-editor.spec via ./helpers/engineDb — one source of truth
+// for the load-bearing "no double-journal" scaffolding.
 
 test("engine-flagged local workspace edits a rich doc through the engine provider — no Hocuspocus, editing lands", async () => {
   const temp = await createTempWorkspace();
@@ -113,7 +57,12 @@ test("engine-flagged local workspace edits a rich doc through the engine provide
     // is live.
     await explorerRow(page, "notes").click();
     await explorerRow(page, "notes/solo.md").click();
-    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
+    // Gated on the engine Y.Doc session going live (async IPC round-trip through
+    // main), so give it the same 15s slack as the surrounding settle assertions
+    // rather than the 5s default (which flakes under load/xvfb).
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
+      timeout: 15_000,
+    });
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible();
 

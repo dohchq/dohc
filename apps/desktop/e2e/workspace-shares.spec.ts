@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   claimRelayWorkspace,
@@ -289,6 +290,11 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // The other three mutation side-doors are refused at the IPC boundary too:
     // a managed agent run, a code-executing site preview, and a write-capable
     // MCP config. All route through the same shared-view guard.
+    //
+    // Snapshot the materialized shared file BEFORE the bypass so the engine
+    // Y.Doc apply attempt can be proven inert — not merely non-throwing.
+    const sharedFilePath = join(temp.rootPath, "docs/shared.md");
+    const originalSharedContents = await readFile(sharedFilePath, "utf8");
     const bypassAttempts = await page.evaluate(async () => {
       const api = (window as unknown as {
         dohcDesktop: {
@@ -353,6 +359,12 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // in a shared view), and applying an update to it is an inert no-op.
     expect(bypassAttempts.engineYDocAvailable).toBe(false);
     expect(bypassAttempts.engineYDocApply).toBe("allowed");
+    // "allowed" only proves the apply didn't throw — a regression that dropped
+    // the read-only guard on applyEngineYDocUpdate (keeping it on open) would
+    // still look like a no-op via the missing-session lookup. Prove the update
+    // NEVER LANDED: the materialized shared file on disk is byte-for-byte
+    // unchanged after the apply attempt.
+    expect(await readFile(sharedFilePath, "utf8")).toBe(originalSharedContents);
 
     // The granter keeps working; the recipient refreshes and sees it.
     await granterWrite("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");

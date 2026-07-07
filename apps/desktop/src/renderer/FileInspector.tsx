@@ -524,12 +524,7 @@ function MarkdownView(props: {
     setPendingScrollLine(null);
   }, [pendingScrollLine, mode]);
 
-  // Lift the save state to the shell (smallest seam): the active editor tab
-  // shows a dirty dot while this is not "saved".
   const { onSaveStateChange } = props;
-  useEffect(() => {
-    onSaveStateChange?.(saveState);
-  }, [saveState, onSaveStateChange]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // True from the keystroke until a write for that draft has been ISSUED.
   // The unmount flush keys off this — never off the timer handle, which stays
@@ -562,6 +557,16 @@ function MarkdownView(props: {
     enabled: !props.truncated && !props.forceReadOnly,
   });
   const readOnly = !!props.forceReadOnly || (props.truncated && !engine.available);
+
+  // Lift the save state to the shell (smallest seam): the active editor tab
+  // shows a dirty dot while this is not "saved". When the engine owns the
+  // surface (engine mode) its in-flight/settling state is the authoritative
+  // dirty cue — the LOCAL saveState never leaves "saved" on the engine path,
+  // so without lifting the engine state the tab dot would be dead while the
+  // engine Y.Doc is still settling.
+  useEffect(() => {
+    onSaveStateChange?.(engine.available ? engine.saveState : saveState);
+  }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
   useEffect(() => {
     if (!readOnly) return;

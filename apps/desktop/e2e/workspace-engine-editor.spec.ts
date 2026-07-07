@@ -1,8 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import {
+  momentTextsForPath,
+  replicationOpKindCount,
+  replicationOpKindsMentioning,
+  withEngineDb,
+  ydocUpdateCount,
+} from "./helpers/engineDb";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -18,92 +24,10 @@ import {
 // debounced settle), replacing HocuspocusProvider. The load-bearing proof: a
 // live edit journals ONLY as ydoc.update — NOT a duplicate moment.append that
 // would collide (P0D) with the ydoc.update stream on a shared workspace — and
-// the .md + engine.db reflect it, and a reopen resumes the rich content.
-const requireModule = createRequire(import.meta.url);
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): {
-      all(...params: unknown[]): Array<Record<string, unknown>>;
-      get(...params: unknown[]): Record<string, unknown> | undefined;
-    };
-    close(): void;
-  };
-};
-
-function withEngineDb<T>(rootPath: string, fn: (db: InstanceType<typeof DatabaseSync>) => T): T | null {
-  let db: InstanceType<typeof DatabaseSync> | null = null;
-  try {
-    db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
-    return fn(db);
-  } catch {
-    // engine.db may not exist yet while the app is still opening.
-    return null;
-  } finally {
-    db?.close();
-  }
-}
-
-function ydocUpdateCount(rootPath: string): number {
-  return (
-    withEngineDb(rootPath, (db) => {
-      const row = db.prepare("SELECT COUNT(*) AS n FROM ydoc_updates").get() as
-        | { n: number }
-        | undefined;
-      return Number(row?.n ?? 0);
-    }) ?? 0
-  );
-}
-
-// Replication ops that carry the sentinel PLAINTEXT, grouped by op_kind. A
-// ydoc.update op's payload is opaque Yjs binary (the plaintext is not
-// searchable), so the ONLY way the typed sentence lands in a replication op as
-// plaintext is a moment.append — i.e. the watcher double-journaling the settle's
-// own .md self-write. This list must therefore be EMPTY (no double-journal).
-function replicationOpKindsMentioning(rootPath: string, needle: string): string[] {
-  return (
-    withEngineDb(rootPath, (db) => {
-      const rows = db
-        .prepare("SELECT op_kind AS opKind, payload_json AS payload FROM replication_log")
-        .all() as Array<{ opKind: string; payload: string }>;
-      return rows
-        .filter((row) => typeof row.payload === "string" && row.payload.includes(needle))
-        .map((row) => row.opKind);
-    }) ?? []
-  );
-}
-
-function replicationOpKindCount(rootPath: string, opKind: string): number {
-  return (
-    withEngineDb(rootPath, (db) => {
-      const row = db
-        .prepare("SELECT COUNT(*) AS n FROM replication_log WHERE op_kind = ?")
-        .get(opKind) as { n: number } | undefined;
-      return Number(row?.n ?? 0);
-    }) ?? 0
-  );
-}
-
-// The projected settle moments (settle points ARE engine history) — these DO
-// carry the text, proving the engine.db reflects the edit, and are journaled
-// through the driver's non-journaling projection write (no moment.append op).
-function momentTextsForPath(rootPath: string, path: string): string[] {
-  return (
-    withEngineDb(rootPath, (db) => {
-      return (
-        db
-          .prepare(
-            `SELECT b.text AS text
-             FROM moments m JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
-             WHERE m.path = ? ORDER BY m.moment_order`,
-          )
-          .all(path) as Array<{ text: string }>
-      ).map((row) => row.text);
-    }) ?? []
-  );
-}
+// the .md + engine.db reflect it, and a reopen resumes the rich content. The
+// SQLite readers (withEngineDb / ydocUpdateCount / replication* / moment*) live
+// in ./helpers/engineDb — shared with workspace-collab-decoupling.spec so the
+// load-bearing "no double-journal" scaffolding can never drift.
 
 async function openEngineDoc(page: import("@playwright/test").Page, path: string): Promise<void> {
   const segments = path.split("/");
