@@ -86,6 +86,9 @@ export interface ExplorerProps {
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   onImportFiles: (droppedPaths?: string[]) => void;
   onImportExport: (path: string | null) => void;
+  // "Share…" (PR 18): offered by the main-owned context menu on synced,
+  // non-shared-view workspaces; opens the shell's share dialog for the path.
+  onShare: (path: string) => void;
   onRefresh: () => void;
   onNewFileDialog: () => void;
 }
@@ -699,6 +702,9 @@ export function Explorer(props: ExplorerProps) {
         case "import-export":
           props.onImportExport(kind === "file" ? (path ?? null) : null);
           break;
+        case "share":
+          if (path) props.onShare(path);
+          break;
         case "open-externally":
           // Main performed the containment-checked reveal already.
           break;
@@ -713,6 +719,7 @@ export function Explorer(props: ExplorerProps) {
       exportZip,
       props.onImportFiles,
       props.onImportExport,
+      props.onShare,
     ],
   );
 

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
+import { OpenSharedView } from "./OpenSharedView";
 import { Titlebar } from "./Titlebar";
 
 // First launch is a working tool, not a marketing page: pick where your
@@ -17,6 +18,7 @@ export function DesktopFirstRun(props: {
   const [error, setError] = useState<string | null>(null);
   const [cloudNote, setCloudNote] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [openingShare, setOpeningShare] = useState(false);
 
   useEffect(() => {
     void bridge()
@@ -76,6 +78,11 @@ export function DesktopFirstRun(props: {
           onWorkspaceReady={props.onWorkspaceReady}
           onBack={() => setJoining(false)}
         />
+      ) : openingShare ? (
+        <OpenSharedView
+          onWorkspaceReady={props.onWorkspaceReady}
+          onBack={() => setOpeningShare(false)}
+        />
       ) : (
       <div className="flex w-105 flex-col gap-3 rounded-lg border border-line bg-panel p-5">
         <div className="flex flex-col gap-1">
@@ -123,6 +130,15 @@ export function DesktopFirstRun(props: {
           className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
         >
           Join a synced workspace from another machine
+        </button>
+
+        <button
+          type="button"
+          data-testid="first-run-open-share"
+          onClick={() => setOpeningShare(true)}
+          className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+        >
+          Open a share someone sent you
         </button>
 
         {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}

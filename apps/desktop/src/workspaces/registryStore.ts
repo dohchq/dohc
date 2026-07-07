@@ -11,9 +11,24 @@ export interface RemoteIdentity {
   remoteWorkspaceId: string;
 }
 
+// A shared VIEW received through a relay share grant (PR 18): read-only,
+// refreshed from the share, never pushed. `ended` marks a revoked share —
+// the local copy stays readable but stops refreshing.
+export interface ShareViewIdentity {
+  shareId: string;
+  granterEmail: string | null;
+  ended?: boolean;
+  // The relay this share was opened from. A refresh only ever runs against
+  // this origin relay; signed into a different relay, the refresh is skipped
+  // rather than misreading a 404 as "the share ended" (PR 18 gate fix).
+  // Optional for views registered before this field existed.
+  relayUrl?: string;
+}
+
 export interface RegistryEntry extends CreatedWorkspace {
   // Present only after the user explicitly enables cloud sync (Phase 9).
   remote?: RemoteIdentity;
+  shareView?: ShareViewIdentity;
 }
 
 interface RegistryFile {
@@ -117,6 +132,14 @@ export function createRegistryStore(registryFile: string) {
       const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       entry.remote = remote;
+      write(registry);
+    },
+
+    setShareView(workspaceId: string, shareView: ShareViewIdentity): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      entry.shareView = shareView;
       write(registry);
     },
 

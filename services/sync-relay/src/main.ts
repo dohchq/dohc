@@ -37,6 +37,13 @@ const storage = openSyncRelayStorage(dbPath);
 // device flow is valid here only when POSTGRES_URL and BETTER_AUTH_SECRET
 // match that service exactly; the relay has no separate login system.
 let pool: Pool | undefined;
+// Share-grant account lookups (PR 18): production resolves against Better
+// Auth's user table on the SAME Postgres the session check uses; the test
+// seam maps "<userId>@dohc.test" <-> "<userId>" so share E2E can address
+// recipients by email without a user database.
+const TEST_EMAIL_SUFFIX = "@dohc.test";
+let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | null;
+let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
 const resolveActor: ResolveActor = testAuthSeam
   ? createTestActorResolver()
   : (() => {
@@ -67,7 +74,36 @@ function createTestActorResolver(): ResolveActor {
   };
 }
 
-const relayHandler = createSyncRelayHandler({ storage, resolveActor });
+if (testAuthSeam) {
+  resolveUserIdByEmail = (email) =>
+    email.endsWith(TEST_EMAIL_SUFFIX) && email.length > TEST_EMAIL_SUFFIX.length
+      ? email.slice(0, -TEST_EMAIL_SUFFIX.length)
+      : null;
+  lookupUserEmail = (userId) => `${userId}${TEST_EMAIL_SUFFIX}`;
+} else {
+  // Better Auth's canonical table/column names on the shared Postgres.
+  resolveUserIdByEmail = async (email) => {
+    const result = await pool!.query<{ id: string }>(
+      'SELECT id FROM "user" WHERE lower(email) = lower($1) LIMIT 1',
+      [email],
+    );
+    return result.rows[0]?.id ?? null;
+  };
+  lookupUserEmail = async (userId) => {
+    const result = await pool!.query<{ email: string }>(
+      'SELECT email FROM "user" WHERE id = $1 LIMIT 1',
+      [userId],
+    );
+    return result.rows[0]?.email ?? null;
+  };
+}
+
+const relayHandler = createSyncRelayHandler({
+  storage,
+  resolveActor,
+  resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
+  lookupUserEmail: (userId) => lookupUserEmail(userId),
+});
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
   if (url.pathname === "/health") return Response.json({ ok: true, service: "sync-relay" });

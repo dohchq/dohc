@@ -90,6 +90,16 @@ export const WorkspaceSummary = z.object({
   rootPath: PATH_STRING,
   kind: KIND_ENUM,
   mode: MODE_ENUM,
+  // Present only on a shared VIEW received through a relay share grant
+  // (PR 18): the workspace is read-only, refreshed from the share, and
+  // carries who shared it for honest copy. `ended` marks a revoked share.
+  shareView: z
+    .object({
+      shareId: z.string().min(1).max(200),
+      granterEmail: z.string().min(3).max(320).nullable(),
+      ended: z.boolean().optional(),
+    })
+    .optional(),
 });
 export type WorkspaceSummary = z.infer<typeof WorkspaceSummary>;
 
@@ -1272,6 +1282,83 @@ export const CollabTokenResult = z.union([
 ]);
 export type CollabTokenResult = z.infer<typeof CollabTokenResult>;
 
+// ---- Relay shares (PR 18, the engine-native cloud) ----
+// A share grant lives on the SYNC RELAY: an explicit path list and/or a
+// version snapshot, addressed to another relay account by email. The grant
+// side gets back a copyable share code (dohc-share:<shareId>:<relayUrl>);
+// the receive side opens it as a read-only shared view workspace.
+
+export const RelayShareSelector = z.object({
+  paths: z.array(PATH_STRING).max(100),
+  versionId: z.string().min(1).max(128).nullable(),
+});
+export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
+
+export const RelayShareGrantedRow = z.object({
+  shareId: SHARE_ID,
+  // The relay-side workspace id (the remote identity, not necessarily a
+  // local registry id).
+  workspaceId: z.string().min(1).max(256),
+  // null for a PENDING email invite (an addressed email that has no dohc
+  // account yet); the recipientEmail carries who it was shared with (PR 18).
+  recipientUserId: z.string().min(1).max(256).nullable(),
+  recipientEmail: EMAIL_STRING.nullable(),
+  selector: RelayShareSelector,
+  createdAtMs: z.number().int().nonnegative(),
+  revokedAtMs: z.number().int().nonnegative().nullable(),
+  shareCode: z.string().min(1).max(4096),
+});
+export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
+
+export const ListRelaySharesResult = z.object({
+  granted: z.array(RelayShareGrantedRow).max(1000),
+});
+export type ListRelaySharesResult = z.infer<typeof ListRelaySharesResult>;
+
+export const CreateRelaySharePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  recipientEmail: EMAIL_STRING,
+  paths: z.array(PATH_STRING).min(1).max(100).optional(),
+  versionId: z.string().min(1).max(128).optional(),
+});
+export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
+
+export const CreateRelayShareResult = z.object({
+  shareId: SHARE_ID,
+  shareCode: z.string().min(1).max(4096),
+  recipientEmail: EMAIL_STRING,
+});
+export type CreateRelayShareResult = z.infer<typeof CreateRelayShareResult>;
+
+export const RevokeRelaySharePayload = z.object({
+  shareId: SHARE_ID,
+});
+export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
+
+export const OpenSharedViewPayload = z.object({
+  shareCode: z.string().min(1).max(4096),
+  rootPath: PATH_STRING,
+});
+export type OpenSharedViewPayload = z.infer<typeof OpenSharedViewPayload>;
+
+export const OpenSharedViewResult = z.object({
+  workspace: WorkspaceSummary,
+});
+export type OpenSharedViewResult = z.infer<typeof OpenSharedViewResult>;
+
+export const RefreshSharedViewPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
+
+export const RefreshSharedViewResult = z.object({
+  // "ended" means the granter revoked the share: the local view stays
+  // readable but stops refreshing, and the UI says so honestly.
+  status: z.enum(["updated", "unchanged", "ended"]),
+  changedPaths: z.number().int().nonnegative(),
+});
+export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
+
 // Local agent integration (Phase 11). An agent run is a LOCAL concept: a small
 // record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
 // the managed MCP stdio child for the workspace and sets the watcher's
@@ -1708,6 +1795,13 @@ export interface DohcDesktopBridge {
   ): Promise<CreateWorkspaceInviteResult>;
   revokeWorkspaceInvite(payload: RevokeWorkspaceInvitePayload): Promise<void>;
   collabToken(payload: CollabTokenPayload): Promise<CollabTokenResult>;
+  // Relay shares (PR 18): grant side.
+  createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
+  listRelayShares(): Promise<ListRelaySharesResult>;
+  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  // Relay shares (PR 18): receive side — read-only shared views.
+  openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
+  refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
   // flag: for unflagged workspaces every call rejects.

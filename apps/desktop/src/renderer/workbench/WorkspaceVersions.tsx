@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw } from "lucide-react";
+import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -65,6 +65,9 @@ export function VersionMenu(props: {
   // review card switches back to Main) so the selector re-reads the active
   // version instead of showing a stale name.
   refreshKey?: number;
+  // "Share this version…" (PR 18): present only when the shell can open the
+  // share dialog (synced, non-shared-view workspaces).
+  onShareVersion?: (version: { id: string; name: string }) => void;
 }) {
   const { workspaceId } = props;
   const [snapshot, setSnapshot] = useState<WorkspaceVersionsSnapshot | null>(null);
@@ -343,6 +346,27 @@ export function VersionMenu(props: {
               </span>
               Try in a version…
             </button>
+
+            {props.onShareVersion ? (
+              <button
+                type="button"
+                role="menuitem"
+                data-testid="version-share"
+                onClick={() => {
+                  closeMenu(false);
+                  props.onShareVersion?.({
+                    id: active?.id ?? "main",
+                    name: activeName,
+                  });
+                }}
+                className={MENU_ITEM_CLASS}
+              >
+                <span className="grid w-4 shrink-0 place-items-center">
+                  <Share2 size={13} aria-hidden />
+                </span>
+                Share this version…
+              </button>
+            ) : null}
 
             {newName === null ? (
               <button

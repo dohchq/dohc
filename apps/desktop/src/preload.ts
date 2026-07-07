@@ -144,6 +144,11 @@ const bridge: DohcDesktopBridge = {
   revokeWorkspaceInvite: (payload) =>
     ipcRenderer.invoke(CHANNELS.revokeWorkspaceInvite, payload),
   collabToken: (payload) => ipcRenderer.invoke(CHANNELS.collabToken, payload),
+  createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
+  listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
+  revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
+  openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
+  refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
   listWorkspaceVersions: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceVersions, payload),

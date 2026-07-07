@@ -265,6 +265,20 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     revokeWorkspaceInvite: vi.fn(async () => undefined),
     collabToken: vi.fn(async () => ({ available: false as const })),
+    createRelayShare: vi.fn(async () => ({
+      shareId: "relay-share-1",
+      shareCode: "dohc-share:relay-share-1:http://relay.test",
+      recipientEmail: "friend@dohc.test",
+    })),
+    listRelayShares: vi.fn(async () => ({ granted: [] })),
+    revokeRelayShare: vi.fn(async () => undefined),
+    openSharedView: vi.fn(async () => {
+      throw new Error("not used in shell tests");
+    }),
+    refreshSharedView: vi.fn(async () => ({
+      status: "unchanged" as const,
+      changedPaths: 0,
+    })),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
       activityCallback = callback;
       return () => {
@@ -430,7 +444,7 @@ describe("file-open-start marking", () => {
 });
 
 describe("active file sharing", () => {
-  it("opens the share dialog for the active inspector path", async () => {
+  it("opens the relay share dialog for the active inspector path and returns a code", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -441,9 +455,16 @@ describe("active file sharing", () => {
 
     const dialog = await screen.findByTestId("share-dialog");
     expect(within(dialog).getByText("a.md")).toBeTruthy();
-    expect(await within(dialog).findByText("Only you have access.")).toBeTruthy();
-    expect(bridge.listWorkspaceShares).toHaveBeenCalledWith({
+
+    await user.type(within(dialog).getByTestId("share-email"), "friend@dohc.test");
+    await user.click(within(dialog).getByTestId("share-create"));
+
+    const codeElement = await within(dialog).findByTestId("share-code");
+    expect(codeElement.textContent).toBe("dohc-share:relay-share-1:http://relay.test");
+    expect(bridge.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
+      recipientEmail: "friend@dohc.test",
+      paths: ["a.md"],
     });
   });
 });

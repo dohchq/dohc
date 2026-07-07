@@ -46,6 +46,22 @@ export interface KeyEnvelopeHistoryRow {
   replacedBySha256: string;
 }
 
+export interface SyncRelayShareRow {
+  shareId: string;
+  workspaceId: string;
+  granterUserId: string;
+  // null for a PENDING email invite: the granter addressed an email that has
+  // no dohc account yet. It is claimed (recipient_user_id filled in) the first
+  // time that account touches the relay (see claimPendingSharesForEmail).
+  recipientUserId: string | null;
+  // Set only for a pending email invite; cleared once claimed.
+  recipientEmail: string | null;
+  // Validated ShareSelector JSON (shareFilter.ts owns the shape).
+  selectorJson: string;
+  createdAtMs: number;
+  revokedAtMs: number | null;
+}
+
 export interface SyncRelayStorage {
   close(): void;
   claimWorkspace(input: {
@@ -83,6 +99,29 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  // PR 18 share grants. Shares are append-only rows; revocation stamps
+  // revoked_at_ms instead of deleting, so a grant leaves an audit trail.
+  createShare(input: Omit<SyncRelayShareRow, "revokedAtMs">): void;
+  // Claims any pending email invites addressed to `email` for `userId`,
+  // filling recipient_user_id and clearing recipient_email. Idempotent; the
+  // email match is exact on the normalized (lowercased) address. Returns the
+  // number of rows claimed. This is the lazy claim path: an invited account
+  // becomes a real recipient the first time it authenticates to the relay.
+  claimPendingSharesForEmail(email: string, userId: string): number;
+  getShare(shareId: string): SyncRelayShareRow | null;
+  listSharesGrantedBy(granterUserId: string): SyncRelayShareRow[];
+  // Received listings exclude revoked shares entirely: after revocation the
+  // recipient must not be able to read even the share's metadata (paths,
+  // version names) — a revoked share is indistinguishable from one that
+  // never existed.
+  listSharesReceivedBy(recipientUserId: string): SyncRelayShareRow[];
+  // Idempotent; returns false only when the share does not exist.
+  revokeShare(shareId: string, revokedAtMs: number): boolean;
+  // Candidate rows for the shared-blob allowlist: every log row whose payload
+  // MIGHT reference the given sha256 (LIKE pre-filter; the share filter makes
+  // the actual decision). sha256 is validated hex upstream, so it cannot
+  // carry LIKE wildcards.
+  listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
 }
 
 interface SqliteRunResult {
@@ -179,6 +218,32 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       );
       CREATE INDEX IF NOT EXISTS idx_sync_relay_key_envelope_history
         ON sync_relay_key_envelope_history(workspace_id, history_seq);
+
+      -- PR 18 share grants: one row per grant. Revocation stamps
+      -- revoked_at_ms (rows are never deleted while the workspace lives).
+      -- recipient_user_id is NULL for a pending email invite (an email with
+      -- no dohc account yet); recipient_email holds the addressed email until
+      -- the invite is claimed. Exactly one of the two identifies the
+      -- recipient at any time.
+      CREATE TABLE IF NOT EXISTS sync_relay_shares (
+        share_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        granter_user_id TEXT NOT NULL,
+        recipient_user_id TEXT,
+        recipient_email TEXT,
+        selector_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        revoked_at_ms INTEGER,
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_granter
+        ON sync_relay_shares(granter_user_id, created_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient
+        ON sync_relay_shares(recipient_user_id, created_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
+        ON sync_relay_shares(recipient_email, created_at_ms);
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -483,6 +548,112 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
+  createShare(input: Omit<SyncRelayShareRow, "revokedAtMs">): void {
+    this.db
+      .prepare(
+        `INSERT INTO sync_relay_shares (
+          share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
+          selector_json, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.shareId,
+        input.workspaceId,
+        input.granterUserId,
+        input.recipientUserId,
+        input.recipientEmail,
+        input.selectorJson,
+        Math.trunc(input.createdAtMs),
+      );
+  }
+
+  claimPendingSharesForEmail(email: string, userId: string): number {
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return 0;
+    const result = this.db
+      .prepare(
+        `UPDATE sync_relay_shares
+         SET recipient_user_id = ?, recipient_email = NULL
+         WHERE recipient_user_id IS NULL AND recipient_email = ?`,
+      )
+      .run(userId, normalized);
+    return Number(result.changes ?? 0);
+  }
+
+  getShare(shareId: string): SyncRelayShareRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
+                selector_json, created_at_ms, revoked_at_ms
+         FROM sync_relay_shares WHERE share_id = ?`,
+      )
+      .get(shareId);
+    return row ? rowToShareRow(row) : null;
+  }
+
+  listSharesGrantedBy(granterUserId: string): SyncRelayShareRow[] {
+    return this.db
+      .prepare(
+        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
+                selector_json, created_at_ms, revoked_at_ms
+         FROM sync_relay_shares
+         WHERE granter_user_id = ?
+         ORDER BY created_at_ms DESC, share_id`,
+      )
+      .all(granterUserId)
+      .map(rowToShareRow);
+  }
+
+  listSharesReceivedBy(recipientUserId: string): SyncRelayShareRow[] {
+    return this.db
+      .prepare(
+        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
+                selector_json, created_at_ms, revoked_at_ms
+         FROM sync_relay_shares
+         WHERE recipient_user_id = ? AND revoked_at_ms IS NULL
+         ORDER BY created_at_ms DESC, share_id`,
+      )
+      .all(recipientUserId)
+      .map(rowToShareRow);
+  }
+
+  revokeShare(shareId: string, revokedAtMs: number): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db
+        .prepare("SELECT revoked_at_ms FROM sync_relay_shares WHERE share_id = ?")
+        .get(shareId);
+      if (existing === undefined) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      if (existing.revoked_at_ms === null || existing.revoked_at_ms === undefined) {
+        this.db
+          .prepare("UPDATE sync_relay_shares SET revoked_at_ms = ? WHERE share_id = ?")
+          .run(Math.trunc(revokedAtMs), shareId);
+      }
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[] {
+    return this.db
+      .prepare(
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+         FROM sync_relay_log
+         WHERE workspace_id = ? AND payload_json LIKE ?
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${sha256}%`)
+      .map(rowToLogRow);
+  }
+
   fetchLogPage(input: {
     workspaceId: string;
     sinceRelaySeq: number;
@@ -509,6 +680,28 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
 function sha256HexUtf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
+  return {
+    shareId: String(row.share_id),
+    workspaceId: String(row.workspace_id),
+    granterUserId: String(row.granter_user_id),
+    recipientUserId:
+      row.recipient_user_id === null || row.recipient_user_id === undefined
+        ? null
+        : String(row.recipient_user_id),
+    recipientEmail:
+      row.recipient_email === null || row.recipient_email === undefined
+        ? null
+        : String(row.recipient_email),
+    selectorJson: String(row.selector_json),
+    createdAtMs: Number(row.created_at_ms),
+    revokedAtMs:
+      row.revoked_at_ms === null || row.revoked_at_ms === undefined
+        ? null
+        : Number(row.revoked_at_ms),
+  };
 }
 
 function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {

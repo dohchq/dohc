@@ -2,7 +2,11 @@ import { app } from "electron";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { createRegistryStore, type RegistryEntry } from "./registryStore";
+import {
+  createRegistryStore,
+  type RegistryEntry,
+  type ShareViewIdentity,
+} from "./registryStore";
 
 // Electron wiring over the pure registry store. The registry lives in
 // userData; in test mode it lives under DOHC_TEST_HOME so E2E runs are
@@ -57,4 +61,11 @@ export function setWorkspaceRemote(
   remote: { serverUrl: string; remoteWorkspaceId: string },
 ): void {
   store().setRemote(workspaceId, remote);
+}
+
+export function setWorkspaceShareView(
+  workspaceId: string,
+  shareView: ShareViewIdentity,
+): void {
+  store().setShareView(workspaceId, shareView);
 }

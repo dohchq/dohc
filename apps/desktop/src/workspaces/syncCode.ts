@@ -89,3 +89,55 @@ export function relayUrlsMatch(left: string, right: string): boolean {
   const normalizedRight = normalizeRelayUrl(right);
   return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }
+
+// The copyable "share code" (PR 18) — the receive handle for an external
+// share grant, same construction and canonicalization rules as the sync
+// code above:
+//
+//   dohc-share:<shareId>:<relayUrl>
+//
+// Share ids are relay-minted UUIDs (colon-free, lowercase hex + hyphens), so
+// the same first-two-colons split is unambiguous, and the same security note
+// applies: the relay URL in a PASTED code is untrusted input — the open-share
+// flow only checks it against the relay the user is already signed in to.
+
+const SHARE_CODE_PREFIX = "dohc-share";
+const MAX_SHARE_ID_LENGTH = 128;
+
+export interface ShareCodeParts {
+  shareId: string;
+  relayUrl: string;
+}
+
+function isValidShareId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_SHARE_ID_LENGTH &&
+    /^[a-z0-9][a-z0-9-]*$/u.test(value)
+  );
+}
+
+export function buildShareCode(parts: ShareCodeParts): string {
+  if (!isValidShareId(parts.shareId)) {
+    throw new Error("Share id cannot be encoded as a share code.");
+  }
+  const relayUrl = normalizeRelayUrl(parts.relayUrl);
+  if (relayUrl === null) {
+    throw new Error("Relay URL cannot be encoded as a share code.");
+  }
+  return `${SHARE_CODE_PREFIX}:${parts.shareId}:${relayUrl}`;
+}
+
+// Returns null for anything that is not a well-formed share code — the
+// caller owns the product-voiced error message.
+export function parseShareCode(code: string): ShareCodeParts | null {
+  const trimmed = code.trim();
+  if (!trimmed.startsWith(`${SHARE_CODE_PREFIX}:`)) return null;
+  const rest = trimmed.slice(SHARE_CODE_PREFIX.length + 1);
+  const separator = rest.indexOf(":");
+  if (separator <= 0) return null;
+  const shareId = rest.slice(0, separator);
+  const relayUrl = normalizeRelayUrl(rest.slice(separator + 1));
+  if (!isValidShareId(shareId) || relayUrl === null) return null;
+  return { shareId, relayUrl };
+}

@@ -17690,3 +17690,325 @@ Verification (all green, unsandboxed): engine 381 (373 + 8), desktop 944,
 relay 23 (22 + 1, all 8 HTTP integration tests executed live including the
 two-machine passphrase round-trip and the two-direction byte-walk), MCP 76,
 repo-wide typecheck, git diff --check, docs link checker.
+
+## PR 18 - External Shares On The Rebuilt Cloud (Relay Share Grants)
+
+Status: Complete (committed, not pushed; pre-merge gate pending)
+Branch: codex/think-bigger-pr18-shares
+Worktree: ../dohc-pr18-shares
+Implementation workstream, if used: PR-18 shares lane (Wave 4)
+PR Link: pending
+Date started: 2026-07-07
+Date completed: 2026-07-07
+
+### Scope
+
+Shares rebuilt on the RELAY (engine-native cloud), per the Plan Completion
+Map — not on the legacy workspace-api stack. The legacy share/invite/member
+IPC + ShareDialog remain in the tree but are UNWIRED from the shell (they
+retire with WS-H legacy retirement).
+
+- [x] Relay share grants: `sync_relay_shares` (share id, workspace,
+      granter, recipient, selector JSON, createdAt, revokedAt nullable);
+      routes: `POST /sync/:ws/shares` (owner-only), `GET /sync/shares`
+      (granted + received listings), `GET /sync/shares/:id` (recipient
+      metadata), `POST /sync/shares/:id/revoke` (granter-only, idempotent),
+      `GET /sync/shares/:id/log` (filtered since-cursor fetch),
+      `GET /sync/shares/:id/blobs/:sha256` (allowlisted blob fetch).
+      Recipient addressing by user id or email; email resolution against
+      Better Auth's user table in production, `<user>@dohc.test` in the
+      test-auth seam. Workspace id `shares` reserved (route namespace).
+- [x] Server-side filter as THE security boundary
+      (`services/sync-relay/src/shareFilter.ts`): strict fail-closed
+      allowlist — `moment.append` (target version match + EVERY referenced
+      path inside the selector + engine-tracked), `version.create` for the
+      shared version with forkSnapshots REDACTED to the selector,
+      `workspace.init` served with an empty payload. Everything else
+      (chats, conflicts, secret ops, unknown kinds, malformed payloads) is
+      excluded. Blob access requires reachability through an allowed op.
+      Every recipient-route denial (absent share, revoked, not-recipient,
+      unshared path/blob, granter probing recipient routes) is the
+      byte-identical generic 404.
+- [x] Secrets are structurally unshareable — TRIPLE gate: (1) grant-time
+      selector validation refuses secret-classified paths (shared
+      classifier `classifyEngineFilePath` via the new
+      `@dohc/workspace-engine/enginePathFloor` subpath export, including
+      percent-encoded disguises); (2) the per-op filter re-classifies every
+      path and denies all `secret.*` op kinds outright; (3) the recipient
+      client re-classifies before replaying (a misbehaving relay cannot
+      plant secret or traversal paths into the local view). No shared keys
+      route exists — the recipient can never fetch the key envelope through
+      a share.
+- [x] Live-follow read-only chosen (documented in shareFilter.ts): the
+      recipient reuses since-cursor fetch with the server-side filter, so
+      granter edits arrive on refresh; a point-in-time snapshot format was
+      rejected as a parallel pipeline. Cursor advances over filtered-out
+      rows so pagination cannot stall.
+- [x] Recipient client (`packages/workspace-engine/src/syncShareView.ts`):
+      a filtered stream has per-origin seq gaps by construction and
+      `applyReplicationOp` fails closed on gaps — so a shared view is NOT a
+      sync replica. Instead allowed ops REPLAY as ordinary local engine
+      writes into a private store (files on the view's main, history
+      moments with the ops' original actor-neutral metadata, renames as
+      delete+write, version-share fork snapshots as seed writes).
+      Content-compared replay makes crash-retry idempotent; commitCursor
+      after materialization mirrors pullWorkspaceFromRelay's contract.
+- [x] Desktop grant side: "Share…" on files/folders (explorer context
+      menu, main-owned; offered only on synced non-shared-view workspaces)
+      and on the file inspector's share button; "Share this version…" in
+      the version menu; RelayShareDialog → recipient email → share code
+      `dohc-share:<shareId>:<relayUrl>` (same canonicalization module as
+      sync codes — buildShareCode/parseShareCode in syncCode.ts);
+      "Shared by me" management list with end-share + copy-code under
+      Settings → Cloud.
+- [x] Desktop receive side: "Open a share someone sent you" on first-run
+      and "Open a share…" in the workspace switcher; signed-in gate;
+      relay-URL match gate (token never sent to a pasted URL — same rule
+      as join); pre-flight share fetch BEFORE any local state; empty-folder
+      requirement; full rollback on a failed first pull. The shared view is
+      a registry entry with `shareView { shareId, granterEmail, ended }`:
+      read-only banner with Refresh, writes refused at the IPC boundary
+      ("This is a shared view — ask <granter> for changes."), reduced
+      explorer menu, no engine capture/watcher, no push ever. Revocation:
+      next refresh surfaces "This share was ended…", persists `ended`, and
+      the local copy stays readable but stops refreshing.
+
+### Files Changed
+
+- services/sync-relay/src/shareFilter.ts (new: selector validation + op
+  filter + blob allowlist)
+- services/sync-relay/src/storage.ts (shares table + share methods +
+  listLogRowsReferencing)
+- services/sync-relay/src/server.ts (share routes, reserved workspace id,
+  resolveUserIdByEmail/lookupUserEmail seams)
+- services/sync-relay/src/main.ts (email lookup wiring: pg in production,
+  @dohc.test mapping in the test seam)
+- services/sync-relay/package.json (workspace-core/engine as runtime deps)
+- packages/workspace-engine/src/syncShareView.ts (new: recipient client)
+- packages/workspace-engine/src/index.ts, package.json (exports incl.
+  ./enginePathFloor subpath)
+- apps/desktop/src/workspaces/syncCode.ts (share codes)
+- apps/desktop/src/workspaces/sharedView.ts (new: refresh + disk
+  materialization with containment)
+- apps/desktop/src/workspaces/registryStore.ts, WorkspaceRegistry.ts
+  (shareView identity)
+- apps/desktop/src/ipc/channels.ts ("share" explorer command + 5 channels)
+- apps/desktop/src/ipc/bridgeContract.ts (relay-share schemas,
+  WorkspaceSummary.shareView)
+- apps/desktop/src/preload.ts (5 bridge methods)
+- apps/desktop/src/main.ts (createRelayShare/listRelayShares/
+  revokeRelayShare/openSharedView/refreshSharedView handlers,
+  assertWritableWorkspace gate on all 8 file-mutating handlers, shared-view
+  explorer menu, capture disabled for shared views)
+- apps/desktop/src/renderer/RelayShareDialog.tsx, OpenSharedView.tsx,
+  settings/SharedByMeList.tsx (new)
+- apps/desktop/src/renderer/DesktopWorkspaceShell.tsx (share target
+  state, shared-view banner + refresh, read-only wiring, switcher overlay)
+- apps/desktop/src/renderer/DesktopFirstRun.tsx, Titlebar.tsx,
+  workbench/Explorer.tsx, workbench/WorkspaceVersions.tsx,
+  FileInspector.tsx (readOnly prop), settings/SettingsDialog.tsx
+
+### Tests Added Or Updated
+
+- services/sync-relay/src/shareFilter.test.ts (14): selector validation
+  (secret/encoded-secret/traversal/absolute/reserved refusals, caps,
+  dedupe), op filter allow/deny matrix incl. prefix look-alikes
+  ("docs-private" vs "docs"), boundary-crossing renames, poisoned-selector
+  defense, every secret/chat/conflict/unknown kind denied, forkSnapshots
+  redaction, garbage payloads fail closed, payload-path traversal.
+- services/sync-relay/src/shares.test.ts (9, adversarial): create/list
+  round trip (recipient never sees the workspace id), grant-time refusals
+  (secret_path incl. encoded, invalid_path, empty_selector, self-share,
+  recipient_not_found), non-owner create denial byte-identical to absent
+  workspace, recipient log filtering with byte-identical denials for
+  stranger AND granter on recipient routes + 401 before storage, shared
+  blob allowlist (unshared and secret-ciphertext hashes byte-identical to
+  unknown hashes, stranger denied on an allowed hash), revocation (
+  recipient-cannot-revoke, idempotent, all recipient routes byte-identical
+  404 after, listings updated), version-share redaction, pagination
+  cursor advance over filtered rows, reserved "shares" workspace id.
+- packages/workspace-engine/src/syncShareView.test.ts (7): metadata fetch
+  + typed ended/unauthorized errors, replay + live-follow refresh +
+  original-metadata history moments, idempotent crash-retry, rename as
+  delete+write, version-share seeding, misbehaving-relay secret/traversal
+  defense (blob bytes never even requested), revocation leaves local state.
+- apps/desktop: sharedView.test.ts (2), syncCode.test.ts (+2 share-code),
+  registryStore.test.ts (+1 shareView persistence), RelayShareDialog (3),
+  OpenSharedView (4), SharedByMeList (3), DesktopWorkspaceShell share test
+  updated to the relay dialog.
+- apps/desktop/e2e/workspace-shares.spec.ts (2): grant side (explorer
+  Share… → code → Settings management → end → recipient loses access
+  byte-identically) and the full receive loop (grant → open → browse/search
+  → IPC write refusal with honest copy → granter edits → refresh sees it →
+  revoke → honest end notice, local copy stays readable). Two real relay
+  accounts through the test-auth seam (bearer `test:<user>`, emails
+  `<user>@dohc.test`); the granter is a headless engine store (0P-C harness
+  pattern).
+
+### Commands Run
+
+```bash
+pnpm --filter @dohc/sync-relay test        # 46 passed (was 23)
+pnpm --filter @dohc/sync-relay typecheck
+pnpm --filter @dohc/workspace-engine test  # 388 passed (was 381)
+pnpm --filter @dohc/workspace-engine typecheck
+pnpm --filter @dohc/desktop test           # 959 passed (was 944)
+pnpm --filter @dohc/desktop typecheck
+pnpm --filter @dohc/mcp test               # 76 passed (baseline held)
+cd apps/desktop && pnpm run build
+npx playwright test e2e/workspace-shares.spec.ts        # 2 passed
+npx playwright test e2e/workspace-sync-rejoin.spec.ts \
+  e2e/workspace-versions.spec.ts e2e/workspace-chats.spec.ts  # 9 passed
+node scripts/check-think-bigger-doc-links.mjs
+```
+
+### E2E / Visual / Manual QA
+
+- workspace-shares.spec.ts: both specs green against a real spawned relay
+  with two accounts (grant flow 2.7s, full receive loop 3.2s).
+- Regressions green: workspace-sync-rejoin (2), workspace-versions (4),
+  workspace-chats (3).
+- Visual QA: not run this round (calm-copy banner/dialog surfaces reuse
+  existing shell tokens); folded into the arc-gate sweep.
+
+### Phase 0 Decision Note Entry Template
+
+- Storage baseline: relay SQLite gains `sync_relay_shares` (lazy CREATE IF
+  NOT EXISTS; existing relay DBs upgrade in place). Recipient views use a
+  normal engine store fed by replayed writes.
+- Filesystem interposition: shared views materialize via plain contained
+  writes (no watcher/capture); refresh-driven.
+- Secret boundary: triple-gated (grant validation, per-op filter, client
+  re-classification); secret ops and ciphertext blobs never cross a share;
+  no shared key-envelope route exists.
+- Merge scope: none — shared views are read-only replays; recipient never
+  pushes and conflicts cannot arise.
+- Chat/file philosophy: chats deliberately excluded from shares (see
+  deferrals).
+- Rust kernel boundary: untouched.
+- Async workspace/request-token gating: share refresh serialized per
+  explicit user action; open-share rollback mirrors the join contract.
+- Unresolved blockers: none.
+- Approval/status: implemented per Plan Completion Map Wave 4; pre-merge
+  three-part gate (orchestrator re-run, CodeRabbit CLI, codex review)
+  pending in the main thread.
+
+### Local Agent CLI QA
+
+#### Pre-Edit Checks
+
+- Root `AGENTS.md` reviewed: yes (via CLAUDE.md redirect)
+- `apps/app/AGENTS.md` reviewed when working in `apps/app`: n/a (untouched)
+- `apps/web/AGENTS.md` reviewed when working in `apps/web`: n/a (untouched)
+- `apps/app/convex/_generated/ai/guidelines.md` reviewed when touching Convex: n/a (untouched)
+- Other required instructions reviewed: 0P sync design note, PR 18 plan
+  section, 0P-A..0P-D execution-log entries
+
+- `DOHC_TEST_AGENT_CLI`: not exercised (no agent-runtime surface changed)
+- Local agent result: n/a
+- Alternative local-agent result, if available: n/a
+- Transcript/artifact path: n/a
+- Secret redaction notes: no secrets in fixtures; test tokens are the
+  documented `test:` seam values
+
+### CodeRabbit
+
+- Status: not run in-lane; queued for the lane's three-part pre-merge gate
+  per the tightened 2026-07-06 rule (runs in parallel with the
+  orchestrator's verification in the main thread).
+- Findings: pending
+- Fixes: pending
+- Overrides: none
+- Override approval reference: n/a
+
+### Unresolved Findings
+
+- None in-lane; gate reviews pending.
+
+### Live Blockers And Overrides
+
+- Current unresolved blockers: none
+- Pending non-blocker overrides: none
+- Approved override references: n/a
+
+### Subagent Reviews
+
+- Architecture: folded into lane design (documented replay-not-replica
+  decision in syncShareView.ts)
+- Security: adversarial isolation suite is the in-lane security review
+  (byte-identical denials, secret triple gate, traversal/encoding attacks);
+  the plan's required security-subagent pass lands with the merge gate
+- QA: suites + E2E above
+- Accessibility: dialogs/menu items reuse existing keyboard-navigable
+  patterns (role=menuitem, labeled inputs)
+- Other: n/a
+
+### Security / Privacy Notes
+
+- The server-side filter is the boundary; the recipient's fetch can never
+  return ops/blobs outside the selector, and every denial is byte-identical
+  to nonexistence (no probing oracle for share ids, paths, or blob hashes).
+- The relay deliberately relaxes "never parses payloads" in ONE direction
+  for shares: it READS well-known path/version/hash fields and REDACTS one
+  field (forkSnapshots); unrecognized shapes are excluded, never passed.
+- Grant-side and receive-side token handling reuses the join flow's rule:
+  the bearer only ever goes to the relay the machine signed in with; pasted
+  codes are untrusted input.
+- Revoked shares vanish from the recipient's listings entirely (metadata
+  incl. path names stops being readable post-revocation).
+- Recipient email resolution reveals account existence to a granter typing
+  an email (deliberate, standard for share-by-email; recorded).
+- Received-share listings omit the granter's workspace id.
+
+### Performance Notes
+
+- Budget areas touched: relay log fetch (per-op JSON parse + filter on
+  shared-log pages only; owner paths unchanged), shared blob fetch (LIKE
+  scan over payload_json per blob request — O(log size), acceptable at
+  alpha, index/caching deferred), recipient replay (full history blob
+  fetch for shared paths).
+- Baseline profile: unchanged owner-path behavior; E2E timings above.
+- Budget pass/fail: pass (no regression on existing perf specs; chats perf
+  spec re-run green).
+- Regression risk: shared-log filtering is per-request CPU on the relay;
+  bounded by page size 500.
+- Follow-up required: blob-allowlist index if share fan-out grows.
+
+### Migration Notes
+
+- Relay DB: additive table + indexes via CREATE IF NOT EXISTS; no
+  migration needed. Engine DB: no schema change (share cursor reuses
+  sync_relay_cursors). Registry: additive optional `shareView` field.
+- Legacy workspace-api shares (atomPath/capability model) are no longer
+  reachable from the shell UI; handlers/dialog retire with WS-H Phase D.
+
+### Remaining Risk
+
+- Boundary-crossing renames (into/out of the selector) are excluded
+  fail-closed: the recipient's copy of a renamed-away file goes stale until
+  its next in-boundary write (documented in shareFilter.ts).
+- A crash between replay and cursor commit can duplicate history moments in
+  the recipient's PRIVATE view store on retry (state converges; bounded to
+  one delta; content-compare makes clean retries no-ops).
+- Recipient disk copies are plain files: a recipient can edit them with
+  external tools (their machine, their bytes); dohc refuses its own write
+  paths and a refresh re-materializes changed shared paths. Local edits to
+  paths the granter never touches again are not clobbered — acceptable and
+  honest for read-only-at-alpha.
+- The relay share filter duplicates knowledge of op payload shapes; a new
+  path-carrying op kind added to the engine is EXCLUDED by default (fail
+  closed — safe, but shares silently won't carry it until the filter
+  learns it).
+
+### Follow-Up / Deletion Conditions
+
+- Deferred (recorded per lane brief): shared CHANNELS / chat sharing (the
+  chat expansion's shared-channel model waits for the team wave);
+  write-back/collaborative shares; share expiry timers; public link
+  shares; share preview UI before grant; notification/search constraint
+  surfaces beyond the structural filter; multi-path picker UI (the dialog
+  shares the clicked file/folder — multiple grants compose).
+- Legacy share stack (ShareDialog.tsx, listWorkspaceShares/
+  createWorkspaceShare/revokeWorkspaceShare IPC + workspace-api routes)
+  deleted under WS-H legacy retirement Phase D.
+- Blob-allowlist performance work if usage grows (see Performance Notes).

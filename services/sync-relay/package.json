@@ -15,11 +15,12 @@
   },
   "dependencies": {
     "@dohc/workspace-api": "workspace:*",
+    "@dohc/workspace-core": "workspace:*",
+    "@dohc/workspace-engine": "workspace:*",
     "better-auth": "^1.6.16",
     "pg": "^8.21.0"
   },
   "devDependencies": {
-    "@dohc/workspace-engine": "workspace:*",
     "@types/node": "^22.19.19",
     "@types/pg": "^8.20.0",
     "esbuild": "0.28.0",

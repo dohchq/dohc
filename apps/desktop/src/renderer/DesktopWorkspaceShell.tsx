@@ -3,6 +3,7 @@ import {
   CircleHelp,
   Cloud,
   ExternalLink,
+  Eye,
   FileArchive,
   FileText,
   History,
@@ -48,6 +49,7 @@ import {
 } from "./FileInspector";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
+import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
 import {
@@ -124,8 +126,8 @@ import {
 
 export type Workspace = WorkspaceSummary;
 
-const LazyShareDialog = lazy(() =>
-  import("./ShareDialog").then((mod) => ({ default: mod.ShareDialog })),
+const LazyRelayShareDialog = lazy(() =>
+  import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
 );
 const LazyImportExportDialog = lazy(() =>
   import("./ImportExportDialog").then((mod) => ({
@@ -786,11 +788,17 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
-  const [sharePath, setSharePath] = useState<string | null>(null);
+  // Relay-share dialog target (PR 18): a path (file/folder) or a version.
+  const [shareTarget, setShareTarget] = useState<{
+    path?: string;
+    versionId?: string;
+    versionName?: string;
+  } | null>(null);
   const [importExportOpen, setImportExportOpen] = useState(false);
   const [importExportPath, setImportExportPath] = useState<string | null>(null);
   const [importExportSelectionText, setImportExportSelectionText] = useState("");
   const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
+  const [openShareOpen, setOpenShareOpen] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
@@ -1811,6 +1819,39 @@ export function DesktopWorkspaceShell(props: {
     ? `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`
     : graphRefreshKey;
 
+  // Read-only shared view (PR 18): the workspace was received through a
+  // share grant. It refreshes on open and on demand, and every edit surface
+  // is disabled with honest copy.
+  const shareView = props.workspace.shareView ?? null;
+  const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
+  const [shareRefreshing, setShareRefreshing] = useState(false);
+  const refreshShareView = useCallback(async () => {
+    if (!shareView || shareViewEnded) return;
+    setShareRefreshing(true);
+    try {
+      const outcome = await bridge().refreshSharedView({ workspaceId });
+      if (outcome.status === "ended") {
+        setShareViewEnded(true);
+        return;
+      }
+      if (outcome.changedPaths > 0) {
+        await refreshFiles();
+        // Re-read open editors: the shared view's files changed on disk.
+        setVersionEpoch((epoch) => epoch + 1);
+      }
+    } catch (error) {
+      reportShellError("Couldn't refresh the shared view.", error);
+    } finally {
+      setShareRefreshing(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareView?.shareId, shareViewEnded, workspaceId]);
+  useEffect(() => {
+    // One automatic refresh when a shared view opens; afterwards on demand.
+    if (shareView && !shareViewEnded) void refreshShareView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
   const explorerView = (
     <>
       <Explorer
@@ -1836,6 +1877,7 @@ export function DesktopWorkspaceShell(props: {
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={(droppedPaths) => void importFiles(droppedPaths)}
         onImportExport={openImportExportDialog}
+        onShare={(path) => setShareTarget({ path })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
             reportShellError("Could not refresh workspace files.", error),
@@ -1878,6 +1920,7 @@ export function DesktopWorkspaceShell(props: {
         workspace={props.workspace}
         workspaces={props.workspaces}
         onSwitchWorkspace={props.onSwitchWorkspace}
+        onOpenShare={() => setOpenShareOpen(true)}
         onQuickOpen={() => setQuickOpenOpen(true)}
       />
       {shellError ? (
@@ -1894,6 +1937,38 @@ export function DesktopWorkspaceShell(props: {
           >
             <X size={12} aria-hidden />
           </button>
+        </div>
+      ) : null}
+      {shareView ? (
+        <div
+          data-testid="shared-view-banner"
+          data-ended={shareViewEnded || undefined}
+          className={`flex min-h-8 items-center gap-2 border-b border-line px-3 text-[12px] ${
+            shareViewEnded ? "bg-warning/10 text-warning" : "bg-panel-2 text-muted"
+          }`}
+        >
+          <Eye size={12} aria-hidden className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate">
+            {shareViewEnded
+              ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
+              : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+          </span>
+          {!shareViewEnded ? (
+            <button
+              type="button"
+              data-testid="shared-view-refresh"
+              disabled={shareRefreshing}
+              onClick={() => void refreshShareView()}
+              className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+            >
+              <RefreshCw
+                size={11}
+                aria-hidden
+                className={shareRefreshing ? "animate-spin" : undefined}
+              />
+              {shareRefreshing ? "Refreshing…" : "Refresh"}
+            </button>
+          ) : null}
         </div>
       ) : null}
       <div className="flex min-h-0 flex-1">
@@ -2051,6 +2126,15 @@ export function DesktopWorkspaceShell(props: {
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
                   onError={(message) => setShellError(message)}
+                  {...(shareView
+                    ? {}
+                    : {
+                        onShareVersion: (version: { id: string; name: string }) =>
+                          setShareTarget({
+                            versionId: version.id,
+                            versionName: version.name,
+                          }),
+                      })}
                   // versionEpoch bumps whenever ANY surface changed version
                   // state (the 0N-2 review card switches back to Main outside
                   // this menu) — the selector re-reads instead of going stale.
@@ -2172,7 +2256,10 @@ export function DesktopWorkspaceShell(props: {
                 onSaveStateChange={onSaveStateChange}
                 registerDraftFlush={registerDraftFlush}
                 knownMarkdownFiles={markdownWikilinkFiles}
-                onSharePath={setSharePath}
+                readOnly={!!shareView}
+                {...(shareView
+                  ? {}
+                  : { onSharePath: (path: string) => setShareTarget({ path }) })}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
@@ -2393,8 +2480,8 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
-      {sharePath ? (
-        <Overlay onClose={() => setSharePath(null)}>
+      {shareTarget ? (
+        <Overlay onClose={() => setShareTarget(null)}>
           <Suspense
             fallback={
               <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
@@ -2402,10 +2489,10 @@ export function DesktopWorkspaceShell(props: {
               </div>
             }
           >
-            <LazyShareDialog
+            <LazyRelayShareDialog
               workspaceId={workspaceId}
-              path={sharePath}
-              onClose={() => setSharePath(null)}
+              target={shareTarget}
+              onClose={() => setShareTarget(null)}
             />
           </Suspense>
         </Overlay>
@@ -2431,6 +2518,17 @@ export function DesktopWorkspaceShell(props: {
               onClose={() => setImportExportOpen(false)}
             />
           </Suspense>
+        </Overlay>
+      ) : null}
+      {openShareOpen ? (
+        <Overlay onClose={() => setOpenShareOpen(false)}>
+          <OpenSharedView
+            onWorkspaceReady={(workspace) => {
+              setOpenShareOpen(false);
+              props.onSwitchWorkspace(workspace);
+            }}
+            onBack={() => setOpenShareOpen(false)}
+          />
         </Overlay>
       ) : null}
       {workspaceManagementOpen ? (

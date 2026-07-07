@@ -77,3 +77,32 @@ describe("syncCode", () => {
     expect(relayUrlsMatch("not-a-url", "not-a-url")).toBe(false);
   });
 });
+
+describe("shareCode", () => {
+  const SHARE_ID = "0f6a2d1c-9d51-4a7e-8f75-1234567890ab";
+
+  it("round-trips a share id and relay URL with the same canonicalization as sync codes", async () => {
+    const { buildShareCode, parseShareCode } = await import("./syncCode");
+    const code = buildShareCode({ shareId: SHARE_ID, relayUrl: "HTTP://Relay.Test:1788/" });
+    expect(code).toBe(`dohc-share:${SHARE_ID}:http://relay.test:1788`);
+    expect(parseShareCode(code)).toEqual({
+      shareId: SHARE_ID,
+      relayUrl: "http://relay.test:1788",
+    });
+    expect(parseShareCode(`  ${code}  `)).toEqual(parseShareCode(code));
+  });
+
+  it("rejects malformed share codes and secret-bearing relay URLs", async () => {
+    const { buildShareCode, parseShareCode } = await import("./syncCode");
+    expect(parseShareCode("dohc-sync:ws:http://relay.test")).toBeNull();
+    expect(parseShareCode("dohc-share:")).toBeNull();
+    expect(parseShareCode("dohc-share:UPPER:http://relay.test")).toBeNull();
+    expect(parseShareCode(`dohc-share:${SHARE_ID}:file:///etc`)).toBeNull();
+    expect(parseShareCode(`dohc-share:${SHARE_ID}:https://user:pass@relay.test`)).toBeNull();
+    expect(parseShareCode(`dohc-share:${SHARE_ID}:https://relay.test?token=x`)).toBeNull();
+    expect(() => buildShareCode({ shareId: "has:colon", relayUrl: "http://x.test" })).toThrow();
+    expect(() =>
+      buildShareCode({ shareId: SHARE_ID, relayUrl: "https://relay.test#fragment" }),
+    ).toThrow();
+  });
+});
