@@ -12,6 +12,8 @@ import {
   createLinkedChatStore,
   createSecretFileStore,
   createVersionedTextStore,
+  createYDocEngineDriver,
+  type YDocSession,
   downloadKeyEnvelope,
   installWorkspaceDataKey,
   pullWorkspaceFromRelay,
@@ -519,6 +521,118 @@ describe("sync relay main process", () => {
         await cStore.close();
       }
     } finally {
+      await bStore.close();
+      await aStore.close();
+    }
+  });
+
+  it("replicates ydoc.update rich-doc edits through the real relay and bootstraps a fresh store", async (context) => {
+    const relayRoot = await tempRoot("relay-ydoc");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const relay = relayConnection(baseUrl);
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay });
+
+    const a = await tempRoot("ydoc-a");
+    const b = await tempRoot("ydoc-b");
+    const c = await tempRoot("ydoc-c");
+    let clock = 1000;
+    const aStore = createVersionedTextStore(a, { nowMs: () => (clock += 5) });
+    const bStore = createVersionedTextStore(b, { nowMs: () => (clock += 5) });
+    const aDriver = createYDocEngineDriver({ store: aStore, rootDir: a, persistClosedSessionState: true });
+    const richPath = "docs/rich.md";
+
+    // Play the editor: capture each Yjs update the doc emits and journal it via
+    // the driver's recordUpdate (which also journals the ydoc.update op).
+    const drive = async (session: YDocSession, insert: string): Promise<void> => {
+      const captured: Uint8Array[] = [];
+      const handler = (update: Uint8Array): void => {
+        captured.push(update);
+      };
+      session.doc.on("update", handler);
+      const text = session.doc.getText("plainText");
+      session.doc.transact(() => text.insert(text.length, insert));
+      session.doc.off("update", handler);
+      for (const update of captured) await session.recordUpdate(update);
+    };
+
+    try {
+      await aStore.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      // Non-journaling seed: the ONLY replication for this object is ydoc.update.
+      await aStore.writeProjectedTextFile!({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: richPath,
+        text: "seed\n",
+        metadata: { origin: "api" },
+      });
+      const session = await aDriver.openSession({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: richPath,
+        contentKind: "plaintext",
+      });
+      await drive(session, "hello through the relay\n");
+      await drive(session, "a second rich line\n");
+      await session.settle();
+      await session.close();
+      await aDriver.close();
+
+      // The object's replication is PURELY ydoc.update ops (no moment.append).
+      const kinds = replicationOps(a).map((operation) => operation.opKind);
+      expect(kinds.filter((k) => k === "ydoc.update").length).toBeGreaterThanOrEqual(3);
+      expect(kinds).not.toContain("moment.append");
+
+      // Converge A <-> B through the real relay.
+      await syncQuiescent(baseUrl, a, b);
+      const aMarkdown = await aStore.readTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: richPath,
+      });
+      const bMarkdown = await bStore.readTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: richPath,
+      });
+      expect(bMarkdown?.text).toBe(aMarkdown?.text);
+      expect(bMarkdown?.text).toContain("hello through the relay");
+      expect(bMarkdown?.text).toContain("a second rich line");
+
+      // Idempotent re-pull applies nothing new.
+      const again = await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });
+      await again.commitFetchCursor();
+      expect(again.applied).toBe(0);
+
+      // A brand-new third store bootstraps the whole rich doc from the relay's
+      // op history alone (workspace.init + base + deltas + update blobs).
+      await pullAndCommit({ rootDir: c, workspaceId: WORKSPACE_ID, relay });
+      const cStore = createVersionedTextStore(c);
+      try {
+        const cMarkdown = await cStore.readTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: richPath,
+        });
+        expect(cMarkdown?.text).toBe(aMarkdown?.text);
+      } finally {
+        await cStore.close();
+      }
+
+      // No conflict rows anywhere: the commutative op never opens P0D.
+      for (const root of [a, b, c]) {
+        expect(await conflictPaths(root)).toEqual(new Set());
+      }
+    } finally {
+      await aDriver.close().catch(() => {});
       await bStore.close();
       await aStore.close();
     }

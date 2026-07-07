@@ -1288,15 +1288,16 @@ function maybeCompactPeerEngineYDoc(
   ).run(headSeq, nowMs, workspaceId, versionId, objectId);
 }
 
-// Apply one remote ydoc.update into engine state and return the re-projected
-// markdown (the caller materializes it as a local, non-journaling settle).
-function applyYDocUpdateToEngine(
+// PHASE 1 of applying a remote ydoc.update: validate + reconstruct the CONVERGED
+// Y.Doc in memory (existing persisted state + the new update) and project it to
+// markdown. This does NOT write ydoc rows yet — the projection write must create
+// the file_object FIRST (ydoc_docs carries a FK to file_objects), so the caller
+// materializes the markdown, THEN persistYDocUpdate stores the CRDT rows.
+function projectYDocUpdate(
   db: SqliteDb,
   workspaceId: WorkspaceId,
   payload: YDocUpdatePayload,
-  actorOriginId: string,
-  nowMs: number,
-): { markdown: string; path: string; versionId: VersionId } {
+): { markdown: string; doc: Y.Doc } {
   // SECRET FLOOR (never a plaintext leak path): a secret-classified path must
   // never be opened/materialized as a replicated Y.Doc. Reject the op outright.
   if (classifyEngineFilePath(payload.path).kind === "secret") {
@@ -1305,14 +1306,35 @@ function applyYDocUpdateToEngine(
       `Refusing ydoc.update for secret-classified path ${payload.path}; secret files never replicate as plaintext Y.Docs.`,
     );
   }
-  const versionId = payload.versionId;
-  const objectId = payload.objectId;
   // The target version must exist locally (its workspace.init/version.create op
   // orders before this one). Same contract as applyRemoteMomentAppend.
-  requireWorkspaceVersionRow(db, workspaceId, versionId);
+  requireWorkspaceVersionRow(db, workspaceId, payload.versionId);
+  // The update bytes were hydrated into binary_blobs before this transaction
+  // (applySyncQueues / the caller's blob transport). Read + digest-verify them.
+  const update = readYDocUpdateBlobBytes(db, payload.updateBlobSha256);
+  // Reconstruct existing persisted state (empty for a from-scratch peer) and
+  // apply the new update in memory — Y.applyUpdate is commutative + idempotent.
+  const doc = reconstructEngineYDoc(db, workspaceId, payload.versionId, payload.objectId);
+  Y.applyUpdate(doc, update);
+  return { markdown: yDocToMarkdown(doc), doc };
+}
+
+// PHASE 2: persist the CRDT rows once the file_object exists (created by the
+// projection write between phase 1 and here). Appends the update to the per-doc
+// log, advances the local head, and bounds replay by compaction.
+function persistYDocUpdate(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: YDocUpdatePayload,
+  doc: Y.Doc,
+  actorOriginId: string,
+  nowMs: number,
+): void {
+  const versionId = payload.versionId;
+  const objectId = payload.objectId;
   const contentKind = payload.contentKind === "plaintext" ? "plaintext" : "richdoc";
-  // Ensure the driver marker (create it for a from-scratch peer that has never
-  // seen this rich doc — bootstrap). Never clobber an existing marker's heads.
+  // Ensure the driver marker (create it for a from-scratch peer that just had
+  // its file_object materialized). Never clobber an existing marker's heads.
   db.prepare(
     `INSERT INTO ydoc_docs
        (workspace_id, version_id, object_id, content_kind,
@@ -1320,9 +1342,6 @@ function applyYDocUpdateToEngine(
      VALUES (?, ?, ?, ?, 0, 0, ?)
      ON CONFLICT(workspace_id, version_id, object_id) DO NOTHING`,
   ).run(workspaceId, versionId, objectId, contentKind, nowMs);
-  // The update bytes were hydrated into binary_blobs before this transaction
-  // (applySyncQueues / the caller's blob transport). Read + digest-verify them.
-  readYDocUpdateBlobBytes(db, payload.updateBlobSha256);
   const headRow = db
     .prepare(
       `SELECT head_update_seq FROM ydoc_docs
@@ -1340,10 +1359,7 @@ function applyYDocUpdateToEngine(
     `UPDATE ydoc_docs SET head_update_seq = ?, updated_at_ms = ?
       WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
   ).run(seq, nowMs, workspaceId, versionId, objectId);
-  const doc = reconstructEngineYDoc(db, workspaceId, versionId, objectId);
-  const markdown = yDocToMarkdown(doc);
   maybeCompactPeerEngineYDoc(db, workspaceId, versionId, objectId, seq, doc, nowMs);
-  return { markdown, path: payload.path, versionId };
 }
 
 function snapshotContentKind(
@@ -3864,6 +3880,12 @@ function createVersionedTextStoreWithHooks(
     // collide two peers' independent settles into a P0D conflict. The moment +
     // snapshot + search index are still written (local history stays intact).
     suppressReplicationJournal?: boolean;
+    // WS-G2-C1: pin the object identity (cross-machine, from a ydoc.update
+    // payload) instead of minting a fresh local id, so the projected file and
+    // the ydoc_docs marker (FK -> file_objects) share the ORIGIN's object id on
+    // every peer. Only honored when creating a NEW object at this path.
+    objectId?: WorkspaceObjectId;
+    objectCreatedAtMs?: number;
   }): VersionedTextWriteResult {
     requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
     const before = selectSnapshotByPath(input.db, input.workspaceId, input.versionId, input.path);
@@ -3872,6 +3894,29 @@ function createVersionedTextStoreWithHooks(
 
     if (before) {
       object = requireFileObjectRow(input.db, input.workspaceId, before.objectId);
+    } else if (input.objectId !== undefined) {
+      // Pinned (replicated) identity. Reuse an existing same-workspace object
+      // row (a prior apply created it); reject a cross-workspace id collision;
+      // otherwise insert with the origin's id + creation time.
+      const existing = input.db
+        .prepare("SELECT workspace_id, created_at_ms FROM file_objects WHERE object_id = ?")
+        .get(input.objectId);
+      if (existing && existing.workspace_id !== input.workspaceId) {
+        rejectDuplicateId("object", input.objectId);
+      }
+      if (existing) {
+        object = {
+          id: input.objectId,
+          workspaceId: input.workspaceId,
+          createdAtMs: Number(existing.created_at_ms),
+        };
+      } else {
+        const createdAtMs = input.objectCreatedAtMs ?? recordedAtMs;
+        object = { id: input.objectId, workspaceId: input.workspaceId, createdAtMs };
+        input.db
+          .prepare("INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)")
+          .run(input.workspaceId, object.id, object.createdAtMs);
+      }
     } else {
       const objectId = createGeneratedId("object");
       const existing = input.db
@@ -5259,22 +5304,28 @@ function createVersionedTextStoreWithHooks(
             // re-projected markdown as a LOCAL, non-journaling settle so
             // file/search/history stay coherent WITHOUT double-replicating the
             // content (the ydoc.update stream is this object's sole channel).
-            const projection = applyYDocUpdateToEngine(
-              txDb,
-              workspaceId,
-              input.payload,
-              input.originId,
-              input.recordedAtMs,
-            );
+            const projection = projectYDocUpdate(txDb, workspaceId, input.payload);
+            // Materialize the projection FIRST — this creates/updates the
+            // file_object that ydoc_docs' FK requires — then persist the CRDT
+            // rows. The write is non-journaling (ydoc.update is the sole channel).
             writeTextFileInDb({
               db: txDb,
               workspaceId,
-              versionId: projection.versionId,
-              path: projection.path,
+              versionId: input.payload.versionId,
+              path: input.payload.path,
               text: projection.markdown,
               metadata: { origin: "sync" },
               suppressReplicationJournal: true,
+              objectId: input.payload.objectId,
             });
+            persistYDocUpdate(
+              txDb,
+              workspaceId,
+              input.payload,
+              projection.doc,
+              input.originId,
+              input.recordedAtMs,
+            );
             break;
           }
           case "version.rename":
