@@ -1,9 +1,9 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
-import { resolveSpawnCommand } from "../agents/JsonRpcTransport";
+import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
 
 export interface SiteLogEntry {
@@ -309,16 +309,15 @@ export async function startSiteDevServer(input: {
   const args = input.args ?? [];
   assertLoopbackOnlyDevServerCommand(input.command, args);
   const logs: SiteLogEntry[] = [];
+  const env = { ...process.env, ...(input.env ?? {}) };
   // Package-manager commands are .cmd shims on Windows and cannot be spawned
   // directly; resolveSpawnCommand is a no-op on other platforms.
-  const spawnSpec = resolveSpawnCommand(input.command, args);
+  const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
-    env: { ...process.env, ...(input.env ?? {}) },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
-    ...(spawnSpec.windowsVerbatimArguments
-      ? { windowsVerbatimArguments: true }
-      : {}),
+    windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
   child.unref();
 
@@ -326,20 +325,17 @@ export async function startSiteDevServer(input: {
   let stopped = false;
 
   return await new Promise<SiteProcessHandle>((resolve, reject) => {
-    let hardKillTimer: ReturnType<typeof setTimeout> | null = null;
     function clearTimers() {
       clearTimeout(failTimer);
-      if (hardKillTimer) clearTimeout(hardKillTimer);
     }
 
     const failTimer = setTimeout(() => {
       if (resolved) return;
       stopped = true;
-      void killChildTreeWin32(child);
-      child.kill("SIGTERM");
-      hardKillTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      }, BUILD_HARD_KILL_GRACE_MS);
+      // stopChild sequences the Windows tree kill BEFORE the wrapper signal;
+      // signalling first would let the taskkill race a dead wrapper pid and
+      // orphan the real dev server.
+      void stopChild(child);
       reject(new Error(`Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`));
     }, input.readyTimeoutMs ?? 15000);
 
@@ -380,22 +376,6 @@ export async function startSiteDevServer(input: {
         reject(new Error(`Site dev server exited before it was ready (code=${code}, signal=${signal}).`));
       }
     });
-  });
-}
-
-// On Windows a package-manager site command runs behind a cmd.exe shim, and
-// killing that wrapper leaves the real dev server alive — still bound to its
-// port, holding the site directory (blocking deletion) and the inherited
-// stdio pipes. Kill the whole tree there; POSIX keeps plain signals.
-function killChildTreeWin32(child: ChildProcess): Promise<boolean> {
-  if (process.platform !== "win32" || !child.pid) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    execFile(
-      "taskkill",
-      ["/pid", String(child.pid), "/T", "/F"],
-      { windowsHide: true },
-      (error) => resolve(!error),
-    );
   });
 }
 
@@ -461,38 +441,32 @@ export async function buildSite(input: {
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
   const logs: SiteLogEntry[] = [];
-  const spawnSpec = resolveSpawnCommand(input.command, args);
+  const env = { ...process.env, ...(input.env ?? {}) };
+  const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
-    env: { ...process.env, ...(input.env ?? {}) },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
-    ...(spawnSpec.windowsVerbatimArguments
-      ? { windowsVerbatimArguments: true }
-      : {}),
+    windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
 
   const exitCode = await new Promise<number | null>((resolve) => {
     let settled = false;
+    let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    let hardKillTimer: ReturnType<typeof setTimeout> | null = null;
     function finish(code: number | null) {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      if (hardKillTimer) clearTimeout(hardKillTimer);
       resolve(code);
     }
 
     timer = setTimeout(() => {
+      timedOut = true;
       pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
-      void killChildTreeWin32(child);
-      child.kill("SIGTERM");
-      hardKillTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGKILL");
-        }
-        finish(null);
-      }, BUILD_HARD_KILL_GRACE_MS);
+      // stopChild sequences the Windows tree kill BEFORE the wrapper signal
+      // and resolves once the child exits (or the kill grace lapses).
+      void stopChild(child).then(() => finish(null));
     }, timeoutMs);
     child.stdout.on("data", (chunk) => pushLog(logs, "stdout", String(chunk)));
     child.stderr.on("data", (chunk) => pushLog(logs, "stderr", String(chunk)));
@@ -501,7 +475,9 @@ export async function buildSite(input: {
       finish(null);
     });
     child.once("exit", (code) => {
-      finish(code);
+      // A timed-out build reports exitCode null regardless of how the kill
+      // is delivered (taskkill termination surfaces as a plain exit code).
+      finish(timedOut ? null : code);
     });
   });
 

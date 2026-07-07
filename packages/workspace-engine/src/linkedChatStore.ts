@@ -120,6 +120,7 @@ interface SqliteDb {
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
   close(): void;
+  readonly isOpen?: boolean;
 }
 
 interface SqliteModule {
@@ -721,7 +722,10 @@ export function createLinkedChatStore(
   let dbHandle: SqliteDb | null = null;
 
   function db(): SqliteDb {
-    if (!dbHandle) {
+    if (!dbHandle || dbHandle.isOpen === false) {
+      // A handle can be closed out from under the store (the test-teardown
+      // sweep releases Windows file locks between tests); reopen instead of
+      // returning a dead handle.
       dbHandle = openDatabase(rootDir);
     }
     return dbHandle;

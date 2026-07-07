@@ -24,6 +24,9 @@ export interface EngineSqliteDb {
   exec(sql: string): void;
   prepare(sql: string): EngineSqliteStatement;
   close(): void;
+  // node:sqlite DatabaseSync exposes this; optional so narrow test doubles
+  // remain assignable. Undefined reads as "open".
+  readonly isOpen?: boolean;
 }
 
 export type EngineIntegrityCheckMode = "quick" | "full";
@@ -33,34 +36,41 @@ export type EngineIntegrityCheckMode = "quick" | "full";
 // workspace root. Production closes handles through each store's close()
 // seam; this registry only tracks handles while running under a test harness
 // (guard below), so production behavior on every platform is unchanged.
-const trackedEngineDbHandlesForTest = new Set<{ close(): void }>();
+const trackedEngineDbHandlesForTest = new Set<{ close(): void; readonly isOpen?: boolean }>();
 
 function isTestHarness(): boolean {
   return process.env.VITEST === "true" || process.env.NODE_ENV === "test";
 }
 
-export function trackEngineDbHandleForTest<T extends { close(): void }>(db: T): T {
+export function trackEngineDbHandleForTest<T extends { close(): void; readonly isOpen?: boolean }>(
+  db: T,
+): T {
   if (!isTestHarness()) return db;
   trackedEngineDbHandlesForTest.add(db);
   const originalClose = db.close.bind(db);
   db.close = () => {
-    trackedEngineDbHandlesForTest.delete(db);
+    // Untrack only once actually closed: a close() that throws leaves the
+    // handle registered so the next sweep can retry it.
     originalClose();
+    trackedEngineDbHandlesForTest.delete(db);
   };
   return db;
 }
 
-// Closes every still-open engine DB handle. Safe between tests: stores reopen
-// lazily on their next use.
+// Closes every still-open engine DB handle. Safe between tests: the stores'
+// lazy openers check isOpen, so a store whose handle was swept reopens (and
+// re-validates) on its next use instead of returning a dead handle.
 export function closeTrackedEngineDbHandlesForTest(): void {
   for (const db of [...trackedEngineDbHandlesForTest]) {
     try {
       db.close();
     } catch {
-      // Already closed or mid-close; the goal is releasing OS handles.
+      // Either already closed or genuinely stuck; decided below.
     }
+    // Keep genuinely still-open handles registered for a later retry; drop
+    // everything else (isOpen undefined means a test double — drop it too).
+    if (db.isOpen !== true) trackedEngineDbHandlesForTest.delete(db);
   }
-  trackedEngineDbHandlesForTest.clear();
 }
 
 const REQUIRED_ENGINE_TABLES = [

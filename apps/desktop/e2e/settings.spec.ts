@@ -136,6 +136,8 @@ test("settings remains usable at desktop minimum size", async () => {
       );
       // Windows DPI scaling can round the applied size by a pixel; the
       // responsive breakpoint under test is unaffected by that rounding.
+      // Other platforms keep the exact round-trip pin.
+      const sizeTolerance = process.platform === "win32" ? 1 : 0;
       await expect
         .poll(async () => {
           const size = await desktop!.app.evaluate(({ BrowserWindow }) => {
@@ -144,7 +146,8 @@ test("settings remains usable at desktop minimum size", async () => {
             return { height: currentHeight, width: currentWidth };
           });
           return (
-            Math.abs(size.width - width) <= 1 && Math.abs(size.height - height) <= 1
+            Math.abs(size.width - width) <= sizeTolerance &&
+            Math.abs(size.height - height) <= sizeTolerance
           );
         })
         .toBe(true);

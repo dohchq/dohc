@@ -468,6 +468,7 @@ interface SqliteDb {
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
   close(): void;
+  readonly isOpen?: boolean;
 }
 
 interface SqliteModule {
@@ -3070,8 +3071,12 @@ function createVersionedTextStoreWithHooks(
   let validated = false;
 
   function db(): SqliteDb {
-    if (!dbHandle) {
+    if (!dbHandle || dbHandle.isOpen === false) {
+      // A handle can be closed out from under the store (the test-teardown
+      // sweep releases Windows file locks between tests); reopen and
+      // re-validate instead of returning a dead handle.
       dbHandle = openDatabase(rootDir, options.integrityCheck ?? "quick");
+      validated = false;
     }
     if (!validated) {
       loadStateFromDatabase(dbHandle);

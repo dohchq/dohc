@@ -1,7 +1,7 @@
-import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { deniedReadCode, denyRead, restoreRead } from "./testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { scanWorkspaceFiles, scanWorkspaceFilesTolerant } from "./scan";
 
@@ -43,35 +43,6 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-// Access denial is chmod 0o000 on POSIX and an explicit NTFS deny-read ACE on
-// Windows (POSIX modes do not exist there). The denied operation surfaces as
-// EACCES on POSIX and EPERM on Windows; the scan behavior under test — skip,
-// keep scanning, report — is identical.
-const deniedReadCode = process.platform === "win32" ? "EPERM" : "EACCES";
-
-async function denyRead(absolute: string, kind: "dir" | "file"): Promise<void> {
-  if (process.platform === "win32") {
-    const user = userInfo().username;
-    const ace = kind === "dir" ? `${user}:(OI)(CI)(R)` : `${user}:(R)`;
-    execFileSync("icacls", [absolute, "/inheritance:r", "/deny", ace], { stdio: "pipe" });
-    return;
-  }
-  await chmod(absolute, 0o000);
-}
-
-async function restoreRead(absolute: string, mode: number): Promise<void> {
-  if (process.platform === "win32") {
-    const user = userInfo().username;
-    try {
-      execFileSync("icacls", [absolute, "/remove:d", user], { stdio: "pipe" });
-      execFileSync("icacls", [absolute, "/inheritance:e"], { stdio: "pipe" });
-    } catch {
-      // Fixture may not exist or never got the deny ACE; cleanup is best-effort.
-    }
-    return;
-  }
-  await chmod(absolute, mode);
-}
 
 async function writeFixture(path: string, text = "content\n") {
   const absolute = join(root, path);

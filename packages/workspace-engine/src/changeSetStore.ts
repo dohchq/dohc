@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants, readFileSync, statSync } from "node:fs";
 import {
@@ -530,6 +531,10 @@ async function writeContainedFileAtomic(
   rootRealPath: string,
   path: string,
   data: string,
+  // Invoked immediately before the commit rename. Lock-holding writers pass
+  // their ownership assert so a lock lost during the (slow, fsync-bearing)
+  // temp write cannot still overwrite the target afterwards.
+  assertBeforeCommit?: () => Promise<void>,
 ): Promise<void> {
   assertHistoryMutationSupported();
   const parentDir = dirname(path);
@@ -548,6 +553,7 @@ async function writeContainedFileAtomic(
     await writeFileDurably(tmpInParent, data);
     await syncDirectoryHandleBestEffort(parentHandle);
     await assertDirectoryIdentity(rootRealPath, parentDir, parentIdentity);
+    await assertBeforeCommit?.();
     await rename(tmpInParent, targetInParent);
     await syncDirectoryHandleBestEffort(parentHandle);
     await assertDirectoryIdentity(rootRealPath, parentDir, parentIdentity);
@@ -688,7 +694,7 @@ interface HistoryLockOwner {
 }
 
 interface HistoryLockProcessIdentity {
-  kind: "linux-proc-starttime";
+  kind: "linux-proc-starttime" | "win32-process-starttime";
   value: string;
 }
 
@@ -706,9 +712,59 @@ function readLinuxProcessStartTicks(pid: number): string | null {
   }
 }
 
+// Windows equivalent of the /proc starttime identity: the process creation
+// FILETIME, queried via PowerShell. Without it, stale-lock reclaim on win32
+// would be purely heartbeat-based and a live-but-stalled owner (sleep,
+// debugger pause) could lose its lock mid-write. Queried lazily and cached
+// for the own pid (the heartbeat rewrites the owner file every 5s); the
+// reclaim path queries a foreign pid at most once per reclaim attempt.
+// Successful lookups are cached forever (a process's start time is constant);
+// failures only briefly, so a transient PowerShell hiccup cannot permanently
+// strip this process of its identity — while still not paying a PowerShell
+// spawn on every 5s heartbeat when the query keeps failing.
+const OWN_WIN32_IDENTITY_FAILURE_RETRY_MS = 60_000;
+let ownWin32ProcessStartCache:
+  | { pid: number; value: string }
+  | { pid: number; value: null; retryAtMs: number }
+  | undefined;
+
+function readWin32ProcessStartFileTime(pid: number): string | null {
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid <= 0) return null;
+  if (pid === process.pid && ownWin32ProcessStartCache?.pid === pid) {
+    const cached = ownWin32ProcessStartCache;
+    if (cached.value !== null) return cached.value;
+    if (Date.now() < cached.retryAtMs) return null;
+  }
+  let value: string | null = null;
+  try {
+    const out = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`,
+      ],
+      { encoding: "utf8", timeout: 5_000, windowsHide: true },
+    ).trim();
+    value = /^[0-9]+$/u.test(out) ? out : null;
+  } catch {
+    value = null;
+  }
+  if (pid === process.pid) {
+    ownWin32ProcessStartCache =
+      value !== null
+        ? { pid, value }
+        : { pid, value: null, retryAtMs: Date.now() + OWN_WIN32_IDENTITY_FAILURE_RETRY_MS };
+  }
+  return value;
+}
+
 function processIdentityForPid(pid: number): HistoryLockProcessIdentity | null {
-  const value = readLinuxProcessStartTicks(pid);
-  return value ? { kind: "linux-proc-starttime", value } : null;
+  const linuxValue = readLinuxProcessStartTicks(pid);
+  if (linuxValue) return { kind: "linux-proc-starttime", value: linuxValue };
+  const win32Value = readWin32ProcessStartFileTime(pid);
+  return win32Value ? { kind: "win32-process-starttime", value: win32Value } : null;
 }
 
 function historyLockOwnerProcessStillMatches(owner: HistoryLockOwner): boolean {
@@ -746,7 +802,8 @@ function parseHistoryLockOwner(text: string): HistoryLockOwner | null {
       !Number.isFinite(value.pid) ||
       (value.processIdentity !== undefined &&
         (!isObjectRecord(value.processIdentity) ||
-          value.processIdentity.kind !== "linux-proc-starttime" ||
+          (value.processIdentity.kind !== "linux-proc-starttime" &&
+            value.processIdentity.kind !== "win32-process-starttime") ||
           typeof value.processIdentity.value !== "string" ||
           !/^[0-9]+$/u.test(value.processIdentity.value))) ||
       typeof value.createdAtMs !== "number" ||
@@ -1227,8 +1284,12 @@ export function createChangeSetStore(
     return normalizeReadableIndexEntries((await readJson<IndexEntry[]>(indexPath)) ?? []);
   }
 
-  async function writeHistoryFile(path: string, data: string): Promise<void> {
-    await writeContainedFileAtomic(await readRootRealPath(), path, data);
+  async function writeHistoryFile(
+    path: string,
+    data: string,
+    assertBeforeCommit?: () => Promise<void>,
+  ): Promise<void> {
+    await writeContainedFileAtomic(await readRootRealPath(), path, data, assertBeforeCommit);
   }
 
   // Serialize record() across all store instances for this root: the index is
@@ -1292,6 +1353,7 @@ export function createChangeSetStore(
           await writeHistoryFile(
             join(historyDir, recordFileName(record)),
             `${JSON.stringify(record, null, 2)}\n`,
+            () => lockLease.assertStillOwnsLock(),
           );
 
           const entry: IndexEntry = {
@@ -1304,7 +1366,9 @@ export function createChangeSetStore(
           };
           index.push(entry);
           await lockLease.assertStillOwnsLock();
-          await writeHistoryFile(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+          await writeHistoryFile(indexPath, `${JSON.stringify(index, null, 2)}\n`, () =>
+            lockLease.assertStillOwnsLock(),
+          );
           committed = true;
         } catch (error) {
           primaryError = error;

@@ -1244,4 +1244,22 @@ describePortableHistory("portable durable history (win32)", () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+
+  it("reclaims a stale lock whose owner process is gone", async () => {
+    // A dead-pid, stale-heartbeat lock must not wedge the store: reclaim runs
+    // through the win32 process-identity check and proceeds.
+    await mkdir(join(root, ".dohc", "history"), { recursive: true });
+    await writeHistoryLockOwner({
+      token: "stale-win32-owner",
+      pid: 4_999_999,
+      createdAtMs: Date.now() - 120_000,
+      heartbeatAtMs: Date.now() - 120_000,
+    });
+
+    const store = createChangeSetStore(root);
+    await expect(
+      store.record(userEdit(), { id: "reclaimed-1", recordedAtMs: 1000 }),
+    ).resolves.toMatchObject({ id: "reclaimed-1" });
+    await expect(store.list()).resolves.toMatchObject([{ id: "reclaimed-1" }]);
+  });
 });
