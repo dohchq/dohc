@@ -18,7 +18,12 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
   type RelayMaterializedPath,
+  type YDocContentKind,
 } from "@dohc/workspace-engine";
+import {
+  openEngineYDocProviderSession,
+  type EngineYDocProviderSession,
+} from "../collab/ydocEngineProviderSession";
 import {
   isTextMediaType,
   mediaTypeForPath,
@@ -244,6 +249,23 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
+  // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
+  // file, REUSING this capture's VersionedTextStore instance (single-writer
+  // safety — a second store on the same engine.db is a second write connection
+  // and node:sqlite deadlocks). The session journals editor edits as
+  // ydoc.update ops and, on each debounced settle, projects the markdown to
+  // engine.db AND writes the on-disk .md through this capture's contained disk
+  // writer. While the session is live its path is marked live-ydoc-driven, so
+  // the watcher's observation of the settle's own .md write is DEFERRED (never
+  // re-captured as an ordinary moment.append — which on a shared workspace
+  // would double-replicate and collide (P0D) with the ydoc.update stream). The
+  // returned session's close() lifts the guard. Rejects (secret path,
+  // not-found, already-live) propagate to the caller, which falls back.
+  openYDocSession(input: {
+    path: string;
+    onRemoteUpdate: (update: Uint8Array) => void;
+    contentKind?: YDocContentKind;
+  }): Promise<EngineYDocProviderSession>;
   // Version operations (PR 0M-4). Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
@@ -731,6 +753,13 @@ export function createWorkspaceEngineCapture(
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
 
+  // Paths with a LIVE engine Y.Doc session (WS-G2-C-2). While a path is here
+  // the editor's Y.Doc is canonical and its settle writes both engine.db (a
+  // non-journaling projection) and the on-disk .md; the watcher's observation
+  // of that self-write is deferred (captureOnePath skips a live path) so the
+  // settle is never double-journaled as an ordinary moment.append.
+  const liveYDocPaths = new Set<string>();
+
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
   // workspaces without secret files never touch the key path.
   function secretStoreFor(): SecretFileStore {
@@ -1019,6 +1048,16 @@ export function createWorkspaceEngineCapture(
       await captureSecretPath(versionId, event.path, metadata);
       return;
     }
+    // WS-G2-C-2 watcher coexistence: a path with a LIVE engine Y.Doc session is
+    // canonical as a Y.Doc. Its settle already recorded ONE history moment via
+    // the driver's non-journaling projection write and its markdown is on disk;
+    // re-capturing that self-write here would append a DUPLICATE moment.append
+    // op that, on a shared workspace, collides (P0D) with the ydoc.update stream
+    // the object already replicates through. Defer — the session owns capture
+    // for this path until it closes (the close-boundary self-write is caught by
+    // the content-equality no-op in writeIfChanged, since the final projection
+    // already updated engine.db).
+    if (liveYDocPaths.has(event.path)) return;
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
@@ -1435,6 +1474,64 @@ export function createWorkspaceEngineCapture(
     },
 
     registerExpectedEngineEvents,
+
+    async openYDocSession(input) {
+      // Reuse THIS capture's store (single-writer safety): the driver writes
+      // only through store.runInEngineWriteLane / store.writeProjectedTextFile,
+      // so it shares the store's one write connection + serialized lane. A
+      // second createVersionedTextStore on the same engine.db would be a second
+      // write connection and node:sqlite deadlocks.
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      const session = await openEngineYDocProviderSession({
+        store: engine,
+        rootDir: rootPath,
+        workspaceId,
+        versionId,
+        path: input.path,
+        ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+        onRemoteUpdate: input.onRemoteUpdate,
+        onSettled: async (result) => {
+          // Register the settle's self-write (sha of the projected markdown) so
+          // even a watcher event that lands after the live-path guard lifts on
+          // close is recognized as our own; then write the on-disk .md the
+          // user/agent sees, through the contained disk writer.
+          const cancel = registerExpectedEngineEvents([
+            { path: input.path, operation: "write", sha256: result.sha256 },
+          ]);
+          try {
+            await diskWriter.writeTextFile(join(rootPath, input.path), result.markdown);
+          } catch (error) {
+            cancel();
+            onError(`ydoc settle disk write of ${input.path}`, error);
+          }
+        },
+      });
+      // Mark the path live only after the open succeeds (a secret/not-found/
+      // already-live rejection propagates to the caller and never guards a path
+      // that has no session).
+      liveYDocPaths.add(input.path);
+      return {
+        doc: session.doc,
+        initialUpdate: session.initialUpdate,
+        contentKind: session.contentKind,
+        path: session.path,
+        applyLocalUpdate: (update) => session.applyLocalUpdate(update),
+        settleNow: (opts) => session.settleNow(opts),
+        applyExternalMarkdownEdit: (markdown) =>
+          session.applyExternalMarkdownEdit(markdown),
+        async close(opts) {
+          try {
+            await session.close(opts);
+          } finally {
+            // Lift the guard exactly when the session tears down (releasing the
+            // single-canonical reservation), so ordinary capture of this path
+            // resumes for the next opener / external editor.
+            liveYDocPaths.delete(input.path);
+          }
+        },
+      };
+    },
 
     async listVersions() {
       const engine = await engineStore();
