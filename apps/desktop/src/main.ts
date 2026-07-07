@@ -112,6 +112,10 @@ import {
   StartChannelThreadResult,
   MarkChatThreadReadPayload,
   MarkChatThreadReadResult,
+  ListChatReactionsPayload,
+  ListChatReactionsResult,
+  SetChatReactionPayload,
+  SetChatReactionResult,
   ChatThreadRecord,
   ChatMessageRecord,
   OpenFileExternallyPayload,
@@ -190,6 +194,7 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import { validateSecretPassphrase } from "./workspaces/secretPassphrase";
@@ -222,6 +227,7 @@ import {
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
+  type ChatReaction,
   type ChatThread,
   type LinkedChatStore,
   type VersionedTextMomentSummary,
@@ -1176,6 +1182,30 @@ function engineSearchStoreFor(workspace: {
 // workspaces fall back to "You".
 function localUserDisplayName(): string {
   return cachedCredentials?.email ?? "You";
+}
+
+// The opaque per-install reactor id used when signed out (no cloud user id). A
+// stable uuid persisted in stateDir — NEVER the email — so a signed-out
+// reaction cell is stable across restarts without leaking PII into the CRDT.
+// Memoized after the first read; the sync fs touch happens at most once.
+let cachedLocalReactorId: string | null = null;
+function localReactorFallbackId(): string {
+  if (cachedLocalReactorId) return cachedLocalReactorId;
+  const id = readOrCreateLocalReactorId(join(stateDir(), "dohc-local-id.json"));
+  cachedLocalReactorId = id;
+  return id;
+}
+
+// The local user's STABLE, OPAQUE reactor identity (WS-MU-C2). This value
+// becomes a replicated CRDT author key, so it must NEVER be the raw email — a
+// raw email would replicate to every peer (PII/GDPR exposure) and persist in
+// the immutable CRDT history. Prefer the Better Auth user id (an opaque uuid)
+// when signed in; that is forward-compatible with MU-C0, which verifies
+// authorId === actor.userId server-side. Signed out (or an older credential
+// file with no userId) falls back to a persisted per-install uuid. The
+// email→display-name mapping stays LOCAL in localUserDisplayName().
+function localUserId(): string {
+  return cachedCredentials?.userId ?? localReactorFallbackId();
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
@@ -2985,6 +3015,64 @@ function registerIpcHandlers(): void {
     return MarkChatThreadReadResult.parse({
       lastReadSequence: state.lastReadSequence,
       revision: state.revision,
+    });
+  });
+
+  // --- Reactions (WS-MU-C2) ------------------------------------------------
+  // Durable, commutative emoji reactions. Identity is main-derived: the viewer
+  // reacts as the local user (never renderer-supplied), so a reaction is an
+  // authored act attributable and, once syncing, relay-verifiable.
+  function chatReactionForIpc(reaction: ChatReaction) {
+    return {
+      reactionId: reaction.reactionId,
+      messageId: reaction.messageId,
+      threadId: reaction.threadId,
+      emoji: reaction.emoji,
+      authorId: reaction.author.authorId,
+      authorKind: reaction.author.kind,
+      authorDisplayName: reaction.author.displayName,
+    };
+  }
+
+  ipcMain.handle(CHANNELS.listChatReactions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatReactionsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const reactions = await linkedChatStoreFor(workspace).listReactions({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+    });
+    return ListChatReactionsResult.parse({
+      reactions: reactions.map(chatReactionForIpc),
+      viewerAuthorId: localUserId(),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.setChatReaction, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetChatReactionPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const reaction = await linkedChatStoreFor(workspace).setReaction({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      emoji: input.emoji,
+      author: {
+        authorId: localUserId(),
+        kind: "human",
+        displayName: localUserDisplayName(),
+      },
+      state: input.state,
+    });
+    return SetChatReactionResult.parse({
+      reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
+      viewerAuthorId: localUserId(),
     });
   });
 

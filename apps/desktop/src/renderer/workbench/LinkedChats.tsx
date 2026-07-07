@@ -1,6 +1,10 @@
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatMessageRecord, ChatThreadRecord } from "../../ipc/bridgeContract";
+import type {
+  ChatMessageRecord,
+  ChatReactionRecord,
+  ChatThreadRecord,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
   ChatComposer,
@@ -8,6 +12,7 @@ import {
   chatAuthorLabel,
   formatChatTime,
   ipcErrorMessage,
+  runReactionToggle,
 } from "./chatMessages";
 
 // Linked Chats side rail (PR 0M-5, workspace-engine alpha). Per-file Chats
@@ -50,10 +55,15 @@ export function LinkedChatsPanel(props: {
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [reactions, setReactions] = useState<ChatReactionRecord[]>([]);
+  const [viewerAuthorId, setViewerAuthorId] = useState("");
   const [creating, setCreating] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   const liveToken = useRef(0);
+  // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
+  // in order (see runReactionToggle).
+  const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const refreshThreads = useCallback(async () => {
@@ -99,14 +109,17 @@ export function LinkedChatsPanel(props: {
       const token = ++liveToken.current;
       setActiveThread(thread);
       setMessages([]);
+      setReactions([]);
       setMessagesLoading(true);
       try {
-        const result = await bridge().listChatMessages({
-          workspaceId,
-          threadId: thread.id,
-        });
+        const [result, reactionResult] = await Promise.all([
+          bridge().listChatMessages({ workspaceId, threadId: thread.id }),
+          bridge().listChatReactions({ workspaceId, threadId: thread.id }),
+        ]);
         if (token !== liveToken.current) return;
         setMessages(result.messages);
+        setReactions(reactionResult.reactions);
+        setViewerAuthorId(reactionResult.viewerAuthorId);
         // Land on the most recent message, matching the post-send scroll.
         requestAnimationFrame(() =>
           messagesEndRef.current?.scrollIntoView({ block: "end" }),
@@ -193,6 +206,30 @@ export function LinkedChatsPanel(props: {
     }
   }, [activeThread, composer, props, sending, workspaceId]);
 
+  // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction with
+  // rollback-on-failure and per-cell ordering, then reconcile to the canonical
+  // server list. Shared with the Chats view so behavior can never drift.
+  const toggleReaction = useCallback(
+    (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
+      const thread = activeThread;
+      if (!thread) return;
+      runReactionToggle(
+        {
+          workspaceId,
+          threadId: thread.id,
+          viewerAuthorId,
+          liveToken,
+          reactionSeq,
+          setReactions,
+          setViewerAuthorId,
+          onError: props.onError,
+        },
+        input,
+      );
+    },
+    [activeThread, props, viewerAuthorId, workspaceId],
+  );
+
   if (activeThread) {
     return (
       <div data-testid="linked-chat-thread" className="flex min-h-0 flex-1 flex-col">
@@ -224,6 +261,11 @@ export function LinkedChatsPanel(props: {
           loading={messagesLoading}
           emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
           endRef={messagesEndRef}
+          reactionControls={{
+            reactions,
+            viewerAuthorId,
+            onToggle: toggleReaction,
+          }}
         />
         <ChatComposer
           testIdPrefix="linked-chat"

@@ -11,6 +11,9 @@ import type {
   ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
+  ChatReaction,
+  ChatReactionAuthor,
+  ChatReactionState,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -48,11 +51,15 @@ import {
 import {
   ackReplicationPeer,
   appliedApplyResult,
+  ensureOriginId,
   journalLocalReplicationOp,
+  journalReplicationOp,
+  nextOriginSeq,
   readReplicationAckedSeq,
   skippedApplyResult,
   type ChatChannelCreatePayload,
   type ChatMessageAppendPayload,
+  type ChatReactionSetPayload,
   type ChatThreadCreatePayload,
 } from "./syncReplication";
 
@@ -68,6 +75,9 @@ export type {
   ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
+  ChatReaction,
+  ChatReactionAuthor,
+  ChatReactionState,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -429,6 +439,176 @@ function actorKindValue(value: unknown): ChatActor["kind"] {
   const kind = stringValue(value);
   if (kind !== "human" && kind !== "agent") throw corruptStore();
   return kind;
+}
+
+// --- Reactions (WS-MU-C2) --------------------------------------------------
+
+// The emoji allowlist bound: a reaction emoji is a short grapheme, never a
+// message body. Emojis normalize to NFC so the same glyph is one cell.
+const REACTION_EMOJI_MAX_CHARS = 32;
+
+// Defense in depth for REPLICATED ops: the desktop bridge (bridgeContract.ts)
+// already rejects non-emoji at the IPC trust boundary, but a reaction op can
+// arrive from another peer that never passed through that check. Validate the
+// codepoints here too so a hostile/buggy peer cannot land arbitrary short
+// strings (URLs, text) as reaction pills. This mirrors EMOJI_GRAPHEME_PATTERN:
+// one emoji grapheme cluster — a pictographic (optional variation selector /
+// skin-tone / keycap) or a regional-indicator pair, plus ZWJ sequences. Unicode
+// property escapes with the `u` flag are ES2018 and supported by every runtime
+// this engine ships on.
+const REACTION_EMOJI_ATOM =
+  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+const REACTION_EMOJI_PATTERN = new RegExp(
+  `^${REACTION_EMOJI_ATOM}(?:\\u200D${REACTION_EMOJI_ATOM})*$`,
+  "u",
+);
+
+// True iff `value` is a bounded, single emoji grapheme cluster. Used both by the
+// LOCAL setReaction normalizer and by the REPLICATED-op apply path — the latter
+// validates verbatim (no re-normalization) so the total-order cell key stays
+// byte-identical across peers.
+function isReactionEmoji(value: string): boolean {
+  return (
+    value.length > 0 && value.length <= REACTION_EMOJI_MAX_CHARS && REACTION_EMOJI_PATTERN.test(value)
+  );
+}
+
+function normalizeReactionEmoji(emoji: string): string {
+  if (typeof emoji !== "string") {
+    throw new LinkedChatStoreError("invalid-message-body", "Reaction emoji must be a string.");
+  }
+  const normalized = emoji.normalize("NFC").trim();
+  if (normalized.length === 0 || normalized.length > REACTION_EMOJI_MAX_CHARS) {
+    throw new LinkedChatStoreError(
+      "invalid-message-body",
+      "Reaction emoji must be a short non-empty grapheme.",
+    );
+  }
+  if (!isReactionEmoji(normalized)) {
+    throw new LinkedChatStoreError(
+      "invalid-message-body",
+      "Reaction emoji must be a single emoji grapheme.",
+    );
+  }
+  return normalized;
+}
+
+function reactionStateValue(value: unknown): ChatReactionState {
+  const state = stringValue(value);
+  if (state !== "added" && state !== "removed") throw corruptStore();
+  return state;
+}
+
+// Stable cross-machine reaction id: a deterministic function of the CELL
+// coordinates. Same (message, emoji, author) => same id on every machine, so
+// an add and its later remove address ONE register. NUL separators keep the
+// join unambiguous (no emoji/id can contain a NUL).
+function reactionIdFor(messageId: string, emoji: string, authorId: string): string {
+  const digest = createHash("sha256")
+    .update(`${messageId}\u0000${emoji}\u0000${authorId}`, "utf8")
+    .digest();
+  return `reaction_${base32LowercaseNoPadding(digest.subarray(0, 16))}`;
+}
+
+function reactionFromRow(row: Record<string, unknown>): ChatReaction {
+  return {
+    reactionId: stringValue(row.reaction_id),
+    threadId: stringValue(row.thread_id),
+    messageId: stringValue(row.message_id),
+    emoji: stringValue(row.emoji),
+    author: {
+      authorId: stringValue(row.author_id),
+      kind: actorKindValue(row.author_kind),
+      displayName: stringValue(row.author_display_name),
+    },
+    state: reactionStateValue(row.state),
+    atMs: numberValue(row.at_ms),
+  };
+}
+
+// ⚠️ CLOCK SKEW — ACCEPTED ALPHA LIMITATION (determinism > the rare skew-pin).
+// A replicated reaction op's at_ms is stored VERBATIM — NEVER re-clamped against
+// the receiver's local clock. An earlier build clamped an implausible-future
+// at_ms back toward (receiverNow + allowance) to stop a runaway-forward remote
+// clock pinning a cell. That clamp REGRESSED convergence: two peers clamp
+// against their OWN clocks, so the SAME op converges to DIFFERENT at_ms on
+// different peers, and a later op sitting between the two clamps wins on one
+// peer and loses on another → permanent divergence. Determinism of the total
+// order (at_ms, stateRank, origin_id, origin_seq) has to be byte-identical on
+// every peer, so the receiver-local clamp is GONE.
+//
+// The re-opened liveness issue: a device with a badly-forward wall clock can
+// stamp a cell with an at_ms no correctly-clocked peer will ever exceed,
+// pinning that cell (a later, lower-at_ms remove is rejected everywhere). This
+// is an accepted alpha limitation. A proper fix is a hybrid logical clock (HLC)
+// or a relay-stamped monotonic time on shared channels; both are deferred (see
+// MU chat design + MU-C0). Note the LOCAL set path keeps a per-cell monotonic
+// at_ms bump — that is local authorship, deterministic per origin, and does not
+// vary by receiver, so it is safe.
+
+// The origin coordinates that make the LWW register a TOTAL order. Read from
+// the replication envelope on the apply path; minted locally (this device's
+// origin + the seq the op will journal at) on the local set path.
+interface ReactionOpOrigin {
+  originId: string;
+  originSeq: number;
+}
+
+// The whole CRDT apply, as ONE conflict-target upsert. The cell is an LWW
+// register: the incoming op wins iff it is strictly greater by the TOTAL order
+// (at_ms, then stateRank['removed'=1 > 'added'=0] — remove-wins on a tie, then
+// origin_id, then origin_seq). Because (origin_id, origin_seq) uniquely
+// identifies every op in the system, the tuple is a STRICT total order with no
+// residual ties, so two ops with equal (at_ms, state) but different origins
+// resolve to the SAME winner on every peer regardless of arrival order (no
+// arrival-order-dependent divergence). 'removed' > 'added' is a plain lexical
+// compare that encodes remove=1 > add=0. Equal tuple is not strictly greater,
+// so a re-apply is a no-op (idempotent). Winner = `max` over a total order, so
+// applying the same ops in ANY order converges (commutative). Shared verbatim
+// by the local set path and the replicated apply path so their semantics can
+// never drift.
+function upsertReactionLww(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatReactionSetPayload,
+  origin: ReactionOpOrigin,
+): void {
+  db.prepare(
+    `INSERT INTO chat_reactions (
+       workspace_id, reaction_id, thread_id, message_id, emoji,
+       author_id, author_kind, author_display_name, state, at_ms,
+       origin_id, origin_seq
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(workspace_id, message_id, emoji, author_id) DO UPDATE SET
+       reaction_id = excluded.reaction_id,
+       thread_id = excluded.thread_id,
+       author_kind = excluded.author_kind,
+       author_display_name = excluded.author_display_name,
+       state = excluded.state,
+       at_ms = excluded.at_ms,
+       origin_id = excluded.origin_id,
+       origin_seq = excluded.origin_seq
+     WHERE excluded.at_ms > chat_reactions.at_ms
+        OR (excluded.at_ms = chat_reactions.at_ms
+            AND (excluded.state > chat_reactions.state
+              OR (excluded.state = chat_reactions.state
+                  AND (excluded.origin_id > chat_reactions.origin_id
+                    OR (excluded.origin_id = chat_reactions.origin_id
+                        AND excluded.origin_seq > chat_reactions.origin_seq)))))`,
+  ).run(
+    workspaceId,
+    payload.reactionId,
+    payload.threadId,
+    payload.messageId,
+    payload.emoji,
+    payload.authorId,
+    payload.authorKind,
+    payload.authorDisplayName,
+    payload.state,
+    payload.atMs,
+    origin.originId,
+    origin.originSeq,
+  );
 }
 
 function stringValue(value: unknown): string {
@@ -1324,6 +1504,129 @@ export function createLinkedChatStore(
       });
     },
 
+    setReaction(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        // requireWorkspaceThread fails closed on a foreign-workspace thread;
+        // the message must live in THIS thread so a reaction can never target a
+        // message the caller cannot see.
+        const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+        const messageExists = db
+          .prepare(
+            "SELECT 1 FROM chat_messages WHERE workspace_id = ? AND thread_id = ? AND message_id = ?",
+          )
+          .get(workspaceId, thread.id, input.messageId);
+        if (!messageExists) {
+          throw new LinkedChatStoreError(
+            "message-not-found",
+            `Message ${input.messageId} was not found in thread ${thread.id}.`,
+          );
+        }
+        const emoji = normalizeReactionEmoji(input.emoji);
+        const authorId = stringValue(input.author.authorId).trim();
+        if (!authorId || authorId.length > 200) {
+          throw new LinkedChatStoreError("invalid-sender", "Reaction author id is invalid.");
+        }
+        const authorKind = actorKindValue(input.author.kind);
+        const authorDisplayName = normalizeDisplayName(input.author.displayName);
+        const state = reactionStateValue(input.state);
+        // Local writes are strictly monotonic PER CELL. A fast toggle
+        // (remove → re-add) can reuse the same wall-clock ms; under the
+        // remove-wins tie in the total order, stateRank outranks origin_seq, so
+        // the causally-later re-add would otherwise LOSE to the just-written
+        // remove. Bumping past the stored cell's at_ms keeps the user's latest
+        // local intent winning (and lets a deliberate local re-add override a
+        // newer remote remove, which is what the click means).
+        const priorRow = db
+          .prepare(
+            `SELECT at_ms FROM chat_reactions
+             WHERE workspace_id = ? AND message_id = ? AND emoji = ? AND author_id = ?`,
+          )
+          .get(workspaceId, input.messageId, emoji, authorId);
+        const priorAtMs = priorRow ? numberValue(priorRow.at_ms) : Number.NEGATIVE_INFINITY;
+        const atMs = Math.max(nowMs(), priorAtMs + 1);
+        const payload: ChatReactionSetPayload = {
+          reactionId: reactionIdFor(input.messageId, emoji, authorId),
+          messageId: input.messageId,
+          threadId: thread.id,
+          emoji,
+          authorId,
+          authorKind,
+          authorDisplayName,
+          state,
+          atMs,
+        };
+        // Mint this device's origin + the seq the op will journal at BEFORE the
+        // upsert, so the register stores the same (origin_id, origin_seq) the
+        // op replicates with — the total-order tie-break has to match on both
+        // paths. nextOriginSeq is stable here: nothing new is journaled until
+        // the journalReplicationOp call below reuses this exact seq, and the
+        // whole method runs under `serialize` so no concurrent write intrudes.
+        const originId = ensureOriginId(db, workspaceId);
+        const originSeq = nextOriginSeq(db, workspaceId, originId);
+        // The LWW upsert IS the mutation — shared verbatim with the replicated
+        // apply path so a local set and an imported op converge identically.
+        // Both paths store at_ms verbatim; the only local adjustment is the
+        // per-cell monotonic bump above (deterministic per origin, not
+        // receiver-dependent — see the clock-skew note near upsertReactionLww).
+        upsertReactionLww(db, workspaceId, payload, { originId, originSeq });
+        // Blob-free, rides the SAME push/pull/apply pipeline as the other chat
+        // ops (no new transport). Journaled even for a SOLO workspace so the
+        // reaction replicates the moment the workspace starts syncing. Uses the
+        // origin/seq captured above (not journalLocalReplicationOp) so the
+        // journaled envelope's coordinates equal the register's.
+        journalReplicationOp(db, {
+          workspaceId,
+          originId,
+          originSeq,
+          opKind: "chat.reaction.set",
+          payload,
+          recordedAtMs: payload.atMs,
+        });
+        // Return the RESOLVED cell (the winning register): for a local set that
+        // is always this call's op, but reading it back keeps the contract
+        // honest under a future clock skew.
+        const row = db
+          .prepare(
+            `SELECT * FROM chat_reactions
+             WHERE workspace_id = ? AND message_id = ? AND emoji = ? AND author_id = ?`,
+          )
+          .get(workspaceId, input.messageId, emoji, authorId);
+        if (!row) throw corruptStore();
+        return cloneJson(reactionFromRow(row));
+      });
+    },
+
+    listReactions(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+          // Active membership only — tombstones ('removed') stay in the table
+          // for LWW convergence but never surface. Oldest cell first so pills
+          // render in a stable order. The INNER JOIN on chat_messages is the
+          // visibility gate: a reaction is head-check-free at APPLY (it may land
+          // before its message across origins) BUT must never leak to the UI for
+          // a message that is absent — an orphan (no matching message row, or a
+          // message the viewer can't see) is filtered out here. Orphans stay in
+          // the table for eventual convergence; only PRESENT messages surface.
+          return db
+            .prepare(
+              `SELECT r.* FROM chat_reactions r
+               JOIN chat_messages m
+                 ON m.workspace_id = r.workspace_id
+                AND m.thread_id = r.thread_id
+                AND m.message_id = r.message_id
+               WHERE r.workspace_id = ? AND r.thread_id = ? AND r.state = 'added'
+               ORDER BY r.at_ms, r.reaction_id`,
+            )
+            .all(workspaceId, thread.id)
+            .map(reactionFromRow)
+            .map(cloneJson);
+        });
+      });
+    },
+
     applyReplicationOp(input): Promise<SyncApplyResult> {
       return serialize(async (db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
@@ -1525,6 +1828,76 @@ export function createLinkedChatStore(
               body: payload.body,
             });
           }
+        } else if (input.opKind === "chat.reaction.set") {
+          const payload = input.payload;
+          // A COMMUTATIVE, head-check-free apply — like ydoc.update, not
+          // message.append. There is NO thread/message existence gate: a
+          // cross-origin reaction can arrive before the message it targets, and
+          // the LWW register converges regardless of arrival order (the missing
+          // message just means the pill has nothing to render on yet;
+          // listReactions JOINs chat_messages so an orphaned reaction never
+          // surfaces to the UI). The per-origin acked_seq dedup above is the
+          // re-apply backstop; the LWW WHERE clause makes a stale replay a no-op
+          // even if it slips through.
+          //
+          // ⚠️ SECURITY — UNVERIFIED AUTHORSHIP UNTIL MU-C0. `payload.authorId`
+          // is part of the CRDT cell key AND is trusted verbatim here. The
+          // engine cannot map a replication origin to a user, so a malicious /
+          // buggy relay collaborator could ship a reaction op that adds or
+          // removes a VICTIM's reaction cell (forged authorship). This is
+          // acceptable ONLY for solo workspaces and trusted-relay-collaborator
+          // deployments. MU-C0 closes it: the relay stamps/verifies
+          // `authorId === actor.userId` server-side on shared channels before an
+          // op is replicated. Do NOT treat replicated reaction authorship as
+          // trustworthy until then. (The LOCAL setReaction path is safe: main
+          // derives authorId from the signed-in user, never the renderer.)
+          if (
+            typeof payload.reactionId !== "string" ||
+            !payload.reactionId ||
+            typeof payload.messageId !== "string" ||
+            !payload.messageId ||
+            typeof payload.threadId !== "string" ||
+            !payload.threadId ||
+            typeof payload.emoji !== "string" ||
+            !payload.emoji ||
+            typeof payload.authorId !== "string" ||
+            !payload.authorId ||
+            typeof payload.atMs !== "number" ||
+            !Number.isFinite(payload.atMs)
+          ) {
+            throw corruptStore();
+          }
+          // Defense in depth for a REPLICATED write: the emoji is the CRDT cell
+          // key and renders as a pill, but this op may come from a peer that
+          // never passed the desktop IPC schema. Reject anything that isn't a
+          // single emoji grapheme so a hostile/buggy peer can't land arbitrary
+          // short strings (URLs, text) as reaction pills. Validated verbatim (no
+          // NFC re-normalization): the origin already normalized, and mutating
+          // here would desync the byte-identical total-order key across peers.
+          if (!isReactionEmoji(payload.emoji)) {
+            throw corruptStore();
+          }
+          upsertReactionLww(
+            db,
+            workspaceId,
+            {
+              reactionId: payload.reactionId,
+              messageId: payload.messageId,
+              threadId: payload.threadId,
+              emoji: payload.emoji,
+              authorId: payload.authorId,
+              authorKind: actorKindValue(payload.authorKind),
+              authorDisplayName: stringValue(payload.authorDisplayName),
+              // Store the op's ORIGINAL at_ms verbatim (no receiver-local
+              // clamp) so the total order is byte-identical on every peer. See
+              // the clock-skew note above upsertReactionLww's origin type.
+              atMs: payload.atMs,
+              state: reactionStateValue(payload.state),
+            },
+            // The envelope's origin coordinates are the total-order tie-break;
+            // they are validated at the top of applyReplicationOp.
+            { originId: input.originId, originSeq: input.originSeq },
+          );
         } else {
           throw new LinkedChatStoreError(
             "state-corrupt",

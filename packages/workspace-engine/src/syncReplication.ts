@@ -22,6 +22,7 @@ type JournalConnection = EngineWriteLaneConnection;
 export type {
   ChatChannelCreatePayload,
   ChatMessageAppendPayload,
+  ChatReactionSetPayload,
   ChatThreadCreatePayload,
   ConflictResolvePayload,
   MomentAppendPayload,

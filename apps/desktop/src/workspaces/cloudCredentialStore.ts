@@ -10,6 +10,10 @@ export interface CloudCredentials {
   serverUrl: string;
   relayUrl?: string;
   email: string;
+  // The Better Auth user id (an opaque uuid). Used as the STABLE, OPAQUE reactor
+  // author key so raw email (PII) never replicates into the CRDT. Optional so an
+  // older credential file (saved before this field existed) still loads.
+  userId?: string;
   token: string;
 }
 
@@ -79,6 +83,7 @@ export function createCloudCredentialStore(options: {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
         email: obj.email,
+        ...(nonEmptyString(obj.userId) ? { userId: obj.userId } : {}),
         token,
       };
     },
@@ -95,6 +100,7 @@ export function createCloudCredentialStore(options: {
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
         email: credentials.email,
+        ...(credentials.userId ? { userId: credentials.userId } : {}),
         token,
       };
       // 0700 dir + 0600 file: the session token is a full account credential,

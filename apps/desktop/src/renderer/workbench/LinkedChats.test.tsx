@@ -24,6 +24,8 @@ const bridgeMock = {
   createFileChat: vi.fn(),
   listChatMessages: vi.fn(),
   sendChatMessage: vi.fn(),
+  listChatReactions: vi.fn(),
+  setChatReaction: vi.fn(),
 };
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
@@ -37,6 +39,23 @@ beforeEach(() => {
     threads: [searchThread],
   });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  bridgeMock.listChatReactions.mockResolvedValue({
+    reactions: [],
+    viewerAuthorId: "you@example.com",
+  });
+  bridgeMock.setChatReaction.mockResolvedValue({
+    reaction: {
+      reactionId: "r1",
+      messageId: "message-1",
+      threadId: "thread-1",
+      emoji: "👍",
+      authorId: "you@example.com",
+      authorKind: "human",
+      authorDisplayName: "you@example.com",
+      state: "added",
+    },
+    viewerAuthorId: "you@example.com",
+  });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 

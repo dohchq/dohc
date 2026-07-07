@@ -334,6 +334,22 @@ reaction is an authored act). A reaction on a message you can see, you can
 make; you can only remove your OWN reactions (enforced by `reactionId` /
 `userId` identity).
 
+> **⚠️ Security — UNVERIFIED reaction authorship until MU-C0 (as shipped in
+> MU-C2).** The verification above describes the TARGET state. As of the MU-C2
+> lane it is NOT yet in force. `authorId` is part of the reaction CRDT cell key
+> and the replicated apply (`applyReplicationOp`, `chat.reaction.set` branch)
+> trusts it verbatim, because the workspace engine cannot map a replication
+> origin to a user. A malicious or buggy relay collaborator can therefore forge
+> authorship — replicate a reaction op that adds or removes a VICTIM's reaction
+> cell. This is acceptable ONLY for solo workspaces and trusted-relay-
+> collaborator deployments; replicated reaction authorship must NOT be treated
+> as trustworthy yet. The LOCAL react path is safe (desktop main derives
+> `authorId` from the signed-in user, never the renderer). **MU-C0 closes this:**
+> the relay must stamp/verify `authorId === actor.userId` server-side on shared
+> channels before an op is admitted to the replication log — the same
+> origin→user provenance MU-C0 establishes for `message.append`. Until MU-C0
+> lands, do not enable shared reactions across untrusted relay members.
+
 ## DMs
 
 A DM is a channel with `kind: "dm"` (`engine.ts:887`, already reserved) whose

@@ -353,7 +353,38 @@ const CHAT_CHANNEL_TABLES_DDL = `
     wire_id TEXT NOT NULL,
     channel_id TEXT NOT NULL,
     PRIMARY KEY (workspace_id, wire_id)
-  )
+  );
+  -- Reactions (WS-MU-C2): a set-membership CRDT of emoji reactions. ONE row per
+  -- (message, emoji, author) CELL — the row is an LWW register holding the
+  -- winning state ('added'|'removed') and its at_ms clock. Tombstones ('removed'
+  -- rows) are KEPT so a stale re-add cannot win; reads filter state='added'.
+  -- Same lazy-additive posture as the channel tables above (NOT in
+  -- REQUIRED_ENGINE_TABLES): a missing table reads as "no reactions yet". No FK
+  -- to chat_messages — a cross-origin reaction op can arrive before the message
+  -- it targets, and the CRDT converges regardless of that arrival order.
+  -- origin_id/origin_seq make the register's order a TOTAL order every peer
+  -- agrees on: two ops with equal (at_ms, state) but different origins break the
+  -- tie by (origin_id, origin_seq) instead of arrival order, so peers converge
+  -- to the same winner (see upsertReactionLww). This table is new in the MU-C2
+  -- lane and never shipped, so the two columns are part of the initial shape (no
+  -- migration needed).
+  CREATE TABLE IF NOT EXISTS chat_reactions (
+    workspace_id TEXT NOT NULL,
+    reaction_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    author_kind TEXT NOT NULL,
+    author_display_name TEXT NOT NULL,
+    state TEXT NOT NULL,
+    at_ms REAL NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id, emoji, author_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_reactions_thread
+    ON chat_reactions(workspace_id, thread_id, message_id);
 `;
 
 // chat_threads.channel_id is a lazy additive nullable column (the

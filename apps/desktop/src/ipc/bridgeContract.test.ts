@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ChatReactionRecord,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -9,6 +10,7 @@ import {
   RestoreEngineMomentFileResult,
   SendChatMessagePayload,
   SendChatMessageResult,
+  SetChatReactionPayload,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
@@ -645,5 +647,56 @@ describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
         },
       }).message.authorKind,
     ).toBe("agent");
+  });
+});
+
+describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
+  function setPayload(emoji: string) {
+    return SetChatReactionPayload.safeParse({
+      workspaceId: "ws-engine",
+      threadId: "thread_1",
+      messageId: "message_1",
+      emoji,
+      state: "added",
+    });
+  }
+
+  it("accepts real emoji graphemes, including multi-codepoint ones", () => {
+    // Simple pictographic, variation-selector, skin-tone modifier, a flag (two
+    // regional indicators), and a ZWJ sequence — all one grapheme cluster.
+    for (const emoji of ["👍", "❤️", "👍🏽", "🇺🇸", "👨‍👩‍👧", "🏳️‍🌈"]) {
+      expect(setPayload(emoji).success, emoji).toBe(true);
+    }
+  });
+
+  it("rejects non-emoji strings the length bound alone would let through", () => {
+    // A URL, plain text, a bare letter/digit, whitespace-padded emoji, and an
+    // oversized string must all be refused — this schema is the trust boundary
+    // for replicated reaction writes, so arbitrary strings must never render as
+    // pills.
+    for (const bad of [
+      "hello",
+      "http://evil.com",
+      "a",
+      "123",
+      "👍 nice",
+      " 👍",
+      "x".repeat(40),
+    ]) {
+      expect(setPayload(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("applies the same validation to a ChatReactionRecord's emoji", () => {
+    const base = {
+      reactionId: "r1",
+      messageId: "message_1",
+      threadId: "thread_1",
+      authorId: "author-1",
+      authorKind: "human" as const,
+      authorDisplayName: "You",
+    };
+    expect(ChatReactionRecord.safeParse({ ...base, emoji: "🎉" }).success).toBe(true);
+    expect(ChatReactionRecord.safeParse({ ...base, emoji: "not-an-emoji" }).success).toBe(false);
   });
 });

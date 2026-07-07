@@ -696,6 +696,78 @@ export const MarkChatThreadReadResult = z.object({
 });
 export type MarkChatThreadReadResult = z.infer<typeof MarkChatThreadReadResult>;
 
+// Reactions (WS-MU-C2). A reaction is durable, commutative chat data — an
+// emoji reaction by an author on a message. The renderer never supplies
+// identity: main derives the reactor from the local user, exactly like a sent
+// message. Emojis are short graphemes, never message bodies.
+//
+// This schema is the TRUST BOUNDARY for chat.reaction.set payloads — including
+// future replicated writes from other peers per the PR's forward-compat design.
+// A length bound alone accepts URLs, profanity, and arbitrary ASCII text as an
+// "emoji"; a hostile/buggy peer could inject those to render as reaction pills.
+// So we validate the actual codepoints: a single emoji grapheme cluster — one
+// pictographic (with optional variation selector / skin-tone modifier /
+// keycap), a regional-indicator pair (flag), and ZWJ sequences thereof.
+//
+// Unicode property escapes (\p{…}) with the `u` flag are ES2018 and supported by
+// every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
+// ES2022), so `\p{Extended_Pictographic}` is safe here.
+const EMOJI_ATOM =
+  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+export const EMOJI_GRAPHEME_PATTERN = new RegExp(
+  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
+  "u",
+);
+const CHAT_EMOJI = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
+
+// One ACTIVE reaction as the renderer paints it. The UI groups these by
+// (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.
+export const ChatReactionRecord = z.object({
+  reactionId: z.string().min(1).max(200),
+  messageId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  emoji: CHAT_EMOJI,
+  authorId: z.string().min(1).max(200),
+  authorKind: z.enum(["human", "agent"]),
+  authorDisplayName: z.string().min(1).max(200),
+});
+export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
+
+export const ListChatReactionsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ListChatReactionsPayload = z.infer<typeof ListChatReactionsPayload>;
+
+export const ListChatReactionsResult = z.object({
+  reactions: z.array(ChatReactionRecord),
+  // The viewer's own reactor id (main-derived), so the renderer can highlight
+  // "your" reactions and toggle them without ever learning another identity.
+  viewerAuthorId: z.string().min(1).max(200),
+});
+export type ListChatReactionsResult = z.infer<typeof ListChatReactionsResult>;
+
+export const SetChatReactionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+  messageId: z.string().min(1).max(200),
+  emoji: CHAT_EMOJI,
+  // add or remove YOUR reaction. The store is a set-membership CRDT: this is
+  // the observed cell state, resolved by LWW-per-cell.
+  state: z.enum(["added", "removed"]),
+});
+export type SetChatReactionPayload = z.infer<typeof SetChatReactionPayload>;
+
+export const SetChatReactionResult = z.object({
+  reaction: ChatReactionRecord.extend({ state: z.enum(["added", "removed"]) }),
+  viewerAuthorId: z.string().min(1).max(200),
+});
+export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
+
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
@@ -1733,6 +1805,14 @@ export interface DohcDesktopBridge {
   markChatThreadRead(
     payload: MarkChatThreadReadPayload,
   ): Promise<MarkChatThreadReadResult>;
+  // Reactions (WS-MU-C2): list active reactions for a thread and add/remove
+  // the viewer's own. Same gate as the rest of chat.
+  listChatReactions(
+    payload: ListChatReactionsPayload,
+  ): Promise<ListChatReactionsResult>;
+  setChatReaction(
+    payload: SetChatReactionPayload,
+  ): Promise<SetChatReactionResult>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
