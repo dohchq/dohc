@@ -352,12 +352,25 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   missingBlobs(workspaceId: string, sha256s: string[]): string[] {
     if (sha256s.length === 0) return [];
+    // Batch the presence check into chunked `IN (...)` queries instead of one
+    // point SELECT per hash (was up to ~2,000 sequential round trips). Dedupe
+    // the probe set but preserve the caller's order/duplicates in the result.
+    const unique = [...new Set(sha256s)];
     const found = new Set<string>();
-    const stmt = this.db.prepare(
-      "SELECT 1 AS ok FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
-    );
-    for (const sha256 of sha256s) {
-      if (stmt.get(workspaceId, sha256)) found.add(sha256);
+    // Keep well under SQLite's default 999 bound-variable limit (one slot is
+    // taken by workspace_id).
+    const CHUNK = 500;
+    for (let start = 0; start < unique.length; start += CHUNK) {
+      const chunk = unique.slice(start, start + CHUNK);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.db
+        .prepare(
+          `SELECT sha256 FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 IN (${placeholders})`,
+        )
+        .all(workspaceId, ...chunk);
+      for (const row of rows) {
+        if (typeof row.sha256 === "string") found.add(row.sha256);
+      }
     }
     return sha256s.filter((sha256) => !found.has(sha256));
   }
@@ -496,10 +509,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
 
+      // Read the current MAX(origin_seq) once, then track it locally: each
+      // insert is exactly currentMax + 1, so re-querying per op (was N extra
+      // SELECTs per batch) is unnecessary. Skipped ops leave it unchanged.
+      let currentMax = Number(
+        maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
+      );
       for (const op of input.ops) {
-        const currentMax = Number(
-          maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
-        );
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
             input.workspaceId,
@@ -532,14 +548,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           op.payloadJson,
           op.recordedAtMs,
         );
+        currentMax = op.originSeq;
         inserted += 1;
       }
 
-      const currentMaxOriginSeq = Number(
-        maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
-      );
       this.db.exec("COMMIT");
-      return { inserted, skipped, currentMaxOriginSeq };
+      return { inserted, skipped, currentMaxOriginSeq: currentMax };
     } catch (error) {
       try {
         this.db.exec("ROLLBACK");

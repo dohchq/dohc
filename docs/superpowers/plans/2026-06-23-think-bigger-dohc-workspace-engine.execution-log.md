@@ -18542,3 +18542,87 @@ platform.
 - Full `electron-builder package` with an empty resource dir was validated via
   package-smoke (static config gate) rather than a full package run (the
   packaging run is network-gated in this environment).
+
+## Consolidated Cleanup Sweep
+
+Branch: codex/cleanup-sweep (worktree /home/ice/dev/dohc-r4-cleanup, main
+453acb1b). Batch pass over the minor/trivial findings the ~15 Think Bigger
+gate lanes recorded for the arc-gate/cleanup sweep. These are quality-only
+(bugs were fixed in their own lanes). Harvested primarily from the recorded
+"Recorded for the arc-gate sweep" (0P-B) and "Recorded minors … listed for
+the arc gate" (0P-D) blocks above, plus a light eyeball of the most-churned
+relay/engine/desktop sources.
+
+Honest summary: 19 findings harvested, 10 still-present-and-fixed, 9
+already-done/covered/moot or deliberately skipped. Every fix is behavior-
+preserving or adds a test-pinned guard; no existing test/assertion weakened.
+
+### Triage table
+
+| # | Source lane | file:line | Finding | Status |
+|---|-------------|-----------|---------|--------|
+| 1 | 0P-B | services/sync-relay/src/main.ts:11,51 | Hardcoded default Postgres URL fallback instead of failing fast when POSTGRES_URL unset outside dev/test | FIXED (fail-fast guard + spawn test) |
+| 2 | 0P-B | services/sync-relay/src/main.ts:10 | No validation of SYNC_RELAY_PORT (NaN → obscure listen error) | FIXED (integer/range guard + spawn test) |
+| 3 | 0P-B | syncRelay/server test | No regression test for claiming a workspace already owned by another user | ALREADY-COVERED (server.test.ts:166 intruder-claim → byte-identical 404) |
+| 4 | 0P-B | syncRelay.test.ts | No coverage for irrecoverable conflict after retry exhaustion / unclaimed push-pull errors | ALREADY-COVERED (probeRelayWorkspace unavailable + divergence fail-closed suites) |
+| 5 | 0P-B | services/sync-relay/src/storage.ts:353 missingBlobs | N+1 point SELECTs (up to ~2,000) instead of one batched IN query | FIXED (chunked IN, order/dupes preserved) |
+| 6 | 0P-B | services/sync-relay/src/storage.ts:474 appendLogBatch | Re-queries MAX(origin_seq) per op instead of tracking locally | FIXED (read once, track locally) |
+| 7 | 0P-B | services/sync-relay/scripts/build.mjs | No sourcemap for the bundled service | FIXED (sourcemap: true) |
+| 8 | 0P-B | workspaceEngineCapture.test.ts | Relay materialization coverage lacks binary fast-forward + missing-snapshot silent-skip cases | ALREADY-COVERED (relay integration round-trip/fuzz exercises binary sync + idempotent skips) |
+| 9 | 0P-B | workspaceActivity.ts:214 | Engine-opted-out workspaces get the generic signed-in-session error from enableCloud; remote set before check | SKIPPED (entangled enable-sync ordering across main.ts + activity; risky refactor for a cosmetic message) |
+| 10 | 0P-B | capture runRelaySync | Policy/engine reads before the quiescent early return | ALREADY-FIXED (fix-1 restructure, per log) |
+| 11 | 0P-B | server.test.ts | 413 regression gap | ALREADY-FIXED (handler-level + streamed integration test) |
+| 12 | 0P-D | syncFolder.test.ts:994 | restore uses `updated.moment?.id ?? ""` instead of asserting the moment id | FIXED (assert truthy, use non-optional) |
+| 13 | 0P-D | CloudLogin.tsx | passphrase UX driven by regex over main-process error strings (wants a structured IPC error code) | SKIPPED (structured-error refactor spans IPC contract + renderer; out of cleanup scope) |
+| 14 | 0P-D | apps/desktop/src/main.ts wrap path | No minimum passphrase length floor | FIXED (validateSecretPassphrase floor=8, enrollment-only + unit test) |
+| 15 | 0P-D | secretKeyEnvelope.ts:129 | wrap length-check throws before the zeroing finally; wrap errors not normalized like unwrap | FIXED (check moved inside try; catch normalizes; + test) |
+| 16 | 0P-D | secretKeyEnvelope.test.ts:247 | manual-fallback test has a dead `.catch()` setup branch | FIXED (explicit seed-then-read) |
+| 17 | 0P-D | CloudLogin.test.tsx | Lacks the unlock-failure-path regression test | FIXED (added failure-path test) |
+| 18 | 0P-D | syncApply.ts:370 | finally closes three stores sequentially — a throwing close leaks the rest | FIXED (Promise.allSettled) |
+| 19 | 0P-D | workspace-contracts secret payloads | No key id for future rotation | SKIPPED (intentional single-key MVP deferral, revisit at rotation) |
+
+WS-H1's "6 minor/trivial CodeRabbit findings recorded for the arc-gate sweep"
+(line ~16702) were never enumerated concretely in the log, so there is nothing
+to action; the one overlapping item (stale seedLegacyOptOut rationale) was
+already fixed in that lane.
+
+### What was fixed, by area
+
+- Sync relay (storage/main/build): fail-fast POSTGRES_URL + SYNC_RELAY_PORT
+  validation (two new spawn tests asserting exit code 1 + stderr); missingBlobs
+  batched into chunked `IN (...)` queries (dedupes probe set, preserves caller
+  order/dupes in result); appendLogBatch reads MAX(origin_seq) once and tracks
+  it locally; esbuild sourcemap for the bundled service. Relay suite 53 → 55.
+- Workspace engine: secretKeyEnvelope wrap now runs the key-length check inside
+  the try (so the copied key is still zeroed on early rejection) and normalizes
+  non-typed errors into SecretKeyEnvelopeError, matching unwrap (new wrong-length
+  wrap test); syncApply's store-close finally uses Promise.allSettled so one
+  throwing close cannot leak the others; syncFolder.test asserts the restore
+  moment id; secretKeyEnvelope.test drops the dead `.catch()` setup branch.
+  Engine suite 389 → 390.
+- Desktop: new `workspaces/secretPassphrase.ts` (MIN_SECRET_PASSPHRASE_LENGTH=8
+  enrollment floor) wired into the cloudEnableSync wrap path (enrollment only —
+  never the unlock path, so no existing secret can be locked out), with a unit
+  test; CloudLogin unlock-failure-path regression test. Desktop suite 953 → 958.
+
+### Skipped (with reason)
+
+- #9 opted-out enableCloud error message: touches the enable-sync ordering
+  (setWorkspaceRemote vs the null-engine check) across main.ts and
+  workspaceActivity — a behavioral change disproportionate to a cosmetic error
+  string.
+- #13 CloudLogin structured IPC error code: a contract-level refactor
+  (replace error-string regex with a typed IPC error) beyond a cleanup sweep.
+- #19 secret key id for rotation: intentional single-key MVP deferral.
+- #18 close-leak: fixed but not given a dedicated throw-injection test — the
+  store factories are constructed internally from rootDir (not injectable), so
+  a test would require mocking three modules; the success path (all three
+  close every run) is already covered by the syncApply suite.
+
+### Verification
+
+- `pnpm -r typecheck` clean repo-wide.
+- Touched suites green: sync-relay 55 (was 53), workspace-engine 390 (was 389)
+  + fs-lock changeSetStore 39/2-skip, desktop 958 (was 953). Untouched
+  baselines unaffected.
+- `git diff --check` clean; doc-links checker green.

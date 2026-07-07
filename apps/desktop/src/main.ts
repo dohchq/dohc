@@ -186,6 +186,7 @@ import {
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
+import { validateSecretPassphrase } from "./workspaces/secretPassphrase";
 import {
   buildShareCode,
   parseShareCode,
@@ -1919,13 +1920,15 @@ function registerIpcHandlers(): void {
         workspace.workspaceId,
       );
       if (dataKey) {
-        if (!input.passphrase) {
-          throw new Error("Passphrase required to protect synced secrets.");
+        const passphrase = input.passphrase ?? "";
+        const passphraseError = validateSecretPassphrase(passphrase);
+        if (passphraseError) {
+          throw new Error(passphraseError);
         }
         try {
           const { envelopeJson } = await wrapWorkspaceDataKey({
             dataKey,
-            passphrase: input.passphrase,
+            passphrase,
             workspaceId: workspace.workspaceId,
           });
           await uploadKeyEnvelope({

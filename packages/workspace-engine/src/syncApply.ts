@@ -368,8 +368,21 @@ export async function applySyncQueues(
       skippedOps,
     };
   } finally {
-    await secrets.close();
-    await chats.close();
-    await versions.close();
+    // Close every store even if one close() rejects — a sequential
+    // `await a.close(); await b.close();` would leak the remaining handles on
+    // the first throw.
+    const closeResults = await Promise.allSettled([
+      secrets.close(),
+      chats.close(),
+      versions.close(),
+    ]);
+    for (const result of closeResults) {
+      // A failed store close can signal unflushed/corrupted durable state —
+      // surface it rather than swallowing it (we still don't rethrow, so one
+      // failed close can't mask the applied/skipped results).
+      if (result.status === "rejected") {
+        console.error("applySyncQueues: store close failed", result.reason);
+      }
+    }
   }
 }

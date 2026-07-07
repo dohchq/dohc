@@ -91,6 +91,19 @@ describe("secret key envelope", () => {
     ).rejects.toMatchObject({ code: "unwrap-failed" });
   });
 
+  it("wrap rejects a wrong-length data key with the generic typed error", async () => {
+    // The length check lives inside the try/finally so the copied key is
+    // still zeroed, and it surfaces as the normalized SecretKeyEnvelopeError
+    // (never a raw error) — same generic shape as unwrap.
+    await expect(
+      wrapWorkspaceDataKey({
+        dataKey: randomBytes(31),
+        passphrase: "correct horse battery staple",
+        workspaceId: WORKSPACE_ID,
+      }),
+    ).rejects.toMatchObject({ code: "unwrap-failed", name: "SecretKeyEnvelopeError" });
+  });
+
   // Honest scope note (gate fix): unwrapWorkspaceDataKey has no filesystem
   // side effects at all, so there is no "target root" to assert about here.
   // What this test locks is that a failed unwrap yields no key material and
@@ -241,13 +254,10 @@ describe("secret key envelope", () => {
   it("manual key-file fallback still round-trips without an envelope", async () => {
     const source = await tempRoot("manual-source");
     const target = await tempRoot("manual-target");
-    const keyFileText = await readFile(
-      join(source, SECRET_KEY_RELATIVE_PATH),
-      "utf8",
-    ).catch(async () => {
-      await createProtectedWorkspace(source);
-      return readFile(join(source, SECRET_KEY_RELATIVE_PATH), "utf8");
-    });
+    // source is a fresh temp dir with no key file, so seed one first — the
+    // previous `.catch()` fallback was the only branch that ever ran.
+    await createProtectedWorkspace(source);
+    const keyFileText = await readFile(join(source, SECRET_KEY_RELATIVE_PATH), "utf8");
     const key = Buffer.from(keyFileText.trim().slice("dohc-secret-key-v1:".length), "base64");
     await installWorkspaceDataKey(target, key);
     await expect(readFile(join(target, SECRET_KEY_RELATIVE_PATH), "utf8")).resolves.toBe(

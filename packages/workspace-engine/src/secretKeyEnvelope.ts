@@ -126,11 +126,14 @@ export async function wrapWorkspaceDataKey(input: {
   workspaceId: WorkspaceId;
 }): Promise<{ envelopeJson: string }> {
   const dataKey = Buffer.from(input.dataKey);
-  if (dataKey.length !== KEY_BYTES) throw new SecretKeyEnvelopeError();
-  const salt = randomBytes(SALT_BYTES);
-  const iv = randomBytes(IV_BYTES);
   let kek: Buffer | null = null;
   try {
+    // Everything that can throw stays inside the try so the `finally` always
+    // zeros the copied dataKey — including an early length rejection and a
+    // synchronous randomBytes() failure.
+    if (dataKey.length !== KEY_BYTES) throw new SecretKeyEnvelopeError();
+    const salt = randomBytes(SALT_BYTES);
+    const iv = randomBytes(IV_BYTES);
     kek = await deriveKek({
       passphrase: input.passphrase,
       salt,
@@ -152,6 +155,11 @@ export async function wrapWorkspaceDataKey(input: {
       ciphertextBase64: b64(ciphertext),
     };
     return { envelopeJson: JSON.stringify(envelope) };
+  } catch (error) {
+    // Normalize like unwrap: never leak cipher/OpenSSL internals from the
+    // wrap path either.
+    if (error instanceof SecretKeyEnvelopeError) throw error;
+    throw new SecretKeyEnvelopeError(error);
   } finally {
     // Best effort only: JS/V8 may have copied key material internally, so this
     // reduces exposure without claiming guaranteed erasure.
