@@ -5370,7 +5370,14 @@ function createVersionedTextStoreWithHooks(
           conflict.path,
           selectSnapshotByPath(txDb, workspaceId, conflict.targetVersionId, conflict.path),
         );
-        if (!fileStatesEqual(current, conflict.current)) {
+        // Exact head check (0P sync-hardening item 3 gate fix): byte-equality
+        // alone (fileStatesEqual) ignores object identity, path, and latest
+        // moment id, so a file that moved on and reverted to the SAME bytes, or
+        // a DIFFERENT object now sitting at this path with identical bytes,
+        // would pass and let this resolve of the OLD conflict delete/overwrite
+        // the newer local work. Require the live head to be the precise state
+        // the conflict row recorded before acting on it.
+        if (!liveStateMatchesConflictCurrent(current, conflict.current)) {
           throw new VersionedTextStoreError(
             "conflict-stale-target",
             `Conflict ${conflict.id} no longer matches ${conflict.path}.`,

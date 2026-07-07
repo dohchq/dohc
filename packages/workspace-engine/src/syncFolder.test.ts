@@ -2838,6 +2838,76 @@ describe("sync folder replication", () => {
     });
   });
 
+  // 0P sync-hardening item 3 GATE FIX (local resolve overwrites newer work).
+  // resolveTextConflict re-reads live state, but the staleness guard used
+  // byte-equality (fileStatesEqual), which ignores the latest moment id. A file
+  // that moved on AFTER the conflict opened and reverted to the SAME bytes has
+  // a NEW head; resolving the OLD conflict against it would act on stale state
+  // and discard the newer local work. The exact-head guard
+  // (liveStateMatchesConflictCurrent) must reject it as stale instead.
+  it("a local resolve of a stale conflict never overwrites a moved-on-then-reverted file (item 3)", async () => {
+    const a = await tempRoot("sync-lr-a");
+    const b = await tempRoot("sync-lr-b");
+    const seedDir = await tempRoot("sync-lr-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-lr-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    // B imports A's divergent edit and opens a LOCAL conflict (current="from B").
+    await replicate(a, b);
+
+    await withStore(b, 4000, "b2-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflict!.current.text).toBe("from B");
+      // The file moves on AFTER the conflict opened, then reverts to the exact
+      // same bytes — a NEW head over identical content.
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B, in progress", metadata: { origin: "api" } });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } });
+      // Resolving the OLD conflict (apply-incoming would write "from A" over the
+      // live head) must fail closed as stale — byte-equality alone would have
+      // let it through and clobbered the newer local lineage.
+      await expect(
+        store.resolveTextConflict({
+          workspaceId: WORKSPACE_ID,
+          conflictId: conflict!.id,
+          resolution: { kind: "apply-incoming" },
+          metadata: { origin: "api" },
+        }),
+      ).rejects.toMatchObject({ code: "conflict-stale-target" });
+      // The newer local work is untouched and the conflict is still open.
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from B");
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toHaveLength(1);
+    });
+  });
+
   // 0P-C gate fix (High): content equality is NOT convergence. Two machines
   // holding the SAME bytes at DIFFERENT paths (divergent renames) must keep
   // the mirror conflict open — auto-closing it would leave the machines
