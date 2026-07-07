@@ -291,6 +291,13 @@ function normalizeDisplayName(displayName: string): string {
 // display are separate fields).
 function normalizeAuthorUserId(authorUserId: string | undefined): string | undefined {
   if (authorUserId === undefined) return undefined;
+  // Type-guard like the sibling boundary validators (normalizeActor,
+  // normalizeReactionEmoji): a non-string from a loosely-typed IPC/tool payload
+  // must surface the typed "invalid-sender" error, not a raw TypeError from
+  // .trim(), so callers that switch on `.code` stay well-behaved.
+  if (typeof authorUserId !== "string") {
+    throw new LinkedChatStoreError("invalid-sender", "Chat author user id is invalid.");
+  }
   const normalized = authorUserId.trim();
   if (!normalized || normalized.length > 200) {
     throw new LinkedChatStoreError("invalid-sender", "Chat author user id is invalid.");

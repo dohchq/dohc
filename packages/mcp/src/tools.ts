@@ -2298,6 +2298,26 @@ async function agentReplyDisplayName(ctx: ToolContext): Promise<string> {
   return "You";
 }
 
+// The VERIFIED opaque relay identity a signed-in agent send stamps on its chat
+// message (WS-MU-C0). Mirrors the desktop's relayAuthorUserId(): the OPAQUE
+// Better Auth user id the relay verifies as `actor.userId` before admitting the
+// replicated op. The desktop plumbs it in via DOHC_MCP_CLOUD_USER_ID (else the
+// dohc-cloud.json credential file's userId). Present ONLY when a cloud session
+// is known; solo/local returns undefined so message.append omits authorUserId
+// and stays byte-identical to today. NEVER the email — identity is opaque.
+async function agentAuthorUserId(ctx: ToolContext): Promise<string | undefined> {
+  if (nonEmptyString(process.env.DOHC_MCP_CLOUD_USER_ID)) {
+    return process.env.DOHC_MCP_CLOUD_USER_ID;
+  }
+  const credentials = await readJson<{ version?: unknown; userId?: unknown }>(
+    join(ctx.home, "dohc-cloud.json"),
+  );
+  if (credentials?.version === 1 && nonEmptyString(credentials.userId)) {
+    return credentials.userId;
+  }
+  return undefined;
+}
+
 async function withEngineStores<T>(
   ctx: ToolContext,
   task: (stores: { texts: VersionedTextStore; chats: LinkedChatStore }) => Promise<T>,
@@ -2519,6 +2539,7 @@ export async function startChannelChat(
   const gate = await requireEngineChats(ctx);
   if (!gate.ok) return { ok: false as const, reason: gate.reason };
   const displayName = await agentReplyDisplayName(ctx);
+  const authorUserId = await agentAuthorUserId(ctx);
   try {
     return await withEngineStores(ctx, async ({ chats }) => {
       const requested = args.channel.replace(/^#/, "").trim();
@@ -2544,6 +2565,9 @@ export async function startChannelChat(
           ...(args.title !== undefined ? { title: args.title } : {}),
           // Agent authorship, always: this tool IS the agent speaking.
           author: { kind: "agent", displayName },
+          // WS-MU-C0: stamp the signed-in opaque userId so the relay verifies
+          // this agent send and it replicates VERIFIED (omitted when solo/local).
+          ...(authorUserId !== undefined ? { authorUserId } : {}),
           body: args.body,
         }),
       );
@@ -2569,6 +2593,7 @@ export async function replyToChat(
   const gate = await requireEngineChats(ctx);
   if (!gate.ok) return { ok: false as const, reason: gate.reason };
   const displayName = await agentReplyDisplayName(ctx);
+  const authorUserId = await agentAuthorUserId(ctx);
   try {
     return await withEngineStores(ctx, async ({ chats }) => {
       const message = await withBusyRetry(() =>
@@ -2578,6 +2603,9 @@ export async function replyToChat(
           // Agent authorship, always: this tool IS the agent speaking. Shared
           // surfaces render it as "<User Name>'s agent".
           author: { kind: "agent", displayName },
+          // WS-MU-C0: stamp the signed-in opaque userId so the relay verifies
+          // this agent send and it replicates VERIFIED (omitted when solo/local).
+          ...(authorUserId !== undefined ? { authorUserId } : {}),
           body: args.body,
         }),
       );

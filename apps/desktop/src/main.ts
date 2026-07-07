@@ -984,6 +984,13 @@ function mcpRuntimeConfigFor(rootPath: string): {
           DOHC_MCP_CLOUD_SERVER_URL: cachedCredentials.serverUrl,
           DOHC_MCP_CLOUD_EMAIL: cachedCredentials.email,
           DOHC_MCP_CLOUD_TOKEN: cachedCredentials.token,
+          // WS-MU-C0: the OPAQUE Better Auth user id, so the agent's chat sends
+          // stamp a VERIFIED authorUserId the relay accepts as actor.userId.
+          // Present only when the session carries it (older credential files omit
+          // it — the agent then sends solo, byte-identical to today).
+          ...(cachedCredentials.userId
+            ? { DOHC_MCP_CLOUD_USER_ID: cachedCredentials.userId }
+            : {}),
         }
       : undefined;
   return {
@@ -2864,6 +2871,11 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // WS-MU-C0: the credential cache must be warm BEFORE relayAuthorUserId()
+    // reads it — a send racing an unfinished async cache load would otherwise
+    // stamp solo (authorUserId omitted) and lose relay provenance for a
+    // signed-in user's message. warmCredentialCache is idempotent.
+    await warmCredentialCache();
     // Author is derived HERE: renderer-sent messages are always the local
     // human user. Agent authorship arrives through agent tooling, never
     // through this channel.
@@ -2996,6 +3008,10 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // WS-MU-C0: warm the credential cache before relayAuthorUserId() reads it,
+    // so a thread opened before the async cache load finishes still stamps the
+    // signed-in author (never falsely solo). Idempotent.
+    await warmCredentialCache();
     // No title, ever, on this path: the thread displays its first-message
     // snippet. Author is main-derived like every renderer send.
     const started = await linkedChatStoreFor(workspace).startChannelThread({

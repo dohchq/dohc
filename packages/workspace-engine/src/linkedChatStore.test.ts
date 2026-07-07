@@ -1419,6 +1419,16 @@ describe("chat reactions (WS-MU-C2)", () => {
         body: "bad id",
       }),
     ).rejects.toMatchObject({ code: "invalid-sender" });
+    // Oversized (past the 200-char cap) is rejected at the same boundary.
+    await expect(
+      a.store.sendMessage({
+        workspaceId: WS,
+        threadId,
+        author: { kind: "human", displayName: "Alice" },
+        authorUserId: "x".repeat(201),
+        body: "bad id",
+      }),
+    ).rejects.toMatchObject({ code: "invalid-sender" });
   });
 
   it("adds and lists a reaction solo, with no relay", async () => {
