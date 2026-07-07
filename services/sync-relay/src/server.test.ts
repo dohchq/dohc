@@ -927,19 +927,26 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(2);
   });
 
-  it("admits a solo message.append that omits authorUserId (byte-identical to today)", async () => {
+  it("stamps the authenticated pusher onto a message.append that omits authorUserId", async () => {
+    // The relay only ever sees AUTHENTICATED pushes, so an append that omits
+    // authorUserId is not "solo" here — it is attributable to its pusher. The
+    // relay stamps actor.userId so the replicated op is VERIFIED, never NULL.
+    // (The genuine solo/no-relay omission survives only in the engine-local
+    // path, which never traverses the relay.)
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    const solo = await h(
+    const stamped = await h(
       request(
         "a",
         "/sync/workspace-a/log",
         jsonBody({ originId: "origin-a", ops: [messageOp(0, undefined)] }),
       ),
     );
-    expect(solo.status).toBe(200);
-    expect(await logOps(h)).toHaveLength(1);
+    expect(stamped.status).toBe(200);
+    const ops = await logOps(h);
+    expect(ops).toHaveLength(1);
+    expect((ops[0] as { payload: { authorUserId?: string } }).payload.authorUserId).toBe("a");
   });
 
   it("rejects a message.append forging another user's authorUserId, leaving the log unchanged", async () => {
@@ -1010,5 +1017,92 @@ describe("MU-C0 verified chat authorship", () => {
     );
     expect(opaque.status).toBe(200);
     expect(await logOps(h)).toHaveLength(1);
+  });
+
+  it("passes through known no-author chat ops (channel.create, thread.create)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const structural = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.channel.create",
+              payload: { channelId: "c-1", name: "general", slug: "general", createdAtMs: 1000 },
+              recordedAtMs: 1000,
+            },
+            {
+              originSeq: 1,
+              opKind: "chat.thread.create",
+              payload: { threadId: "t-1", title: "hi", createdAtMs: 1001, channelSlug: "general" },
+              recordedAtMs: 1001,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(structural.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(2);
+  });
+
+  it("REJECTS an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
+    // A future authored chat op (here a made-up chat.thread.update) that carries
+    // an author-shaped field we have NOT taught the policy to verify must be
+    // refused, not admitted unverified. Shipping a new authored chat op without
+    // extending CHAT_OP_POLICY fails closed.
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const unknownAuthored = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.update",
+              payload: { threadId: "t-1", authorUserId: "victim", title: "renamed" },
+              recordedAtMs: 1000,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(unknownAuthored.status).toBe(403);
+    expect(await json(unknownAuthored)).toMatchObject({ ok: false, code: "unknown_chat_op" });
+    expect(await logOps(h)).toEqual([]);
+  });
+
+  it("REJECTS a made-up chat.* op even with no author field (unknown = fail-closed)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const madeUp = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.message.edit",
+              payload: { messageId: "m-1", body: "edited" },
+              recordedAtMs: 1000,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(madeUp.status).toBe(403);
+    expect(await json(madeUp)).toMatchObject({ ok: false, code: "unknown_chat_op" });
+    expect(await logOps(h)).toEqual([]);
   });
 });
