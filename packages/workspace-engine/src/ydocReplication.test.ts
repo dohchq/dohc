@@ -417,6 +417,12 @@ describe("ydoc.update replication", () => {
       .readTextFile({ workspaceId: WS, versionId: "main", path: ".env" })
       .catch(() => null);
     expect(file).toBeNull();
+
+    // The driver's local open path is guarded too (defense in depth): even if a
+    // secret file somehow existed, a Y.Doc session for it is refused.
+    await expect(
+      a.driver.openSession({ workspaceId: WS, versionId: "main", path: ".env" }),
+    ).rejects.toThrow(/secret/i);
   });
 
   it("counts the update blob as a GC root reference (engine + relay accounting)", () => {

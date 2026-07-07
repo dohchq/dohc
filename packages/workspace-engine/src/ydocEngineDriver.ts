@@ -75,6 +75,7 @@ import {
   trackEngineDbHandleForTest,
 } from "./engineDbSchema";
 import { canonicalEngineDbPath } from "./versionedTextStore";
+import { classifyEngineFilePath } from "./enginePathFloor";
 import { journalLocalReplicationOp } from "./syncReplication";
 import type { YDocUpdatePayload } from "@dohc/workspace-contracts/engine";
 
@@ -662,6 +663,16 @@ export function createYDocEngineDriver(
     },
 
     async openSession({ workspaceId, versionId, path, contentKind, resume }) {
+      // SECRET FLOOR (defense in depth): a secret-classified path must NEVER be
+      // opened as a replicated Y.Doc. Secret files live only in the encrypted
+      // secret store (readTextFile would miss them anyway), but reject here
+      // explicitly so no future change can create a plaintext-Y.Doc leak path.
+      if (classifyEngineFilePath(path).kind === "secret") {
+        throw new YDocEngineDriverError(
+          "invalid-input",
+          `Refusing to open a Y.Doc session for secret-classified path ${path}.`,
+        );
+      }
       const snapshot = await store.readTextFile({ workspaceId, versionId, path });
       if (!snapshot) {
         throw new YDocEngineDriverError(
