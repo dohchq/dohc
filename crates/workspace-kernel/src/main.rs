@@ -788,8 +788,14 @@ mod tests {
         write_file(temp.path().join(".dohc/history.json"), b"hidden");
         write_file(temp.path().join(".git/config"), b"hidden");
         write_file(temp.path().join("node_modules/pkg/index.js"), b"hidden");
-        write_file(temp.path().join("node_modules /pkg/index.js"), b"hidden");
-        write_file(temp.path().join(".git./config"), b"hidden");
+        // Trailing-space and trailing-dot path components are not creatable
+        // through Win32 APIs (and cannot occur in real Windows workspaces), so
+        // these near-miss fixtures exist only on unix.
+        #[cfg(unix)]
+        {
+            write_file(temp.path().join("node_modules /pkg/index.js"), b"hidden");
+            write_file(temp.path().join(".git./config"), b"hidden");
+        }
         write_file(temp.path().join(".dohc-write-123.tmp"), b"hidden");
         write_file(
             temp.path().join("finance/ledger.sqlite"),
@@ -917,9 +923,12 @@ mod tests {
     }
 
     fn scan_request(root: &Path, extra_fields: Option<&str>) -> String {
+        // serde_json escaping keeps the request valid when the root contains
+        // JSON-significant characters (Windows backslash separators).
+        let root_json = serde_json::to_string(&root.to_string_lossy()).unwrap();
         format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"kernel.scan","token":"test-token","params":{{"root":"{}"{}}}}}"#,
-            root.to_string_lossy(),
+            r#"{{"jsonrpc":"2.0","id":1,"method":"kernel.scan","token":"test-token","params":{{"root":{}{}}}}}"#,
+            root_json,
             extra_fields.unwrap_or("")
         )
     }
@@ -935,12 +944,14 @@ mod tests {
             write_file(root.join(&file.path), file.text.as_bytes());
         }
         for symlink in &workspace.symlinks {
+            let path = root.join(&symlink.path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
             #[cfg(unix)]
-            {
-                let path = root.join(&symlink.path);
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::os::unix::fs::symlink(&symlink.target, path).unwrap();
-            }
+            std::os::unix::fs::symlink(&symlink.target, path).unwrap();
+            // File symlink creation needs Developer Mode ON (a documented dev
+            // prerequisite for this repo on Windows).
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(&symlink.target, path).unwrap();
         }
     }
 
