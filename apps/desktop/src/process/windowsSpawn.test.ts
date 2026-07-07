@@ -56,6 +56,42 @@ describe("resolveSpawnCommand", () => {
     ).toThrow(/double quote/);
   });
 
+  it("refuses arguments containing a percent sign so %VAR% cannot inject a second command", () => {
+    // cmd.exe expands %VAR% even inside double quotes, so a crafted env value
+    // could break out of the quoting the same way an embedded quote would.
+    // The refusal must fire before any command line is built.
+    expect(() =>
+      resolveSpawnCommand("npm", ["run", "dev", "--flag=%DOHC_PWN%"], {
+        platform: "win32",
+        env: { Path: "C:\\npm", PATHEXT: ".CMD", ComSpec: "cmd.exe" },
+        exists: (candidate) => candidate === "C:\\npm\\npm.CMD",
+      }),
+    ).toThrow(/percent sign/);
+    // A lone percent (not even a %VAR% pair) is still refused — quoting cannot
+    // contain it, so no percent survives onto a cmd.exe line.
+    expect(() =>
+      resolveSpawnCommand("npm", ["50%"], {
+        platform: "win32",
+        env: { Path: "C:\\npm", PATHEXT: ".CMD", ComSpec: "cmd.exe" },
+        exists: (candidate) => candidate === "C:\\npm\\npm.CMD",
+      }),
+    ).toThrow(/percent sign/);
+  });
+
+  it("still quotes literal cmd metacharacters through the cmd path", () => {
+    // & | < > ^ are inert inside double quotes, so they pass through quoted
+    // (only embedded quotes and percent signs are refused).
+    const resolved = resolveSpawnCommand("npm", ["a&b", "c|d", "e<f", "g>h", "i^j"], {
+      platform: "win32",
+      env: { Path: "C:\\npm", PATHEXT: ".CMD", ComSpec: "cmd.exe" },
+      exists: (candidate) => candidate === "C:\\npm\\npm.CMD",
+    });
+    expect(resolved.command).toBe("cmd.exe");
+    expect(resolved.args[3]).toBe(
+      '""C:\\npm\\npm.CMD" "a&b" "c|d" "e<f" "g>h" "i^j""',
+    );
+  });
+
   it("doubles a trailing backslash run so it cannot escape the closing quote", () => {
     const resolved = resolveSpawnCommand("npm", ["C:\\site\\", "C:\\deep\\\\"], {
       platform: "win32",
