@@ -33,9 +33,11 @@ async function tempRoot(label: string): Promise<string> {
   return root;
 }
 
-async function testStorage(): Promise<SyncRelayStorage> {
+async function testStorage(
+  options?: Parameters<typeof openSyncRelayStorage>[1],
+): Promise<SyncRelayStorage> {
   const root = await tempRoot("db");
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
+  const storage = openSyncRelayStorage(join(root, "relay.sqlite"), options);
   storages.push(storage);
   return storage;
 }
@@ -473,5 +475,135 @@ describe("sync relay handler", () => {
     expect(put.status).toBe(413);
     const get = await h(request("a", `/sync/workspace-a/blobs/${oversizedSha}`, { method: "GET" }));
     expect(get.status).toBe(404);
+  });
+
+  it("rejects a new over-quota blob PUT without rejecting idempotent re-PUTs", async () => {
+    const storage = await testStorage({ workspaceQuotaBytes: 5 });
+    const h = handler(storage);
+    await createWorkspace(h);
+    const first = Buffer.from("abc");
+    const firstSha = sha256(first);
+    const second = Buffer.from("de");
+    const secondSha = sha256(second);
+    const rejected = Buffer.from("f");
+    const rejectedSha = sha256(rejected);
+
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${firstSha}`, { method: "PUT", body: first }))).status,
+    ).toBe(200);
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${secondSha}`, { method: "PUT", body: second }))).status,
+    ).toBe(200);
+
+    const retry = await json(
+      await h(request("a", `/sync/workspace-a/blobs/${firstSha}`, { method: "PUT", body: first })),
+    );
+    expect(retry).toMatchObject({ ok: true, alreadyHad: true, byteLength: first.byteLength });
+
+    const put = await h(request("a", `/sync/workspace-a/blobs/${rejectedSha}`, { method: "PUT", body: rejected }));
+    expect(put.status).toBe(413);
+    expect(await json(put)).toMatchObject({ ok: false, code: "quota_exceeded" });
+    expect((await h(request("a", `/sync/workspace-a/blobs/${rejectedSha}`, { method: "GET" }))).status).toBe(
+      404,
+    );
+  });
+
+  it("rejects an over-quota log append atomically", async () => {
+    const storage = await testStorage({ workspaceQuotaBytes: 40 });
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (await h(request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })))).status,
+    ).toBe(200);
+
+    const rejected = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [op(1, { big: "x".repeat(20) }), op(2, { big: "y".repeat(20) })],
+        }),
+      ),
+    );
+    expect(rejected.status).toBe(413);
+    expect(await json(rejected)).toMatchObject({ ok: false, code: "quota_exceeded" });
+
+    const fetched = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    expect((fetched.ops as Array<{ originSeq: number }>).map((row) => row.originSeq)).toEqual([0]);
+  });
+
+  it("garbage-collects only unreferenced blobs without pruning log or key history", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const referenced = Buffer.from("referenced");
+    const referencedSha = sha256(referenced);
+    const unreferenced = Buffer.from("unreferenced");
+    const unreferencedSha = sha256(unreferenced);
+
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${referencedSha}`, { method: "PUT", body: referenced })))
+        .status,
+    ).toBe(200);
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${unreferencedSha}`, { method: "PUT", body: unreferenced })))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody({ originId: "origin-a", ops: [op(0, { payloadAfterBlobSha256: referencedSha })] }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const firstKey = keyEnvelopeJson("Zmlyc3Q=");
+    const secondKey = keyEnvelopeJson("c2Vjb25k");
+    expect((await h(putKeys(firstKey))).status).toBe(200);
+    expect((await h(putKeys(secondKey, sha256(firstKey)))).status).toBe(200);
+    const logBefore = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    const historyBefore = storage.getKeyEnvelopeHistory("workspace-a");
+
+    const gc = await json(
+      await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
+    );
+    expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [unreferencedSha] });
+    expect((await h(request("a", `/sync/workspace-a/blobs/${unreferencedSha}`, { method: "GET" }))).status).toBe(
+      404,
+    );
+    await expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${referencedSha}`, { method: "GET" }))).text(),
+    ).resolves.toBe("referenced");
+
+    const logAfter = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    expect(logAfter).toEqual(logBefore);
+    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual(historyBefore);
+  });
+
+  it("allows only the workspace owner to run GC", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const orphan = Buffer.from("orphan");
+    const orphanSha = sha256(orphan);
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${orphanSha}`, { method: "PUT", body: orphan }))).status,
+    ).toBe(200);
+
+    const nonOwner = await h(request("intruder", "/sync/workspace-a/maintenance/gc", { method: "POST" }));
+    expect(nonOwner.status).toBe(404);
+    expect((await h(request("a", `/sync/workspace-a/blobs/${orphanSha}`, { method: "GET" }))).status).toBe(
+      200,
+    );
+
+    const owner = await json(
+      await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
+    );
+    expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
   });
 });

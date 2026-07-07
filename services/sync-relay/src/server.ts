@@ -8,6 +8,7 @@ import {
 } from "./shareFilter";
 import {
   SyncRelayConflictError,
+  SyncRelayQuotaExceededError,
   type SyncRelayLogInput,
   type SyncRelayShareRow,
   type SyncRelayStorage,
@@ -32,6 +33,7 @@ type SyncRelayRoute =
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
+  | { route: "gc"; workspaceId: string }
   | { route: "keys"; workspaceId: string }
   | { route: "log"; workspaceId: string }
   | { route: "shares-create"; workspaceId: string }
@@ -254,6 +256,12 @@ export function createSyncRelayHandler({
       if (route.route === "share-blob") throw methodNotAllowed();
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      if (route.route === "gc" && request.method === "POST") {
+        const result = storage.collectUnreferencedBlobs(route.workspaceId);
+        return jsonResponse({ ok: true, ...result });
+      }
+      if (route.route === "gc") throw methodNotAllowed();
 
       if (route.route === "shares-create" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -499,6 +507,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 4 && parts[2] === "blobs" && parts[3]) {
     return { route: "blob", workspaceId, sha256: parts[3] };
   }
+  if (parts.length === 4 && parts[2] === "maintenance" && parts[3] === "gc") {
+    return { route: "gc", workspaceId };
+  }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
   }
@@ -654,17 +665,22 @@ function errorResponse(error: unknown): Response {
   const classified =
     error instanceof HttpError ||
     error instanceof SyncRelayConflictError ||
+    error instanceof SyncRelayQuotaExceededError ||
     (Number.isInteger(duckStatus) && duckStatus! >= 400 && duckStatus! <= 499);
   if (!classified) {
     console.error("[sync-relay] unhandled error", error);
     return jsonResponse({ ok: false, error: "internal error", code: "internal_error" }, 500);
   }
   const status =
-    error instanceof HttpError || error instanceof SyncRelayConflictError
+    error instanceof HttpError ||
+    error instanceof SyncRelayConflictError ||
+    error instanceof SyncRelayQuotaExceededError
       ? error.statusCode
       : duckStatus!;
   const code =
-    error instanceof HttpError || error instanceof SyncRelayConflictError
+    error instanceof HttpError ||
+    error instanceof SyncRelayConflictError ||
+    error instanceof SyncRelayQuotaExceededError
       ? error.code
       : typeof error === "object" && error && "code" in error
         ? String((error as { code?: unknown }).code)

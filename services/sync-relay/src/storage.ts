@@ -33,6 +33,11 @@ export interface PutBlobResult {
   alreadyHad: boolean;
 }
 
+export interface CollectUnreferencedBlobsResult {
+  removed: number;
+  removedSha256s: string[];
+}
+
 export interface KeyEnvelopeRow {
   envelopeJson: string;
   sha256: string;
@@ -75,6 +80,7 @@ export interface SyncRelayStorage {
     sha256: string;
     content: Uint8Array;
   }): PutBlobResult;
+  collectUnreferencedBlobs(workspaceId: string): CollectUnreferencedBlobsResult;
   getBlob(workspaceId: string, sha256: string): Uint8Array | null;
   missingBlobs(workspaceId: string, sha256s: string[]): string[];
   // Create-only on first write (expectedSha256 null), compare-and-swap
@@ -152,6 +158,11 @@ function nodeSqlite(): SqliteModule {
 }
 
 export const SYNC_RELAY_BUSY_TIMEOUT_MS = 5_000;
+export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+
+export interface OpenSyncRelayStorageOptions {
+  workspaceQuotaBytes?: number;
+}
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
   db.exec("BEGIN IMMEDIATE");
@@ -254,17 +265,22 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   }
 }
 
-export function openSyncRelayStorage(dbPath: string): SyncRelayStorage {
+export function openSyncRelayStorage(
+  dbPath: string,
+  options: OpenSyncRelayStorageOptions = {},
+): SyncRelayStorage {
   const resolved = resolve(dbPath);
   mkdirSync(dirname(resolved), { recursive: true });
   const { DatabaseSync } = nodeSqlite();
+  const workspaceQuotaBytes =
+    options.workspaceQuotaBytes ?? DEFAULT_WORKSPACE_QUOTA_BYTES;
   const db = new DatabaseSync(resolved);
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     initializeSyncRelaySchema(db);
-    return new SqliteSyncRelayStorage(db);
+    return new SqliteSyncRelayStorage(db, workspaceQuotaBytes);
   } catch (error) {
     try {
       db.close();
@@ -274,7 +290,10 @@ export function openSyncRelayStorage(dbPath: string): SyncRelayStorage {
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
-  constructor(private readonly db: SqliteDb) {}
+  constructor(
+    private readonly db: SqliteDb,
+    private readonly workspaceQuotaBytes: number,
+  ) {}
 
   close(): void {
     this.db.close();
@@ -329,13 +348,66 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     content: Uint8Array;
   }): PutBlobResult {
     const byteLength = input.content.byteLength;
-    const result = this.db
-      .prepare(
-        `INSERT OR IGNORE INTO sync_relay_blobs (workspace_id, sha256, byte_length, content)
-         VALUES (?, ?, ?, ?)`,
-      )
-      .run(input.workspaceId, input.sha256, byteLength, Buffer.from(input.content));
-    return { byteLength, alreadyHad: result.changes === 0 };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db
+        .prepare(
+          "SELECT 1 AS ok FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
+        )
+        .get(input.workspaceId, input.sha256);
+      if (existing !== undefined) {
+        this.db.exec("COMMIT");
+        return { byteLength, alreadyHad: true };
+      }
+      this.assertWorkspaceQuota(input.workspaceId, byteLength);
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(input.workspaceId, input.sha256, byteLength, Buffer.from(input.content));
+      this.db.exec("COMMIT");
+      return { byteLength, alreadyHad: false };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  collectUnreferencedBlobs(workspaceId: string): CollectUnreferencedBlobsResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT b.sha256
+           FROM sync_relay_blobs b
+           WHERE b.workspace_id = ?
+             AND NOT EXISTS (
+               SELECT 1
+               FROM sync_relay_log l
+               WHERE l.workspace_id = b.workspace_id
+                 AND l.payload_json LIKE '%' || b.sha256 || '%'
+             )
+           ORDER BY b.sha256`,
+        )
+        .all(workspaceId);
+      const removedSha256s = rows.map((row) => String(row.sha256));
+      const deleteStmt = this.db.prepare(
+        "DELETE FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
+      );
+      for (const sha256 of removedSha256s) {
+        deleteStmt.run(workspaceId, sha256);
+      }
+      this.db.exec("COMMIT");
+      return { removed: removedSha256s.length, removedSha256s };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
   }
 
   getBlob(workspaceId: string, sha256: string): Uint8Array | null {
@@ -493,6 +565,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     try {
       let inserted = 0;
       let skipped = 0;
+      let addedLogBytes = 0;
+      const newOps: SyncRelayLogInput[] = [];
       const maxStmt = this.db.prepare(
         `SELECT COALESCE(MAX(origin_seq), -1) AS max_seq
          FROM sync_relay_log
@@ -503,12 +577,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       );
-      const insertStmt = this.db.prepare(
-        `INSERT INTO sync_relay_log (
-          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
-      );
-
       // Read the current MAX(origin_seq) once, then track it locally: each
       // insert is exactly currentMax + 1, so re-querying per op (was N extra
       // SELECTs per batch) is unnecessary. Skipped ops leave it unchanged.
@@ -540,6 +608,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             `origin_seq gap: expected ${currentMax + 1}, got ${op.originSeq}`,
           );
         }
+        currentMax = op.originSeq;
+        newOps.push(op);
+        addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
+      }
+
+      this.assertWorkspaceQuota(input.workspaceId, addedLogBytes);
+
+      const insertStmt = this.db.prepare(
+        `INSERT INTO sync_relay_log (
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const op of newOps) {
         insertStmt.run(
           input.workspaceId,
           input.originId,
@@ -548,7 +629,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           op.payloadJson,
           op.recordedAtMs,
         );
-        currentMax = op.originSeq;
         inserted += 1;
       }
 
@@ -559,6 +639,34 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         this.db.exec("ROLLBACK");
       } catch {}
       throw error;
+    }
+  }
+
+  private workspaceUsageBytes(workspaceId: string): number {
+    const blobRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(byte_length), 0) AS bytes
+         FROM sync_relay_blobs
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    const logRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) AS bytes
+         FROM sync_relay_log
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    return Number(blobRow?.bytes ?? 0) + Number(logRow?.bytes ?? 0);
+  }
+
+  private assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
+    if (addedBytes <= 0) return;
+    const currentUsage = this.workspaceUsageBytes(workspaceId);
+    if (currentUsage + addedBytes > this.workspaceQuotaBytes) {
+      throw new SyncRelayQuotaExceededError(
+        `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${this.workspaceQuotaBytes}`,
+      );
     }
   }
 
@@ -733,4 +841,9 @@ function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
 export class SyncRelayConflictError extends Error {
   readonly statusCode = 409;
   readonly code = "conflict";
+}
+
+export class SyncRelayQuotaExceededError extends Error {
+  readonly statusCode = 413;
+  readonly code = "quota_exceeded";
 }

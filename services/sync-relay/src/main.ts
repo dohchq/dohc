@@ -1,18 +1,28 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
-import { openSyncRelayStorage } from "./storage";
+import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 
 const requestedPort = process.env.SYNC_RELAY_PORT === undefined ? 1788 : Number(process.env.SYNC_RELAY_PORT);
+const workspaceQuotaBytes =
+  process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES === undefined
+    ? DEFAULT_WORKSPACE_QUOTA_BYTES
+    : Number(process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES);
 const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc_v2";
 const secret = process.env.BETTER_AUTH_SECRET ?? "";
 const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
+
+function fatal(message: string): never {
+  writeSync(2, `${message}\n`);
+  process.exit(1);
+}
 
 // Reject an unparseable SYNC_RELAY_PORT up front: Number("abc") is NaN and
 // server.listen(NaN) fails with an obscure downstream error. Port 0 is
@@ -21,10 +31,18 @@ if (
   process.env.SYNC_RELAY_PORT !== undefined &&
   (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535)
 ) {
-  console.error(
+  fatal(
     `FATAL: SYNC_RELAY_PORT must be an integer in 0-65535, got "${process.env.SYNC_RELAY_PORT}".`,
   );
-  process.exit(1);
+}
+
+if (
+  process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES !== undefined &&
+  (!Number.isInteger(workspaceQuotaBytes) || workspaceQuotaBytes <= 0)
+) {
+  fatal(
+    `FATAL: SYNC_RELAY_WORKSPACE_QUOTA_BYTES must be a positive integer, got "${process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES}".`,
+  );
 }
 
 // In production the relay reuses workspace-api's Postgres for session and
@@ -32,29 +50,26 @@ if (
 // silently point auth at the wrong database; fail fast instead. The default
 // stays available for dev/test convenience only.
 if (!isDevOrTest && !testAuthSeam && process.env.POSTGRES_URL === undefined) {
-  console.error(
+  fatal(
     "FATAL: POSTGRES_URL must be set outside development/test (it must match workspace-api's database).",
   );
-  process.exit(1);
 }
 
 if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
-  console.error(
+  fatal(
     `FATAL: SYNC_RELAY_TEST_AUTH=1 requires NODE_ENV=development or test, got NODE_ENV=${nodeEnv ?? "(unset)"}. ` +
       "This fake bearer seam is test-only — refusing to start.",
   );
-  process.exit(1);
 }
 
 if (!testAuthSeam && secret.length < 32) {
-  console.error(
+  fatal(
     "BETTER_AUTH_SECRET must be set (>=32 chars) and must match workspace-api's secret.",
   );
-  process.exit(1);
 }
 
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
-const storage = openSyncRelayStorage(dbPath);
+const storage = openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
