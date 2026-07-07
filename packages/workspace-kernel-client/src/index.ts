@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -226,11 +226,19 @@ export class WorkspaceKernelClient {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    const child = this.child;
-    this.child = null;
     for (const [id, pending] of this.pending) {
       this.rejectPending(id, pending, new KernelUnavailableError("Workspace kernel client disposed."));
     }
+    // Await any in-flight restart before deciding what to kill: a restart could
+    // be mid-backoff (child === null right now) and about to spawn. startOrRestart
+    // bails on `disposed`, so this settles fast; awaiting it closes the window
+    // where a backoff timer spawns a NEW child after dispose returned (a leaked
+    // sidecar). Read this.child only AFTER, so a child spawned in that window is
+    // still killed.
+    const restarting = this.restarting;
+    if (restarting) await restarting.catch(() => undefined);
+    const child = this.child;
+    this.child = null;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => {
@@ -318,7 +326,10 @@ export class WorkspaceKernelClient {
   }
 
   private async startOrRestart(): Promise<void> {
-    if (!existsSync(this.options.binaryPath)) {
+    // Never spawn after dispose(): a scheduled restart must observe disposal
+    // and bail, otherwise it leaks a sidecar the client can no longer track.
+    if (this.disposed) return;
+    if (!isFilePath(this.options.binaryPath)) {
       throw new KernelUnavailableError(`Workspace kernel binary not found: ${this.options.binaryPath}`);
     }
     if (this.restartFailures > 0) {
@@ -328,6 +339,8 @@ export class WorkspaceKernelClient {
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
+    // Re-check AFTER the backoff await: dispose() may have run during the delay.
+    if (this.disposed) return;
     if (this.restartFailures > (this.options.maxRestarts ?? 3)) {
       throw new KernelUnavailableError("Workspace kernel restart limit exceeded.");
     }
@@ -443,6 +456,16 @@ export class WorkspaceKernelClient {
 
 export function repoRootFromPackage(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+}
+
+// statSync().isFile() (not existsSync): a directory or dangling entry at the
+// binary path is not a runnable kernel and must be treated as unavailable.
+function isFilePath(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -30,8 +30,16 @@ function isFile(path) {
   }
 }
 
-mkdirSync(resourceDir, { recursive: true });
-rmSync(stagedBinary, { force: true });
+// "Degrade, never fail the JS build": even the staging fs ops are best-effort.
+// A read-only resources dir or a locked stale binary must warn and skip, not
+// abort packaging of the rest of the app.
+try {
+  mkdirSync(resourceDir, { recursive: true });
+  rmSync(stagedBinary, { force: true });
+} catch (error) {
+  warn("could not prepare the staging directory; packaging will omit the workspace kernel binary.", error);
+  process.exit(0);
+}
 
 if (process.env.DOHC_SKIP_WORKSPACE_KERNEL_BUILD === "1") {
   warn("DOHC_SKIP_WORKSPACE_KERNEL_BUILD=1; packaging will omit the workspace kernel binary.");
@@ -65,5 +73,10 @@ if (!isFile(builtBinary)) {
   process.exit(0);
 }
 
-copyFileSync(builtBinary, stagedBinary);
+try {
+  copyFileSync(builtBinary, stagedBinary);
+} catch (error) {
+  warn("could not stage the built binary; packaging will omit the workspace kernel binary.", error);
+  process.exit(0);
+}
 console.log(`[workspace-kernel] staged ${stagedBinary}`);

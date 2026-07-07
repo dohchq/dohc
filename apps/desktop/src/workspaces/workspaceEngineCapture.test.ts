@@ -157,6 +157,24 @@ async function writeCrashingFakeKernel(): Promise<string> {
   return path;
 }
 
+// The handshake gate now runs before every kernel scan, so any test that mocks
+// scan (rather than spawning a real kernel) must also present a compatible
+// handshake or it would fall back to TS.
+function mockValidHandshake() {
+  return vi
+    .spyOn(WorkspaceKernelClient.prototype, "handshake")
+    .mockResolvedValue({
+      protocolVersion: 1,
+      capabilities: [
+        "kernel.handshake",
+        "kernel.scan",
+        "kernel.hashChanged",
+        "kernel.reconcile",
+        "kernel.cancel",
+      ],
+    });
+}
+
 // PR 0N-1: the author a persisted moment carries (NULL = actor-neutral).
 function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown> | null> {
   const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
@@ -819,6 +837,11 @@ describe("workspaceEngineCapture startup reconciliation", () => {
   it("serializes reconciliation before a live watcher batch on one chain", async () => {
     const root = await tempRoot();
     await write(root, "offline.md", "offline edit\n");
+    // This test exercises pure chain serialization with an injected store; the
+    // scan backend is incidental. Pin it to the deterministic TS scan so a
+    // kernel binary present in the dev tree (its extra spawn+handshake latency
+    // would let the scan observe the live write) can't flip the ordering.
+    process.env.DOHC_KERNEL_SIDECAR = "0";
 
     const order: string[] = [];
     const store = createVersionedTextStore(root);
@@ -979,6 +1002,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     const root = await tempRoot();
     await write(root, "kernel.md", "kernel edit\n");
     await write(root, "typescript.md", "typescript edit\n");
+    const handshakeSpy = mockValidHandshake();
     const scanSpy = vi
       .spyOn(WorkspaceKernelClient.prototype, "scan")
       .mockResolvedValue({
@@ -1003,6 +1027,9 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     engine.start();
     await engine.stop();
 
+    // The kernel really engaged (handshake gate passed, then scan drove the
+    // add) — the hardening must not silently disable the fast path.
+    expect(handshakeSpy).toHaveBeenCalled();
     expect(scanSpy).toHaveBeenCalledWith(root);
     expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
       ["kernel.md", "write"],
@@ -1058,6 +1085,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
   it("stops attempting the kernel after consecutive process-lifetime failures", async () => {
     const root = await tempRoot();
     await write(root, "offline.md", "offline edit\n");
+    mockValidHandshake();
     const scanSpy = vi
       .spyOn(WorkspaceKernelClient.prototype, "scan")
       .mockRejectedValue(new Error("fake kernel scan failed"));
@@ -1110,6 +1138,203 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
       ["offline.md", "write"],
     ]);
+  });
+
+  // ADVERSARIAL (data-integrity): a default-on kernel is trusted for the bulk
+  // scan, but a plausible-but-INCOMPLETE files list (wrong-but-valid, so
+  // fail-open never fires) must NEVER drive a delete. Deletes are TS-confirmed.
+  it("never lets an incomplete kernel scan drive a false delete (TS-confirmed deletes)", async () => {
+    const root = await tempRoot();
+    await write(root, "keep.md", "keep me\n");
+    await write(root, "also.md", "also here\n");
+
+    // Seed the engine with BOTH files through the TS path (kernel off).
+    process.env.DOHC_KERNEL_SIDECAR = "0";
+    const seed = capture(root);
+    seed.start();
+    await seed.stop();
+    expect(
+      readEngineMoments(root)
+        .filter((m) => m.operation === "write")
+        .map((m) => m.path)
+        .sort(),
+    ).toEqual(["also.md", "keep.md"]);
+
+    // keep.md is still on disk; also.md is genuinely deleted. The kernel now
+    // returns an EMPTY (incomplete) list — it omits BOTH. The TS-confirmed
+    // delete gate must save keep.md (still present) while still retiring
+    // also.md (confirmed gone), proving the gate discriminates, not blanket-
+    // skips every delete.
+    await unlink(join(root, "also.md"));
+    delete process.env.DOHC_KERNEL_SIDECAR;
+    process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+    mockValidHandshake();
+    const scanSpy = vi
+      .spyOn(WorkspaceKernelClient.prototype, "scan")
+      .mockResolvedValue({ files: [] });
+
+    const engine = capture(root);
+    engine.start();
+    await engine.stop();
+
+    expect(scanSpy).toHaveBeenCalledWith(root);
+    // Only the genuinely-absent file is retired; keep.md survives the
+    // incomplete scan.
+    expect(
+      readEngineMoments(root)
+        .filter((m) => m.operation === "delete")
+        .map((m) => m.path),
+    ).toEqual(["also.md"]);
+    expect(
+      readSnapshotKinds(root)
+        .map((s) => s.path)
+        .includes("keep.md"),
+    ).toBe(true);
+  });
+
+  // ADVERSARIAL (fail-open gap): a malformed-but-valid JSON-RPC result must be
+  // rejected INSIDE the try so the existing catch falls back to TS — never
+  // throw outside the fallback and break reconciliation. Each shape counts as a
+  // kernel failure toward the disable-after-N guard.
+  const malformedScanResults: Array<{ name: string; result: unknown }> = [
+    { name: "an empty object (files undefined)", result: {} },
+    { name: "an explicit undefined files field", result: { files: undefined } },
+    { name: "a non-array files field", result: { files: "nope" } },
+    { name: "a null file entry", result: { files: [null] } },
+    {
+      name: "an entry missing its path",
+      result: { files: [{ size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" }] },
+    },
+    {
+      name: "a traversal path",
+      result: {
+        files: [
+          { path: "../escape.md", size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" },
+        ],
+      },
+    },
+    {
+      name: "an absolute path",
+      result: {
+        files: [
+          { path: "/etc/passwd", size: 1, sha256: "a".repeat(64), mediaType: "text/plain" },
+        ],
+      },
+    },
+    {
+      name: "a backslash-escaping path",
+      result: {
+        files: [
+          { path: "notes\\..\\..\\escape.md", size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" },
+        ],
+      },
+    },
+    {
+      name: "a non-hex sha256",
+      result: { files: [{ path: "note.md", size: 1, sha256: "not-hex", mediaType: "text/markdown" }] },
+    },
+    {
+      name: "a negative size",
+      result: {
+        files: [{ path: "note.md", size: -1, sha256: "a".repeat(64), mediaType: "text/markdown" }],
+      },
+    },
+    {
+      name: "a non-string mediaType",
+      result: { files: [{ path: "note.md", size: 1, sha256: "a".repeat(64), mediaType: 7 }] },
+    },
+  ];
+
+  for (const { name, result } of malformedScanResults) {
+    it(`falls back to the TS scan when the kernel returns ${name}`, async () => {
+      const root = await tempRoot();
+      await write(root, "note.md", "real disk content\n");
+      mockValidHandshake();
+      vi.spyOn(WorkspaceKernelClient.prototype, "scan").mockResolvedValue(
+        result as never,
+      );
+      const errors: Array<{ context: string; error: unknown }> = [];
+      delete process.env.DOHC_KERNEL_SIDECAR;
+      process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+      const engine = capture(root, {
+        onError(context, error) {
+          errors.push({ context, error });
+        },
+      });
+      engine.start();
+      // Must resolve — a malformed result never throws outside the fallback.
+      await engine.stop();
+
+      // The tolerant TS scan captured the real on-disk file.
+      expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+        ["note.md", "write"],
+      ]);
+      // The malformed result counted as a kernel failure.
+      expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+    });
+  }
+
+  // ADVERSARIAL (handshake gate): a stale/incompatible binary can speak enough
+  // JSON-RPC to answer with wrong results, so a protocol mismatch or a missing
+  // kernel.scan capability must reject BEFORE any scan output is trusted.
+  it("falls back to the TS scan when the handshake protocol version mismatches", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", "disk content\n");
+    vi.spyOn(WorkspaceKernelClient.prototype, "handshake").mockResolvedValue({
+      protocolVersion: 999,
+      capabilities: ["kernel.scan"],
+    });
+    const scanSpy = vi
+      .spyOn(WorkspaceKernelClient.prototype, "scan")
+      .mockResolvedValue({ files: [] });
+    const errors: Array<{ context: string; error: unknown }> = [];
+    delete process.env.DOHC_KERNEL_SIDECAR;
+    process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+    const engine = capture(root, {
+      onError(context, error) {
+        errors.push({ context, error });
+      },
+    });
+    engine.start();
+    await engine.stop();
+
+    // An incompatible binary is never scanned.
+    expect(scanSpy).not.toHaveBeenCalled();
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["note.md", "write"],
+    ]);
+    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+  });
+
+  it("falls back to the TS scan when the handshake omits the kernel.scan capability", async () => {
+    const root = await tempRoot();
+    await write(root, "note.md", "disk content\n");
+    vi.spyOn(WorkspaceKernelClient.prototype, "handshake").mockResolvedValue({
+      protocolVersion: 1,
+      capabilities: ["kernel.handshake"],
+    });
+    const scanSpy = vi
+      .spyOn(WorkspaceKernelClient.prototype, "scan")
+      .mockResolvedValue({ files: [] });
+    const errors: Array<{ context: string; error: unknown }> = [];
+    delete process.env.DOHC_KERNEL_SIDECAR;
+    process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+    const engine = capture(root, {
+      onError(context, error) {
+        errors.push({ context, error });
+      },
+    });
+    engine.start();
+    await engine.stop();
+
+    expect(scanSpy).not.toHaveBeenCalled();
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["note.md", "write"],
+    ]);
+    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
   });
 });
 

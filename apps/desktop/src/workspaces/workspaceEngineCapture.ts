@@ -31,7 +31,7 @@ import {
   defaultWorkspaceKernelPackagedBinaryPath,
 } from "@dohc/workspace-kernel-client";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import {
@@ -44,6 +44,14 @@ import {
 } from "./workspaceEnginePolicyFile";
 
 export const WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD = 3;
+
+// The JSON-RPC protocol version this desktop build speaks. A stale/incompatible
+// kernel binary that answers handshake with a different version (or that does
+// not advertise kernel.scan) is rejected before its scan output is ever trusted.
+export const WORKSPACE_KERNEL_PROTOCOL_VERSION = 1;
+
+// A kernel scan result is only trusted when every entry carries a hex sha256.
+const KERNEL_SHA256_RE = /^[0-9a-f]{64}$/;
 
 interface WorkspaceKernelRuntimeOptions {
   isPackaged: boolean;
@@ -400,6 +408,27 @@ function isUnderScanFailedPath(path: string, failedPaths: readonly string[]): bo
   );
 }
 
+// TS-CONFIRMED delete gate (the false-delete defense for a default-on kernel):
+// the reconcile scan (kernel or TS) drives adds/updates, but a scan is NOT
+// trusted to authorize a DELETE. A kernel that returns a plausible-but-
+// INCOMPLETE files list (wrong-but-valid, so fail-open never fires) would omit
+// a still-present tracked file and the retire pass would false-delete it. Before
+// retiring ANY previously-tracked path absent from the scan, this confirms the
+// absence with a direct lstat: only a genuinely gone path (ENOENT/ENOTDIR) is
+// retired. A path that still exists in any form — even transiently unreadable —
+// is left tracked, so an incomplete scan can never drive a false delete on any
+// platform. lstat (never stat) so a symlink leaf is treated as present, matching
+// readDiskTextState's symlink handling.
+async function pathConfirmedAbsentOnDisk(rootPath: string, path: string): Promise<boolean> {
+  try {
+    await lstat(join(rootPath, path));
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
 async function readDiskTextState(rootPath: string, path: string): Promise<DiskTextState> {
   const absolute = join(rootPath, path);
   try {
@@ -599,15 +628,82 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   };
 }
 
+function isExistingFile(path: string): boolean {
+  // statSync().isFile() (not existsSync): a directory, socket, or dangling
+  // entry at the resolved path is not a runnable kernel binary. existsSync
+  // would accept any of them and hand a non-executable path to spawn.
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function firstExistingWorkspaceKernelBinaryPath(): string | null {
   const packagedPath = defaultWorkspaceKernelPackagedBinaryPath(workspaceKernelRuntime);
-  const configuredPath = process.env.DOHC_KERNEL_BINARY_PATH?.trim() || null;
+  // The DOHC_KERNEL_BINARY_PATH override is a DEV/non-packaged escape hatch
+  // only: in a packaged build the bundled resource is the sole trusted source,
+  // so an env var can never point production at a stale/incompatible binary.
+  const configuredPath = workspaceKernelRuntime.isPackaged
+    ? null
+    : process.env.DOHC_KERNEL_BINARY_PATH?.trim() || null;
   const releasePath = defaultWorkspaceKernelBinaryPath(workspaceKernelRuntime.repoRoot);
   const debugPath = defaultWorkspaceKernelDebugBinaryPath(workspaceKernelRuntime.repoRoot);
   for (const candidate of [packagedPath, configuredPath, releasePath, debugPath]) {
-    if (candidate && existsSync(candidate)) return candidate;
+    if (candidate && isExistingFile(candidate)) return candidate;
   }
   return null;
+}
+
+// Runtime validation of a kernel.scan result BEFORE any of it is trusted as the
+// authoritative disk listing. A malformed-but-valid JSON-RPC result (e.g.
+// `{}` -> files: undefined, or an entry with a traversal path / non-hex sha)
+// throws here, INSIDE the try, so the existing catch takes the tolerant TS
+// path and the failure counts toward the disable-after-N guard. Each entry must
+// carry a safe normalized RELATIVE path (same validation the TS write path
+// uses), a finite non-negative size, a hex sha256, and a string mediaType.
+// Duplicate paths are de-duped (first wins).
+function validateKernelScanFiles(result: unknown): ReconcileScanFile[] {
+  if (typeof result !== "object" || result === null) {
+    throw new Error("Kernel scan returned a non-object result.");
+  }
+  const files = (result as { files?: unknown }).files;
+  if (!Array.isArray(files)) {
+    throw new Error("Kernel scan result is missing a files array.");
+  }
+  const seen = new Set<string>();
+  const validated: ReconcileScanFile[] = [];
+  for (const entry of files) {
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error("Kernel scan returned a non-object file entry.");
+    }
+    const record = entry as Record<string, unknown>;
+    const path = record.path;
+    if (typeof path !== "string") {
+      throw new Error("Kernel scan returned a file entry without a string path.");
+    }
+    const check = validateUserWritePath(path);
+    if (!check.ok || check.normalized !== path) {
+      throw new Error(`Kernel scan returned an unsafe file path: ${path}`);
+    }
+    if (
+      typeof record.size !== "number" ||
+      !Number.isFinite(record.size) ||
+      record.size < 0
+    ) {
+      throw new Error(`Kernel scan returned an invalid size for ${path}.`);
+    }
+    if (typeof record.sha256 !== "string" || !KERNEL_SHA256_RE.test(record.sha256)) {
+      throw new Error(`Kernel scan returned an invalid sha256 for ${path}.`);
+    }
+    if (typeof record.mediaType !== "string") {
+      throw new Error(`Kernel scan returned an invalid mediaType for ${path}.`);
+    }
+    if (seen.has(path)) continue;
+    seen.add(path);
+    validated.push({ path });
+  }
+  return validated;
 }
 
 async function fallbackReconcileScan(rootPath: string): Promise<ReconcileScan> {
@@ -660,12 +756,34 @@ export function createWorkspaceEngineCapture(
     const client = new WorkspaceKernelClient({
       binaryPath,
       timeoutMs: 30_000,
-      maxRestarts: 1,
+      // One-shot reconcile client: a binary that cannot even start is a hard
+      // failure for this scan, and restarting a broken/incompatible binary an
+      // extra time only wastes a spawn per pass. dispose() during a scheduled
+      // restart could also leak a sidecar, so keep the supervisor off here.
+      maxRestarts: 0,
     });
     try {
+      // Handshake gate (before ANY scan output is trusted): a stale/incompatible
+      // binary can speak enough JSON-RPC to answer with wrong results, so verify
+      // the protocol version matches and kernel.scan is an advertised capability
+      // first. A mismatch throws here -> the catch below falls back to TS and
+      // counts this as a kernel failure toward the disable-after-N guard.
+      const handshake = await client.handshake();
+      if (
+        handshake.protocolVersion !== WORKSPACE_KERNEL_PROTOCOL_VERSION ||
+        !Array.isArray(handshake.capabilities) ||
+        !handshake.capabilities.includes("kernel.scan")
+      ) {
+        throw new Error(
+          `Kernel handshake mismatch (protocolVersion=${handshake.protocolVersion}).`,
+        );
+      }
       const result = await client.scan(rootPath);
+      // Validate the shape INSIDE the try so a malformed-but-valid result falls
+      // back to TS instead of throwing outside the fallback during reconcile.
+      const files = validateKernelScanFiles(result);
       workspaceKernelConsecutiveFailures = 0;
-      return { files: result.files, failedPaths: [] };
+      return { files, failedPaths: [] };
     } catch (error) {
       workspaceKernelConsecutiveFailures += 1;
       if (workspaceKernelConsecutiveFailures >= WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD) {
@@ -1018,6 +1136,9 @@ export function createWorkspaceEngineCapture(
     for (const snapshot of tracked) {
       if (diskPaths.has(snapshot.path)) continue;
       if (isUnderScanFailedPath(snapshot.path, failedPaths)) continue;
+      // TS-confirm the absence before retiring: the scan (kernel or TS) is
+      // trusted for adds/updates but never to authorize a delete on its own.
+      if (!(await pathConfirmedAbsentOnDisk(rootPath, snapshot.path))) continue;
       await deleteIfTracked(engine, versionId, snapshot.path, metadata);
     }
     // Same rule for the encrypted store: protected files deleted while dohc
@@ -1030,6 +1151,9 @@ export function createWorkspaceEngineCapture(
       if (secretDiskPaths.has(stat.path)) continue;
       if (secretUnreadablePaths.has(stat.path)) continue;
       if (isUnderScanFailedPath(stat.path, failedPaths)) continue;
+      // Same TS-confirmed delete gate for protected files: an incomplete scan
+      // must never retire a secret whose file is still on disk.
+      if (!(await pathConfirmedAbsentOnDisk(rootPath, stat.path))) continue;
       await secretStoreFor().deleteSecretFile({
         workspaceId,
         versionId,

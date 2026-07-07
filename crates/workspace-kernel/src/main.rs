@@ -438,6 +438,13 @@ fn check_cancelled(cancel: &CancelFlag) -> Result<(), HandlerError> {
     Ok(())
 }
 
+// A walkdir error is a benign mid-scan race only when its underlying io error
+// is NotFound (the entry vanished after readdir). Any other error (permissions,
+// loop, IO) is a real failure the scan must surface.
+fn is_not_found(error: Option<&io::Error>) -> bool {
+    error.map(io::Error::kind) == Some(io::ErrorKind::NotFound)
+}
+
 fn scan_workspace(root: &Path, cancel: &CancelFlag) -> Result<Vec<FileMetadata>, HandlerError> {
     let canonical_root = canonical_workspace_root(root)?;
     let mut files = Vec::new();
@@ -450,6 +457,11 @@ fn scan_workspace(root: &Path, cancel: &CancelFlag) -> Result<Vec<FileMetadata>,
         check_cancelled(cancel)?;
         let entry = match entry {
             Ok(entry) => entry,
+            // A file/dir vanishing between readdir and the walker's own stat is
+            // a benign race, not a scan failure: skip that entry, consistent
+            // with the tolerant TS scan, instead of aborting the whole kernel
+            // scan (which would degrade every OTHER file's listing too).
+            Err(error) if is_not_found(error.io_error()) => continue,
             Err(error) => {
                 return Err(HandlerError::new(
                     INTERNAL_ERROR_CODE,
@@ -468,27 +480,37 @@ fn scan_workspace(root: &Path, cancel: &CancelFlag) -> Result<Vec<FileMetadata>,
         if file_type.is_symlink() || !file_type.is_file() || is_database_sidecar(entry.path()) {
             continue;
         }
-        let metadata = entry.metadata().map_err(|error| {
-            HandlerError::new(
-                INTERNAL_ERROR_CODE,
-                format!(
-                    "Workspace scan failed for {}: {error}",
-                    entry.path().display()
-                ),
-            )
-        })?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            // Same race: the file was removed after we listed it. Skip it.
+            Err(error) if is_not_found(error.io_error()) => continue,
+            Err(error) => {
+                return Err(HandlerError::new(
+                    INTERNAL_ERROR_CODE,
+                    format!(
+                        "Workspace scan failed for {}: {error}",
+                        entry.path().display()
+                    ),
+                ))
+            }
+        };
         if !metadata.is_file() {
             continue;
         }
-        let hashed = sha256_file(entry.path(), cancel).map_err(|error| {
-            HandlerError::new(
-                INTERNAL_ERROR_CODE,
-                format!(
-                    "Workspace scan failed for {}: {error}",
-                    entry.path().display()
-                ),
-            )
-        })?;
+        let hashed = match sha256_file(entry.path(), cancel) {
+            Ok(hashed) => hashed,
+            // The file disappeared before we could hash it: skip, don't abort.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(HandlerError::new(
+                    INTERNAL_ERROR_CODE,
+                    format!(
+                        "Workspace scan failed for {}: {error}",
+                        entry.path().display()
+                    ),
+                ))
+            }
+        };
         files.push(FileMetadata {
             path: relative.clone(),
             size: hashed.bytes,
@@ -835,6 +857,18 @@ mod tests {
             paths,
             vec!["finance/ledger.sqlite", "notes/a.md", "notes/draft-wal"]
         );
+    }
+
+    #[test]
+    fn is_not_found_only_matches_not_found_io_errors() {
+        assert!(is_not_found(Some(&io::Error::from(
+            io::ErrorKind::NotFound
+        ))));
+        // A file vanishing mid-scan is skipped; any other error still aborts.
+        assert!(!is_not_found(Some(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        ))));
+        assert!(!is_not_found(None));
     }
 
     #[test]

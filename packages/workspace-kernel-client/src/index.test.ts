@@ -230,6 +230,49 @@ process.stdin.once("data", () => process.exit(1));
     }
   });
 
+  it("does not spawn a new child when disposed during a restart backoff", async () => {
+    const marker = await freshMarker();
+    const crashesOnFirstRequest = await writeFakeKernel(`
+printf 'x' >> ${marker}
+IFS= read -r _line
+exit 1
+`);
+    const client = new WorkspaceKernelClient({
+      binaryPath: crashesOnFirstRequest,
+      timeoutMs: 500,
+      initialBackoffMs: 500,
+      maxBackoffMs: 500,
+      maxRestarts: 3,
+    });
+    // Spawn #1 crashes on the first request and schedules a restart backoff.
+    await expect(client.handshake()).rejects.toBeInstanceOf(KernelUnavailableError);
+    // Dispose DURING the backoff: startOrRestart must observe disposal and bail
+    // instead of leaking a sidecar the disposed client can no longer track.
+    await client.dispose();
+    // Give any (buggy) scheduled restart well past its backoff to fire.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(await readFile(marker, "utf8")).toBe("x");
+  });
+
+  it("with maxRestarts:0 spawns the binary only once (one-shot reconcile path)", async () => {
+    const marker = await freshMarker();
+    const exitsOnRequest = await writeFakeKernel(`
+printf 'x' >> ${marker}
+IFS= read -r _line
+exit 1
+`);
+    const client = new WorkspaceKernelClient({
+      binaryPath: exitsOnRequest,
+      timeoutMs: 500,
+      maxRestarts: 0,
+    });
+    await expect(client.handshake()).rejects.toBeInstanceOf(KernelUnavailableError);
+    await client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // maxRestarts:0 never re-spawns a broken binary an extra time per call.
+    expect(await readFile(marker, "utf8")).toBe("x");
+  });
+
   it("times out a call when the kernel never replies", async () => {
     const neverReplies = await writeFakeKernel(
       `
@@ -316,6 +359,14 @@ async function writeFakeKernel(bashSource: string, nodeSource: string): Promise<
   await writeFile(path, `#!/usr/bin/env bash\n${bashSource.trim()}\n`);
   await chmod(path, 0o755);
   return { binaryPath: path };
+}
+
+// A per-test marker file a fake kernel appends to on each spawn, so a test can
+// count how many times the binary actually started.
+async function freshMarker(): Promise<string> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-kernel-marker-"));
+  roots.push(root);
+  return join(root, "spawns.log");
 }
 
 function nativeTmpdir(): string {
