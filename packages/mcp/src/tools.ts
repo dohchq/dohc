@@ -40,13 +40,7 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
-import {
-  createChangeSetStore,
-  isDurableChangeSetRecordingSupported,
-  mergeMarkdown,
-  type ChangeSetStore,
-  type HistoryRecord,
-} from "@dohc/workspace-history";
+import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
@@ -81,93 +75,6 @@ export interface ToolContext {
   // registered, so a shared-view MCP server cannot write, create, move,
   // delete, import, publish, share, or post chat. Set by the --read-only flag.
   readOnly?: boolean;
-}
-
-function mergeHistoryRecords(
-  records: HistoryRecord[],
-  order: "newest-first" | "oldest-first",
-): HistoryRecord[] {
-  const unique = new Map<string, HistoryRecord>();
-  for (const record of records) {
-    if (!unique.has(record.id)) unique.set(record.id, record);
-  }
-  return [...unique.values()].sort((a, b) => {
-    const time = a.recordedAtMs - b.recordedAtMs;
-    const id = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-    return order === "oldest-first" ? time || id : -(time || id);
-  });
-}
-
-function mergedReadStore(durable: ChangeSetStore, ephemeral: ChangeSetStore): ChangeSetStore {
-  const durableRecordsOrEmpty = async (
-    read: () => Promise<HistoryRecord[]>,
-  ): Promise<HistoryRecord[]> => {
-    try {
-      return await read();
-    } catch {
-      return [];
-    }
-  };
-
-  return {
-    record: durable.record,
-    async listIndexed() {
-      const records = mergeHistoryRecords(
-        [...(await ephemeral.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
-        "newest-first",
-      );
-      return records.map((record, index) => ({ index, record }));
-    },
-    async list() {
-      return mergeHistoryRecords(
-        [...(await ephemeral.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
-        "newest-first",
-      );
-    },
-    async listSince(afterMs) {
-      return mergeHistoryRecords(
-        [
-          ...(await ephemeral.listSince(afterMs)),
-          ...(await durableRecordsOrEmpty(() => durable.listSince(afterMs))),
-        ],
-        "oldest-first",
-      );
-    },
-    async maxRecordedAtMs() {
-      try {
-        return Math.max(await ephemeral.maxRecordedAtMs(), await durable.maxRecordedAtMs());
-      } catch {
-        return ephemeral.maxRecordedAtMs();
-      }
-    },
-    async get(id) {
-      const ephemeralRecord = await ephemeral.get(id);
-      if (ephemeralRecord) return ephemeralRecord;
-      try {
-        return await durable.get(id);
-      } catch {
-        return null;
-      }
-    },
-  };
-}
-
-function historyReadStoreFor(ctx: ToolContext) {
-  if (isDurableChangeSetRecordingSupported()) return createChangeSetStore(ctx.root);
-  // Read-only MCP status/history views should remain useful in the same process
-  // as the desktop watcher when durable recording is unavailable, while still
-  // preserving access to any existing readable disk history.
-  return mergedReadStore(
-    createChangeSetStore(ctx.root),
-    createChangeSetStore(ctx.root, { ephemeralIfUnsupported: true }),
-  );
-}
-
-function isStaleRecordedAtError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.message.includes("is not newer than the latest committed timestamp")
-  );
 }
 
 const MCP_AUTHOR: ChangeAuthor = {
@@ -323,8 +230,9 @@ export async function isWorkspaceEngineFlagged(ctx: ToolContext): Promise<boolea
 // next startup reconciliation. A workspace that explicitly opted OUT of the
 // engine has NO recorder at all; naming a recorder there would be a lie, so
 // mutating tools report `historyRecording: "off"` instead. Legacy
-// .dohc/history left by pre-flip versions is a read-only relic (the read
-// tools below can still list it).
+// .dohc/history left by pre-flip versions is no longer read (the relic reader
+// retired with @dohc/workspace-history); the read tools below list engine
+// moments only.
 async function recordedChangeFields(
   ctx: ToolContext,
 ): Promise<{ recordedBy: "workspace-engine" } | { historyRecording: "off" }> {
@@ -1272,30 +1180,14 @@ export async function workspaceStatus(ctx: ToolContext) {
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
-// WS-H1 gate fix: after the flag flip the workspace ENGINE records history
-// (moments in .dohc/engine/engine.db), so these tools read engine moments
-// first — otherwise agents would honestly-falsely see "0 changes" after real
-// edits. Pre-flip legacy .dohc/history change sets remain readable as a
-// read-only relic and are merged in (each entry names its `source`). Legacy
-// fields that no longer exist on a moment (kind, boundaryCrossings,
-// provenance) are omitted, not faked; a moment adds path/operation/versionId.
+// After the flag flip the workspace ENGINE is the sole recorder of history
+// (moments in .dohc/engine/engine.db), so these tools read engine moments —
+// the engine IS the history now. The pre-flip legacy `.dohc/history`
+// change-set relic was retired with @dohc/workspace-history; a moment carries
+// path/operation/versionId (the legacy kind/boundaryCrossings/provenance
+// fields no longer exist and are never faked).
 
 const LIST_CHANGES_HARD_LIMIT = 500;
-
-function changeSummary(record: HistoryRecord, includeFiles: boolean) {
-  return {
-    id: record.id,
-    recordedAtMs: record.recordedAtMs,
-    source: "legacy-change-set" as const,
-    kind: record.kind,
-    author: record.author,
-    summary: record.summary,
-    fileCount: record.files.length,
-    boundaryCrossings: record.boundaryCrossings,
-    ...(record.provenance ? { provenance: record.provenance } : {}),
-    ...(includeFiles ? { files: record.files } : {}),
-  };
-}
 
 // Structural pick so both the timeline summary (listMoments) and the full
 // moment (getMoment) can be summarized with one shape.
@@ -1354,8 +1246,8 @@ async function engineMomentsForRoot(
       return page.moments;
     });
   } catch {
-    // Unreadable/locked engine store: the read tool degrades to the legacy
-    // view instead of crashing (same posture as durableRecordsOrEmpty).
+    // Unreadable/locked engine store: the read tool degrades to an empty
+    // view instead of crashing.
     return [];
   }
 }
@@ -1384,19 +1276,15 @@ export async function listChanges(
   const sinceMs = args.sinceMs;
   const limit = Math.min(LIST_CHANGES_HARD_LIMIT, Math.max(1, Math.floor(args.limit ?? 50)));
   const moments = await engineMomentsForRoot(ctx, LIST_CHANGES_HARD_LIMIT);
-  // Same strictly-after cursor rule as the legacy store's listSince.
+  // Strictly-after cursor rule (same as the engine store's listSince).
   const selectedMoments =
     sinceMs === undefined
       ? moments
       : moments.filter((moment) => moment.recordedAtMs > sinceMs);
-  const store = historyReadStoreFor(ctx);
-  const records =
-    sinceMs === undefined ? await store.list() : await store.listSince(sinceMs);
-  // Newest first across BOTH sources, ties broken by id for a stable order.
-  const merged = [
-    ...selectedMoments.map((moment) => momentChangeSummary(moment, includeFiles)),
-    ...records.map((record) => changeSummary(record, includeFiles)),
-  ].sort((a, b) => b.recordedAtMs - a.recordedAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // Newest first, ties broken by id for a stable order.
+  const merged = selectedMoments
+    .map((moment) => momentChangeSummary(moment, includeFiles))
+    .sort((a, b) => b.recordedAtMs - a.recordedAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const selected = merged.slice(0, limit);
   const cursorMs = selected.reduce(
     (max, entry) => Math.max(max, entry.recordedAtMs),
@@ -1425,9 +1313,7 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
       },
     };
   }
-  const record = await historyReadStoreFor(ctx).get(args.id);
-  if (!record) return { ok: false as const, reason: `change not found: ${args.id}` };
-  return { ok: true as const, change: changeSummary(record, true) };
+  return { ok: false as const, reason: `change not found: ${args.id}` };
 }
 
 // --- dohc site tools --------------------------------------------------------
