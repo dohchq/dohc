@@ -765,6 +765,15 @@ function candidateMaterializationPaths(ops: readonly SyncReplicationEnvelope[]):
       }
       continue;
     }
+    if (op.opKind === "ydoc.update") {
+      // The apply re-projects the converged Y.Doc into this path's markdown
+      // snapshot (a local, non-journaling settle), so the path must ride the
+      // materialization diff or the on-disk file would stay stale after a pull.
+      if (typeof op.payload.path === "string" && op.payload.path.length > 0) {
+        paths.add(op.payload.path);
+      }
+      continue;
+    }
     if (op.opKind !== "moment.append") continue;
     for (const path of [
       op.payload.path,

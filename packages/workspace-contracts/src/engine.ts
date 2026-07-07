@@ -224,7 +224,11 @@ export type SyncReplicationOpKind =
   | "chat.thread.create"
   // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
   | "chat.thread.update"
-  | "chat.message.append";
+  | "chat.message.append"
+  // WS-G2-C1: a Yjs CRDT update for a rich-doc object. UNLIKE moment.append it
+  // is a COMMUTATIVE delta — apply carries NO head-check and opens NO P0D
+  // conflict (Yjs guarantees convergence). See YDocUpdatePayload.
+  | "ydoc.update";
 
 // Wire encoding of "did the origin see a prior state for this object": absent
 // (no before at all), null (origin recorded an explicit no-file preimage), or
@@ -384,6 +388,42 @@ export interface ChatMessageAppendPayload {
   createdAtMs: number;
 }
 
+// The driver dimension for a replicated rich doc: does its projection read the
+// XmlFragment body (richdoc) or the plain Y.Text (plaintext). Mirrors the
+// engine's ydoc_docs.content_kind column.
+export type YDocReplicationContentKind = "richdoc" | "plaintext";
+
+/**
+ * WS-G2-C1 — one Yjs CRDT update for a rich-doc object, riding the multi-origin
+ * op log as a COMMUTATIVE op (0P sync design "ydoc.update"). The `updateBlob`
+ * is a `Y.encodeStateAsUpdate`/incremental-`update` byte string, content-
+ * addressed into `binary_blobs` and shipped over the identical blob-have/
+ * blob-put transport moment.append's binary blobs use — no new route.
+ *
+ * Apply semantics differ FUNDAMENTALLY from moment.append: there is no
+ * before-head, no divergence check, no conflict row. `Y.applyUpdate` is
+ * commutative (any order converges) and idempotent (re-apply is a no-op via
+ * Yjs state vectors), so the log's per-origin `acked_seq` dedup is the only
+ * ordering machinery and the CRDT is the convergence backstop.
+ */
+export interface YDocUpdatePayload {
+  versionId: VersionId;
+  objectId: WorkspaceObjectId;
+  // The projection target path: where the peer materializes the settled
+  // markdown, and the SECRET-floor gate (a secret-classified path is never
+  // opened as a replicated Y.Doc).
+  path: string;
+  contentKind: YDocReplicationContentKind;
+  // The Yjs update bytes, content-addressed into binary_blobs(sha256).
+  updateBlobSha256: string;
+  // True for the full-state BASE op the driver emits when a live session's
+  // replication baseline is established (`Y.encodeStateAsUpdate(seed)`). It is
+  // still just a Yjs update — applied identically — but marks the op that lets
+  // a from-scratch peer (no file, no prior state) reconstruct the doc, and
+  // bounds replay (a fresh base supersedes older deltas). Deltas omit it.
+  isBaseState?: boolean;
+}
+
 export interface SyncReplicationEnvelopeOf<
   Kind extends SyncReplicationOpKind,
   Payload,
@@ -415,7 +455,8 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"chat.channel.create", ChatChannelCreatePayload>
   | SyncReplicationEnvelopeOf<"chat.thread.create", ChatThreadCreatePayload>
   | SyncReplicationEnvelopeOf<"chat.thread.update", unknown>
-  | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>;
+  | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>
+  | SyncReplicationEnvelopeOf<"ydoc.update", YDocUpdatePayload>;
 
 /**
  * Identity of a peer's conflict.resolve that could not be applied here
@@ -618,6 +659,24 @@ export interface VersionedTextStore {
   }): Promise<VersionRecord>;
   listVersions(input: { workspaceId: WorkspaceId }): Promise<VersionRecord[]>;
   writeTextFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    text: string;
+    metadata: ActorNeutralWriteMetadata;
+    author?: MomentAuthor;
+    momentId?: VersionedTextMomentId;
+  }): Promise<VersionedTextWriteResult>;
+  // WS-G2-C1 non-journaling projection write. Materializes a rich doc's settled
+  // markdown (a local moment + searchable snapshot) WITHOUT journaling a
+  // moment.append replication op. A Y.Doc-driven object replicates SOLELY
+  // through the commutative ydoc.update op stream; if its projection ALSO
+  // journaled moment.append, two peers' independent settles would collide into
+  // a P0D conflict on markdown the CRDT already reconciled. Optional (like
+  // runInEngineWriteLane) so partial mocks typecheck; the Y.Doc driver requires
+  // it. Behaves exactly like writeTextFile otherwise (origin metadata, moment,
+  // snapshot, search index) minus the journal.
+  writeProjectedTextFile?(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
     path: string;

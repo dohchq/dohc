@@ -18937,3 +18937,189 @@ reusable for teammate-authored asks too.
 - `git diff --check` clean. e2e: covered by robust unit/integration tests
   (model + parser + composer + notice center + ChatsView invoke wiring)
   rather than a new Electron spec.
+## Y.Doc Replication G2-C-1
+
+Makes engine-native Y.Doc rich-doc state (the G2-B substrate) REPLICATE across
+machines over the sync relay: the `ydoc.update` op kind, its commutative CRDT
+apply, driver journaling, blob transport, and GC-root wiring. Substrate +
+replication only — NO editor/renderer binding (G2-C-2), NO Hocuspocus deletion
+(G2-C-3). Tests-first, Linux-verified. Basis:
+`2026-07-07-think-bigger-ydoc-engine-driver-design.md` §G2-C1.
+
+### The `ydoc.update` op design
+
+- **Payload** (`YDocUpdatePayload`, contracts): `versionId`, `objectId`, `path`
+  (projection target + secret-floor gate), `contentKind` (`richdoc`/`plaintext`),
+  `updateBlobSha256` (the Yjs update bytes, content-addressed into
+  `binary_blobs`), and `isBaseState?`. Carried in the standard envelope with
+  `(originId, originSeq, recordedAtMs)` like every op.
+- **Snapshot strategy: reuse the update stream, no separate op kind.** A
+  ydoc.update is any `Y.applyUpdate`-able byte string. The driver emits ONE
+  full-state BASE op (`isBaseState`, `Y.encodeStateAsUpdate(seed)`) when a live
+  session's replication baseline is established (open / merge-reseed), then
+  DELTA ops per edit. The base op makes the stream self-contained (a from-
+  scratch peer with no file reconstructs the doc) and re-bases replay each open;
+  peer-side compaction (threshold 128) folds the log into a fresh snapshot to
+  bound replay.
+
+### The commutative apply (how it differs from P0D, why convergence holds)
+
+`moment.append` carries `before_latest_moment_id` and takes the head-check /
+divergence path (fast-forward or open a P0D conflict). `ydoc.update` is
+different in kind: Yjs updates are **commutative CRDT deltas**, so the apply
+branch (`versionedTextStore.applyReplicationOp`) does NO head check, opens NO
+conflict row, and has NO `before` guard. It: (1) digest-verifies the hydrated
+update blob, (2) reconstructs the converged Y.Doc in memory (existing persisted
+state + `Y.applyUpdate` of the new update), (3) re-projects markdown and
+materializes it as a LOCAL, NON-JOURNALING settle (`writeProjectedTextFile` /
+`suppressReplicationJournal`), (4) persists the CRDT rows (append + advance
+head, pinning the ORIGIN's `objectId` so the file and the `ydoc_docs` marker
+share cross-machine identity). Convergence is guaranteed by Yjs semantics, not
+the log: any arrival order converges, a re-applied update is a Yjs no-op, and
+the log's per-origin `acked_seq` dedup makes re-import a no-op at the log level
+too (CRDT idempotence is the backstop). A live co-edit therefore produces ONLY
+fine-grained ydoc.update ops — the settle NEVER journals moment.append, so two
+peers' independent settles can never collide into a P0D conflict on markdown the
+CRDT already reconciled (this is the single-replication-channel invariant).
+
+### Blob-upload-before-log ordering
+
+`collectBlobHashesFromOp` (engine) and `referencedBlobShas` (relay) now count a
+ydoc.update's `updateBlobSha256` as a binary blob. The existing push path
+(`uploadMissingBlobs` before `appendOriginOps`) therefore ships the update blob
+BEFORE the log op, and the relay's append-time blob-ref validation is satisfied.
+The driver journals the ydoc.update op in the SAME write-lane transaction as the
+`ydoc_updates` append, so the blob is already in `binary_blobs` when the op is
+appended locally.
+
+### GC-root wiring
+
+`referencedBlobShas` counting the update blob makes a blob referenced by a live
+ydoc.update log op a relay GC ROOT — `collectUnreferencedBlobs` never reclaims
+it (proven: survives GC with a zero grace window while a sibling orphan is
+collected). Engine-side, the G2-B invariant holds unchanged (a blob referenced
+by a live `ydoc_updates`/`ydoc_snapshots` head is a root; the pull path adds the
+projected path to `candidateMaterializationPaths` so the on-disk file settles).
+
+### Secret floor
+
+The apply rejects a ydoc.update whose `path` classifies as `secret`
+(`.env` family) BEFORE any materialization — no `ydoc_docs` marker, no file, no
+plaintext-leak path for secret files. Defense in depth: the driver's
+`openSession` independently rejects secret-classified paths, so a secret file
+can never be opened as a live Y.Doc either. Both proven by test.
+
+### Verification
+
+- `pnpm -r typecheck` clean repo-wide.
+- workspace-engine 437 (was 432: +5 `ydocReplication.test.ts` — state+markdown
+  convergence, idempotent re-import, fresh-store bootstrap, seeded
+  concurrent/out-of-order fuzz with ZERO conflict rows, secret-path rejection,
+  GC-root blob-ref accounting) + changeSetStore 39/5-skip green.
+- sync-relay 67 (was 65: +1 real relay-child ydoc.update convergence + bootstrap
+  + idempotency in `main.integration.test.ts`, +1 GC-root blob survival in
+  `server.test.ts`).
+- desktop 967 unchanged (additive contract method is optional; no perturbation).
+- `git diff --check` clean.
+
+### G2-C-2 / G2-C-3 handoff
+
+- **G2-C-2 (editor provider).** Replace the renderer `HocuspocusProvider`
+  (`useCollabDoc.ts`) with an engine provider driving
+  `driver.openSession`/`recordUpdate`/`settle`/`close`. Two invariants this lane
+  established that the provider MUST honor: (a) **join-before-edit** — a peer
+  must apply the doc's replicated lineage and open with `resume: true` (seed from
+  `loadPersistedDoc`, NOT re-seed from the file) before editing; two independent
+  `markdownToYDoc` seeds of the same file mint different Yjs item ids and merging
+  them DUPLICATES content (inherent CRDT property). (b) The provider must apply
+  incoming remote ydoc.update deltas into the LIVE Y.Doc (this lane converges
+  PERSISTED state; the live in-memory doc is the provider's responsibility).
+  Awareness (presence/cursors) is ephemeral and MUST NOT journal — a separate
+  non-durable channel (still G2-C-2).
+- **G2-C-3 (Hocuspocus retirement).** Delete `services/hocuspocus`, the
+  collab-token route + IPC, and the hocuspocus provider; cut over at a closed-
+  session boundary. Replication is now engine-native, so nothing in the relay
+  path depends on Hocuspocus.
+
+## Y.Doc Replication G2-C-1 — gate fix round (durable-resume lifecycle)
+
+An adversarial review found 3 HIGH + 1 MEDIUM convergence/data-integrity bugs in
+the first cut. The root cause of the two most severe was that a REPLICATED doc
+was NOT treated as one durable lineage: it pruned its CRDT on close and re-seeded
+from markdown on reopen, minting a second independent base op — and a fresh peer
+replaying `base1 + deltas + base2` merged two lineages into DUPLICATED content.
+Fixed tests-first (each HIGH gets a test that reproduces the divergence/loss).
+
+### The unifying principle — durable-resume vs local-only prune
+
+A doc that participates in replication is now ONE durable CRDT lineage
+(`createYDocEngineDriver({ replicated: true })`):
+
+- **First creation** (no persisted lineage): seed from the file's markdown and
+  emit the full-state BASE `ydoc.update` op EXACTLY ONCE.
+- **Every subsequent open**: ALWAYS resume from the persisted/replicated CRDT
+  (`loadPersistedDoc`) — the `resume` flag is forced on for a replicated doc, so
+  a caller can no longer accidentally re-seed. A re-seed forks a second lineage
+  (a fresh `markdownToYDoc` mints new Yjs ids) and duplicates on replay.
+- **Close**: settle the projection but NEVER prune the CRDT rows — they stay
+  durable for the next resume AND for a peer bootstrapping from the log. A
+  replicated doc therefore emits a base ONCE and never prunes.
+
+Prune-on-close (and reseed-on-open, and NO `ydoc.update` journaling at all) stays
+ONLY for `replicated: false` LOCAL-ONLY docs — markdown-is-the-artifact for the
+solo case. A doc that never replicated cannot diverge a peer, so pruning it is
+safe. `persistClosedSessionState` still keeps even a local-only doc's CRDT durable
+(future persistent-threads layer). The split is documented in the LIFECYCLE
+SPLIT header of `ydocEngineDriver.ts`.
+
+### The four fixes
+
+1. **[HIGH] Repeated independent BASE ops diverge/duplicate** — durable-resume as
+   above. A replicated doc journals its base ONCE (`resetPersistedState` runs only
+   on first creation), always resumes, and `close` compacts-not-prunes. TEST:
+   `close→reopen(no resume flag)→edit` on A, a fresh peer B replays the full log →
+   byte-identical state + markdown, each line present exactly once, `baseOpCount`
+   is 1; plus a seeded close/reopen fuzz. Extended the real relay child-process
+   test to cover the reopen-then-fresh-peer bootstrap (base-once over HTTP).
+2. **[HIGH] objectId pinning bypassed on the occupied path** — `projectYDocUpdate`
+   now REJECTS a ydoc.update before materializing when any snapshot at
+   `payload.path` is a DIFFERENT object, or any snapshot for `payload.objectId`
+   sits at a different path (no Y.Doc rename protocol). Stops object A's op from
+   writing through object B's occupied path. TEST: a ydoc.update for object A
+   carrying B's path is rejected; B's file untouched, no marker minted.
+3. **[HIGH] Remote update not applied to the live in-memory doc → loss on close**
+   — a process-global live-doc registry (`liveYDocRegistry.ts`, keyed exactly like
+   the driver's single-canonical reservation). The driver registers a replicated
+   session's live Y.Doc on open and unregisters on close; `applyReplicationOp`
+   routes an applied remote `ydoc.update` straight into that live doc with
+   `Y.applyUpdate`, so the eventual close settles the CONVERGED state, never a
+   stale one over newer CRDT. TEST: object live in a session, a remote update
+   arrives, the session makes a local edit and closes → the remote edit is in the
+   final projection file + persisted state (dropped without the routing).
+4. **[MEDIUM] Uncapped local update size** — `recordUpdate` rejects an update over
+   `MAX_VERSIONED_BINARY_FILE_BYTES` (5 MiB) BEFORE the blob put + journal, so an
+   oversized update that every peer would reject on hydrate is never stored or
+   pushed. TEST: a ~6 MiB update is rejected; no `ydoc_updates` row, no journaled op.
+
+### Verification (gate fix round)
+
+- `pnpm -r typecheck` clean repo-wide.
+- workspace-engine 442 (was 437: +5 `ydocReplication.test.ts` — close/reopen
+  convergence base-once, close/reopen fuzz, objectId/path rejection, live-session
+  apply survival, oversized-update rejection) + changeSetStore 39/5-skip green.
+  Both HIGH tests verified load-bearing (red with the fix reverted).
+- sync-relay 67 (extended the real relay-child ydoc.update test with a
+  close→reopen→edit cycle + base-once + no-duplication assertions).
+- desktop 967 unchanged. `git diff --check` clean.
+
+### G2-C-2 handoff update (durable-resume — the editor provider MUST resume)
+
+The engine provider replacing `HocuspocusProvider` MUST drive the driver with
+`replicated: true` and MUST NOT re-seed a replicated doc: opening now ALWAYS
+resumes an existing lineage (the `resume` flag is forced on internally), so the
+provider just calls `driver.openSession` — never a fresh `markdownToYDoc` seed
+for a doc that already has a lineage. Incoming remote `ydoc.update` deltas are
+already routed into the LIVE Y.Doc by the engine (fix 3), so the provider does
+not have to reconcile persisted-vs-live itself; it binds the editor to
+`session.doc` and lets `recordUpdate` journal local edits. Awareness
+(presence/cursors) is still ephemeral and MUST NOT journal.

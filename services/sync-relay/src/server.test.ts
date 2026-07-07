@@ -609,6 +609,65 @@ describe("sync relay handler", () => {
     expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
   });
 
+  // WS-G2-C1 GC-ROOT: a blob referenced by a LIVE ydoc.update log op is a root
+  // and MUST NOT be collected out from under the rich-doc head — even with a
+  // zero grace window (so aging cannot save it) and even though a sibling
+  // orphan blob IS reclaimed in the same sweep. This is the relay side of the
+  // GC-root invariant G2-B documented; referencedBlobShas now counts the update.
+  it("never GCs a blob a live ydoc.update op references (GC root), while collecting a sibling orphan", async () => {
+    const storage = await testStorage({ blobGraceMs: 0 });
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    const update = Buffer.from("yjs-update-bytes-🧬");
+    const updateSha = sha256(update);
+    const orphan = Buffer.from("truly-orphaned");
+    const orphanSha = sha256(orphan);
+    for (const [sha, body] of [
+      [updateSha, update],
+      [orphanSha, orphan],
+    ] as const) {
+      expect(
+        (await h(request("a", `/sync/workspace-a/blobs/${sha}`, { method: "PUT", body }))).status,
+      ).toBe(200);
+    }
+
+    // Append a ydoc.update op referencing the update blob. The relay is content
+    // agnostic (dumb log), but referencedBlobShas must recognize the reference.
+    const appended = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "ydoc.update",
+              payload: {
+                versionId: "main",
+                objectId: "obj-rich",
+                path: "docs/rich.md",
+                contentKind: "plaintext",
+                updateBlobSha256: updateSha,
+                isBaseState: true,
+              },
+              recordedAtMs: 1000,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(appended.status).toBe(200);
+
+    const gc = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
+    // Only the orphan is reclaimed; the live ydoc update blob is a root.
+    expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${updateSha}`, { method: "GET" }))).status,
+    ).toBe(200);
+  });
+
   // 0P sync-hardening item 4 GATE FIX (GC deletes a live blob mid-upload).
   // Blob upload is two-phase: PUT /blobs/:sha, then POST /log referencing it.
   // A GC that ran between the two used to reclaim the blob (no log row referred

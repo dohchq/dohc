@@ -1,11 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type {
+  EngineWriteLaneConnection,
   PendingConflictResolve as PendingConflictResolveType,
   SyncApplyResult,
   SyncReplicationOpKind,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
-import type { EngineSqliteDb } from "./engineDbSchema";
+
+// The journaling + peer-ack helpers only ever call `db.prepare(...).run/get`, so
+// they accept the minimal EngineWriteLaneConnection surface rather than the full
+// EngineSqliteDb. This lets the Y.Doc engine driver journal a `ydoc.update` op
+// on the store's shared write-lane connection (which is handed to lane tasks as
+// EngineWriteLaneConnection) INSIDE the same transaction as the ydoc_updates
+// append — every EngineSqliteDb is assignable here, so existing callers are
+// unaffected.
+type JournalConnection = EngineWriteLaneConnection;
 
 // The per-op payload shapes are contract-owned (they discriminate
 // SyncReplicationEnvelope so opKind/payload agreement is compile-checked);
@@ -37,7 +46,7 @@ export interface JournalReplicationOpInput {
   recordedAtMs: number;
 }
 
-export function ensureOriginId(db: EngineSqliteDb, workspaceId: WorkspaceId): string {
+export function ensureOriginId(db: JournalConnection, workspaceId: WorkspaceId): string {
   const existing = db
     .prepare("SELECT origin_id FROM sync_identity WHERE workspace_id = ?")
     .get(workspaceId);
@@ -57,7 +66,7 @@ export function ensureOriginId(db: EngineSqliteDb, workspaceId: WorkspaceId): st
 }
 
 export function nextOriginSeq(
-  db: EngineSqliteDb,
+  db: JournalConnection,
   workspaceId: WorkspaceId,
   originId: string,
 ): number {
@@ -72,7 +81,7 @@ export function nextOriginSeq(
 }
 
 export function journalReplicationOp(
-  db: EngineSqliteDb,
+  db: JournalConnection,
   input: JournalReplicationOpInput,
 ): void {
   db.prepare(
@@ -90,7 +99,7 @@ export function journalReplicationOp(
 }
 
 export function journalLocalReplicationOp(
-  db: EngineSqliteDb,
+  db: JournalConnection,
   input: {
     workspaceId: WorkspaceId;
     opKind: SyncReplicationOpKind;
@@ -110,7 +119,7 @@ export function journalLocalReplicationOp(
 }
 
 export function readReplicationAckedSeq(
-  db: EngineSqliteDb,
+  db: JournalConnection,
   workspaceId: WorkspaceId,
   originId: string,
 ): number {
@@ -121,7 +130,7 @@ export function readReplicationAckedSeq(
 }
 
 export function ackReplicationPeer(
-  db: EngineSqliteDb,
+  db: JournalConnection,
   workspaceId: WorkspaceId,
   originId: string,
   originSeq: number,

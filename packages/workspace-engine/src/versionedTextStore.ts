@@ -42,6 +42,9 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
+import * as Y from "yjs";
+import { yDocToMarkdown } from "@dohc/ydoc-projection";
+import type { YDocUpdatePayload } from "@dohc/workspace-contracts/engine";
 import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
   assertEngineSqliteIntegrity,
@@ -50,6 +53,7 @@ import {
   type EngineIntegrityCheckMode,
 } from "./engineDbSchema";
 import { classifyEngineFilePath } from "./enginePathFloor";
+import { REMOTE_YDOC_APPLY_ORIGIN, getLiveYDoc, liveYDocKey } from "./liveYDocRegistry";
 import {
   deleteFileSearchIndex,
   ensureSearchIndexForVersion,
@@ -1163,6 +1167,223 @@ function sha256Text(text: string): string {
 
 function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+// ---- WS-G2-C1: ydoc.update apply (the commutative CRDT core) ----------------
+//
+// Applying a `ydoc.update` op is FUNDAMENTALLY different from `moment.append`:
+// there is NO before-head check, NO divergence detection, and NO P0D conflict
+// row. `Y.applyUpdate` is commutative (arrival order is irrelevant to the
+// converged state) and idempotent (a re-applied update is a no-op via Yjs
+// state vectors), so convergence is guaranteed by Yjs semantics, not by the
+// log. The op-log's per-origin `acked_seq` dedup (in applyReplicationOp, before
+// the switch) is the only ordering machinery: a re-imported op is skipped there
+// so no duplicate ydoc_updates row is ever appended, with CRDT idempotence as
+// the backstop. Each peer keeps its OWN local `seq` numbering (the origin's seq
+// lives in the replication log, not here), so two peers that apply the same set
+// of updates in different orders still reconstruct byte-identical Y.Doc state
+// and project byte-identical markdown.
+const YDOC_PEER_COMPACTION_THRESHOLD = 128;
+
+function readYDocUpdateBlobBytes(db: SqliteDb, sha256: string): Uint8Array {
+  const row = db
+    .prepare("SELECT content, byte_length FROM binary_blobs WHERE sha256 = ?")
+    .get(sha256);
+  const content = row?.content;
+  if (!(content instanceof Uint8Array) && !Buffer.isBuffer(content)) throw corruptStore();
+  const bytes = new Uint8Array(content as Uint8Array);
+  // Verify the digest (matches the driver's read posture): reconstructing CRDT
+  // state from unverified bytes would silently diverge the doc.
+  if (bytes.byteLength !== Number(row?.byte_length)) throw corruptStore();
+  if (sha256Bytes(bytes) !== sha256) throw corruptStore();
+  return bytes;
+}
+
+function putYDocUpdateBlobBytes(db: SqliteDb, bytes: Uint8Array): string {
+  const content = Buffer.from(bytes);
+  const sha256 = sha256Bytes(content);
+  db.prepare(
+    "INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)",
+  ).run(sha256, content.byteLength, content);
+  return sha256;
+}
+
+// Rebuild the persisted Y.Doc from the latest snapshot + trailing update log,
+// exactly as the driver's loadPersistedDoc does (Hocuspocus's load+replay
+// shape), but on the apply transaction's connection.
+function reconstructEngineYDoc(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+): Y.Doc {
+  const doc = new Y.Doc();
+  const snapshotRow = db
+    .prepare(
+      `SELECT up_to_seq, snapshot_blob_sha256
+         FROM ydoc_snapshots
+        WHERE workspace_id = ? AND version_id = ? AND object_id = ?
+        ORDER BY up_to_seq DESC
+        LIMIT 1`,
+    )
+    .get(workspaceId, versionId, objectId);
+  let fromSeq = 0;
+  if (snapshotRow) {
+    Y.applyUpdate(doc, readYDocUpdateBlobBytes(db, String(snapshotRow.snapshot_blob_sha256)));
+    fromSeq = Number(snapshotRow.up_to_seq);
+  }
+  const updates = db
+    .prepare(
+      `SELECT update_blob_sha256
+         FROM ydoc_updates
+        WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND seq > ?
+        ORDER BY seq ASC`,
+    )
+    .all(workspaceId, versionId, objectId, fromSeq);
+  for (const u of updates) {
+    Y.applyUpdate(doc, readYDocUpdateBlobBytes(db, String(u.update_blob_sha256)));
+  }
+  return doc;
+}
+
+// Bound peer-side replay: past a threshold of accumulated updates, fold the log
+// into a fresh full-state snapshot and prune the folded rows (the compaction
+// the legacy Hocuspocus stack skipped, design Risk 3). The snapshot blob is
+// LOCAL compaction state (never pushed), still a GC root while referenced.
+function maybeCompactPeerEngineYDoc(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  headSeq: number,
+  doc: Y.Doc,
+  nowMs: number,
+): void {
+  const marker = db
+    .prepare(
+      `SELECT head_snapshot_seq FROM ydoc_docs
+        WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
+    )
+    .get(workspaceId, versionId, objectId);
+  const headSnapshotSeq = Number(marker?.head_snapshot_seq ?? 0);
+  if (headSeq - headSnapshotSeq < YDOC_PEER_COMPACTION_THRESHOLD) return;
+  const snapshotSha = putYDocUpdateBlobBytes(db, Y.encodeStateAsUpdate(doc));
+  const stateVectorSha = putYDocUpdateBlobBytes(db, Y.encodeStateVector(doc));
+  db.prepare(
+    `INSERT OR REPLACE INTO ydoc_snapshots
+       (workspace_id, version_id, object_id, up_to_seq,
+        snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(workspaceId, versionId, objectId, headSeq, snapshotSha, stateVectorSha, nowMs);
+  db.prepare(
+    `DELETE FROM ydoc_updates
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND seq <= ?`,
+  ).run(workspaceId, versionId, objectId, headSeq);
+  db.prepare(
+    `DELETE FROM ydoc_snapshots
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND up_to_seq < ?`,
+  ).run(workspaceId, versionId, objectId, headSeq);
+  db.prepare(
+    `UPDATE ydoc_docs SET head_snapshot_seq = ?, updated_at_ms = ?
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
+  ).run(headSeq, nowMs, workspaceId, versionId, objectId);
+}
+
+// PHASE 1 of applying a remote ydoc.update: validate + reconstruct the CONVERGED
+// Y.Doc in memory (existing persisted state + the new update) and project it to
+// markdown. This does NOT write ydoc rows yet — the projection write must create
+// the file_object FIRST (ydoc_docs carries a FK to file_objects), so the caller
+// materializes the markdown, THEN persistYDocUpdate stores the CRDT rows.
+function projectYDocUpdate(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: YDocUpdatePayload,
+): { markdown: string; doc: Y.Doc; update: Uint8Array } {
+  // SECRET FLOOR (never a plaintext leak path): a secret-classified path must
+  // never be opened/materialized as a replicated Y.Doc. Reject the op outright.
+  if (classifyEngineFilePath(payload.path).kind === "secret") {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      `Refusing ydoc.update for secret-classified path ${payload.path}; secret files never replicate as plaintext Y.Docs.`,
+    );
+  }
+  // The target version must exist locally (its workspace.init/version.create op
+  // orders before this one). Same contract as applyRemoteMomentAppend.
+  requireWorkspaceVersionRow(db, workspaceId, payload.versionId);
+  // OBJECT/PATH INTEGRITY (fix 2 — never write through a path occupant): the
+  // materialization below (writeTextFileInDb) uses the EXISTING snapshot at
+  // payload.path as its object when one exists, IGNORING payload.objectId. A
+  // malformed/hostile op for object A carrying object B's occupied path would
+  // otherwise project A's CRDT into B's markdown file while recording ydoc rows
+  // under A — a sync payload silently mutating the WRONG plaintext file. There
+  // is no rename protocol for Y.Docs, so require the identity to be pinned both
+  // ways before materializing: any snapshot at this path must already be this
+  // object, and any snapshot for this object must already be at this path.
+  const byPath = selectSnapshotByPath(db, workspaceId, payload.versionId, payload.path);
+  if (byPath && byPath.objectId !== payload.objectId) {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      `Refusing ydoc.update for object ${payload.objectId}: path ${payload.path} is already occupied by object ${byPath.objectId}.`,
+    );
+  }
+  const byObject = selectSnapshotByObject(db, workspaceId, payload.versionId, payload.objectId);
+  if (byObject && byObject.path !== payload.path) {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      `Refusing ydoc.update for object ${payload.objectId}: it already occupies path ${byObject.path}, not ${payload.path}.`,
+    );
+  }
+  // The update bytes were hydrated into binary_blobs before this transaction
+  // (applySyncQueues / the caller's blob transport). Read + digest-verify them.
+  const update = readYDocUpdateBlobBytes(db, payload.updateBlobSha256);
+  // Reconstruct existing persisted state (empty for a from-scratch peer) and
+  // apply the new update in memory — Y.applyUpdate is commutative + idempotent.
+  const doc = reconstructEngineYDoc(db, workspaceId, payload.versionId, payload.objectId);
+  Y.applyUpdate(doc, update);
+  return { markdown: yDocToMarkdown(doc), doc, update };
+}
+
+// PHASE 2: persist the CRDT rows once the file_object exists (created by the
+// projection write between phase 1 and here). Appends the update to the per-doc
+// log, advances the local head, and bounds replay by compaction.
+function persistYDocUpdate(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: YDocUpdatePayload,
+  doc: Y.Doc,
+  actorOriginId: string,
+  nowMs: number,
+): void {
+  const versionId = payload.versionId;
+  const objectId = payload.objectId;
+  const contentKind = payload.contentKind === "plaintext" ? "plaintext" : "richdoc";
+  // Ensure the driver marker (create it for a from-scratch peer that just had
+  // its file_object materialized). Never clobber an existing marker's heads.
+  db.prepare(
+    `INSERT INTO ydoc_docs
+       (workspace_id, version_id, object_id, content_kind,
+        head_update_seq, head_snapshot_seq, updated_at_ms)
+     VALUES (?, ?, ?, ?, 0, 0, ?)
+     ON CONFLICT(workspace_id, version_id, object_id) DO NOTHING`,
+  ).run(workspaceId, versionId, objectId, contentKind, nowMs);
+  const headRow = db
+    .prepare(
+      `SELECT head_update_seq FROM ydoc_docs
+        WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
+    )
+    .get(workspaceId, versionId, objectId);
+  const seq = Number(headRow?.head_update_seq ?? 0) + 1;
+  db.prepare(
+    `INSERT INTO ydoc_updates
+       (workspace_id, version_id, object_id, seq,
+        update_blob_sha256, actor_origin_id, recorded_at_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(workspaceId, versionId, objectId, seq, payload.updateBlobSha256, actorOriginId, nowMs);
+  db.prepare(
+    `UPDATE ydoc_docs SET head_update_seq = ?, updated_at_ms = ?
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
+  ).run(seq, nowMs, workspaceId, versionId, objectId);
+  maybeCompactPeerEngineYDoc(db, workspaceId, versionId, objectId, seq, doc, nowMs);
 }
 
 function snapshotContentKind(
@@ -3677,6 +3898,18 @@ function createVersionedTextStoreWithHooks(
     metadata: ActorNeutralWriteMetadata;
     author?: MomentAuthor;
     momentId?: VersionedTextMomentId;
+    // WS-G2-C1: skip journaling a moment.append replication op. A Y.Doc-driven
+    // object's markdown is a LOCAL projection of the replicated ydoc.update
+    // stream; journaling its settle would double-replicate the content and
+    // collide two peers' independent settles into a P0D conflict. The moment +
+    // snapshot + search index are still written (local history stays intact).
+    suppressReplicationJournal?: boolean;
+    // WS-G2-C1: pin the object identity (cross-machine, from a ydoc.update
+    // payload) instead of minting a fresh local id, so the projected file and
+    // the ydoc_docs marker (FK -> file_objects) share the ORIGIN's object id on
+    // every peer. Only honored when creating a NEW object at this path.
+    objectId?: WorkspaceObjectId;
+    objectCreatedAtMs?: number;
   }): VersionedTextWriteResult {
     requireWorkspaceVersionRow(input.db, input.workspaceId, input.versionId);
     const before = selectSnapshotByPath(input.db, input.workspaceId, input.versionId, input.path);
@@ -3685,6 +3918,29 @@ function createVersionedTextStoreWithHooks(
 
     if (before) {
       object = requireFileObjectRow(input.db, input.workspaceId, before.objectId);
+    } else if (input.objectId !== undefined) {
+      // Pinned (replicated) identity. Reuse an existing same-workspace object
+      // row (a prior apply created it); reject a cross-workspace id collision;
+      // otherwise insert with the origin's id + creation time.
+      const existing = input.db
+        .prepare("SELECT workspace_id, created_at_ms FROM file_objects WHERE object_id = ?")
+        .get(input.objectId);
+      if (existing && existing.workspace_id !== input.workspaceId) {
+        rejectDuplicateId("object", input.objectId);
+      }
+      if (existing) {
+        object = {
+          id: input.objectId,
+          workspaceId: input.workspaceId,
+          createdAtMs: Number(existing.created_at_ms),
+        };
+      } else {
+        const createdAtMs = input.objectCreatedAtMs ?? recordedAtMs;
+        object = { id: input.objectId, workspaceId: input.workspaceId, createdAtMs };
+        input.db
+          .prepare("INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?, ?, ?)")
+          .run(input.workspaceId, object.id, object.createdAtMs);
+      }
     } else {
       const objectId = createGeneratedId("object");
       const existing = input.db
@@ -3739,16 +3995,18 @@ function createVersionedTextStoreWithHooks(
     };
 
     insertMomentRow(input.db, moment);
-    journalLocalReplicationOp(input.db, {
-      workspaceId: input.workspaceId,
-      opKind: "moment.append",
-      payload: momentAppendPayload({
-        db: input.db,
-        moment,
-        objectCreatedAtMs: object.createdAtMs,
-      }),
-      recordedAtMs: moment.recordedAtMs,
-    });
+    if (!input.suppressReplicationJournal) {
+      journalLocalReplicationOp(input.db, {
+        workspaceId: input.workspaceId,
+        opKind: "moment.append",
+        payload: momentAppendPayload({
+          db: input.db,
+          moment,
+          objectCreatedAtMs: object.createdAtMs,
+        }),
+        recordedAtMs: moment.recordedAtMs,
+      });
+    }
     insertOrReplaceSnapshot(input.db, "snapshots", input.workspaceId, input.versionId, snapshot);
     input.db
       .prepare(
@@ -5064,6 +5322,55 @@ function createVersionedTextStoreWithHooks(
             }
             break;
           }
+          case "ydoc.update": {
+            // Commutative CRDT apply — no head check, no conflict row (Yjs
+            // converges). Append + advance the head, then MATERIALIZE the
+            // re-projected markdown as a LOCAL, non-journaling settle so
+            // file/search/history stay coherent WITHOUT double-replicating the
+            // content (the ydoc.update stream is this object's sole channel).
+            const projection = projectYDocUpdate(txDb, workspaceId, input.payload);
+            // Materialize the projection FIRST — this creates/updates the
+            // file_object that ydoc_docs' FK requires — then persist the CRDT
+            // rows. The write is non-journaling (ydoc.update is the sole channel).
+            writeTextFileInDb({
+              db: txDb,
+              workspaceId,
+              versionId: input.payload.versionId,
+              path: input.payload.path,
+              text: projection.markdown,
+              metadata: { origin: "sync" },
+              suppressReplicationJournal: true,
+              objectId: input.payload.objectId,
+            });
+            persistYDocUpdate(
+              txDb,
+              workspaceId,
+              input.payload,
+              projection.doc,
+              input.originId,
+              input.recordedAtMs,
+            );
+            // LIVE-SESSION CONVERGENCE (fix 3 — never drop a remote edit on
+            // close): if this object is OPEN in a Y.Doc session, the persisted
+            // rows + re-projected file above are not enough — the live in-memory
+            // doc would stay stale and, on close, settle OVER this projection and
+            // (formerly) prune the newer CRDT, silently losing the remote edit.
+            // Route the update straight into the live doc so it converges now;
+            // Y.applyUpdate is commutative + idempotent, so the eventual close
+            // settles the CONVERGED state. No live doc (closed object) => the
+            // next open resumes the persisted rows, so nothing is lost either.
+            {
+              const liveDoc = getLiveYDoc(
+                liveYDocKey(stateFilePath, workspaceId, input.payload.objectId),
+              );
+              // Apply under the RESERVED remote-apply origin (G2-C-2 handoff): a
+              // future editor provider observing doc.on("update") MUST ignore
+              // updates carrying REMOTE_YDOC_APPLY_ORIGIN so it never re-journals
+              // a remote op back to every peer (echo storm). See liveYDocRegistry.
+              if (liveDoc) Y.applyUpdate(liveDoc, projection.update, REMOTE_YDOC_APPLY_ORIGIN);
+            }
+            break;
+          }
           case "version.rename":
           case "chat.channel.create":
           case "chat.thread.create":
@@ -5131,6 +5438,37 @@ function createVersionedTextStoreWithHooks(
           metadata,
           ...(author !== undefined ? { author } : {}),
           momentId: input.momentId,
+        });
+        await persistBarrier();
+        return result;
+      });
+    },
+
+    // WS-G2-C1: settle a Y.Doc projection WITHOUT journaling a moment.append op
+    // (identical to writeTextFile otherwise). The Y.Doc driver uses this for
+    // every rich-doc settle: the object replicates only through ydoc.update ops,
+    // so its markdown must never independently ride the log and collide two
+    // peers' settles into a P0D conflict.
+    writeProjectedTextFile(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const path = normalizePlaintextStorablePath(input.path);
+        const text = normalizeWriteText(input.text);
+        const metadata = normalizeWriteMetadata(input.metadata);
+        const author = normalizeMomentAuthor(input.author);
+        await beforeWriteMutation();
+        const result = writeTextFileInDb({
+          db: db(),
+          workspaceId,
+          versionId,
+          path,
+          text,
+          metadata,
+          ...(author !== undefined ? { author } : {}),
+          momentId: input.momentId,
+          suppressReplicationJournal: true,
         });
         await persistBarrier();
         return result;
