@@ -79,8 +79,17 @@ export interface SyncRelayStorage {
     workspaceId: string;
     sha256: string;
     content: Uint8Array;
+    createdAtMs: number;
   }): PutBlobResult;
-  collectUnreferencedBlobs(workspaceId: string): CollectUnreferencedBlobsResult;
+  // Async + chunked so a large sweep never monopolizes the event loop on the
+  // request path. Only reclaims blobs that are BOTH unreferenced AND older than
+  // the retention grace window (created_at_ms <= nowMs - grace), which is what
+  // keeps a blob uploaded moments before its referencing log op is appended
+  // from being deleted between the two phases.
+  collectUnreferencedBlobs(
+    workspaceId: string,
+    options: { nowMs: number },
+  ): Promise<CollectUnreferencedBlobsResult>;
   getBlob(workspaceId: string, sha256: string): Uint8Array | null;
   missingBlobs(workspaceId: string, sha256s: string[]): string[];
   // Create-only on first write (expectedSha256 null), compare-and-swap
@@ -159,9 +168,16 @@ function nodeSqlite(): SqliteModule {
 
 export const SYNC_RELAY_BUSY_TIMEOUT_MS = 5_000;
 export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+// Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
+// upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
+// runs between the two must NOT reclaim the blob just because no log row
+// references it yet. Any blob younger than this window is untouchable. Ten
+// minutes comfortably covers a slow/retried push.
+export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
 
 export interface OpenSyncRelayStorageOptions {
   workspaceQuotaBytes?: number;
+  blobGraceMs?: number;
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
@@ -195,6 +211,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         sha256 TEXT NOT NULL,
         byte_length INTEGER NOT NULL,
         content BLOB NOT NULL,
+        created_at_ms INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (workspace_id, sha256),
         FOREIGN KEY (workspace_id)
           REFERENCES sync_relay_workspaces(workspace_id)
@@ -256,6 +273,20 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
         ON sync_relay_shares(recipient_email, created_at_ms);
     `);
+    // Lazy additive migration (0P sync-hardening item 4): dbs created before the
+    // blob retention window gain created_at_ms on open. Existing rows default to
+    // 0, so a legacy unreferenced blob is immediately past any grace window and
+    // still collectible — the new protection only applies to blobs uploaded
+    // with a real timestamp going forward.
+    const blobColumns = db
+      .prepare("PRAGMA table_info(sync_relay_blobs)")
+      .all()
+      .map((row) => String(row.name));
+    if (!blobColumns.includes("created_at_ms")) {
+      db.exec(
+        "ALTER TABLE sync_relay_blobs ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0",
+      );
+    }
     db.exec("COMMIT");
   } catch (error) {
     try {
@@ -274,13 +305,29 @@ export function openSyncRelayStorage(
   const { DatabaseSync } = nodeSqlite();
   const workspaceQuotaBytes =
     options.workspaceQuotaBytes ?? DEFAULT_WORKSPACE_QUOTA_BYTES;
+  // Validate the quota HERE, not just in main.ts: this helper is exported and
+  // reused (tests, other services). A NaN/Infinity/negative cap would silently
+  // disable the quota check (currentUsage + added > NaN is always false), so
+  // reject anything that is not a positive safe integer before constructing
+  // storage.
+  if (!Number.isSafeInteger(workspaceQuotaBytes) || workspaceQuotaBytes <= 0) {
+    throw new Error(
+      `workspaceQuotaBytes must be a positive safe integer, got ${String(workspaceQuotaBytes)}`,
+    );
+  }
+  const blobGraceMs = options.blobGraceMs ?? DEFAULT_BLOB_GRACE_MS;
+  if (!Number.isSafeInteger(blobGraceMs) || blobGraceMs < 0) {
+    throw new Error(
+      `blobGraceMs must be a non-negative safe integer, got ${String(blobGraceMs)}`,
+    );
+  }
   const db = new DatabaseSync(resolved);
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     initializeSyncRelaySchema(db);
-    return new SqliteSyncRelayStorage(db, workspaceQuotaBytes);
+    return new SqliteSyncRelayStorage(db, workspaceQuotaBytes, blobGraceMs);
   } catch (error) {
     try {
       db.close();
@@ -293,6 +340,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   constructor(
     private readonly db: SqliteDb,
     private readonly workspaceQuotaBytes: number,
+    private readonly blobGraceMs: number,
   ) {}
 
   close(): void {
@@ -346,6 +394,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     sha256: string;
     content: Uint8Array;
+    createdAtMs: number;
   }): PutBlobResult {
     const byteLength = input.content.byteLength;
     this.db.exec("BEGIN IMMEDIATE");
@@ -362,10 +411,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       this.assertWorkspaceQuota(input.workspaceId, byteLength);
       this.db
         .prepare(
-          `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content, created_at_ms)
+           VALUES (?, ?, ?, ?, ?)`,
         )
-        .run(input.workspaceId, input.sha256, byteLength, Buffer.from(input.content));
+        .run(
+          input.workspaceId,
+          input.sha256,
+          byteLength,
+          Buffer.from(input.content),
+          Math.trunc(input.createdAtMs),
+        );
       this.db.exec("COMMIT");
       return { byteLength, alreadyHad: false };
     } catch (error) {
@@ -376,38 +431,70 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  collectUnreferencedBlobs(workspaceId: string): CollectUnreferencedBlobsResult {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const rows = this.db
-        .prepare(
-          `SELECT b.sha256
-           FROM sync_relay_blobs b
-           WHERE b.workspace_id = ?
-             AND NOT EXISTS (
-               SELECT 1
-               FROM sync_relay_log l
-               WHERE l.workspace_id = b.workspace_id
-                 AND l.payload_json LIKE '%' || b.sha256 || '%'
-             )
-           ORDER BY b.sha256`,
-        )
-        .all(workspaceId);
-      const removedSha256s = rows.map((row) => String(row.sha256));
-      const deleteStmt = this.db.prepare(
-        "DELETE FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
-      );
-      for (const sha256 of removedSha256s) {
-        deleteStmt.run(workspaceId, sha256);
-      }
-      this.db.exec("COMMIT");
-      return { removed: removedSha256s.length, removedSha256s };
-    } catch (error) {
+  async collectUnreferencedBlobs(
+    workspaceId: string,
+    options: { nowMs: number },
+  ): Promise<CollectUnreferencedBlobsResult> {
+    // Grace window (item 4): never reclaim a blob younger than blobGraceMs, so
+    // a blob uploaded just before its referencing log op is appended survives
+    // the gap between the two phases. cutoff is the newest created_at_ms still
+    // eligible for collection.
+    const cutoff = options.nowMs - this.blobGraceMs;
+    // Phase 1 (read only, no write lock): candidate shas that are unreferenced
+    // AND aged past the grace window.
+    const candidates = this.db
+      .prepare(
+        `SELECT b.sha256
+         FROM sync_relay_blobs b
+         WHERE b.workspace_id = ?
+           AND b.created_at_ms <= ?
+           AND NOT EXISTS (
+             SELECT 1
+             FROM sync_relay_log l
+             WHERE l.workspace_id = b.workspace_id
+               AND l.payload_json LIKE '%' || b.sha256 || '%'
+           )
+         ORDER BY b.sha256`,
+      )
+      .all(workspaceId, cutoff)
+      .map((row) => String(row.sha256));
+    // Phase 2: delete in bounded chunks, each in its OWN short transaction, and
+    // yield the event loop between chunks so a large sweep never monopolizes it
+    // (CodeRabbit: keep GC off the single-threaded request path). The delete
+    // RE-CHECKS unreferenced + aged so a blob newly referenced (or replaced)
+    // between phases is left alone.
+    const removedSha256s: string[] = [];
+    const deleteStmt = this.db.prepare(
+      `DELETE FROM sync_relay_blobs
+       WHERE workspace_id = ? AND sha256 = ? AND created_at_ms <= ?
+         AND NOT EXISTS (
+           SELECT 1
+           FROM sync_relay_log l
+           WHERE l.workspace_id = ?
+             AND l.payload_json LIKE '%' || ? || '%'
+         )`,
+    );
+    const CHUNK = 200;
+    for (let start = 0; start < candidates.length; start += CHUNK) {
+      const chunk = candidates.slice(start, start + CHUNK);
+      this.db.exec("BEGIN IMMEDIATE");
       try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
+        for (const sha256 of chunk) {
+          const result = deleteStmt.run(workspaceId, sha256, cutoff, workspaceId, sha256);
+          if (result.changes > 0) removedSha256s.push(sha256);
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        try {
+          this.db.exec("ROLLBACK");
+        } catch {}
+        throw error;
+      }
+      if (start + CHUNK < candidates.length) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
     }
+    return { removed: removedSha256s.length, removedSha256s };
   }
 
   getBlob(workspaceId: string, sha256: string): Uint8Array | null {
@@ -469,12 +556,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         this.db.exec("COMMIT");
         return { sha256: nextSha256 };
       }
+      // The envelope + its append-only history count toward the workspace
+      // quota (CodeRabbit Stability): each rotation adds roughly the new
+      // envelope's size (the prior copy moves into history), so the cap now
+      // bounds unbounded rotation growth. workspaceUsageBytes already includes
+      // both tables, so the incremental bytes to charge is the new envelope.
+      const envelopeAddedBytes = Buffer.byteLength(input.envelopeJson, "utf8");
       if (currentJson === null) {
         if (input.expectedSha256 !== null) {
           throw new SyncRelayConflictError(
             "key envelope does not exist; a conditional replace has nothing to match",
           );
         }
+        this.assertWorkspaceQuota(input.workspaceId, envelopeAddedBytes);
         this.db
           .prepare(
             `INSERT INTO sync_relay_key_envelopes (workspace_id, envelope_json, updated_at_ms)
@@ -495,6 +589,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           "key envelope was replaced concurrently; refresh and retry with the current sha256",
         );
       }
+      this.assertWorkspaceQuota(input.workspaceId, envelopeAddedBytes);
       this.db
         .prepare(
           `INSERT INTO sync_relay_key_envelope_history (
@@ -657,7 +752,30 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
          WHERE workspace_id = ?`,
       )
       .get(workspaceId);
-    return Number(blobRow?.bytes ?? 0) + Number(logRow?.bytes ?? 0);
+    // Key envelopes count toward the quota too (CodeRabbit Stability): the
+    // current envelope plus the append-only history table can otherwise grow
+    // without bound across repeated CAS rotations, letting a workspace bypass
+    // its cap by replacing the envelope over and over.
+    const envelopeRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))), 0) AS bytes
+         FROM sync_relay_key_envelopes
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    const envelopeHistoryRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))), 0) AS bytes
+         FROM sync_relay_key_envelope_history
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    return (
+      Number(blobRow?.bytes ?? 0) +
+      Number(logRow?.bytes ?? 0) +
+      Number(envelopeRow?.bytes ?? 0) +
+      Number(envelopeHistoryRow?.bytes ?? 0)
+    );
   }
 
   private assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {

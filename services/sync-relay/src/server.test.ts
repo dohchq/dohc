@@ -534,7 +534,9 @@ describe("sync relay handler", () => {
   });
 
   it("garbage-collects only unreferenced blobs without pruning log or key history", async () => {
-    const storage = await testStorage();
+    // blobGraceMs: 0 isolates the reference-detection logic under this fixed
+    // test clock; the retention grace window is exercised in its own test.
+    const storage = await testStorage({ blobGraceMs: 0 });
     const h = handler(storage);
     await createWorkspace(h);
     const referenced = Buffer.from("referenced");
@@ -586,7 +588,7 @@ describe("sync relay handler", () => {
   });
 
   it("allows only the workspace owner to run GC", async () => {
-    const storage = await testStorage();
+    const storage = await testStorage({ blobGraceMs: 0 });
     const h = handler(storage);
     await createWorkspace(h);
     const orphan = Buffer.from("orphan");
@@ -605,5 +607,106 @@ describe("sync relay handler", () => {
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
     );
     expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
+  });
+
+  // 0P sync-hardening item 4 GATE FIX (GC deletes a live blob mid-upload).
+  // Blob upload is two-phase: PUT /blobs/:sha, then POST /log referencing it.
+  // A GC that ran between the two used to reclaim the blob (no log row referred
+  // to it yet), orphaning the content the pending log op depends on. The
+  // retention grace window makes a freshly-uploaded blob untouchable, so the
+  // append lands on durable content.
+  it("does not GC a freshly uploaded blob before its referencing log op is appended (item 4)", async () => {
+    const clock = { now: 1_000_000 };
+    const storage = await testStorage({ blobGraceMs: 10 * 60 * 1000 });
+    const h = createSyncRelayHandler({
+      storage,
+      resolveActor: (request, workspaceId) => {
+        const auth = request.headers.get("authorization") ?? "";
+        if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
+        return { userId: auth.slice("Bearer user:".length), workspaceId };
+      },
+      nowMs: () => clock.now,
+    });
+    await createWorkspace(h);
+    const content = Buffer.from("blob-in-flight");
+    const contentSha = sha256(content);
+
+    // Phase 1: the blob is uploaded.
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content })))
+        .status,
+    ).toBe(200);
+
+    // GC runs in the gap BEFORE the log append. The blob is younger than the
+    // grace window, so it is NOT reclaimed.
+    const gc = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
+    expect(gc).toEqual({ ok: true, removed: 0, removedSha256s: [] });
+    expect((await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status).toBe(200);
+
+    // Phase 2: the referencing log op is appended against durable content.
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                {
+                  originSeq: 0,
+                  opKind: "moment.append",
+                  payload: { operation: "write", payloadAfterBlobSha256: contentSha },
+                  recordedAtMs: 1000,
+                },
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    // Once the blob has aged past the grace window AND is referenced by the log,
+    // it stays (referenced). An unreferenced aged blob is still collectible.
+    clock.now += 10 * 60 * 1000 + 1;
+    const gcLater = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
+    expect(gcLater).toEqual({ ok: true, removed: 0, removedSha256s: [] });
+    expect((await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status).toBe(200);
+  });
+
+  // CodeRabbit Security: openSyncRelayStorage is exported and reused, so it must
+  // reject a NaN/Infinity/negative quota itself -- otherwise the quota check
+  // (currentUsage + added > NaN) never trips and writes exceed the cap.
+  it("refuses to open storage with a non-positive or non-finite quota", async () => {
+    const root = await tempRoot("bad-quota");
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5]) {
+      expect(() =>
+        openSyncRelayStorage(join(root, `relay-${String(bad)}.sqlite`), {
+          workspaceQuotaBytes: bad,
+        }),
+      ).toThrow(/workspaceQuotaBytes/u);
+    }
+  });
+
+  // CodeRabbit Stability: the key envelope + its append-only history count
+  // toward the quota, so a workspace cannot bypass the cap by rotating the
+  // envelope over and over.
+  it("counts key-envelope storage (including rotation history) against the quota", async () => {
+    const first = keyEnvelopeJson("Zmlyc3Q=");
+    const storage = await testStorage({ workspaceQuotaBytes: first.length + 10 });
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    // The create fits under the cap.
+    expect((await h(putKeys(first))).status).toBe(200);
+    // A rotation moves the prior envelope into history and adds the new one, so
+    // usage would roughly double -- over the cap, rejected as quota_exceeded.
+    const second = keyEnvelopeJson("c2Vjb25k");
+    const rotated = await h(putKeys(second, sha256(first)));
+    expect(rotated.status).toBe(413);
+    expect(await json(rotated)).toMatchObject({ ok: false, code: "quota_exceeded" });
+    // The original envelope is intact (the rejected rotation changed nothing).
+    const current = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
+    expect(await current.text()).toBe(first);
   });
 });

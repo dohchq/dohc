@@ -258,7 +258,9 @@ export function createSyncRelayHandler({
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
 
       if (route.route === "gc" && request.method === "POST") {
-        const result = storage.collectUnreferencedBlobs(route.workspaceId);
+        const result = await storage.collectUnreferencedBlobs(route.workspaceId, {
+          nowMs: nowMs(),
+        });
         return jsonResponse({ ok: true, ...result });
       }
       if (route.route === "gc") throw methodNotAllowed();
@@ -346,6 +348,7 @@ export function createSyncRelayHandler({
           workspaceId: route.workspaceId,
           sha256: route.sha256,
           content: bytes,
+          createdAtMs: nowMs(),
         });
         return jsonResponse({
           ok: true,
