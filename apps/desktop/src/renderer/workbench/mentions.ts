@@ -49,6 +49,59 @@ function normalizeHandle(handle: string): string {
   return handle.normalize("NFC").toLowerCase();
 }
 
+// Options shared by the scanning helpers. `ignoreCode` makes an @handle that
+// sits inside an inline-code span or a fenced code block INERT — it is neither
+// treated as an invoke mention nor rendered as a chip. This keeps config/CLI
+// text like `npm install @agent/pkg` from accidentally invoking the agent.
+export interface MentionScanOptions {
+  ignoreCode?: boolean;
+}
+
+// Character ranges [start, end) that fall inside inline-code spans or fenced
+// code blocks. Deliberately pragmatic (not a full CommonMark parser): it covers
+// the realistic cases — backtick spans and ``` / ~~~ fences — so an @handle in
+// code text never reads as a mention.
+export function codeRanges(body: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  // --- fenced code blocks (line-based) ---
+  const fenceRe = /^[ \t]*(`{3,}|~{3,})/;
+  let offset = 0;
+  let openFence: { char: string; len: number; start: number } | null = null;
+  for (const line of body.split("\n")) {
+    const lineStart = offset;
+    const lineEnd = offset + line.length;
+    const marker = fenceRe.exec(line)?.[1];
+    if (!openFence) {
+      if (marker) openFence = { char: marker[0]!, len: marker.length, start: lineStart };
+    } else if (
+      marker &&
+      marker[0] === openFence.char &&
+      marker.length >= openFence.len &&
+      line.trim() === marker
+    ) {
+      ranges.push([openFence.start, lineEnd]);
+      openFence = null;
+    }
+    offset = lineEnd + 1; // + 1 for the consumed "\n"
+  }
+  if (openFence) ranges.push([openFence.start, body.length]);
+  // --- inline code spans (backtick runs), skipping anything already fenced ---
+  const inFence = (pos: number) => ranges.some(([s, e]) => pos >= s && pos < e);
+  const runRe = /`+/g;
+  let open: { len: number; start: number } | null = null;
+  for (let match = runRe.exec(body); match !== null; match = runRe.exec(body)) {
+    if (inFence(match.index)) continue;
+    const len = match[0].length;
+    if (!open) open = { len, start: match.index };
+    else if (len === open.len) {
+      ranges.push([open.start, match.index + len]);
+      open = null;
+    }
+    // A run of a DIFFERENT length inside an open span is span content — ignore.
+  }
+  return ranges;
+}
+
 // Case-insensitive exact match on a candidate's handle. Unknown handles never
 // resolve, so a stray "@todo" stays plain text — only real people/agents light
 // up, which keeps the mention affordance honest.
@@ -65,8 +118,11 @@ export function resolveMentionCandidate(
 export function findMentions(
   body: string,
   candidates: readonly MentionCandidate[],
+  options: MentionScanOptions = {},
 ): ResolvedMention[] {
   if (candidates.length === 0) return [];
+  const ranges = options.ignoreCode ? codeRanges(body) : [];
+  const inCode = (pos: number) => ranges.some(([s, e]) => pos >= s && pos < e);
   const found: ResolvedMention[] = [];
   MENTION_RE.lastIndex = 0;
   for (let match = MENTION_RE.exec(body); match !== null; match = MENTION_RE.exec(body)) {
@@ -74,6 +130,8 @@ export function findMentions(
     const candidate = resolveMentionCandidate(handle ?? "", candidates);
     if (!candidate) continue;
     const start = match.index + (lead?.length ?? 0);
+    // The "@" of the handle sits inside code text — leave it inert.
+    if (inCode(start)) continue;
     found.push({ start, end: start + 1 + (handle?.length ?? 0), handle: handle ?? "", candidate });
   }
   return found;
@@ -85,8 +143,9 @@ export function findMentions(
 export function toMentionSegments(
   body: string,
   candidates: readonly MentionCandidate[],
+  options: MentionScanOptions = {},
 ): MentionSegment[] {
-  const mentions = findMentions(body, candidates);
+  const mentions = findMentions(body, candidates, options);
   if (mentions.length === 0) return [{ type: "text", text: body }];
   const segments: MentionSegment[] = [];
   let cursor = 0;
@@ -110,8 +169,9 @@ export function toMentionSegments(
 export function mentionsAnyCandidate(
   body: string,
   candidates: readonly MentionCandidate[],
+  options: MentionScanOptions = {},
 ): boolean {
-  return findMentions(body, candidates).length > 0;
+  return findMentions(body, candidates, options).length > 0;
 }
 
 // --- composer autocomplete --------------------------------------------------

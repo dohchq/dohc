@@ -144,6 +144,54 @@ describe("reduceAgentNotifications auto-clear", () => {
     expect(newRun).toHaveLength(1);
     expect(newRun[0]!.runId).toBe("run-2");
   });
+
+  it("re-raises needs-input for a NEW permission on the same run after the first was dismissed", () => {
+    // Permission A blocks the run.
+    const blockedA = reduce(
+      [],
+      input({
+        status: "waiting-permission",
+        pendingPermissionTitle: "Run: rm a.md",
+        pendingPermissionId: "perm-a",
+      }),
+    );
+    expect(blockedA).toHaveLength(1);
+    // The user dismisses it.
+    const dismissed = new Set([blockedA[0]!.id]);
+    const afterDismiss = dismissAgentNotification(blockedA, blockedA[0]!.id);
+    // The run resumes — needs-input auto-clears.
+    const resumed = reduce(afterDismiss, input({ status: "running" }), dismissed);
+    expect(resumed).toEqual([]);
+    // The run hits a DIFFERENT permission — a fresh notice IS raised (not
+    // suppressed by the dismissed permission-A id).
+    const blockedB = reduce(
+      resumed,
+      input({
+        status: "waiting-permission",
+        pendingPermissionTitle: "Run: rm b.md",
+        pendingPermissionId: "perm-b",
+      }),
+      dismissed,
+    );
+    expect(blockedB).toHaveLength(1);
+    expect(blockedB[0]!.kind).toBe("needs-input");
+    expect(blockedB[0]!.body).toContain("rm b.md");
+  });
+
+  it("still suppresses a re-poll of the SAME dismissed permission", () => {
+    const blocked = reduce(
+      [],
+      input({ status: "waiting-permission", pendingPermissionTitle: "Run: rm a.md", pendingPermissionId: "perm-a" }),
+    );
+    const dismissed = new Set([blocked[0]!.id]);
+    const afterDismiss = dismissAgentNotification(blocked, blocked[0]!.id);
+    const repoll = reduce(
+      afterDismiss,
+      input({ status: "waiting-permission", pendingPermissionTitle: "Run: rm a.md", pendingPermissionId: "perm-a" }),
+      dismissed,
+    );
+    expect(repoll).toEqual([]);
+  });
 });
 
 describe("deriveAgentActivity", () => {
@@ -189,15 +237,27 @@ describe("deriveAgentActivity", () => {
     expect(activity?.addressedToUser).toBe(true);
   });
 
-  it("carries the pending permission title through", () => {
+  it("carries the pending permission title and id through", () => {
     const activity = deriveAgentActivity({
       ...base,
       session: session({
         status: "waiting-permission",
-        pendingPermissions: [{ title: "Run: rm old.md" }],
+        pendingPermissions: [{ title: "Run: rm old.md", requestId: "perm-42" }],
       }),
     });
     expect(activity?.pendingPermissionTitle).toBe("Run: rm old.md");
+    expect(activity?.pendingPermissionId).toBe("perm-42");
+  });
+
+  it("does not treat an @mention inside code as addressing the user", () => {
+    const activity = deriveAgentActivity({
+      ...base,
+      session: session({
+        status: "completed",
+        messages: [{ role: "assistant", text: "Edit the config: `@you = owner`." }],
+      }),
+    });
+    expect(activity?.addressedToUser).toBe(false);
   });
 });
 

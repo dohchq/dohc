@@ -759,6 +759,9 @@ export function DesktopWorkspaceShell(props: {
   const [folders, setFolders] = useState<string[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
+  // Synchronous guard against a mention-invoke race: two quick @agent sends
+  // must start ONE session, not overlap into two (see handleAgentMentioned).
+  const agentMentionStartingRef = useRef(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -1478,13 +1481,18 @@ export function DesktopWorkspaceShell(props: {
   // the existing agent-chat reply path (dohc_read_chat + dohc_reply_to_chat).
   const handleAgentMentioned = useCallback(
     async (input: { threadId: string; mentioned: MentionCandidate[]; body: string }) => {
-      if (agentActive) {
+      // `agentActive` is React state and stays false until startAgentSession
+      // resolves, so two quick mention-invokes would both pass this guard and
+      // race into overlapping session starts. The synchronous ref closes that
+      // window BEFORE the first await; it's cleared in finally.
+      if (agentActive || agentMentionStartingRef.current) {
         reportShellError(
           "Your agent is busy right now — it'll pick up the mention on its next turn.",
           new Error("agent busy"),
         );
         return;
       }
+      agentMentionStartingRef.current = true;
       try {
         const panel = await bridge().probeAgentDrivers({ workspaceId });
         const driver = panel.drivers.find((entry) => entry.installed) ?? panel.drivers[0];
@@ -1506,6 +1514,8 @@ export function DesktopWorkspaceShell(props: {
         mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
       } catch (error) {
         reportShellError("Could not reach your agent for that mention.", error);
+      } finally {
+        agentMentionStartingRef.current = false;
       }
     },
     [agentActive, mutateWb, reportShellError, workspaceId],

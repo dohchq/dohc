@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeMentionQuery,
   applyMentionCompletion,
+  codeRanges,
   findMentions,
   matchMentionCandidates,
   mentionsAnyCandidate,
@@ -53,6 +54,48 @@ describe("findMentions", () => {
     const found = findMentions("thanks @Agent", candidates);
     expect(found).toHaveLength(1);
     expect(found[0]!.candidate.id).toBe("agent:default");
+  });
+});
+
+describe("findMentions code-awareness (ignoreCode)", () => {
+  it("ignores an @handle inside an inline-code span", () => {
+    const body = "run `npm install @agent/pkg` first";
+    // Default: the span is scanned and the agent resolves (an accidental invoke).
+    expect(findMentions(body, candidates).map((m) => m.candidate.id)).toEqual(["agent:default"]);
+    // ignoreCode: the @agent inside backticks is inert.
+    expect(findMentions(body, candidates, { ignoreCode: true })).toEqual([]);
+  });
+
+  it("ignores an @handle inside a fenced code block", () => {
+    const body = "Setup:\n```\ndeps: @agent\n```\nthanks";
+    expect(findMentions(body, candidates, { ignoreCode: true })).toEqual([]);
+  });
+
+  it("still resolves a normal @handle outside code with ignoreCode on", () => {
+    const body = "hey @agent see `@you` in code";
+    const found = findMentions(body, candidates, { ignoreCode: true });
+    // Only the out-of-code @agent resolves; the backticked @you is inert.
+    expect(found.map((m) => m.candidate.id)).toEqual(["agent:default"]);
+  });
+
+  it("keeps a package scope like @agent/pkg in code inert", () => {
+    const body = "install `@agent/pkg` please";
+    expect(mentionsAnyCandidate(body, [agent], { ignoreCode: true })).toBe(false);
+    expect(toMentionSegments(body, candidates, { ignoreCode: true })).toEqual([
+      { type: "text", text: body },
+    ]);
+  });
+});
+
+describe("codeRanges", () => {
+  it("covers inline spans and fenced blocks", () => {
+    const body = "a `b` c";
+    expect(codeRanges(body)).toEqual([[2, 5]]);
+    const fenced = "x\n```\ny\n```\nz";
+    // The whole fence (opening line through closing line) is one range.
+    const ranges = codeRanges(fenced);
+    expect(ranges).toHaveLength(1);
+    expect(fenced.slice(ranges[0]![0], ranges[0]![1])).toBe("```\ny\n```");
   });
 });
 

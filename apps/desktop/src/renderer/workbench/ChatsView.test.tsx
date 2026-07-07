@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -295,6 +295,78 @@ describe("ChatsView mentions", () => {
     const call = onAgentMentioned.mock.calls[0]![0];
     expect(call.threadId).toBe("thread-1");
     expect(call.mentioned.map((c: { id: string }) => c.id)).toEqual(["agent:default"]);
+  });
+
+  it("does not invoke the agent for an @agent typed inside inline code", async () => {
+    const user = userEvent.setup();
+    const onAgentMentioned = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "m-code", body: "run `npm i @agent/pkg` please" }),
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster, onAgentMentioned });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    // The @agent sits inside backticks, so the invoke path must ignore it.
+    await user.type(
+      screen.getByTestId("chats-composer"),
+      "run `npm i @agent/pkg` please{Enter}",
+    );
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+    expect(onAgentMentioned).not.toHaveBeenCalled();
+  });
+
+  it("does not render a mention chip for an @handle inside inline code", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "m-code",
+          authorKind: "agent",
+          authorDisplayName: "ice@dohc.ai",
+          body: "set `@you = owner` in the config",
+        }),
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-message-body");
+    // No chip is rendered for the backticked handle.
+    expect(screen.queryByTestId("chats-message-body-mention")).toBeNull();
+  });
+
+  it("fires a single send (one agent invoke) for a synchronous double-Enter", async () => {
+    const user = userEvent.setup();
+    const onAgentMentioned = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    let resolveSend!: (value: { message: ChatMessageRecord }) => void;
+    bridgeMock.sendChatMessage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster, onAgentMentioned });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@agent look");
+
+    // Two Enter keydowns in the SAME tick (no await between): the synchronous
+    // in-flight ref must swallow the second so only ONE send goes out.
+    fireEvent.keyDown(composer, { key: "Enter" });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    resolveSend({ message: message({ id: "m-new", body: "@agent look" }) });
+
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onAgentMentioned).toHaveBeenCalledTimes(1));
   });
 
   it("does not invoke an agent when only the user is mentioned", async () => {

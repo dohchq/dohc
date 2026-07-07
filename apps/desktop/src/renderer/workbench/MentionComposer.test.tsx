@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MentionComposer } from "./MentionComposer";
@@ -99,6 +99,29 @@ describe("MentionComposer autocomplete", () => {
       .find((el) => el.getAttribute("data-candidate-id") === "user:you")!;
     await userEvent.click(userOption);
     expect(composer.value).toBe("@you ");
+  });
+
+  it("does not accept a candidate or send on Enter while IME composing (menu open)", async () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await userEvent.type(composer, "hey @ag");
+    await screen.findByTestId("chats-mention-menu");
+    // Enter fired mid-composition (isComposing) must be a no-op: the composed
+    // characters are being confirmed, not a mention accept or a send.
+    fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
+    expect(composer.value).toBe("hey @ag");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chats-mention-menu")).not.toBeNull();
+  });
+
+  it("does not send on Enter while IME composing (no menu)", async () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await userEvent.type(composer, "hello");
+    fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("exposes combobox/listbox roles for assistive tech", async () => {

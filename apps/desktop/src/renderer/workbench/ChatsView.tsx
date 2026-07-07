@@ -150,6 +150,13 @@ export function ChatsView(props: {
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
+  // and stay false until the next render, so a double-send (two Enters in one
+  // tick) can fire TWO IPC sends — and two agent invocations — before the state
+  // flips. These refs flip synchronously BEFORE the first await, so the second
+  // call is ignored immediately.
+  const sendingRef = useRef(false);
+  const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -261,7 +268,11 @@ export function ChatsView(props: {
   const notifyAgentMention = useCallback(
     (threadId: string, body: string) => {
       if (!props.onAgentMentioned || agentCandidates.length === 0) return;
-      const mentioned = findMentions(body, agentCandidates).map((match) => match.candidate);
+      // Invoke path is code-aware: an @agent typed inside inline code or a
+      // fenced block (e.g. `npm install @agent/pkg`) must NOT invoke the agent.
+      const mentioned = findMentions(body, agentCandidates, { ignoreCode: true }).map(
+        (match) => match.candidate,
+      );
       if (mentioned.length === 0) return;
       const unique = Array.from(new Map(mentioned.map((c) => [c.id, c])).values());
       props.onAgentMentioned({ threadId, mentioned: unique, body });
@@ -274,9 +285,10 @@ export function ChatsView(props: {
   const startThread = useCallback(async () => {
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
-    if (body.length === 0 || startingThread) return;
+    if (body.length === 0 || startingThread || startingThreadRef.current) return;
     const channel = nav.channel;
     const token = liveToken.current;
+    startingThreadRef.current = true;
     setStartingThread(true);
     try {
       const result = await bridge().startChannelThread({
@@ -294,6 +306,7 @@ export function ChatsView(props: {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that chat."));
     } finally {
+      startingThreadRef.current = false;
       setStartingThread(false);
     }
   }, [nav, newThreadBody, notifyAgentMention, props, startingThread, workspaceId]);
@@ -301,8 +314,9 @@ export function ChatsView(props: {
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
     const body = composer.trim();
-    if (body.length === 0 || sending) return;
+    if (body.length === 0 || sending || sendingRef.current) return;
     const token = liveToken.current;
+    sendingRef.current = true;
     setSending(true);
     try {
       const result = await bridge().sendChatMessage({
@@ -322,6 +336,7 @@ export function ChatsView(props: {
       // Unconditional reset (LinkedChats precedent): navigation bumps the
       // token without resetting `sending`, and the token guard on the READ
       // above already prevents concurrent sends.
+      sendingRef.current = false;
       setSending(false);
     }
   }, [composer, nav, notifyAgentMention, props, sending, workspaceId]);

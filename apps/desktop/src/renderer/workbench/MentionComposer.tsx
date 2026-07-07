@@ -84,6 +84,10 @@ export function MentionComposer(props: {
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // IME guard FIRST: Enter during composition confirms the composed
+      // characters — it must never accept a mention candidate or send, even
+      // when the mention menu is open. Let the browser handle the keystroke.
+      if (event.nativeEvent.isComposing) return;
       if (showMenu) {
         if (event.key === "ArrowDown") {
           event.preventDefault();

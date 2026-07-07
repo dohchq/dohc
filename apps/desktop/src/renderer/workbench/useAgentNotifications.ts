@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import {
   clearAgentNotificationsForThread,
@@ -43,20 +43,24 @@ export function useAgentNotifications(params: {
   const pollIntervalMs = params.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   const [notifications, setNotifications] = useState<AgentNotification[]>([]);
-  // State keys the user has already seen/dismissed, so a still-true state
-  // (e.g. a run that stays "completed" until replaced) never re-raises.
-  const dismissedRef = useRef<Set<string>>(new Set());
+  // Dismissed state keys, KEYED BY workspace. A flat set cleared on switch let
+  // switching away/back re-raise a dismissed run; per-workspace sets that
+  // persist across switches never do. Each notice carries its workspaceId, so
+  // a dismissal always lands in the right bucket.
+  const dismissedRef = useRef<Map<string, Set<string>>>(new Map());
+  const dismissedFor = useCallback((ws: string): Set<string> => {
+    let set = dismissedRef.current.get(ws);
+    if (!set) {
+      set = new Set();
+      dismissedRef.current.set(ws, set);
+    }
+    return set;
+  }, []);
   // Latest candidates without retriggering the poll effect on every render.
   const candidatesRef = useRef(userCandidates);
   candidatesRef.current = userCandidates;
   const metaRef = useRef({ workspaceName, agentName });
   metaRef.current = { workspaceName, agentName };
-
-  // Workspace switch: reset to a clean slate (see scope note above).
-  useEffect(() => {
-    dismissedRef.current = new Set();
-    setNotifications([]);
-  }, [workspaceId]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -81,7 +85,7 @@ export function useAgentNotifications(params: {
       setNotifications((prev) =>
         reduceAgentNotifications(prev, activity, {
           nowMs: Date.now(),
-          dismissed: dismissedRef.current,
+          dismissed: dismissedFor(workspaceId),
         }),
       );
     };
@@ -92,30 +96,53 @@ export function useAgentNotifications(params: {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [enabled, pollIntervalMs, workspaceId]);
+  }, [dismissedFor, enabled, pollIntervalMs, workspaceId]);
 
-  const dismiss = useCallback((id: string) => {
-    dismissedRef.current.add(id);
-    setNotifications((prev) => dismissAgentNotification(prev, id));
-  }, []);
+  const dismiss = useCallback(
+    (id: string) => {
+      setNotifications((prev) => {
+        const target = prev.find((notice) => notice.id === id);
+        if (target) dismissedFor(target.workspaceId).add(id);
+        return dismissAgentNotification(prev, id);
+      });
+    },
+    [dismissedFor],
+  );
 
   const clearForCurrentWorkspace = useCallback(() => {
     setNotifications((prev) => {
       for (const notice of prev) {
-        if (notice.workspaceId === workspaceId) dismissedRef.current.add(notice.id);
+        if (notice.workspaceId === workspaceId) dismissedFor(workspaceId).add(notice.id);
       }
       return clearAgentNotificationsForWorkspace(prev, workspaceId);
     });
-  }, [workspaceId]);
+  }, [dismissedFor, workspaceId]);
 
-  const clearForThread = useCallback((threadId: string) => {
-    setNotifications((prev) => {
-      for (const notice of prev) {
-        if (notice.threadId === threadId) dismissedRef.current.add(notice.id);
-      }
-      return clearAgentNotificationsForThread(prev, threadId);
-    });
-  }, []);
+  const clearForThread = useCallback(
+    (threadId: string) => {
+      setNotifications((prev) => {
+        for (const notice of prev) {
+          if (notice.threadId === threadId) dismissedFor(notice.workspaceId).add(notice.id);
+        }
+        return clearAgentNotificationsForThread(prev, threadId);
+      });
+    },
+    [dismissedFor],
+  );
 
-  return { notifications, dismiss, clearForCurrentWorkspace, clearForThread };
+  // Render only the CURRENT workspace's notices, computed synchronously. A
+  // switch to workspace B therefore never repaints workspace A's notices, even
+  // for the tick before the next poll runs (product invariant: a slow/stale
+  // response for A must never repaint B).
+  const currentWorkspaceNotifications = useMemo(
+    () => notifications.filter((notice) => notice.workspaceId === workspaceId),
+    [notifications, workspaceId],
+  );
+
+  return {
+    notifications: currentWorkspaceNotifications,
+    dismiss,
+    clearForCurrentWorkspace,
+    clearForThread,
+  };
 }

@@ -47,6 +47,10 @@ export interface AgentActivityInput {
   lastError?: string;
   // Title of the permission the run is blocked on (drives "needs input" copy).
   pendingPermissionTitle?: string;
+  // Stable id of the permission the run is blocked on. Discriminates the
+  // needs-input notice per WAIT so a dismissed permission-A does not suppress a
+  // later permission-B on the SAME run (each wait can re-raise once).
+  pendingPermissionId?: string;
   // First line of the agent's latest message, used for specific "finished" /
   // "asked" copy ("Your agent finished reorganizing /notes").
   latestSummary?: string;
@@ -64,7 +68,7 @@ export interface AgentSessionLike {
   runId?: string;
   lastError?: string;
   messages: ReadonlyArray<{ role: "assistant" | "reasoning"; text: string }>;
-  pendingPermissions: ReadonlyArray<{ title: string }>;
+  pendingPermissions: ReadonlyArray<{ title: string; requestId?: string }>;
 }
 
 function firstLine(text: string): string {
@@ -92,7 +96,8 @@ export function deriveAgentActivity(params: {
   const latestSummary = firstLine(latestText);
   const addressedToUser =
     latestText.trim().length > 0 &&
-    (mentionsAnyCandidate(latestText, params.userCandidates) || /\?\s*$/.test(latestText.trim()));
+    (mentionsAnyCandidate(latestText, params.userCandidates, { ignoreCode: true }) ||
+      /\?\s*$/.test(latestText.trim()));
   return {
     workspaceId: params.workspaceId,
     workspaceName: params.workspaceName,
@@ -103,6 +108,9 @@ export function deriveAgentActivity(params: {
     ...(session.pendingPermissions[0]?.title
       ? { pendingPermissionTitle: session.pendingPermissions[0].title }
       : {}),
+    ...(session.pendingPermissions[0]?.requestId
+      ? { pendingPermissionId: session.pendingPermissions[0].requestId }
+      : {}),
     ...(latestSummary ? { latestSummary } : {}),
     addressedToUser,
   };
@@ -112,8 +120,22 @@ export function agentNotificationId(
   workspaceId: string,
   runId: string,
   kind: AgentNotificationKind,
+  discriminator?: string,
 ): string {
-  return `${workspaceId}::${runId}::${kind}`;
+  const base = `${workspaceId}::${runId}::${kind}`;
+  return discriminator ? `${base}::${discriminator}` : base;
+}
+
+// The dismissal/coalescing key for a desired notice. needs-input is
+// discriminated by the pending permission id so a NEW wait on the same run
+// gets a fresh id (and can re-raise after an earlier wait was dismissed).
+function notificationIdFor(
+  input: AgentActivityInput,
+  kind: AgentNotificationKind,
+  runId: string,
+): string {
+  const discriminator = kind === "needs-input" ? input.pendingPermissionId : undefined;
+  return agentNotificationId(input.workspaceId, runId, kind, discriminator);
 }
 
 // error > needs-input > asked > finished. Only terminal / blocked states raise
@@ -179,7 +201,7 @@ function build(
 ): AgentNotification {
   const { title, body } = copyFor(input, kind);
   return {
-    id: agentNotificationId(input.workspaceId, runId, kind),
+    id: notificationIdFor(input, kind, runId),
     kind,
     workspaceId: input.workspaceId,
     workspaceName: input.workspaceName,
@@ -214,15 +236,17 @@ export function reduceAgentNotifications(
   const runId = input.runId;
   if (!runId) return [...prev];
   const kind = desiredKind(input);
+  const desiredId = kind !== null ? notificationIdFor(input, kind, runId) : null;
   const kept = prev.filter((notice) => {
     if (notice.workspaceId !== input.workspaceId || notice.runId !== runId) return true;
-    return kind !== null && notice.kind === kind;
+    // For THIS run, keep only the exact desired notice; any other kind — or an
+    // earlier needs-input for a DIFFERENT permission — is superseded.
+    return desiredId !== null && notice.id === desiredId;
   });
-  if (kind === null) return kept;
-  const id = agentNotificationId(input.workspaceId, runId, kind);
-  if (opts.dismissed?.has(id)) return kept;
-  if (kept.some((notice) => notice.id === id)) return kept;
-  return [...kept, build(input, kind, runId, opts.nowMs)];
+  if (desiredId === null) return kept;
+  if (opts.dismissed?.has(desiredId)) return kept;
+  if (kept.some((notice) => notice.id === desiredId)) return kept;
+  return [...kept, build(input, kind!, runId, opts.nowMs)];
 }
 
 export function dismissAgentNotification(

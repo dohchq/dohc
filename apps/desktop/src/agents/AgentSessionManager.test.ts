@@ -181,6 +181,62 @@ describe("AgentSessionManager", () => {
     expect(manager.panelSnapshot("ws-1").session?.status).toBe("failed");
   });
 
+  it("rejects a concurrent start for the same workspace (one session, no duplicate)", async () => {
+    // Hold the first start open so it is still in flight when the second fires.
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let driverStarts = 0;
+    const { manager, integration } = harness({
+      async startSession() {
+        driverStarts += 1;
+        await gate;
+        return new FakeSession();
+      },
+    });
+
+    const first = manager.startSession({ workspaceId: "ws-1", driverId: "fake-driver", prompt: "a" });
+    // Second call while the first is mid-flight — rejected synchronously.
+    const second = manager.startSession({ workspaceId: "ws-1", driverId: "fake-driver", prompt: "b" });
+    await expect(second).rejects.toThrow(/already starting/i);
+
+    releaseFirst();
+    await first;
+    // Only ONE session/run was ever created.
+    expect(driverStarts).toBe(1);
+    expect(integration.startAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a fresh start for a DIFFERENT workspace concurrently", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let driverStarts = 0;
+    const { manager } = harness({
+      async startSession() {
+        driverStarts += 1;
+        await gate;
+        return new FakeSession();
+      },
+    });
+    const a = manager.startSession({ workspaceId: "ws-a", driverId: "fake-driver", prompt: "a" });
+    const b = manager.startSession({ workspaceId: "ws-b", driverId: "fake-driver", prompt: "b" });
+    release();
+    await Promise.all([a, b]);
+    expect(driverStarts).toBe(2);
+  });
+
+  it("permits a sequential restart after the first start settles", async () => {
+    const { manager } = harness();
+    await manager.startSession({ workspaceId: "ws-1", driverId: "fake-driver", prompt: "a" });
+    // Not concurrent — the mutex has been released, so a restart is allowed.
+    await expect(
+      manager.startSession({ workspaceId: "ws-1", driverId: "fake-driver", prompt: "b" }),
+    ).resolves.toBeDefined();
+  });
+
   it("ends attribution as failed when the provider reports a fatal error", async () => {
     const { manager, endAgentRun, emit } = harness();
     await manager.startSession({

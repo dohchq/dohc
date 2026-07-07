@@ -47,7 +47,9 @@ export function MentionText(props: {
   candidates: readonly MentionCandidate[];
   testId?: string;
 }) {
-  const segments = toMentionSegments(props.body, props.candidates);
+  // Chips are code-aware too: an @handle inside inline code / a fenced block
+  // reads as code text, not a mention chip.
+  const segments = toMentionSegments(props.body, props.candidates, { ignoreCode: true });
   return (
     <>
       {segments.map((segment, index) =>
