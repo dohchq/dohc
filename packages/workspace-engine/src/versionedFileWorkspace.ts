@@ -68,7 +68,7 @@ import {
   createChangeSetStore,
   type ChangeSetStore,
   type HistoryRecord,
-} from "@dohc/workspace-history";
+} from "./changeSetStore";
 import {
   createVersionedTextStore,
   type ActorNeutralWriteMetadata,

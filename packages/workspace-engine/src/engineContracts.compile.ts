@@ -7,7 +7,7 @@ import type {
   ChangeSetKind,
   FileChange,
 } from "@dohc/workspace-core";
-import type { ChangeSetStore, HistoryRecord } from "@dohc/workspace-history";
+import type { ChangeSetStore, HistoryRecord } from "./changeSetStore";
 
 type IsSame<A, B> =
   (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2)
@@ -97,9 +97,9 @@ type ContractChecks = [
   AssertSame<Engine.WorkspaceSearchPolicy, Contracts.WorkspaceSearchPolicy>,
 ];
 
-// The contracts package cannot import @dohc/workspace-core or
-// @dohc/workspace-history (both would create a dependency cycle: workspace-core
-// already depends on workspace-contracts). engine.ts therefore carries private
+// The contracts package cannot import @dohc/workspace-core or the engine's
+// changeSetStore (both would create a dependency cycle: workspace-core already
+// depends on workspace-contracts). engine.ts therefore carries private
 // structural copies of the history/provenance shapes. These checks pin those
 // copies to the real types so any drift fails this package's typecheck, which
 // CAN see both sides.

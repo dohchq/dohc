@@ -17,6 +17,19 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+// Legacy `.dohc/history` change-set store. The engine (moments in
+// engine.db) is the production recorder post-flip; createChangeSetStore is
+// retained ONLY so read-only relic reads and drift-guard checks (the desktop
+// capture guard test, the phase0m QA script) can confirm the engine writes no
+// legacy history. No production surface records through it.
+export {
+  createChangeSetStore,
+  isDurableChangeSetRecordingSupported,
+} from "./changeSetStore";
+export type {
+  ChangeSetStore,
+  HistoryRecord,
+} from "./changeSetStore";
 export {
   exportSyncBundle,
   importSyncBundle,
