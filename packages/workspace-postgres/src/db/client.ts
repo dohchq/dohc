@@ -1,6 +1,4 @@
 import pg from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import * as schema from "./schema";
 
 // Local development fallback only; production/self-hosted services must set
 // POSTGRES_URL explicitly rather than consuming these hardcoded credentials.
@@ -12,9 +10,3 @@ export function createPgPool(
 ) {
   return new pg.Pool({ connectionString });
 }
-
-export function createWorkspaceDb(pool = createPgPool()) {
-  return drizzle(pool, { schema });
-}
-
-export type WorkspacePostgresDb = ReturnType<typeof createWorkspaceDb>;

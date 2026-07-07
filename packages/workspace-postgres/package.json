@@ -4,18 +4,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./blobStore": "./src/blobStore.ts",
-    "./repositories/workspaces": "./src/repositories/workspaces.ts",
-    "./services/backend": "./src/services/backend.ts",
-    "./services/provisioning": "./src/services/provisioning.ts"
+    "./repositories/workspaces": "./src/repositories/workspaces.ts"
   },
   "scripts": {
     "test": "vitest run --no-file-parallelism",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dohc/workspace-contracts": "workspace:*",
-    "drizzle-orm": "^0.45.2",
     "pg": "^8.13.1"
   },
   "devDependencies": {
