@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -162,7 +162,12 @@ export function defaultWorkspaceKernelPackagedBinaryPath(
   options: WorkspaceKernelPackagedBinaryOptions,
 ): string | null {
   if (!options.isPackaged || !options.resourcesPath) return null;
-  return join(
+  // The function is parameterized by target platform (tests exercise foreign
+  // layouts), so join with THAT platform's separators, not the host's. At
+  // runtime the platform is the host and this is identical to plain join.
+  const joinForPlatform =
+    (options.platform ?? process.platform) === "win32" ? win32.join : posix.join;
+  return joinForPlatform(
     options.resourcesPath,
     WORKSPACE_KERNEL_RESOURCE_DIR,
     workspaceKernelBinaryName(options.platform),

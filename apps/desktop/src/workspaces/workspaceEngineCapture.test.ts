@@ -5,7 +5,7 @@ import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testi
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";

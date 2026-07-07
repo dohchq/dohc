@@ -77,7 +77,7 @@ describe("WorkspaceKernelClient", () => {
         resourcesPath: "C:\\dohc\\resources",
         platform: "win32",
       }),
-    ).toContain(`workspace-kernel${process.platform === "win32" ? "\\" : "/"}dohc-workspace-kernel.exe`);
+    ).toBe("C:\\dohc\\resources\\workspace-kernel\\dohc-workspace-kernel.exe");
     expect(
       defaultWorkspaceKernelPackagedBinaryPath({ isPackaged: false, resourcesPath: "/tmp" }),
     ).toBeNull();
