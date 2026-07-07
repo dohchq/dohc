@@ -18,6 +18,7 @@ import {
   isExplorerMenuCommand,
   isMenuCommand,
   isWorkbenchMenuCommand,
+  parseEngineYDocRemoteUpdateEvent,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
   parseWorkspaceActivatedEvent,
@@ -296,6 +297,28 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.searchResults, handler);
     return () => ipcRenderer.removeListener(CHANNELS.searchResults, handler);
+  },
+  // WS-G2-C-2 engine Y.Doc editor binding: the drop-in for HocuspocusProvider.
+  // Updates cross as raw Uint8Array (structured clone); the sessionId
+  // round-trips so the renderer applies forwarded deltas only for the bound
+  // session.
+  openEngineYDocSession: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocOpen, payload),
+  applyEngineYDocUpdate: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
+  closeEngineYDocSession: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
+  // Same boundary rule as onSearchResults: every event is validated by the
+  // closed dependency-free parseEngineYDocRemoteUpdateEvent check (bounded
+  // sessionId, real Uint8Array within the byte bound) before it reaches
+  // renderer code.
+  onEngineYDocRemoteUpdate: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parseEngineYDocRemoteUpdateEvent(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.engineYDocRemoteUpdate, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.engineYDocRemoteUpdate, handler);
   },
 };
 

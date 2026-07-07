@@ -16,7 +16,9 @@ import {
   isMenuCommand,
   isSafeRelativePath,
   isWorkbenchMenuCommand,
+  ENGINE_YDOC_UPDATE_MAX_BYTES,
   MENU_COMMANDS,
+  parseEngineYDocRemoteUpdateEvent,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
   parseWorkspaceActivatedEvent,
@@ -446,5 +448,43 @@ void _updaterChannelsCoverTuple;
 describe("update channel drift guard", () => {
   it("keeps preload and updater channel tuples in sync", () => {
     expect(UPDATE_CHANNELS).toEqual(UPDATER_UPDATE_CHANNELS);
+  });
+});
+
+describe("parseEngineYDocRemoteUpdateEvent (preload boundary)", () => {
+  it("accepts a bounded sessionId + a real Uint8Array, rebuilding only validated fields", () => {
+    const update = new Uint8Array([1, 2, 3]);
+    const parsed = parseEngineYDocRemoteUpdateEvent({
+      sessionId: "s-1",
+      update,
+      // An extra field must never cross the boundary.
+      evil: "drop me",
+    });
+    expect(parsed).toEqual({ sessionId: "s-1", update });
+    expect((parsed as unknown as Record<string, unknown>).evil).toBeUndefined();
+  });
+
+  it("rejects a missing field, a bad sessionId, and a non-Uint8Array update", () => {
+    const update = new Uint8Array([1]);
+    expect(parseEngineYDocRemoteUpdateEvent({ update })).toBeNull();
+    expect(parseEngineYDocRemoteUpdateEvent({ sessionId: "s", update: [1, 2, 3] })).toBeNull();
+    expect(
+      parseEngineYDocRemoteUpdateEvent({ sessionId: "s", update: update.buffer }),
+    ).toBeNull();
+    expect(parseEngineYDocRemoteUpdateEvent({ sessionId: "", update })).toBeNull();
+    expect(parseEngineYDocRemoteUpdateEvent(null)).toBeNull();
+    expect(parseEngineYDocRemoteUpdateEvent([{ sessionId: "s", update }])).toBeNull();
+  });
+
+  it("rejects an empty or over-bound update", () => {
+    expect(
+      parseEngineYDocRemoteUpdateEvent({ sessionId: "s", update: new Uint8Array(0) }),
+    ).toBeNull();
+    expect(
+      parseEngineYDocRemoteUpdateEvent({
+        sessionId: "s",
+        update: new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES + 1),
+      }),
+    ).toBeNull();
   });
 });

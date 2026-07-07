@@ -19123,3 +19123,241 @@ already routed into the LIVE Y.Doc by the engine (fix 3), so the provider does
 not have to reconcile persisted-vs-live itself; it binds the editor to
 `session.doc` and lets `recordUpdate` journal local edits. Awareness
 (presence/cursors) is still ephemeral and MUST NOT journal.
+
+## Y.Doc Editor Binding G2-C-2
+
+Lane G2-C-2: bind the desktop rich-text editor to the engine-native Y.Doc,
+replacing HocuspocusProvider, so solo editing runs on the engine Y.Doc and
+co-editing rides the G2-C-1 replication. Design doc:
+`2026-07-07-think-bigger-ydoc-engine-driver-design.md` §G2-C2 + the durable-
+resume handoff notes.
+
+### The provider design (bind / observe / skip-reserved-origin / settle / close)
+
+The engine driver is node-only (node:sqlite + the store write lane), so the
+live `session.doc` lives in MAIN and the renderer's Tiptap editor binds to a
+MIRROR doc kept convergent over IPC. The provider is therefore TWO halves:
+
+- **Main core** — `apps/desktop/src/collab/ydocEngineProviderSession.ts`
+  (`openEngineYDocProviderSession`). Constructs the driver with
+  `replicated: true` (contract a — openSession resumes the lineage internally;
+  the core NEVER re-seeds), binds to `session.doc`, and installs ONE
+  `doc.on("update", (u, origin) => …)` observer:
+  - `origin === REMOTE_YDOC_APPLY_ORIGIN` → forward to the editor via
+    `onRemoteUpdate`, **never** `recordUpdate` (contract b — the store already
+    persisted+journaled+acked that remote op; re-journaling echo-storms peers);
+    schedule a settle so the converged state projects.
+  - `origin === LOCAL_EDITOR_ORIGIN` (stamped by `applyLocalUpdate`) → journal
+    via `session.recordUpdate` (persists the CRDT delta AND the replicated
+    `ydoc.update` op) and schedule a debounced settle.
+  - any other origin → ignored.
+  `applyLocalUpdate` = `Y.applyUpdate(session.doc, u, LOCAL_EDITOR_ORIGIN)`.
+  Journaling is serialized (promise chain) to keep `ydoc_updates.seq` in
+  emission order; settle is debounced (800ms, matching the local autosave feel)
+  and coalesced. `close()` drains pending journal+settle, settles the converged
+  state, then releases the single-canonical reservation (`session.close`) and
+  the driver read handle — so a version switch of the same object can reopen.
+  `applyExternalMarkdownEdit` swallows the replicated `invalid-input` rejection
+  and returns `{ supported: false }` (contract c — external-edit-as-deltas is
+  G2-C-3/later; the live session must not crash on an agent/restore write).
+- **Renderer half** — `apps/desktop/src/renderer/collab/engineYDocProvider.ts`
+  (`bindEngineYDoc(transport)`). The drop-in replacement for HocuspocusProvider:
+  seeds a mirror `Y.Doc` from the engine's `initialUpdate` under a private
+  `ENGINE_SOURCED_ORIGIN`, ships every non-engine-origin (real editor) update to
+  main via the transport, and applies forwarded remote deltas under the engine
+  origin so they render live but never echo back to main. Exposes `doc` for the
+  Tiptap Collaboration extension (`field: "body"`), `available`, and an
+  idempotent `destroy()`. No websocket, no token, no `collabToken`.
+
+### How the three G2-C-1 contracts are honored (proven in tests)
+
+- (a) replicated:true + never-reseed: the core only constructs
+  `{ replicated: true }` and binds `session.doc`; the driver's openSession
+  resumes. Proven by the close→reopen round-trip test (the earlier edit
+  survives via the CRDT lineage, not a fresh markdown seed).
+- (b) skip `REMOTE_YDOC_APPLY_ORIGIN`: the "no echo storm" test routes a remote
+  delta into `session.doc` under the reserved origin and asserts it is
+  **forwarded** (onRemoteUpdate fires) but produces **no new `ydoc_updates`
+  row**, while still converging (a following settle projects the remote line).
+- (c) graceful external edit: `applyExternalMarkdownEdit` on a replicated doc
+  returns `{ supported: false }` and the session stays alive+editable.
+
+### Solo-editing-on-engine proof (no relay, no cloud)
+
+`ydocEngineProviderSession.test.ts` (real store + real Yjs, no Electron): open a
+plain local rich file → a mirror-bridged editor edit journals through
+`recordUpdate` → `settleNow` projects it into `engine.db` AND hands markdown to
+`onSettled` for the disk write → close → reopen resumes the rich content. Same
+provider drives co-editing: a remote `ydoc.update` the engine routes into
+`session.doc` (liveYDocRegistry) is forwarded to the editor unchanged.
+
+### Verification (Linux-green)
+
+- `ydocEngineProviderSession.test.ts` — 6 tests (solo settle round-trip,
+  reserved-origin skip, close/reopen resume, single-canonical version-switch
+  handoff, graceful external-edit, secret-path refusal).
+- `engineYDocProvider.test.ts` — 4 tests (seed, ship-local + receive-remote
+  without echo, unavailable fallback, idempotent destroy).
+- `pnpm --filter @dohc/desktop typecheck` green.
+
+### What is BUILT vs. what remains (honest scope)
+
+BUILT + tested + committed: both provider halves — the contract heart of "the
+editor binds to the engine Y.Doc, not Hocuspocus". These are the reusable,
+transport-agnostic pieces; the main core is what the IPC layer wraps, the
+renderer half is what `useCollabDoc`'s sibling hook drives.
+
+REMAINING (a runtime-sensitive integration on the editor's riskiest path +
+the security-reviewed capture module — handed off, NOT landed blind):
+
+1. **Share the capture's store with the YDoc session.** The YDoc driver needs
+   the SAME `VersionedTextStore` instance the desktop capture owns (single-
+   writer safety: two stores on one `engine.db` = two write connections =
+   node:sqlite deadlock). `WorkspaceEngineCapture` does not expose its store or
+   active version yet — add an accessor (e.g. `engineStore()` +
+   `activeVersionId()`), or an `openYDocSession(path)` method on the capture
+   that constructs `openEngineYDocProviderSession({ store, rootDir, versionId })`
+   with its own store.
+2. **Capture-watcher coexistence.** A live ydoc-driven path's settle writes the
+   disk `.md`; the capture watcher would re-capture it as a `moment.append` (and
+   for a SHARED workspace, double-replicate → P0D conflict on the markdown the
+   `ydoc.update` stream already reconciles). Teach the capture to defer for a
+   live ydoc path: consult `driver.canonicalSourceFor`/`isYDocDriven` and
+   suppress `moment.append` (use `writeProjectedTextFile`, or recognize the
+   settle's self-write sha) while a session is live. For SOLO/local this is
+   benign today (no relay), so a solo-first cutover can land ahead of the shared
+   coexistence hardening.
+3. **IPC surface.** Channels `engineYDocOpen` / `engineYDocApplyUpdate` /
+   `engineYDocClose` + a `engineYDocRemoteUpdate` main→renderer event (mirror the
+   `searchWorkspace`/`onSearchResults` streaming pattern: Zod payloads in
+   channels.ts, handlers in main.ts gated on `activity.engineCaptureFor`,
+   preload subscription, bridge-contract types). Updates cross IPC as
+   `Uint8Array` (structured clone). Gate open on engine-flagged workspace + a
+   rich/markdown path; catch the driver's secret/not-found/already-live throws
+   and return `{ available: false }`.
+4. **Renderer transport + hook + FileInspector flip.** An `EngineYDocTransport`
+   implementation over the bridge, a `useEngineDoc` hook (sibling to
+   `useCollabDoc`) that `bindEngineYDoc`s it, and switching `FileInspector`'s
+   editor to it for local rich docs — keeping the save-state/Edit-gate UX for
+   solo (the collab branch currently drops `markdown-save-state`; solo-on-engine
+   should keep a settle indicator so the editing feel is unchanged). Undo/redo:
+   `COLLAB_STARTER_KIT` already disables `undoRedo`; the Collaboration extension
+   must supply the Yjs `UndoManager` binding so undo stays intact.
+5. **e2e.** Adjust `workspace-collab-decoupling.spec.ts` — local editing now
+   flows THROUGH the engine provider (still zero WebSocket, `collabToken` still
+   `{ available: false }`) — and add an editor-on-engine round-trip spec
+   (type → settle → reopen through `engine.db` + the `.md`).
+
+### G2-C-3 handoff (what is now safe to delete)
+
+Once the FileInspector flip (item 4) lands, the editor no longer instantiates
+`HocuspocusProvider`. G2-C-3 can then delete: the Hocuspocus service
+(`services/hocuspocus`), the `collab-token` route + the `collabToken` IPC +
+`deriveHocuspocusUrl`, and the `HocuspocusProvider` code path in
+`useCollabDoc.ts`/`collabSession.ts`. The cloud co-editing cutover the user
+chose: a shared workspace now co-edits through the engine provider (the same
+`ydoc.update` replication), not Hocuspocus — ship the closed-boundary migration
+tool (file == re-projection, else preserve-both) as part of the retirement.
+
+### MU-C1 handoff (presence)
+
+The provider exposes the live `session.doc`; MU-C1 presence can bind Yjs
+awareness to it as the ephemeral channel (never journaled), replacing the
+Hocuspocus awareness the old `useCollabDoc` used. Awareness updates must NOT go
+through `recordUpdate` (they are not `ydoc.update` ops).
+
+### REMAINING WIRING — LANDED (the runtime-sensitive integration, tests-first + real Electron e2e)
+
+The five deferred items are DONE, committed, and proven Linux-green (unit +
+xvfb Electron e2e). The editor now binds to the engine Y.Doc, not Hocuspocus.
+
+1. **Store sharing** — `WorkspaceEngineCapture.openYDocSession({ path,
+   onRemoteUpdate, contentKind? })` constructs the provider session with the
+   capture's OWN `VersionedTextStore` (its `engineStore()`), so the driver writes
+   only through that store's `runInEngineWriteLane` / `writeProjectedTextFile` —
+   one write connection, one lane, no second `engine.db` handle (the deadlock the
+   plan warned of). `activeVersionIdOf(store)` supplies the version. main.ts calls
+   this; it never constructs a store. Proven: `workspaceEngineYDocSession.test.ts`
+   ("shares one store instance" — a second store would have deadlocked the
+   settle).
+2. **Watcher coexistence (data integrity)** — a `liveYDocPaths` set on the
+   capture; `openYDocSession` adds the path, the wrapped `close()` removes it.
+   `captureOnePath` DEFERS a live path (after the secret check, before policy), so
+   the watcher's observation of the settle's own `.md` self-write is never
+   re-captured as a `moment.append` — which on a shared workspace would collide
+   (P0D) with the `ydoc.update` stream. `onSettled` also registers the settled
+   sha as an expected-engine-event before writing the `.md` (belt) so the
+   close-boundary self-write is recognized too. Proven: the unit test asserts a
+   live path's `captureBatch` adds ZERO `moment.append`/`conflict.open` ops, and
+   the E2E (`workspace-engine-editor.spec.ts`) asserts the typed sentinel appears
+   in NO `moment.append` replication op (only opaque `ydoc.update` ops) with no
+   `conflict.open` — the load-bearing no-double-journal / no-P0D proof.
+3. **IPC** — `engineYDocOpen` / `engineYDocApplyUpdate` / `engineYDocClose`
+   invokes + an `engineYDocRemoteUpdate` main→renderer event, mirroring
+   searchWorkspace/onSearchResults. Zod payloads (binary as `z.custom<Uint8Array>`
+   so the inferred type matches yjs), the dependency-free
+   `parseEngineYDocRemoteUpdateEvent` at the preload boundary (unit-tested),
+   main-side handlers gated on `activity.engineCaptureFor` + `isRichEnginePath`
+   (markdown only). Sessions keyed by a renderer-minted `sessionId`, owner-scoped
+   (a foreign/stale session is a no-op), closed on renderer-destroyed and (before
+   the engine stores stop) on app quit. Secret/not-found/already-live →
+   `{ available: false }`.
+4. **useEngineDoc + FileInspector flip** — `useEngineDoc` (sibling to
+   `useCollabDoc`) binds an `EngineYDocTransport` over the bridge, guarded by a
+   per-open request token (the async-state invariant: a slow A response never
+   repaints B). FileInspector's markdown branch binds Tiptap to the engine doc
+   with a `markdown-save-state` settle indicator. Undo/redo is intact: the
+   Collaboration extension (v3.23.6) bundles the yjs `yUndoPlugin` +
+   Mod-z/Mod-y, so `COLLAB_STARTER_KIT`'s disabled history is covered for free.
+   Solo local works with no relay; secret paths never open (graceful fallback).
+   Hocuspocus code stays present; the editor no longer instantiates it.
+5. **Version-switch / lifecycle** — opening takes the single-canonical
+   reservation; `useEngineDoc`'s effect cleanup settles+closes on PATH or
+   WORKSPACE change (releasing the reservation so the object reopens), and no
+   flicker/cursor-jump (the `ENGINE_SOURCED_ORIGIN` seed guard). E2E reopen
+   resumes the rich content, and the capture/versions/secret-env e2e regress
+   clean. KNOWN FOLLOW-UP (G2-C-3): the RENDERER does not yet close/reopen the
+   live session when the ACTIVE VERSION switches while the SAME rich file stays
+   open — `useEngineDoc` keys on (workspaceId, path, enabled), not the active
+   version. Single-canonical always held; this was a same-object-across-versions
+   coexistence gap, not a two-live-docs one.
+
+   GATE FIX (WS-G2-C-2 gate round — the data-integrity half of that follow-up is
+   now CLOSED server-side): the coarse `liveYDocPaths` SET was replaced with an
+   AUTHORITATIVE live-session registry on `WorkspaceEngineCapture`
+   (path → {versionId, session, status, close}) and every lifecycle op now
+   coordinates through it. `switchVersion` / `createVersion` (create-and-switch) /
+   `mergeVersionIntoMain` SYNCHRONOUSLY settle+close ALL live sessions before
+   materializing (no stale projection into the now-active version — the
+   two-lineage corruption is gone); `beginFileRename` and the delete IPC
+   settle+close any session at/under the touched path first (no resurrection/
+   orphan); and `captureOnePath` no longer blanket-skips a live path — the
+   settle's own self-write is suppressed PRECISELY by its expected-event sha, so
+   a GENUINE external edit is captured as a moment instead of silently dropped.
+   Close is now retryable (a failing close retains a `failing-close` guard;
+   capture stays suppressed + a retry is possible instead of stranding the
+   reservation), `engineYDocOpen`/`applyUpdate` enforce the shared-view read-only
+   guard, and a settle failure now propagates from the explicit `settleNow`/close
+   path (a failed flush fails the version/rename op instead of losing the edit).
+   STILL FUTURE for G2-C-3: (a) the renderer closing/reopening on active-version
+   change (server-side is safe, but the open editor still needs to re-bind — key
+   `useEngineDoc` on the version or flush-on-switch in the UI); (b) folding an
+   external edit into a LIVE replicated doc as CRDT deltas (today it lands as a
+   separate moment — not dropped, but not merged into the live lineage); and
+   (c) an in-session rename protocol (today rename settles+closes then reopens
+   under the new path, rather than moving the live session's object in place).
+
+Verify (Linux-green): `pnpm -r typecheck`; `@dohc/desktop` unit suite (1063
+pass / 2 skip) incl. `workspaceEngineYDocSession.test.ts` + the channels parser;
+`@dohc/workspace-engine` (parallel + serial 128/5-skip); `@dohc/desktop` build;
+E2E under xvfb — the two engine-editor specs + capture/versions/secret-env/history
+regression (all green, no double-capture, no P0D).
+
+### G2-C-3 go-list (now safe to delete — the editor no longer instantiates Hocuspocus)
+
+Confirmed unblocked by the FileInspector flip: the `HocuspocusProvider` code path
+in `renderer/collab/useCollabDoc.ts` + `collabSession.ts`; the `services/hocuspocus`
+service; the `collab-token` route + the `collabToken` IPC + `deriveHocuspocusUrl`.
+`useCollabDoc` is no longer imported by any editor surface (only its own test +
+`collabSession.test.ts` reference it). Ship the closed-boundary shared-workspace
+migration (file == re-projection, else preserve-both) as part of the retirement.
