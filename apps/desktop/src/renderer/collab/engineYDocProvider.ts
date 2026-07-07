@@ -1,0 +1,107 @@
+// WS-G2-C-2 — the ENGINE Y.Doc provider (renderer half of the bridge).
+//
+// The live engine Y.Doc lives in MAIN (the engine driver is node-only). The
+// renderer's Tiptap editor binds to a MIRROR Y.Doc that this provider keeps
+// convergent with the main session over a transport (IPC in production, a mock
+// in tests). This is the drop-in replacement for HocuspocusProvider in the
+// editor's collab binding — it exposes a Y.Doc the Collaboration extension
+// binds to via its "body" XmlFragment, exactly like the Hocuspocus path, but
+// with no websocket, no token, and no server: solo editing runs purely on the
+// engine, and co-editing rides the same channel because main forwards remote
+// ydoc.update deltas through onRemoteUpdate.
+//
+// The echo guard mirrors the main core's origin contract. Every engine-sourced
+// update (the initial state + every forwarded remote delta) is applied to the
+// mirror doc under ENGINE_SOURCED_ORIGIN; the update observer that ships local
+// edits to main SKIPS that origin, so an engine-applied update is never bounced
+// back to main (which would double-journal / echo-storm). A real editor edit
+// carries Tiptap's own (non-ENGINE) origin and IS shipped.
+
+import * as Y from "yjs";
+
+// Applied to the mirror doc for every update that ORIGINATED in the engine
+// (initial state, forwarded remote deltas). The local-edit observer ignores it.
+const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
+
+export interface EngineYDocTransport {
+  // Open the engine session in main. available:false => not an engine-backed
+  // doc (unflagged workspace, secret path, missing file, or already live) — the
+  // caller falls back to the plain local editor.
+  open(): Promise<{ available: boolean; initialUpdate?: Uint8Array }>;
+  // Ship a local editor update to main, where it is journaled via recordUpdate.
+  applyLocalUpdate(update: Uint8Array): void;
+  // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
+  // through the engine). Returns an unsubscribe function.
+  onRemoteUpdate(listener: (update: Uint8Array) => void): () => void;
+  // Settle + close the engine session in main (releases the reservation).
+  close(): Promise<void>;
+}
+
+export interface EngineYDocBinding {
+  // The mirror Y.Doc Tiptap binds to, or null when the doc is not engine-backed
+  // (available:false) — the caller stays on the local autosave editor.
+  readonly doc: Y.Doc | null;
+  readonly available: boolean;
+  // Tear down: stop shipping edits, unsubscribe, close the engine session, and
+  // destroy the mirror doc. Idempotent.
+  destroy(): Promise<void>;
+}
+
+// Bind a mirror Y.Doc to an engine session over `transport`. On success the
+// returned binding's `doc` is ready for the Collaboration extension.
+export async function bindEngineYDoc(
+  transport: EngineYDocTransport,
+): Promise<EngineYDocBinding> {
+  const opened = await transport.open();
+  if (!opened.available || !opened.initialUpdate) {
+    return {
+      doc: null,
+      available: false,
+      async destroy() {
+        // Best-effort close even on the unavailable path: main may have taken a
+        // reservation before deciding not to serve (it should not, but never
+        // leak one).
+        await transport.close().catch(() => undefined);
+      },
+    };
+  }
+
+  const doc = new Y.Doc();
+  // Seed the mirror to the engine's current state BEFORE binding, under the
+  // engine origin so the observer we attach next does not ship it back.
+  Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);
+
+  let destroyed = false;
+
+  // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
+  // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
+  // skipped (no echo back to main).
+  const onUpdate = (update: Uint8Array, origin: unknown): void => {
+    if (destroyed) return;
+    if (origin === ENGINE_SOURCED_ORIGIN) return;
+    transport.applyLocalUpdate(update);
+  };
+  doc.on("update", onUpdate);
+
+  // Apply forwarded remote deltas under the engine origin so they render live
+  // in the editor but are never shipped back to main.
+  const unsubscribe = transport.onRemoteUpdate((update) => {
+    if (destroyed) return;
+    Y.applyUpdate(doc, update, ENGINE_SOURCED_ORIGIN);
+  });
+
+  return {
+    doc,
+    available: true,
+    async destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      doc.off("update", onUpdate);
+      unsubscribe();
+      // Close the engine session first (it settles the converged state), then
+      // drop the mirror doc.
+      await transport.close().catch(() => undefined);
+      doc.destroy();
+    },
+  };
+}
