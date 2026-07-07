@@ -1510,6 +1510,102 @@ describe("chat reactions (WS-MU-C2)", () => {
     expect(activeCells(tieB.root)).toEqual([]);
   });
 
+  it("converges cross-origin ties (equal at_ms + state, different origin) to one winner", async () => {
+    // Same CELL (message, emoji, author), same at_ms, same state 'added', but
+    // two DIFFERENT origins carrying different threadId. The (at_ms, state)
+    // prefix ties, so ONLY the (origin_id, origin_seq) tail can break it — and a
+    // total-order register must break it the SAME way on every peer, whatever
+    // the arrival order. A non-total register would keep whichever arrived
+    // first → the stored threadId (visible metadata) would diverge permanently.
+    const base = {
+      messageId: "m1",
+      emoji: "👍",
+      authorId: "alice@x",
+      state: "added" as const,
+      atMs: 700,
+    };
+    const opX = reactionEnvelope({ ...base, origin: "originX", seq: 0, threadId: "tX" });
+    const opY = reactionEnvelope({ ...base, origin: "originY", seq: 0, threadId: "tY" });
+
+    const forward = await makeEngine("tieFwd");
+    await forward.store.applyReplicationOp(opX);
+    await forward.store.applyReplicationOp(opY);
+    const reverse = await makeEngine("tieRev");
+    await reverse.store.applyReplicationOp(opY);
+    await reverse.store.applyReplicationOp(opX);
+
+    const winner = (root: string) =>
+      rawDbFor(root, (db) =>
+        db
+          .prepare("SELECT thread_id, origin_id FROM chat_reactions WHERE message_id = ?")
+          .get("m1"),
+      );
+    // Both peers pick the SAME op — no arrival-order divergence.
+    expect(winner(forward.root)).toEqual(winner(reverse.root));
+    // origin_id 'originY' > 'originX' breaks the tie, so opY (threadId 'tY') wins
+    // deterministically on both.
+    expect(winner(forward.root)).toMatchObject({ thread_id: "tY", origin_id: "originY" });
+  });
+
+  it("clamps an implausible-future at_ms so a runaway clock can't pin a cell", async () => {
+    const cell = { messageId: "m1", threadId: "t1", emoji: "👍", authorId: "alice@x" };
+    const engine = await makeEngine("skew");
+    const farFuture = 9_000_000_000; // ~+9e9 ms beyond the test's ~1000ms clock
+    await engine.store.applyReplicationOp(
+      reactionEnvelope({ ...cell, origin: "bad", seq: 0, state: "added", atMs: farFuture }),
+    );
+    // Stored at_ms is clamped down toward the receiver's clock, NOT the far
+    // future — that is what stops the cell being pinned forever.
+    const storedAdd = rawDbFor(engine.root, (db) =>
+      db.prepare("SELECT at_ms, state FROM chat_reactions WHERE message_id = ?").get("m1"),
+    ) as { at_ms: number; state: string };
+    expect(storedAdd.state).toBe("added");
+    expect(storedAdd.at_ms).toBeLessThan(farFuture);
+    // A later remove with a LOWER raw at_ms than the add (5e9 < 9e9) would be
+    // REJECTED without the clamp, pinning the cell 'added' forever. With the
+    // clamp both land near the receiver's clock and the later-applied remove
+    // (a strictly higher ceiling) wins.
+    await engine.store.applyReplicationOp(
+      reactionEnvelope({ ...cell, origin: "good", seq: 0, state: "removed", atMs: 5_000_000_000 }),
+    );
+    expect(activeCells(engine.root)).toEqual([]);
+  });
+
+  it("does not surface an orphan reaction (no matching message) in listReactions", async () => {
+    const a = await makeEngine("orphan");
+    const { threadId, messageId } = await seedMessage(a);
+    // A replicated reaction for a message that does NOT exist in this engine
+    // (arrived before its message, or targets a message the viewer can't see).
+    await a.store.applyReplicationOp(
+      reactionEnvelope({
+        origin: "peer",
+        seq: 0,
+        messageId: "ghost-message",
+        threadId,
+        emoji: "👻",
+        authorId: "mallory@x",
+        state: "added",
+        atMs: 500,
+      }),
+    );
+    // The orphan row IS stored (for eventual convergence when its message lands)…
+    expect(activeCells(a.root)).toContain("ghost-message|👻|mallory@x");
+    // …but never surfaces: listReactions INNER JOINs chat_messages, so only the
+    // present message's reactions reach the UI (no leaked metadata for absent /
+    // unseeable messages).
+    await a.store.setReaction({
+      workspaceId: WS,
+      threadId,
+      messageId,
+      emoji: "👍",
+      author: { authorId: "alice@x", kind: "human", displayName: "Alice" },
+      state: "added",
+    });
+    const list = await a.store.listReactions({ workspaceId: WS, threadId });
+    expect(list.map((r) => r.emoji)).toEqual(["👍"]);
+    expect(list.some((r) => r.emoji === "👻")).toBe(false);
+  });
+
   it("is idempotent at the CRDT level: a stale re-add never revives a newer remove", async () => {
     const cell = { messageId: "m1", threadId: "t1", emoji: "👍", authorId: "alice@x" };
     const engine = await makeEngine("idem");
@@ -1529,27 +1625,47 @@ describe("chat reactions (WS-MU-C2)", () => {
     expect(activeCells(engine.root)).toEqual([]);
   });
 
-  it("fuzz: two engines applying random interleavings of the same ops converge", async () => {
-    // A small pool of cells; each op flips a random cell to a random state at a
-    // strictly increasing atMs (unique winner per cell = the last op applied to
-    // it). Ops are spread across two origins so a cell can receive writes from
-    // both — the cross-origin interleaving genuinely differs between engines.
+  it("fuzz: two engines applying random interleavings of the same ops converge (incl. equal-at_ms cross-origin ties)", async () => {
+    // A small pool of cells; each op flips a random cell to a random state.
+    // Ops are spread across two origins so a cell can receive writes from both —
+    // the cross-origin interleaving genuinely differs between engines. Crucially
+    // the clock only SOMETIMES advances, so many ops share an at_ms: two ops on
+    // DIFFERENT origins can tie on (at_ms, state), forcing the (origin_id,
+    // origin_seq) tail of the total order to decide. A non-total register would
+    // resolve those by arrival order → the two engines would diverge.
     const authors = ["alice@x", "bob@x"];
     const emojis = ["👍", "🎉"];
     const origins = ["oX", "oY"];
     const seqByOrigin: Record<string, number> = { oX: 0, oY: 0 };
-    const perCellWinner = new Map<string, { state: "added" | "removed"; atMs: number }>();
+    // The winner per cell by the FULL total order the store's LWW WHERE encodes:
+    // (at_ms, stateRank['removed'=1 > 'added'=0], origin_id, origin_seq).
+    interface Winner {
+      state: "added" | "removed";
+      atMs: number;
+      origin: string;
+      seq: number;
+    }
+    const stateRank = (s: "added" | "removed"): number => (s === "removed" ? 1 : 0);
+    const totalOrderGreater = (a: Winner, b: Winner): boolean => {
+      if (a.atMs !== b.atMs) return a.atMs > b.atMs;
+      if (stateRank(a.state) !== stateRank(b.state)) return stateRank(a.state) > stateRank(b.state);
+      if (a.origin !== b.origin) return a.origin > b.origin;
+      return a.seq > b.seq;
+    };
+    const perCellWinner = new Map<string, Winner>();
     const streams: Record<string, SyncReplicationEnvelope[]> = { oX: [], oY: [] };
     let atMs = 1000;
-    for (let i = 0; i < 60; i += 1) {
-      atMs += 10;
+    for (let i = 0; i < 80; i += 1) {
+      // Only advance the clock half the time → deliberate at_ms ties across ops.
+      if (Math.random() < 0.5) atMs += 10;
       const authorId = authors[Math.floor(Math.random() * authors.length)]!;
       const emoji = emojis[Math.floor(Math.random() * emojis.length)]!;
       const state = Math.random() < 0.5 ? "added" : "removed";
       const origin = origins[Math.floor(Math.random() * origins.length)]!;
+      const seq = seqByOrigin[origin]!++;
       const spec: ReactionOpSpec = {
         origin,
-        seq: seqByOrigin[origin]!++,
+        seq,
         messageId: "m1",
         threadId: "t1",
         emoji,
@@ -1558,8 +1674,10 @@ describe("chat reactions (WS-MU-C2)", () => {
         atMs,
       };
       streams[origin]!.push(reactionEnvelope(spec));
-      // atMs strictly increases, so the last write to each cell is its winner.
-      perCellWinner.set(`m1|${emoji}|${authorId}`, { state, atMs });
+      const key = `m1|${emoji}|${authorId}`;
+      const candidate: Winner = { state, atMs, origin, seq };
+      const current = perCellWinner.get(key);
+      if (!current || totalOrderGreater(candidate, current)) perCellWinner.set(key, candidate);
     }
     const expected = [...perCellWinner.entries()]
       .filter(([, value]) => value.state === "added")

@@ -51,7 +51,10 @@ import {
 import {
   ackReplicationPeer,
   appliedApplyResult,
+  ensureOriginId,
   journalLocalReplicationOp,
+  journalReplicationOp,
+  nextOriginSeq,
   readReplicationAckedSeq,
   skippedApplyResult,
   type ChatChannelCreatePayload,
@@ -491,29 +494,75 @@ function reactionFromRow(row: Record<string, unknown>): ChatReaction {
   };
 }
 
+// A reaction op is only ever trusted to be at most this far in the FUTURE of
+// the receiver's clock. A device with a runaway-forward clock could otherwise
+// stamp a cell with an at_ms no correctly-clocked peer can ever exceed, pinning
+// the cell forever (a later remove has a lower at_ms → rejected everywhere).
+// Clamping an implausible-future op back to (localNow + this allowance) at the
+// replicated trust boundary bounds that pin to a few minutes instead of
+// forever. This is a minimal mitigation, NOT a total-order guarantee: two peers
+// clamp against their OWN clocks, so a clamped op can still transiently diverge
+// until a later in-window op settles it. A hybrid logical clock (HLC) would
+// remove that residue; deferred (see MU chat design).
+const REACTION_MAX_FUTURE_SKEW_MS = 5 * 60_000;
+
+// Bound a replicated op's at_ms to (localNow + allowance) so a runaway-future
+// clock cannot pin a cell. Past timestamps pass through untouched (a legitimate
+// older op must still be able to lose to a newer one).
+function clampFutureReactionAtMs(atMs: number, localNowMs: number): number {
+  const ceiling = localNowMs + REACTION_MAX_FUTURE_SKEW_MS;
+  return atMs > ceiling ? ceiling : atMs;
+}
+
+// The origin coordinates that make the LWW register a TOTAL order. Read from
+// the replication envelope on the apply path; minted locally (this device's
+// origin + the seq the op will journal at) on the local set path.
+interface ReactionOpOrigin {
+  originId: string;
+  originSeq: number;
+}
+
 // The whole CRDT apply, as ONE conflict-target upsert. The cell is an LWW
-// register: the incoming op wins iff it is strictly newer by the total order
-// (at_ms, then 'removed' > 'added' on a tie — remove-wins). Equal (at_ms,
-// state) is not strictly newer, so a re-apply is a no-op (idempotent). Because
-// the winner is `max` over a total order, applying the same ops in ANY order
-// converges (commutative). Shared verbatim by the local set path and the
-// replicated apply path so their semantics can never drift.
-function upsertReactionLww(db: SqliteDb, workspaceId: WorkspaceId, payload: ChatReactionSetPayload): void {
+// register: the incoming op wins iff it is strictly greater by the TOTAL order
+// (at_ms, then stateRank['removed'=1 > 'added'=0] — remove-wins on a tie, then
+// origin_id, then origin_seq). Because (origin_id, origin_seq) uniquely
+// identifies every op in the system, the tuple is a STRICT total order with no
+// residual ties, so two ops with equal (at_ms, state) but different origins
+// resolve to the SAME winner on every peer regardless of arrival order (no
+// arrival-order-dependent divergence). 'removed' > 'added' is a plain lexical
+// compare that encodes remove=1 > add=0. Equal tuple is not strictly greater,
+// so a re-apply is a no-op (idempotent). Winner = `max` over a total order, so
+// applying the same ops in ANY order converges (commutative). Shared verbatim
+// by the local set path and the replicated apply path so their semantics can
+// never drift.
+function upsertReactionLww(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatReactionSetPayload,
+  origin: ReactionOpOrigin,
+): void {
   db.prepare(
     `INSERT INTO chat_reactions (
        workspace_id, reaction_id, thread_id, message_id, emoji,
-       author_id, author_kind, author_display_name, state, at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       author_id, author_kind, author_display_name, state, at_ms,
+       origin_id, origin_seq
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id, message_id, emoji, author_id) DO UPDATE SET
        reaction_id = excluded.reaction_id,
        thread_id = excluded.thread_id,
        author_kind = excluded.author_kind,
        author_display_name = excluded.author_display_name,
        state = excluded.state,
-       at_ms = excluded.at_ms
+       at_ms = excluded.at_ms,
+       origin_id = excluded.origin_id,
+       origin_seq = excluded.origin_seq
      WHERE excluded.at_ms > chat_reactions.at_ms
         OR (excluded.at_ms = chat_reactions.at_ms
-            AND excluded.state > chat_reactions.state)`,
+            AND (excluded.state > chat_reactions.state
+              OR (excluded.state = chat_reactions.state
+                  AND (excluded.origin_id > chat_reactions.origin_id
+                    OR (excluded.origin_id = chat_reactions.origin_id
+                        AND excluded.origin_seq > chat_reactions.origin_seq)))))`,
   ).run(
     workspaceId,
     payload.reactionId,
@@ -525,6 +574,8 @@ function upsertReactionLww(db: SqliteDb, workspaceId: WorkspaceId, payload: Chat
     payload.authorDisplayName,
     payload.state,
     payload.atMs,
+    origin.originId,
+    origin.originSeq,
   );
 }
 
@@ -1458,14 +1509,28 @@ export function createLinkedChatStore(
           state,
           atMs: nowMs(),
         };
+        // Mint this device's origin + the seq the op will journal at BEFORE the
+        // upsert, so the register stores the same (origin_id, origin_seq) the
+        // op replicates with — the total-order tie-break has to match on both
+        // paths. nextOriginSeq is stable here: nothing new is journaled until
+        // the journalReplicationOp call below reuses this exact seq, and the
+        // whole method runs under `serialize` so no concurrent write intrudes.
+        const originId = ensureOriginId(db, workspaceId);
+        const originSeq = nextOriginSeq(db, workspaceId, originId);
         // The LWW upsert IS the mutation — shared verbatim with the replicated
         // apply path so a local set and an imported op converge identically.
-        upsertReactionLww(db, workspaceId, payload);
+        // A local op uses its own wall clock unclamped: the clamp is a
+        // trust-boundary defense against REMOTE runaway clocks, not local ones.
+        upsertReactionLww(db, workspaceId, payload, { originId, originSeq });
         // Blob-free, rides the SAME push/pull/apply pipeline as the other chat
         // ops (no new transport). Journaled even for a SOLO workspace so the
-        // reaction replicates the moment the workspace starts syncing.
-        journalLocalReplicationOp(db, {
+        // reaction replicates the moment the workspace starts syncing. Uses the
+        // origin/seq captured above (not journalLocalReplicationOp) so the
+        // journaled envelope's coordinates equal the register's.
+        journalReplicationOp(db, {
           workspaceId,
+          originId,
+          originSeq,
           opKind: "chat.reaction.set",
           payload,
           recordedAtMs: payload.atMs,
@@ -1491,12 +1556,21 @@ export function createLinkedChatStore(
           const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
           // Active membership only — tombstones ('removed') stay in the table
           // for LWW convergence but never surface. Oldest cell first so pills
-          // render in a stable order.
+          // render in a stable order. The INNER JOIN on chat_messages is the
+          // visibility gate: a reaction is head-check-free at APPLY (it may land
+          // before its message across origins) BUT must never leak to the UI for
+          // a message that is absent — an orphan (no matching message row, or a
+          // message the viewer can't see) is filtered out here. Orphans stay in
+          // the table for eventual convergence; only PRESENT messages surface.
           return db
             .prepare(
-              `SELECT * FROM chat_reactions
-               WHERE workspace_id = ? AND thread_id = ? AND state = 'added'
-               ORDER BY at_ms, reaction_id`,
+              `SELECT r.* FROM chat_reactions r
+               JOIN chat_messages m
+                 ON m.workspace_id = r.workspace_id
+                AND m.thread_id = r.thread_id
+                AND m.message_id = r.message_id
+               WHERE r.workspace_id = ? AND r.thread_id = ? AND r.state = 'added'
+               ORDER BY r.at_ms, r.reaction_id`,
             )
             .all(workspaceId, thread.id)
             .map(reactionFromRow)
@@ -1712,9 +1786,23 @@ export function createLinkedChatStore(
           // message.append. There is NO thread/message existence gate: a
           // cross-origin reaction can arrive before the message it targets, and
           // the LWW register converges regardless of arrival order (the missing
-          // message just means the pill has nothing to render on yet). The
-          // per-origin acked_seq dedup above is the re-apply backstop; the LWW
-          // WHERE clause makes a stale replay a no-op even if it slips through.
+          // message just means the pill has nothing to render on yet;
+          // listReactions JOINs chat_messages so an orphaned reaction never
+          // surfaces to the UI). The per-origin acked_seq dedup above is the
+          // re-apply backstop; the LWW WHERE clause makes a stale replay a no-op
+          // even if it slips through.
+          //
+          // ⚠️ SECURITY — UNVERIFIED AUTHORSHIP UNTIL MU-C0. `payload.authorId`
+          // is part of the CRDT cell key AND is trusted verbatim here. The
+          // engine cannot map a replication origin to a user, so a malicious /
+          // buggy relay collaborator could ship a reaction op that adds or
+          // removes a VICTIM's reaction cell (forged authorship). This is
+          // acceptable ONLY for solo workspaces and trusted-relay-collaborator
+          // deployments. MU-C0 closes it: the relay stamps/verifies
+          // `authorId === actor.userId` server-side on shared channels before an
+          // op is replicated. Do NOT treat replicated reaction authorship as
+          // trustworthy until then. (The LOCAL setReaction path is safe: main
+          // derives authorId from the signed-in user, never the renderer.)
           if (
             typeof payload.reactionId !== "string" ||
             !payload.reactionId ||
@@ -1731,17 +1819,26 @@ export function createLinkedChatStore(
           ) {
             throw corruptStore();
           }
-          upsertReactionLww(db, workspaceId, {
-            reactionId: payload.reactionId,
-            messageId: payload.messageId,
-            threadId: payload.threadId,
-            emoji: payload.emoji,
-            authorId: payload.authorId,
-            authorKind: actorKindValue(payload.authorKind),
-            authorDisplayName: stringValue(payload.authorDisplayName),
-            state: reactionStateValue(payload.state),
-            atMs: payload.atMs,
-          });
+          upsertReactionLww(
+            db,
+            workspaceId,
+            {
+              reactionId: payload.reactionId,
+              messageId: payload.messageId,
+              threadId: payload.threadId,
+              emoji: payload.emoji,
+              authorId: payload.authorId,
+              authorKind: actorKindValue(payload.authorKind),
+              authorDisplayName: stringValue(payload.authorDisplayName),
+              // Clamp an implausible-future at_ms against THIS receiver's clock
+              // so a runaway-forward remote clock can't pin the cell forever.
+              atMs: clampFutureReactionAtMs(payload.atMs, nowMs()),
+              state: reactionStateValue(payload.state),
+            },
+            // The envelope's origin coordinates are the total-order tie-break;
+            // they are validated at the top of applyReplicationOp.
+            { originId: input.originId, originSeq: input.originSeq },
+          );
         } else {
           throw new LinkedChatStoreError(
             "state-corrupt",
