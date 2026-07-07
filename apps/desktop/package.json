@@ -6,8 +6,8 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/ensure-electron-installed.mjs && electron-vite dev",
-    "build": "node scripts/ensure-electron-installed.mjs && electron-vite build",
-    "package": "node scripts/ensure-electron-installed.mjs && electron-vite build && electron-builder --publish never",
+    "build": "node scripts/ensure-electron-installed.mjs && node scripts/build-workspace-kernel.mjs && electron-vite build",
+    "package": "node scripts/ensure-electron-installed.mjs && node scripts/build-workspace-kernel.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:settings": "playwright test --config playwright.config.ts --grep @settings-smoke",
     "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",

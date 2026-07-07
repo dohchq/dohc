@@ -9,7 +9,9 @@ import {
   KernelUnavailableError,
   WorkspaceKernelClient,
   defaultWorkspaceKernelDebugBinaryPath,
+  defaultWorkspaceKernelPackagedBinaryPath,
   repoRootFromPackage,
+  workspaceKernelBinaryName,
   type KernelManifestEntry,
 } from ".";
 
@@ -61,6 +63,27 @@ afterAll(async () => {
 });
 
 describe("WorkspaceKernelClient", () => {
+  it("resolves the packaged resources binary without depending on Electron imports", () => {
+    expect(
+      defaultWorkspaceKernelPackagedBinaryPath({
+        isPackaged: true,
+        resourcesPath: "/Applications/dohc.app/Contents/Resources",
+        platform: "darwin",
+      }),
+    ).toBe("/Applications/dohc.app/Contents/Resources/workspace-kernel/dohc-workspace-kernel");
+    expect(
+      defaultWorkspaceKernelPackagedBinaryPath({
+        isPackaged: true,
+        resourcesPath: "C:\\dohc\\resources",
+        platform: "win32",
+      }),
+    ).toContain(`workspace-kernel${process.platform === "win32" ? "\\" : "/"}dohc-workspace-kernel.exe`);
+    expect(
+      defaultWorkspaceKernelPackagedBinaryPath({ isPackaged: false, resourcesPath: "/tmp" }),
+    ).toBeNull();
+    expect(workspaceKernelBinaryName("win32")).toBe("dohc-workspace-kernel.exe");
+  });
+
   it("handshakes with the kernel over newline-delimited JSON-RPC", async () => {
     const client = new WorkspaceKernelClient({ binaryPath, timeoutMs: 5000 });
     try {

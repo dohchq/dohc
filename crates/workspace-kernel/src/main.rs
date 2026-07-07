@@ -450,7 +450,12 @@ fn scan_workspace(root: &Path, cancel: &CancelFlag) -> Result<Vec<FileMetadata>,
         check_cancelled(cancel)?;
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(error) => {
+                return Err(HandlerError::new(
+                    INTERNAL_ERROR_CODE,
+                    format!("Workspace scan failed: {error}"),
+                ))
+            }
         };
         if entry.path() == canonical_root {
             continue;
@@ -463,14 +468,27 @@ fn scan_workspace(root: &Path, cancel: &CancelFlag) -> Result<Vec<FileMetadata>,
         if file_type.is_symlink() || !file_type.is_file() || is_database_sidecar(entry.path()) {
             continue;
         }
-        match entry.metadata() {
-            Ok(metadata) if metadata.is_file() => {}
-            _ => continue,
+        let metadata = entry.metadata().map_err(|error| {
+            HandlerError::new(
+                INTERNAL_ERROR_CODE,
+                format!(
+                    "Workspace scan failed for {}: {error}",
+                    entry.path().display()
+                ),
+            )
+        })?;
+        if !metadata.is_file() {
+            continue;
         }
-        let hashed = match sha256_file(entry.path(), cancel) {
-            Ok(hashed) => hashed,
-            Err(_) => continue,
-        };
+        let hashed = sha256_file(entry.path(), cancel).map_err(|error| {
+            HandlerError::new(
+                INTERNAL_ERROR_CODE,
+                format!(
+                    "Workspace scan failed for {}: {error}",
+                    entry.path().display()
+                ),
+            )
+        })?;
         files.push(FileMetadata {
             path: relative.clone(),
             size: hashed.bytes,

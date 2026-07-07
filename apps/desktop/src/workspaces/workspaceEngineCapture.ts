@@ -28,6 +28,7 @@ import {
   WorkspaceKernelClient,
   defaultWorkspaceKernelBinaryPath,
   defaultWorkspaceKernelDebugBinaryPath,
+  defaultWorkspaceKernelPackagedBinaryPath,
 } from "@dohc/workspace-kernel-client";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -41,6 +42,28 @@ import {
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
+
+export const WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD = 3;
+
+interface WorkspaceKernelRuntimeOptions {
+  isPackaged: boolean;
+  resourcesPath?: string;
+  repoRoot?: string;
+}
+
+let workspaceKernelRuntime: WorkspaceKernelRuntimeOptions = { isPackaged: false };
+let workspaceKernelConsecutiveFailures = 0;
+let workspaceKernelDisabledForProcess = false;
+
+export function configureWorkspaceKernelRuntime(options: WorkspaceKernelRuntimeOptions): void {
+  workspaceKernelRuntime = { ...options };
+}
+
+export function resetWorkspaceKernelRuntimeForTests(): void {
+  workspaceKernelRuntime = { isPackaged: false };
+  workspaceKernelConsecutiveFailures = 0;
+  workspaceKernelDisabledForProcess = false;
+}
 
 // PR 0M-3 watcher->engine capture + PR 0M-4 named-version operations +
 // PR 0M-5 history/restore (which ended the 0M-3 interim dual-write).
@@ -576,6 +599,22 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   };
 }
 
+function firstExistingWorkspaceKernelBinaryPath(): string | null {
+  const packagedPath = defaultWorkspaceKernelPackagedBinaryPath(workspaceKernelRuntime);
+  const configuredPath = process.env.DOHC_KERNEL_BINARY_PATH?.trim() || null;
+  const releasePath = defaultWorkspaceKernelBinaryPath(workspaceKernelRuntime.repoRoot);
+  const debugPath = defaultWorkspaceKernelDebugBinaryPath(workspaceKernelRuntime.repoRoot);
+  for (const candidate of [packagedPath, configuredPath, releasePath, debugPath]) {
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function fallbackReconcileScan(rootPath: string): Promise<ReconcileScan> {
+  const scan = await scanWorkspaceFilesTolerant(rootPath);
+  return { files: scan.files, failedPaths: scan.failures.map((failure) => failure.path) };
+}
+
 export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
@@ -608,16 +647,16 @@ export function createWorkspaceEngineCapture(
   // whole scan, so one bad directory can never stop every OTHER existing
   // file from seeding the engine on a cold adoption.
   async function scanWorkspaceFilesForReconcile(): Promise<ReconcileScan> {
-    if (process.env.DOHC_KERNEL_SIDECAR !== "1") {
-      const scan = await scanWorkspaceFilesTolerant(rootPath);
-      return { files: scan.files, failedPaths: scan.failures.map((failure) => failure.path) };
+    if (process.env.DOHC_KERNEL_SIDECAR === "0") {
+      return fallbackReconcileScan(rootPath);
     }
-    const configured = process.env.DOHC_KERNEL_BINARY_PATH;
-    const releasePath = defaultWorkspaceKernelBinaryPath();
-    const debugPath = defaultWorkspaceKernelDebugBinaryPath();
-    const binaryPath =
-      configured ??
-      (existsSync(releasePath) ? releasePath : existsSync(debugPath) ? debugPath : releasePath);
+    if (workspaceKernelDisabledForProcess) {
+      return fallbackReconcileScan(rootPath);
+    }
+    const binaryPath = firstExistingWorkspaceKernelBinaryPath();
+    if (!binaryPath) {
+      return fallbackReconcileScan(rootPath);
+    }
     const client = new WorkspaceKernelClient({
       binaryPath,
       timeoutMs: 30_000,
@@ -625,11 +664,15 @@ export function createWorkspaceEngineCapture(
     });
     try {
       const result = await client.scan(rootPath);
+      workspaceKernelConsecutiveFailures = 0;
       return { files: result.files, failedPaths: [] };
     } catch (error) {
+      workspaceKernelConsecutiveFailures += 1;
+      if (workspaceKernelConsecutiveFailures >= WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD) {
+        workspaceKernelDisabledForProcess = true;
+      }
       onError("kernel scan fallback", error);
-      const scan = await scanWorkspaceFilesTolerant(rootPath);
-      return { files: scan.files, failedPaths: scan.failures.map((failure) => failure.path) };
+      return fallbackReconcileScan(rootPath);
     } finally {
       await client.dispose().catch(() => undefined);
     }

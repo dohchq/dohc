@@ -227,7 +227,10 @@ import {
 } from "./ipc/engineHistoryIpc";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
-import { captureForFlaggedWorkspace } from "./workspaces/engineCaptureGate";
+import {
+  captureForFlaggedWorkspace,
+  configureWorkspaceKernelRuntime,
+} from "./workspaces/engineCaptureGate";
 import {
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
@@ -1013,6 +1016,11 @@ function engineForWorkspace(
     ...testSyncTimingOverrides(),
   });
 }
+
+configureWorkspaceKernelRuntime({
+  isPackaged: app.isPackaged,
+  resourcesPath: (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+});
 
 const activity = createWorkspaceActivity(notifyRenderer, {
   cloudStateFor: (workspaceId) => {

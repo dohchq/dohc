@@ -17,10 +17,14 @@ import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
+  WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD,
+  configureWorkspaceKernelRuntime,
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
+  resetWorkspaceKernelRuntimeForTests,
 } from "./workspaceEngineCapture";
 import { createChangeSetStore } from "@dohc/workspace-engine";
+import { WorkspaceKernelClient } from "@dohc/workspace-kernel-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
@@ -37,6 +41,8 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 };
 
 const roots: string[] = [];
+const ORIGINAL_KERNEL_SIDECAR = process.env.DOHC_KERNEL_SIDECAR;
+const ORIGINAL_KERNEL_BINARY_PATH = process.env.DOHC_KERNEL_BINARY_PATH;
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-capture-"));
@@ -49,6 +55,11 @@ afterEach(async () => {
   // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
   // so release every tracked engine handle before removing the temp roots.
   closeTrackedEngineDbHandlesForTest();
+  resetWorkspaceKernelRuntimeForTests();
+  if (ORIGINAL_KERNEL_SIDECAR === undefined) delete process.env.DOHC_KERNEL_SIDECAR;
+  else process.env.DOHC_KERNEL_SIDECAR = ORIGINAL_KERNEL_SIDECAR;
+  if (ORIGINAL_KERNEL_BINARY_PATH === undefined) delete process.env.DOHC_KERNEL_BINARY_PATH;
+  else process.env.DOHC_KERNEL_BINARY_PATH = ORIGINAL_KERNEL_BINARY_PATH;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -130,6 +141,20 @@ function capture(root: string, options: {
     rootPath: root,
     ...options,
   });
+}
+
+async function fakeKernelRoot(): Promise<string> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-fake-kernel-"));
+  roots.push(root);
+  return root;
+}
+
+async function writeCrashingFakeKernel(): Promise<string> {
+  const root = await fakeKernelRoot();
+  const path = join(root, "fake-kernel");
+  await writeFile(path, "#!/usr/bin/env node\nprocess.exit(1);\n");
+  await chmod(path, 0o755);
+  return path;
 }
 
 // PR 0N-1: the author a persisted moment carries (NULL = actor-neutral).
@@ -950,15 +975,97 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     ).toEqual(["vanishes.md"]);
   });
 
-  it("falls back to the TypeScript scan path when the flagged kernel cannot spawn", async () => {
+  it("uses the kernel by default when a valid binary is present and the sidecar flag is unset", async () => {
     const root = await tempRoot();
+    await write(root, "kernel.md", "kernel edit\n");
+    await write(root, "typescript.md", "typescript edit\n");
+    const scanSpy = vi
+      .spyOn(WorkspaceKernelClient.prototype, "scan")
+      .mockResolvedValue({
+        files: [
+          {
+            path: "kernel.md",
+            mediaType: "text/markdown",
+            size: Buffer.byteLength("kernel edit\n"),
+            sha256: sha256Utf8("kernel edit\n"),
+          },
+        ],
+      });
+    const errors: Array<{ context: string; error: unknown }> = [];
+    delete process.env.DOHC_KERNEL_SIDECAR;
+    process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+    const engine = capture(root, {
+      onError(context, error) {
+        errors.push({ context, error });
+      },
+    });
+    engine.start();
+    await engine.stop();
+
+    expect(scanSpy).toHaveBeenCalledWith(root);
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["kernel.md", "write"],
+    ]);
+    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(false);
+  });
+
+  it("falls back quietly to the TypeScript scan path when no kernel binary exists", async () => {
+    const root = await tempRoot();
+    const emptyRepoRoot = await fakeKernelRoot();
     await write(root, "offline.md", "offline edit\n");
     const errors: Array<{ context: string; error: unknown }> = [];
-    const previousFlag = process.env.DOHC_KERNEL_SIDECAR;
-    const previousBinary = process.env.DOHC_KERNEL_BINARY_PATH;
-    process.env.DOHC_KERNEL_SIDECAR = "1";
+    configureWorkspaceKernelRuntime({ isPackaged: false, repoRoot: emptyRepoRoot });
+    delete process.env.DOHC_KERNEL_SIDECAR;
     process.env.DOHC_KERNEL_BINARY_PATH = join(root, "missing-kernel");
-    try {
+
+    const engine = capture(root, {
+      onError(context, error) {
+        errors.push({ context, error });
+      },
+    });
+    engine.start();
+    await engine.stop();
+
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["offline.md", "write"],
+    ]);
+    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(false);
+  });
+
+  it("falls back to the TypeScript scan path when the default-on kernel cannot spawn", async () => {
+    const root = await tempRoot();
+    await write(root, "offline.md", "offline edit\n");
+    const binaryPath = await writeCrashingFakeKernel();
+    const errors: Array<{ context: string; error: unknown }> = [];
+    delete process.env.DOHC_KERNEL_SIDECAR;
+    process.env.DOHC_KERNEL_BINARY_PATH = binaryPath;
+
+    const engine = capture(root, {
+      onError(context, error) {
+        errors.push({ context, error });
+      },
+    });
+    engine.start();
+    await engine.stop();
+
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["offline.md", "write"],
+    ]);
+    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+  });
+
+  it("stops attempting the kernel after consecutive process-lifetime failures", async () => {
+    const root = await tempRoot();
+    await write(root, "offline.md", "offline edit\n");
+    const scanSpy = vi
+      .spyOn(WorkspaceKernelClient.prototype, "scan")
+      .mockRejectedValue(new Error("fake kernel scan failed"));
+    const errors: Array<{ context: string; error: unknown }> = [];
+    delete process.env.DOHC_KERNEL_SIDECAR;
+    process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+    for (let index = 0; index < WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD + 1; index += 1) {
       const engine = capture(root, {
         onError(context, error) {
           errors.push({ context, error });
@@ -966,17 +1073,43 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       });
       engine.start();
       await engine.stop();
-    } finally {
-      if (previousFlag === undefined) delete process.env.DOHC_KERNEL_SIDECAR;
-      else process.env.DOHC_KERNEL_SIDECAR = previousFlag;
-      if (previousBinary === undefined) delete process.env.DOHC_KERNEL_BINARY_PATH;
-      else process.env.DOHC_KERNEL_BINARY_PATH = previousBinary;
     }
 
+    expect(scanSpy).toHaveBeenCalledTimes(WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD);
+    expect(
+      errors.filter((entry) => entry.context === "kernel scan fallback"),
+    ).toHaveLength(WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD);
     expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
       ["offline.md", "write"],
     ]);
-    expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+  });
+
+  it("honors DOHC_KERNEL_SIDECAR=0 as a force-off escape hatch even with a valid binary", async () => {
+    const root = await tempRoot();
+    await write(root, "offline.md", "offline edit\n");
+    const scanSpy = vi
+      .spyOn(WorkspaceKernelClient.prototype, "scan")
+      .mockResolvedValue({
+        files: [
+          {
+            path: "offline.md",
+            mediaType: "text/markdown",
+            size: Buffer.byteLength("offline edit\n"),
+            sha256: sha256Utf8("offline edit\n"),
+          },
+        ],
+      });
+    process.env.DOHC_KERNEL_SIDECAR = "0";
+    process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+    const engine = capture(root);
+    engine.start();
+    await engine.stop();
+
+    expect(scanSpy).not.toHaveBeenCalled();
+    expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+      ["offline.md", "write"],
+    ]);
   });
 });
 

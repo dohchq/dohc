@@ -74,6 +74,12 @@ export interface WorkspaceKernelClientOptions {
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
+export interface WorkspaceKernelPackagedBinaryOptions {
+  isPackaged: boolean;
+  resourcesPath?: string;
+  platform?: NodeJS.Platform;
+}
+
 interface JsonRpcResponse {
   id?: KernelRequestId;
   result?: unknown;
@@ -130,19 +136,36 @@ export class KernelProtocolError extends KernelClientError {
   }
 }
 
-export function defaultWorkspaceKernelBinaryPath(repoRoot = resolve(process.cwd())): string {
+export const WORKSPACE_KERNEL_RESOURCE_DIR = "workspace-kernel";
+
+export function workspaceKernelBinaryName(platform: NodeJS.Platform = process.platform): string {
+  return `dohc-workspace-kernel${platform === "win32" ? ".exe" : ""}`;
+}
+
+export function defaultWorkspaceKernelBinaryPath(repoRoot = repoRootFromPackage()): string {
   return join(
     repoRoot,
     "crates/workspace-kernel/target/release",
-    `dohc-workspace-kernel${process.platform === "win32" ? ".exe" : ""}`,
+    workspaceKernelBinaryName(),
   );
 }
 
-export function defaultWorkspaceKernelDebugBinaryPath(repoRoot = resolve(process.cwd())): string {
+export function defaultWorkspaceKernelDebugBinaryPath(repoRoot = repoRootFromPackage()): string {
   return join(
     repoRoot,
     "crates/workspace-kernel/target/debug",
-    `dohc-workspace-kernel${process.platform === "win32" ? ".exe" : ""}`,
+    workspaceKernelBinaryName(),
+  );
+}
+
+export function defaultWorkspaceKernelPackagedBinaryPath(
+  options: WorkspaceKernelPackagedBinaryOptions,
+): string | null {
+  if (!options.isPackaged || !options.resourcesPath) return null;
+  return join(
+    options.resourcesPath,
+    WORKSPACE_KERNEL_RESOURCE_DIR,
+    workspaceKernelBinaryName(options.platform),
   );
 }
 

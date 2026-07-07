@@ -23,6 +23,16 @@ directories:
 files:
   - dist/**
 asar: true
+extraResources:
+  # Native sidecars must stay outside app.asar. This directory is always
+  # created by scripts/build-workspace-kernel.mjs; when cargo is unavailable it
+  # is empty and packaging still succeeds. macOS/Windows binaries are produced
+  # by running that script on those platforms; a CI matrix that uploads each
+  # OS's own binary is a follow-up, not implemented here.
+  - from: resources/workspace-kernel
+    to: workspace-kernel
+    filter:
+      - "**/*"
 artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
 # Workspace deps are raw TS bundled into dist by electron-vite; nothing needs
 # a native rebuild against Electron headers.
