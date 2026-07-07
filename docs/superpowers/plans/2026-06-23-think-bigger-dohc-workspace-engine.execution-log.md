@@ -18101,3 +18101,68 @@ Dogfooding. The engine is the default and every loop is tested and reviewed,
 but the product's promise is a *feel* — flip a real workspace, work in a named
 version for a day, hand a task to an agent with "Try in a version", and let
 the friction reshape the next phase more than any document does.
+
+## Legacy Cloud Safe Deletion
+
+Scope: the safe, tightly-bounded slice of the legacy-cloud retirement (audit
+Phase D). Live co-editing SURVIVES per User Decision — Hocuspocus, the
+workspace-api collab route + auth wiring, the workspace-postgres membership
+slice, and renderer collab all stay. `workspace-history` and `workspace-sync`
+were left untouched (they have live engine/MCP importers). Postgres stays for
+Better Auth's `user` table and the collab membership check.
+
+Sequence (each step left typecheck + suites green; one commit per step):
+
+1. **Auth extraction.** Moved the relay's production auth surface out of
+   `services/workspace-api` into a new `packages/workspace-auth`
+   (`@dohc/workspace-auth`, subpath exports `./betterAuth` + `./session`). Cut
+   the one bad edge — `betterAuth.ts` imported `claimWorkspaceInvitations` from
+   workspace-api routes — by replacing it with an injected optional
+   `onEmailVerified(user)` callback on `WorkspaceAuthOptions`, invoked in the
+   `afterEmailVerification` hook (errors swallowed + logged, as before).
+   workspace-auth imports nothing from workspace-api. Re-pointed both consumers:
+   `services/sync-relay` (the relay's PRODUCTION login) and workspace-api's
+   `main.ts`, which passes `onEmailVerified: claimWorkspaceInvitations` to
+   preserve today's claim-on-verification behavior.
+2. **Deleted `apps/web`** (46 files, ~6.6k LOC; nothing imported `@dohc/web`).
+   Re-pointed root `dev` to the desktop, dropped web-only scripts, deleted the
+   web-only root `playwright.config.ts`, removed the compose `web` service.
+3. **Reduced `services/workspace-api` to collab + auth.** Deleted the
+   shares/shared/members/invites/dataFragments/sync/files/workspaces/email
+   routes + `realtime/`; kept only `POST /workspaces/:id/collab/token` and the
+   Better Auth wiring. `workspace-fs`'s `localMode.test.ts` (which drove
+   `createLocalSyncClient` through the old file/sync routes) was re-based onto
+   an in-test stub of that HTTP contract, faithful to the retired
+   `applyWorkspaceSync` (per-op, non-fail-fast, approval codes in `results[]`);
+   the `@dohc/workspace-api` devDep was dropped. Coverage preserved.
+4. **Reduced `packages/workspace-postgres` to the membership slice.** Kept
+   `repositories/workspaces` (`hasWorkspaceMembership` + `listUserWorkspaces`),
+   `defaultPostgresUrl`/`createPgPool` (trimmed to raw pg — dropped drizzle +
+   schema.ts), and migrations `0001`/`0002`/`0003`. Deleted blobStore,
+   policy/authorize, repositories/{atoms,assets,events}, all of services/*, the
+   drizzle schema, and the deleted-feature migrations `0004`..`0010`. Dropped
+   now-unused deps `drizzle-orm` + `@dohc/workspace-contracts`.
+5. **Config + docs.** self-host compose: workspace-api reduced to the collab +
+   auth service (added shared `HOCUSPOCUS_JWT_SECRET`, dropped the unused
+   object-storage dep + `DOHC_BACKEND`); `.env.self-host.example` dropped
+   `DOHC_BACKEND`/`WEB_PORT`/stale `APP_TESTER_*`; `check-self-host.mjs`
+   REQUIRED_SERVICES now matches the real compose (dropped web + app-tester,
+   added sync-relay) and its package refs were de-staled. Updated README + the
+   living docs (backend-modes, authz-boundaries, self-hosting, local-dev,
+   AGENTS.md) to the reduced-surface / relay-auth reality; historical
+   point-in-time records were left untouched.
+
+Result: 89 files deleted, ~15.6k lines removed (387 added), lockfile aside.
+Final suites all green on live Postgres: workspace-engine 389, desktop 960,
+sync-relay 53, workspace-auth 8, workspace-api 10, workspace-postgres 2,
+workspace-fs 44, hocuspocus 96, mcp 80, workspace-core 108, workspace-history
+47, workspace-sync 38, workspace-contracts 10, sdk 20, performance 18,
+sqlite-worker 11, agent-sandbox 3, workspace-kernel-client 8; repo-wide
+typecheck clean; desktop build + the load-bearing e2e (workspace-collab-
+decoupling, workspace-sync-rejoin, workspace-shares) 6/6; `check-self-host` and
+the think-bigger doc-links checker green.
+
+Deferred (recorded follow-up for the full retirement): the `workspace-history`
+and `workspace-sync` salvage (live engine/MCP importers keep them for now), and
+the eventual full Postgres-for-auth retirement once Arc 0P's engine-native sync
+subsumes the relay + collab auth path.
