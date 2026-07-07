@@ -7,6 +7,141 @@ Plan:
 
 - [Think Bigger Multi-User Chat](./2026-07-07-think-bigger-multiuser-chat-design.md)
 
+## Verified Chat Authorship MU-C0
+
+The foundational security lane: the relay now stamps/verifies that a chat op's
+claimed author equals the authenticated pushing actor before the op is admitted
+to the replication log. This closes the reaction-forgery / PII gap MU-C2 shipped
+with a documented `⚠️` and unblocks DMs (MU-C3) + shared channels (MU-C4) — they
+now build recipient-scoping on a VERIFIED identity. Depends on 0P-B (the relay)
+only.
+
+### The trust boundary — where/how the relay verifies
+
+The engine cannot verify authorship: it has no origin→user map. The relay can —
+it authenticates WHO is pushing (`actor.userId`, server-derived from the Better
+Auth session via `resolveActor`; a client cannot assert it). MU-C0 adds
+`assertChatAuthorship(rawOps, actor.userId)` to the `POST /sync/:ws/log`
+append path (`services/sync-relay/src/server.ts`), running BEFORE
+`storage.appendLogBatch` so a batch mixing one forged op with valid ones is
+rejected atomically — nothing reaches the log. For every op naming an author it
+checks the claim against the pusher:
+
+- `chat.message.append.authorUserId` — OPTIONAL. Absent = a solo/legacy send
+  (no verified identity, allowed); present and ≠ actor → reject.
+- `chat.reaction.set.authorId` — REQUIRED. Missing/non-string OR ≠ actor →
+  reject (a reaction is inherently an authored act; fail-closed).
+- Any future authored chat op is covered by adding it to `CHAT_AUTHOR_FIELDS`.
+
+A mismatch throws `403 authorship_mismatch` (not 404: the caller is
+authenticated and owns the bucket — the request is forbidden, not hidden;
+non-retryable — the client must send its OWN id). This is the second narrow,
+tested relaxation of "chat payloads are opaque" (after PR-18's share filter),
+scoped to one field, fail-closed. The shared-channel member-append route (MU-C4)
+reuses the same gate.
+
+### Canonical opaque author identity (message + reaction)
+
+Authorship keys on the OPAQUE Better Auth user id — NEVER a raw email (a raw
+email would replicate into the immutable CRDT history: PII/GDPR exposure). This
+is the same id the client already derives and the relay verifies as
+`actor.userId`.
+
+- `ChatMessageAppendPayload` and `ChatMessage` gained an optional
+  `authorUserId` (`packages/workspace-contracts/src/engine.ts`). The store's
+  `sendMessage` / `startChannelThread` take an optional `authorUserId`, persist
+  it to a new lazy-additive nullable `chat_messages.author_user_id` column
+  (`engineDbSchema.ts` `ensureNullableColumn`), carry it in the journaled op
+  ONLY when present, and return it. The apply path persists the replicated value
+  (authoritative only because the relay verified it). The display name
+  (`authorDisplayName` / `author`) stays a SEPARATE, non-authoritative field —
+  rendering only, never identity/authz.
+- Desktop main stamps `authorUserId: relayAuthorUserId()` on both send paths;
+  `relayAuthorUserId()` returns `cachedCredentials?.userId` (opaque) ONLY when
+  signed in, so a solo/signed-out send OMITS the field and its op is
+  byte-identical to the pre-MU-C0 shape. Identity is main-derived, never
+  renderer-supplied.
+- Reactions already carry the opaque `authorId` (MU-C2's fix via
+  `cachedCredentials.userId ?? localReactorFallbackId()`); MU-C0 makes the relay
+  verify it. No raw email is used as an identity/CRDT key anywhere — grep-confirmed
+  across the engine chat store, the contracts, the relay, and desktop
+  (`cachedCredentials.email` survives ONLY in `localUserDisplayName()` (display)
+  and an MCP env var, never as an author id).
+
+### Engine side — trusts the relay; the MU-C2 `⚠️` notes are CLOSED
+
+The engine's `applyReplicationOp` still trusts `authorId`/`authorUserId`
+verbatim, and this is now correct: a replicated authored op is authoritative
+ONLY because the relay verified it before admitting it to the log; a
+locally-applied op uses the local identity; the no-relay/solo path is a single
+trusted user. The three MU-C2 "unverified until MU-C0" notes are updated to
+reflect the close: the `chat.reaction.set` apply-site comment
+(`linkedChatStore.ts`), the design doc's Reactions `⚠️ SECURITY` block (now `✅
+VERIFIED`) and Authenticated-authorship section, and this log.
+
+### Adversarial forgery-rejection evidence (BLOCKING, incl. over-HTTP)
+
+- Relay unit (`server.test.ts`, +8): honest author (msg + reaction) admitted;
+  solo message omitting `authorUserId` admitted (byte-identical); a
+  `message.append` forging another user's `authorUserId` → 403
+  `authorship_mismatch`, log unchanged; a `chat.reaction.set` forging
+  `authorId` → 403, log unchanged; a reaction with NO `authorId` → 403
+  (fail-closed); a batch mixing one valid + one forged op → 403 ATOMIC (the
+  valid op is NOT admitted either); a non-chat opaque op carrying an
+  `authorId`-shaped field passes through untouched.
+- Relay child-process integration (`main.integration.test.ts`, +1, real HTTP):
+  a second authenticated user (alice, owns the bucket) cannot forge mallory's
+  authorship on a message or a reaction (403, empty log); a mixed batch is
+  rejected atomically; alice authoring as HERSELF is admitted. Proves the relay
+  derives identity server-side over the wire.
+- Engine (`linkedChatStore.test.ts`, +3): a solo `message.append` OMITS
+  `authorUserId` (byte-identical); a signed-in send stamps the opaque id, both
+  send paths journal it, and a fresh peer persists+returns it through the real
+  apply path; an invalid (blank/oversized) `authorUserId` is rejected at the
+  store boundary.
+
+### Suite counts (Linux-green)
+
+- `pnpm -r typecheck`: green (all 13 packages).
+- sync-relay: 75 passed (server 32 incl. +8, main.integration 13 incl. +1,
+  shares 14, shareFilter 16). The MU-C2 chat fuzz (agent messages, no
+  `authorUserId`) still converges — solo/absent ops admitted.
+- workspace-engine: default config 376 passed (+3); fs-lock config 128
+  passed / 5 skipped.
+- desktop: 1082 passed / 2 skipped, +1 pre-existing parallel-load flake
+  (`FileInspector.engineSaveState.test.tsx`, a transient "saving" timing
+  assertion) that passes on isolated re-run — same class as the documented
+  MU-C2 `versionedFileWorkspace` flake, unrelated to this lane. Chat renderer
+  suites (chatMessages/ChatsView/LinkedChats) green.
+- workspace-auth: 8 passed. `git diff --check`: clean.
+
+### Files changed
+
+- `packages/workspace-contracts/src/engine.ts` — `authorUserId` on
+  `ChatMessageAppendPayload` + `ChatMessage`; `authorUserId` input on
+  `sendMessage` / `startChannelThread`.
+- `packages/workspace-engine/src/{engineDbSchema.ts, linkedChatStore.ts}` —
+  lazy-additive `chat_messages.author_user_id` column; `normalizeAuthorUserId`;
+  plumb + persist + return `authorUserId` on send/start/apply; row mapping;
+  updated reaction apply-site trust-boundary comment.
+- `services/sync-relay/src/server.ts` — `assertChatAuthorship` +
+  `CHAT_AUTHOR_FIELDS` + `authorshipMismatch()` (403); wired into `POST /log`.
+- `apps/desktop/src/main.ts` — `relayAuthorUserId()`; stamp on both send paths.
+- Tests: `services/sync-relay/src/{server.test.ts, main.integration.test.ts}`,
+  `packages/workspace-engine/src/linkedChatStore.test.ts`.
+- Docs: the design doc (Reactions `⚠️`→`✅`, Authenticated-authorship note) and
+  this log.
+
+### Handoff to DMs (MU-C3) + shared channels (MU-C4)
+
+Both now have a VERIFIED, server-derived author identity to build
+recipient-scoping on. The append-time gate (`assertChatAuthorship`) is the
+reusable primitive: MU-C4's `POST /sync/shares/:shareId/log` member-append route
+runs the SAME check (plus the chat-aware `filterOpForShare` branch scoping to
+the granted `channelWireId`), and MU-C3's DM messages/reactions inherit it
+unchanged. `authorUserId` is persisted and returned, so recipient/participant UI
+can key on the durable opaque id, never the display name.
+
 ## Chat Reactions MU-C2
 
 Durable, commutative emoji reactions on chat messages — solo AND replicated.

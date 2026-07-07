@@ -521,6 +521,62 @@ describe("channel tools (PR 12/13 slice)", () => {
   });
 });
 
+describe("MU-C0 agent chat authorship", () => {
+  it("stamps the signed-in opaque userId so agent sends sync VERIFIED", async () => {
+    await withWorkspace(async (ctx) => {
+      // The desktop passes the cloud session's OPAQUE Better Auth user id to the
+      // MCP process; the agent stamps it as authorUserId so the relay verifies
+      // `authorUserId === actor.userId` and the message replicates VERIFIED.
+      vi.stubEnv("DOHC_MCP_CLOUD_USER_ID", "opaque-user-ice");
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-channels");
+      await listChannels(ctx); // auto-creates the general channel
+
+      const started = await startChannelChat(ctx, {
+        channel: "general",
+        body: "Import finished.",
+      });
+      if (!started.ok) throw new Error("startChannelChat failed");
+      const reply = await replyToChat(ctx, {
+        threadId: started.thread.id,
+        body: "Logs attached.",
+      });
+      expect(reply.ok).toBe(true);
+
+      const chats = createLinkedChatStore(ctx.root);
+      const messages = await chats.listMessages({
+        workspaceId: "ws-channels",
+        threadId: started.thread.id,
+      });
+      await chats.close();
+      // Both the thread-opening send and the reply carry the verified id.
+      expect(messages.map((m) => m.authorUserId)).toEqual([
+        "opaque-user-ice",
+        "opaque-user-ice",
+      ]);
+    });
+  });
+
+  it("omits authorUserId on the solo/local path (no cloud userId)", async () => {
+    await withWorkspace(async (ctx) => {
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-channels");
+      await listChannels(ctx); // auto-creates the general channel
+      const started = await startChannelChat(ctx, { channel: "general", body: "Solo note." });
+      if (!started.ok) throw new Error("startChannelChat failed");
+
+      const chats = createLinkedChatStore(ctx.root);
+      const messages = await chats.listMessages({
+        workspaceId: "ws-channels",
+        threadId: started.thread.id,
+      });
+      await chats.close();
+      expect(messages).toHaveLength(1);
+      expect(messages[0].authorUserId).toBeUndefined();
+    });
+  });
+});
+
 describe("isSqliteBusyError", () => {
   it("classifies busy/locked errors, including nested causes", () => {
     expect(isSqliteBusyError(new Error("database is locked"))).toBe(true);

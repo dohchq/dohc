@@ -861,3 +861,248 @@ describe("sync relay handler", () => {
     expect(await current.text()).toBe(first);
   });
 });
+
+// WS-MU-C0 — the relay stamps/verifies that a chat op's claimed author equals
+// the authenticated pusher (actor.userId) before admitting it to the log. These
+// mirror PR-18's isolation rigor: a forged author is rejected atomically and
+// leaves the log unchanged; the honest path is admitted; solo ops are untouched.
+describe("MU-C0 verified chat authorship", () => {
+  function messageOp(
+    originSeq: number,
+    author: string | undefined,
+    messageId = `m-${originSeq}`,
+  ) {
+    return {
+      originSeq,
+      opKind: "chat.message.append",
+      payload: {
+        messageId,
+        threadId: "t-1",
+        authorKind: "human",
+        authorDisplayName: "Someone",
+        ...(author !== undefined ? { authorUserId: author } : {}),
+        body: "hello",
+        createdAtMs: 1000 + originSeq,
+      },
+      recordedAtMs: 1000 + originSeq,
+    };
+  }
+
+  function reactionOp(
+    originSeq: number,
+    author: string | undefined,
+    reactionId = `r-${originSeq}`,
+  ) {
+    const payload: Record<string, unknown> = {
+      reactionId,
+      messageId: "m-1",
+      threadId: "t-1",
+      emoji: "👍",
+      authorKind: "human",
+      authorDisplayName: "Someone",
+      state: "added",
+      atMs: 1000 + originSeq,
+    };
+    if (author !== undefined) payload.authorId = author;
+    return { originSeq, opKind: "chat.reaction.set", payload, recordedAtMs: 1000 + originSeq };
+  }
+
+  async function logOps(h: SyncRelayHandler): Promise<unknown[]> {
+    const fetched = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    return fetched.ops as unknown[];
+  }
+
+  it("admits a chat op whose author IS the authenticated pusher", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const message = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [messageOp(0, "a")] })),
+    );
+    expect(message.status).toBe(200);
+    const reaction = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [reactionOp(1, "a")] })),
+    );
+    expect(reaction.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(2);
+  });
+
+  it("stamps the authenticated pusher onto a message.append that omits authorUserId", async () => {
+    // The relay only ever sees AUTHENTICATED pushes, so an append that omits
+    // authorUserId is not "solo" here — it is attributable to its pusher. The
+    // relay stamps actor.userId so the replicated op is VERIFIED, never NULL.
+    // (The genuine solo/no-relay omission survives only in the engine-local
+    // path, which never traverses the relay.)
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const stamped = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({ originId: "origin-a", ops: [messageOp(0, undefined)] }),
+      ),
+    );
+    expect(stamped.status).toBe(200);
+    const ops = await logOps(h);
+    expect(ops).toHaveLength(1);
+    expect((ops[0] as { payload: { authorUserId?: string } }).payload.authorUserId).toBe("a");
+  });
+
+  it("rejects a message.append forging another user's authorUserId, leaving the log unchanged", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const forged = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [messageOp(0, "victim")] })),
+    );
+    expect(forged.status).toBe(403);
+    expect(await json(forged)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    expect(await logOps(h)).toEqual([]);
+  });
+
+  it("rejects a chat.reaction.set forging another user's authorId, leaving the log unchanged", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const forged = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [reactionOp(0, "victim")] })),
+    );
+    expect(forged.status).toBe(403);
+    expect(await json(forged)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    expect(await logOps(h)).toEqual([]);
+  });
+
+  it("rejects a reaction op with no authorId at all (required author, fail-closed)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const missing = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [reactionOp(0, undefined)] })),
+    );
+    expect(missing.status).toBe(403);
+    expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    expect(await logOps(h)).toEqual([]);
+  });
+
+  it("rejects a batch mixing one valid and one forged op ATOMICALLY (nothing admitted)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const mixed = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({ originId: "origin-a", ops: [messageOp(0, "a"), reactionOp(1, "victim")] }),
+      ),
+    );
+    expect(mixed.status).toBe(403);
+    expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    // Atomic: the valid op in the same batch was NOT admitted either.
+    expect(await logOps(h)).toEqual([]);
+  });
+
+  it("does not touch non-chat ops (opaque payloads with an authorId-shaped field pass through)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    // A non-chat op that happens to carry an authorId belonging to someone else
+    // is NOT a chat op, so the authorship gate ignores it.
+    const opaque = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({ originId: "origin-a", ops: [op(0, { authorId: "victim", n: 0 })] }),
+      ),
+    );
+    expect(opaque.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(1);
+  });
+
+  it("passes through known no-author chat ops (channel.create, thread.create)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const structural = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.channel.create",
+              payload: { channelId: "c-1", name: "general", slug: "general", createdAtMs: 1000 },
+              recordedAtMs: 1000,
+            },
+            {
+              originSeq: 1,
+              opKind: "chat.thread.create",
+              payload: { threadId: "t-1", title: "hi", createdAtMs: 1001, channelSlug: "general" },
+              recordedAtMs: 1001,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(structural.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(2);
+  });
+
+  it("REJECTS an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
+    // A future authored chat op (here a made-up chat.thread.update) that carries
+    // an author-shaped field we have NOT taught the policy to verify must be
+    // refused, not admitted unverified. Shipping a new authored chat op without
+    // extending CHAT_OP_POLICY fails closed.
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const unknownAuthored = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.update",
+              payload: { threadId: "t-1", authorUserId: "victim", title: "renamed" },
+              recordedAtMs: 1000,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(unknownAuthored.status).toBe(403);
+    expect(await json(unknownAuthored)).toMatchObject({ ok: false, code: "unknown_chat_op" });
+    expect(await logOps(h)).toEqual([]);
+  });
+
+  it("REJECTS a made-up chat.* op even with no author field (unknown = fail-closed)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const madeUp = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.message.edit",
+              payload: { messageId: "m-1", body: "edited" },
+              recordedAtMs: 1000,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(madeUp.status).toBe(403);
+    expect(await json(madeUp)).toMatchObject({ ok: false, code: "unknown_chat_op" });
+    expect(await logOps(h)).toEqual([]);
+  });
+});

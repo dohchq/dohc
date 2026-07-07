@@ -226,6 +226,25 @@ async function postJson(baseUrl: string, path: string, value: unknown): Promise<
   });
 }
 
+// Push as an ARBITRARY authenticated user (WS-MU-C0 forgery tests). The
+// test-auth seam maps `Bearer test:<userId>` -> actor.userId, so this proves the
+// relay derives the pusher's identity server-side and cannot be told otherwise.
+async function postJsonAs(
+  baseUrl: string,
+  userId: string,
+  path: string,
+  value: unknown,
+): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer test:${userId}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(value),
+  });
+}
+
 async function putBytes(baseUrl: string, path: string, bytes: Uint8Array): Promise<Response> {
   return fetch(`${baseUrl}${path}`, {
     method: "PUT",
@@ -1063,6 +1082,107 @@ describe("sync relay main process", () => {
     expect(fetched.map((op) => `${op.originId}:${op.originSeq}`).sort()).toEqual(
       [...new Set(fetched.map((op) => `${op.originId}:${op.originSeq}`))].sort(),
     );
+  });
+
+  // WS-MU-C0 over real HTTP: a second authenticated user cannot forge the first
+  // user's chat authorship. The relay derives the pusher's identity from the
+  // bearer session and rejects any chat op claiming a different author, atomically
+  // — the log stays empty. The honest self-authored push is admitted.
+  it("rejects forged chat authorship over real HTTP and admits the honest author", async (context) => {
+    const relayRoot = await tempRoot("relay-authorship");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const alice = "user-alice";
+    const mallory = "user-mallory";
+    const ws = "workspace-authorship";
+
+    // Alice owns the bucket (claimed under her own authenticated identity).
+    const claimed = await postJsonAs(baseUrl, alice, "/sync/workspaces", { workspaceId: ws });
+    expect(claimed.status).toBe(200);
+
+    const messageOp = (originSeq: number, authorUserId: string | undefined) => ({
+      originSeq,
+      opKind: "chat.message.append",
+      payload: {
+        messageId: `m-${originSeq}`,
+        threadId: "t-1",
+        authorKind: "human",
+        authorDisplayName: "display only",
+        ...(authorUserId !== undefined ? { authorUserId } : {}),
+        body: "hi over http",
+        createdAtMs: 5_000 + originSeq,
+      },
+      recordedAtMs: 5_000 + originSeq,
+    });
+    const reactionOp = (originSeq: number, authorId: string) => ({
+      originSeq,
+      opKind: "chat.reaction.set",
+      payload: {
+        reactionId: `r-${originSeq}`,
+        messageId: "m-0",
+        threadId: "t-1",
+        emoji: "👍",
+        authorId,
+        authorKind: "human",
+        authorDisplayName: "display only",
+        state: "added",
+        atMs: 5_000 + originSeq,
+      },
+      recordedAtMs: 5_000 + originSeq,
+    });
+
+    const logLength = async (): Promise<number> => {
+      const response = await fetch(`${baseUrl}/sync/${ws}/log?since=0`, {
+        headers: { authorization: `Bearer test:${alice}` },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ops: unknown[] };
+      return body.ops.length;
+    };
+
+    // Alice forging Mallory's authorship on a message → 403, log unchanged.
+    const forgedMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
+      originId: "origin-alice",
+      ops: [messageOp(0, mallory)],
+    });
+    expect(forgedMessage.status).toBe(403);
+    expect((await forgedMessage.json()) as Record<string, unknown>).toMatchObject({
+      code: "authorship_mismatch",
+    });
+    expect(await logLength()).toBe(0);
+
+    // Alice forging Mallory's authorship on a reaction → 403, log unchanged.
+    const forgedReaction = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
+      originId: "origin-alice",
+      ops: [reactionOp(0, mallory)],
+    });
+    expect(forgedReaction.status).toBe(403);
+    expect(await logLength()).toBe(0);
+
+    // A batch mixing Alice's honest op with a forged one is rejected atomically.
+    const mixed = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
+      originId: "origin-alice",
+      ops: [messageOp(0, alice), reactionOp(1, mallory)],
+    });
+    expect(mixed.status).toBe(403);
+    expect(await logLength()).toBe(0);
+
+    // Alice authoring as HERSELF is admitted.
+    const honest = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
+      originId: "origin-alice",
+      ops: [messageOp(0, alice), reactionOp(1, alice)],
+    });
+    expect(honest.status).toBe(200);
+    expect(await logLength()).toBe(2);
   });
 
   // Gate finding: the transport must cap request bodies AT THE STREAM. A

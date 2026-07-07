@@ -984,6 +984,13 @@ function mcpRuntimeConfigFor(rootPath: string): {
           DOHC_MCP_CLOUD_SERVER_URL: cachedCredentials.serverUrl,
           DOHC_MCP_CLOUD_EMAIL: cachedCredentials.email,
           DOHC_MCP_CLOUD_TOKEN: cachedCredentials.token,
+          // WS-MU-C0: the OPAQUE Better Auth user id, so the agent's chat sends
+          // stamp a VERIFIED authorUserId the relay accepts as actor.userId.
+          // Present only when the session carries it (older credential files omit
+          // it — the agent then sends solo, byte-identical to today).
+          ...(cachedCredentials.userId
+            ? { DOHC_MCP_CLOUD_USER_ID: cachedCredentials.userId }
+            : {}),
         }
       : undefined;
   return {
@@ -1206,6 +1213,17 @@ function localReactorFallbackId(): string {
 // email→display-name mapping stays LOCAL in localUserDisplayName().
 function localUserId(): string {
   return cachedCredentials?.userId ?? localReactorFallbackId();
+}
+
+// The VERIFIED relay identity a signed-in send stamps on a chat message
+// (WS-MU-C0). Present ONLY when signed in to the relay: the OPAQUE Better Auth
+// user id the relay verifies as `actor.userId` before admitting the op. Solo /
+// signed-out returns undefined, so message.append omits `authorUserId` and stays
+// byte-identical to the pre-MU-C0 shape (unlike reactions, which anchor on a
+// stable local fallback id even offline). NEVER the email — identity is opaque;
+// the email is display-only via localUserDisplayName().
+function relayAuthorUserId(): string | undefined {
+  return cachedCredentials?.userId;
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
@@ -2853,6 +2871,11 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // WS-MU-C0: the credential cache must be warm BEFORE relayAuthorUserId()
+    // reads it — a send racing an unfinished async cache load would otherwise
+    // stamp solo (authorUserId omitted) and lose relay provenance for a
+    // signed-in user's message. warmCredentialCache is idempotent.
+    await warmCredentialCache();
     // Author is derived HERE: renderer-sent messages are always the local
     // human user. Agent authorship arrives through agent tooling, never
     // through this channel.
@@ -2860,6 +2883,10 @@ function registerIpcHandlers(): void {
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
       author: { kind: "human", displayName: localUserDisplayName() },
+      // WS-MU-C0: stamp the verified relay identity when signed in (the relay
+      // checks it === actor.userId); omit it solo. Identity is main-derived,
+      // never renderer-supplied.
+      authorUserId: relayAuthorUserId(),
       body: input.body,
     });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
@@ -2981,12 +3008,18 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // WS-MU-C0: warm the credential cache before relayAuthorUserId() reads it,
+    // so a thread opened before the async cache load finishes still stamps the
+    // signed-in author (never falsely solo). Idempotent.
+    await warmCredentialCache();
     // No title, ever, on this path: the thread displays its first-message
     // snippet. Author is main-derived like every renderer send.
     const started = await linkedChatStoreFor(workspace).startChannelThread({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
       author: { kind: "human", displayName: localUserDisplayName() },
+      // WS-MU-C0: stamp the verified relay identity when signed in; omit solo.
+      authorUserId: relayAuthorUserId(),
       body: input.body,
     });
     return StartChannelThreadResult.parse({

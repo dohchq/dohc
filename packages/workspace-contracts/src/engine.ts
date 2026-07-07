@@ -389,6 +389,15 @@ export interface ChatMessageAppendPayload {
   threadId: ChatThreadId;
   authorKind: ChatActor["kind"];
   authorDisplayName: string;
+  // WS-MU-C0 verified authorship: the OPAQUE Better Auth user id of the sender,
+  // never a raw email (PII must not enter the replicated CRDT). Present only for
+  // a signed-in send; the relay VERIFIES `authorUserId === actor.userId` before
+  // admitting the op to the replication log, so it is the durable, spoofing-
+  // resistant "who said this". Solo/signed-out sends OMIT it — the op is then
+  // byte-identical to the pre-MU-C0 shape and `authorDisplayName` (display-only,
+  // never used for identity/authz) still renders. See the design's "Authenticated
+  // authorship" section.
+  authorUserId?: string;
   body: string;
   createdAtMs: number;
 }
@@ -1087,6 +1096,12 @@ export interface ChatMessage {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   author: ChatActor;
+  // WS-MU-C0 verified authorship: the sender's OPAQUE relay user id (Better Auth
+  // user id), the same value the relay verifies as `actor.userId`. Present only
+  // for a signed-in send; absent for solo/legacy messages. `author` stays the
+  // display-only convenience — identity/authz key on `authorUserId`, never the
+  // display name.
+  authorUserId?: string;
   body: string;
   createdAtMs: number;
 }
@@ -1164,6 +1179,10 @@ export interface LinkedChatStore {
     channelId: ChatChannelId;
     title?: string;
     author: ChatActor;
+    // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
+    // supplies it ONLY when signed in; the journaled message.append then carries
+    // it for relay verification. Omit for solo (byte-identical to today).
+    authorUserId?: string;
     body: string;
   }): Promise<{ thread: ChatThread; message: ChatMessage }>;
   // Most-recent-activity first, with derived unread counts.
@@ -1194,6 +1213,10 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
     author: ChatActor;
+    // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
+    // supplies it ONLY when signed in; the journaled message.append then carries
+    // it for relay verification. Omit for solo (byte-identical to today).
+    authorUserId?: string;
     body: string;
   }): Promise<ChatMessage>;
   listMessages(input: {

@@ -284,6 +284,27 @@ function normalizeDisplayName(displayName: string): string {
   return normalized;
 }
 
+// WS-MU-C0: the caller-supplied OPAQUE relay user id for a message. Absent for
+// solo/legacy sends (returns undefined, so the op stays byte-identical to the
+// pre-MU-C0 shape). When present it is trimmed and length-capped like the
+// reaction author id; it is NEVER derived from the display name (identity and
+// display are separate fields).
+function normalizeAuthorUserId(authorUserId: string | undefined): string | undefined {
+  if (authorUserId === undefined) return undefined;
+  // Type-guard like the sibling boundary validators (normalizeActor,
+  // normalizeReactionEmoji): a non-string from a loosely-typed IPC/tool payload
+  // must surface the typed "invalid-sender" error, not a raw TypeError from
+  // .trim(), so callers that switch on `.code` stay well-behaved.
+  if (typeof authorUserId !== "string") {
+    throw new LinkedChatStoreError("invalid-sender", "Chat author user id is invalid.");
+  }
+  const normalized = authorUserId.trim();
+  if (!normalized || normalized.length > 200) {
+    throw new LinkedChatStoreError("invalid-sender", "Chat author user id is invalid.");
+  }
+  return normalized;
+}
+
 function normalizeActor(actor: ChatActor): ChatActor {
   if (actor.kind !== "human" && actor.kind !== "agent") {
     throw new LinkedChatStoreError("invalid-sender", "Chat sender kind is invalid.");
@@ -420,6 +441,9 @@ function channelFromRow(row: Record<string, unknown>): ChatChannel {
 }
 
 function messageFromRow(row: Record<string, unknown>): ChatMessage {
+  // author_user_id (WS-MU-C0) is the OPAQUE relay identity, kept SEPARATE from
+  // the display-only author. NULL/absent for solo/legacy messages.
+  const authorUserId = optionalString(row.author_user_id);
   return {
     id: stringValue(row.message_id),
     workspaceId: stringValue(row.workspace_id),
@@ -428,6 +452,7 @@ function messageFromRow(row: Record<string, unknown>): ChatMessage {
       kind: actorKindValue(row.author_kind),
       displayName: stringValue(row.author_display_name),
     },
+    ...(authorUserId !== undefined ? { authorUserId } : {}),
     body: stringValue(row.body),
     createdAtMs: numberValue(row.created_at_ms),
   };
@@ -1240,6 +1265,7 @@ export function createLinkedChatStore(
         const channel = requireWorkspaceChannel(db, workspaceId, input.channelId);
         const title = normalizeOptionalThreadTitle(input.title);
         const author = normalizeActor(input.author);
+        const authorUserId = normalizeAuthorUserId(input.authorUserId);
         const body = normalizeBody(input.body);
         const threadId = createId("thread");
         const recordedAtMs = nowMs();
@@ -1254,20 +1280,22 @@ export function createLinkedChatStore(
           workspaceId,
           threadId,
           author,
+          ...(authorUserId !== undefined ? { authorUserId } : {}),
           body,
           createdAtMs: recordedAtMs,
         };
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
-            author_display_name, body, created_at_ms
-          ) VALUES (?, ?, 0, ?, ?, ?, ?, ?)`,
+            author_display_name, author_user_id, body, created_at_ms
+          ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)`,
         ).run(
           workspaceId,
           threadId,
           message.id,
           author.kind,
           author.displayName,
+          authorUserId ?? null,
           body,
           recordedAtMs,
         );
@@ -1316,6 +1344,9 @@ export function createLinkedChatStore(
             threadId,
             authorKind: author.kind,
             authorDisplayName: author.displayName,
+            // WS-MU-C0: carry the verified identity ONLY when signed in (see
+            // sendMessage). Solo omits it — byte-identical to the pre-MU-C0 shape.
+            ...(authorUserId !== undefined ? { authorUserId } : {}),
             body,
             createdAtMs: recordedAtMs,
           } satisfies ChatMessageAppendPayload,
@@ -1431,11 +1462,13 @@ export function createLinkedChatStore(
       return serialize(async (db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+        const authorUserId = normalizeAuthorUserId(input.authorUserId);
         const message: ChatMessage = {
           id: createId("message"),
           workspaceId,
           threadId: thread.id,
           author: normalizeActor(input.author),
+          ...(authorUserId !== undefined ? { authorUserId } : {}),
           body: normalizeBody(input.body),
           createdAtMs: nowMs(),
         };
@@ -1443,8 +1476,8 @@ export function createLinkedChatStore(
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
-            author_display_name, body, created_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            author_display_name, author_user_id, body, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           workspaceId,
           thread.id,
@@ -1452,6 +1485,7 @@ export function createLinkedChatStore(
           message.id,
           message.author.kind,
           message.author.displayName,
+          authorUserId ?? null,
           message.body,
           message.createdAtMs,
         );
@@ -1485,6 +1519,10 @@ export function createLinkedChatStore(
             threadId: thread.id,
             authorKind: message.author.kind,
             authorDisplayName: message.author.displayName,
+            // WS-MU-C0: carry the verified identity ONLY when the caller supplied
+            // one (signed-in send). Omitting it keeps solo ops byte-identical to
+            // the pre-MU-C0 shape and leaves the relay's optional check inert.
+            ...(authorUserId !== undefined ? { authorUserId } : {}),
             body: message.body,
             createdAtMs: message.createdAtMs,
           } satisfies ChatMessageAppendPayload,
@@ -1786,11 +1824,18 @@ export function createLinkedChatStore(
               .get(workspaceId, payload.messageId)
           ) {
             const messageOrder = nextMessageOrder(db, workspaceId, payload.threadId);
+            // WS-MU-C0: `authorUserId` is the sender's OPAQUE relay identity. On
+            // a REPLICATED op it is authoritative ONLY because the relay verified
+            // `authorUserId === actor.userId` before admitting it to the log — the
+            // engine has no origin→user map and cannot check it here (see the
+            // chat.reaction.set note below). Absent on solo/legacy ops (persisted
+            // as NULL). Never derived from the display name.
+            const authorUserId = optionalString(payload.authorUserId) ?? null;
             db.prepare(
               `INSERT INTO chat_messages (
                 workspace_id, thread_id, message_order, message_id, author_kind,
-                author_display_name, body, created_at_ms
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                author_display_name, author_user_id, body, created_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).run(
               workspaceId,
               payload.threadId,
@@ -1798,6 +1843,7 @@ export function createLinkedChatStore(
               payload.messageId,
               payload.authorKind,
               payload.authorDisplayName,
+              authorUserId,
               payload.body,
               payload.createdAtMs,
             );
@@ -1840,17 +1886,21 @@ export function createLinkedChatStore(
           // re-apply backstop; the LWW WHERE clause makes a stale replay a no-op
           // even if it slips through.
           //
-          // ⚠️ SECURITY — UNVERIFIED AUTHORSHIP UNTIL MU-C0. `payload.authorId`
-          // is part of the CRDT cell key AND is trusted verbatim here. The
-          // engine cannot map a replication origin to a user, so a malicious /
-          // buggy relay collaborator could ship a reaction op that adds or
-          // removes a VICTIM's reaction cell (forged authorship). This is
-          // acceptable ONLY for solo workspaces and trusted-relay-collaborator
-          // deployments. MU-C0 closes it: the relay stamps/verifies
-          // `authorId === actor.userId` server-side on shared channels before an
-          // op is replicated. Do NOT treat replicated reaction authorship as
-          // trustworthy until then. (The LOCAL setReaction path is safe: main
-          // derives authorId from the signed-in user, never the renderer.)
+          // AUTHORSHIP TRUST BOUNDARY (WS-MU-C0 — now VERIFIED at the relay).
+          // `payload.authorId` is part of the CRDT cell key and is trusted
+          // verbatim HERE because the engine has no origin→user map and cannot
+          // verify it itself. That verification now lives at its correct home:
+          // the relay's log-append path rejects any chat op whose claimed author
+          // (`chat.reaction.set.authorId` / `chat.message.append.authorUserId`)
+          // does not equal the authenticated pushing `actor.userId`, atomically
+          // failing the whole batch with 403 `authorship_mismatch` (see
+          // services/sync-relay/src/server.ts `assertChatAuthorship`). So a
+          // replicated authored op is authoritative ONLY because the relay
+          // verified it before admitting it to the log — a relay collaborator can
+          // no longer forge a reaction as a VICTIM. A locally-applied op uses the
+          // local identity (the LOCAL setReaction path derives authorId from the
+          // signed-in user, never the renderer). The no-relay/solo path is a
+          // single trusted user and is unaffected.
           if (
             typeof payload.reactionId !== "string" ||
             !payload.reactionId ||

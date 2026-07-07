@@ -438,6 +438,14 @@ export function createSyncRelayHandler({
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
         if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
+        // MU-C0 verified authorship — the trust boundary. Every chat op that
+        // carries an author identity must claim the AUTHENTICATED pusher; a
+        // client can no longer forge a message/reaction as another user, and an
+        // unrecognized chat op is refused (fail-closed). Runs BEFORE parseLogOp
+        // so a stamped message.append authorUserId is frozen into payloadJson,
+        // and BEFORE appendLogBatch so a batch mixing one forged/unknown op with
+        // valid ones is rejected atomically (nothing is admitted to the log).
+        assertChatAuthorship(input.ops, actor.userId);
         const ops = input.ops.map(parseLogOp);
         const result = storage.appendLogBatch({
           workspaceId: route.workspaceId,
@@ -598,6 +606,83 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
   return { originSeq, opKind, payloadJson, recordedAtMs };
 }
 
+// MU-C0 verified authorship. The relay authenticates WHO is pushing
+// (actor.userId, server-derived from the Better Auth session — a client cannot
+// assert it). For every chat op that names an author, that author MUST be the
+// pusher, or the whole batch is rejected. This is the one place the relay reads
+// into (and, for message.append, stamps) a chat payload — a second narrow,
+// tested relaxation of "payloads are opaque", after PR-18's share filter,
+// scoped to the author field, fail-closed.
+//
+// FAIL-CLOSED COMPLETENESS. The chat.* namespace is EXHAUSTIVE here: every
+// chat op is either an explicitly-enumerated structural (no-author) op or an
+// authored op with a known author field. An unknown/unmapped chat.* op (a
+// future chat.thread.update, chat.message.edit, ...) is REJECTED, never
+// admitted unverified — shipping a new authored chat op without extending this
+// policy fails CLOSED, not open. Non-chat ops stay fully opaque and pass
+// through untouched.
+//
+// Author identity is always the OPAQUE relay user id (never a raw email — PII
+// must not enter the replicated CRDT):
+//  - chat.message.append.authorUserId — verified when present; STAMPED to the
+//    pusher when absent. The relay only ever sees authenticated pushes, so an
+//    append is always attributable to actor.userId; a NULL/unattributed author
+//    survives only in the engine-local/no-relay path, which never reaches here.
+//  - chat.reaction.set.authorId       — REQUIRED. A reaction is inherently an
+//    authored act, so a missing/non-string author id is a malformed op and is
+//    rejected (fail-closed), same as a mismatch.
+//
+// A future authored chat op is verified by adding it to CHAT_OP_POLICY; a
+// future no-author chat op by enumerating it as "structural".
+type ChatOpPolicy =
+  | { kind: "structural" }
+  | { kind: "authored"; field: string; onMissing: "reject" | "stamp" };
+const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
+  // No-author structural ops: nothing to verify, pass through.
+  "chat.channel.create": { kind: "structural" },
+  "chat.thread.create": { kind: "structural" },
+  // Authored ops: the author field MUST equal the authenticated pusher.
+  "chat.message.append": { kind: "authored", field: "authorUserId", onMissing: "stamp" },
+  "chat.reaction.set": { kind: "authored", field: "authorId", onMissing: "reject" },
+};
+
+// Verifies (and, for message.append, STAMPS) chat authorship on the RAW op
+// payloads in place — so a stamped authorUserId is what parseLogOp later freezes
+// into payloadJson and replicates. Must run BEFORE parseLogOp for the stamp to
+// take effect.
+export function assertChatAuthorship(rawOps: unknown[], actorUserId: string): void {
+  for (const rawOp of rawOps) {
+    if (!rawOp || typeof rawOp !== "object" || Array.isArray(rawOp)) continue;
+    const op = rawOp as Record<string, unknown>;
+    const opKind = op.opKind;
+    if (typeof opKind !== "string") continue;
+    // Only chat.* ops are subject to the authorship gate; everything else is an
+    // opaque payload and passes through even if it carries an author-shaped field.
+    if (!opKind.startsWith("chat.")) continue;
+    const policy = CHAT_OP_POLICY[opKind];
+    if (!policy) throw unknownChatOp(); // fail-closed: an unrecognized chat op.
+    if (policy.kind === "structural") continue;
+    const payload = op.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      // An authored op with no object payload cannot be verified — reject
+      // (fail-closed). parseLogOp would also reject it, but authorship first.
+      throw authorshipMismatch();
+    }
+    const bag = payload as Record<string, unknown>;
+    const claimed = bag[policy.field];
+    if (claimed === undefined || claimed === null) {
+      if (policy.onMissing === "reject") throw authorshipMismatch();
+      // stamp: attribute the op to the authenticated pusher so it replicates
+      // VERIFIED rather than as a NULL/forgeable-display-name author.
+      bag[policy.field] = actorUserId;
+      continue;
+    }
+    if (typeof claimed !== "string" || claimed !== actorUserId) {
+      throw authorshipMismatch();
+    }
+  }
+}
+
 function stableJsonStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJsonStringify).join(",")}]`;
   if (value && typeof value === "object") {
@@ -719,6 +804,23 @@ function badRequest(message: string): HttpError {
 
 function selfShare(): HttpError {
   return new HttpError(400, "self_share", "a share needs a recipient other than yourself");
+}
+
+// MU-C0: a chat op claimed an author other than the authenticated pusher (or a
+// required author was missing). 403 (not 404): the caller IS authenticated and
+// owns the bucket — the request is forbidden, not hidden. Non-retryable; the
+// client must send its OWN identity. Deliberately does not name which op failed.
+function authorshipMismatch(): HttpError {
+  return new HttpError(403, "authorship_mismatch", "chat op author does not match the authenticated actor");
+}
+
+// MU-C0 fail-closed completeness: a chat.* op the authorship policy does not
+// recognize. It may carry author-shaped fields the relay cannot verify, so it
+// is refused rather than admitted unverified. 403 (not 400): the caller is
+// authenticated and owns the bucket; the op is forbidden until the policy
+// learns to verify it. Non-retryable as sent.
+function unknownChatOp(): HttpError {
+  return new HttpError(403, "unknown_chat_op", "unrecognized chat op cannot be authorship-verified");
 }
 
 function notFound(): HttpError {

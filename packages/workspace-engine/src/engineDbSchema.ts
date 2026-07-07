@@ -540,6 +540,12 @@ export function initializeOrValidateEngineSchema(
   ensureNullableColumn(db, "versions", "sync_materialized", "INTEGER", corrupt);
   ensureChatThreadsChannelColumn(db, corrupt);
   ensureBinaryContentKindColumns(db, corrupt);
+  // chat_messages.author_user_id (WS-MU-C0 verified authorship, lazy additive):
+  // the sender's OPAQUE relay user id (Better Auth user id) the relay verifies as
+  // `actor.userId`. NULL — the pre-MU-C0 truth — means an unattributed/solo
+  // message (display name only). Additive-nullable both ways: older readers
+  // select named columns and ignore it; an older writer leaves it NULL.
+  ensureNullableColumn(db, "chat_messages", "author_user_id", "TEXT", corrupt);
 }
 
 export function assertRequiredEngineTables(
