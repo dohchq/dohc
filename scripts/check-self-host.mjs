@@ -7,7 +7,6 @@ const REQUIRED_SERVICES = [
   'workspace-api',
   'sync-relay',
   'postgres',
-  'hocuspocus',
   'sqlite-worker',
   'agent-sandbox',
 ]
@@ -58,7 +57,6 @@ function checkServiceScripts() {
   for (const [label, path] of [
     ['workspace API package', 'services/workspace-api/package.json'],
     ['sync relay package', 'services/sync-relay/package.json'],
-    ['Hocuspocus package', 'services/hocuspocus/package.json'],
     ['sqlite worker package', 'services/sqlite-worker/package.json'],
     ['agent sandbox package', 'services/agent-sandbox/package.json'],
   ]) {

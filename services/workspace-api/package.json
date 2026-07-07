@@ -13,10 +13,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@dohc/hocuspocus": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
-    "@dohc/workspace-contracts": "workspace:*",
-    "@dohc/workspace-postgres": "workspace:*",
     "better-auth": "^1.6.16",
     "pg": "^8.21.0"
   },

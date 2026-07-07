@@ -3,11 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./repositories/workspaces": "./src/repositories/workspaces.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run --no-file-parallelism",
+    "test": "vitest run --no-file-parallelism --passWithNoTests",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

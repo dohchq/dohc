@@ -26,7 +26,6 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    collabToken: vi.fn(async () => ({ available: false as const })),
   };
 
   beforeEach(() => {

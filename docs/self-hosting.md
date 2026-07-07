@@ -1,16 +1,18 @@
 # Self-Hosting
 
-Self-hosting runs the opt-in, reduced Postgres cloud stack: **live
-collaboration** (Hocuspocus + the workspace-api collab-token route) and the
-**sync relay**, both authenticated by Better Auth over Postgres. The desktop
-product itself is local-first and needs none of this. The former sharing/
-members/invites/files/sync web surface and the `apps/web` client have been
-retired; engine-native sync (Arc 0P) is the ongoing replacement. This is still
-an MVP mode, not the final production runbook.
+Self-hosting runs the opt-in, reduced Postgres cloud stack: the **sync relay**
+(engine-native co-editing + blob transport) and an **auth** server, both
+authenticated by Better Auth over Postgres. Co-editing is engine-native — a
+shared workspace co-edits through the engine Y.Doc driver's `ydoc.update`
+replication over the relay, so there is no separate collaboration server
+(Hocuspocus was retired at a clean cutover, G2-C-3). The desktop product itself
+is local-first and needs none of this. The former sharing/members/invites/
+files/sync web surface and the `apps/web` client have been retired. This is
+still an MVP mode, not the final production runbook.
 
 Service matrix (see `docker-compose.self-host.yml`): `postgres`,
-`hocuspocus`, `workspace-api` (collab + auth), `sync-relay`, `sqlite-worker`,
-`agent-sandbox`. There is no `web` service.
+`workspace-api` (auth only), `sync-relay`, `sqlite-worker`, `agent-sandbox`.
+There is no `web` and no `hocuspocus` service.
 
 ## Prerequisites
 
@@ -38,20 +40,16 @@ pnpm check:self-host -- --start
 
 Important variables live in `.env.self-host.example`:
 
-- `POSTGRES_*` for the SQL core (Better Auth's user table + collab membership).
-- `HOCUSPOCUS_*` for collaborative document sync. `HOCUSPOCUS_JWT_SECRET` is
-  shared with `workspace-api` so its collab-token route mints tokens hocuspocus
-  can verify.
+- `POSTGRES_*` for the SQL core (Better Auth's `user`/`session` tables).
 - `BETTER_AUTH_SECRET` — shared by `workspace-api` AND `sync-relay` so a bearer
   token minted by the workspace-api device flow validates at the relay
   (>=32 chars; `openssl rand -base64 32`).
-- `WORKSPACE_API_*` for the collab + auth service.
+- `WORKSPACE_API_*` for the auth service.
 - `SYNC_RELAY_PORT` for the sync relay.
 - `SQLITE_WORKER_*` for SQLite import/query/materialization.
 
 Replace every `change-me` value before starting the stack. Compose refuses to
-start without the explicit Postgres password and the required auth and
-Hocuspocus secrets.
+start without the explicit Postgres password and the required auth secret.
 
 ## First Boot
 
@@ -79,7 +77,7 @@ Do not use reset commands against production data.
 Back up:
 
 - Postgres database volumes.
-- Hocuspocus/Yjs persistence data if separated from Postgres.
+- the sync-relay's SQLite volume (engine-journal + blob storage).
 - environment and secret material through the deployment secret manager.
 
 Restore by bringing up a compatible dohc version, restoring Postgres first,
@@ -93,8 +91,8 @@ Upgrade order:
 2. back up Postgres.
 3. run migrations.
 4. run `pnpm check:self-host` to validate the compose/service matrix.
-5. smoke-test the surviving surface: Better Auth sign-in, a collab token, and a
-   sync-relay round-trip.
+5. smoke-test the surviving surface: Better Auth sign-in and a sync-relay
+   round-trip (engine-native co-editing rides the relay).
 6. re-enable writes.
 
 ## Security Notes

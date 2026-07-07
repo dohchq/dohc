@@ -13,16 +13,16 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-G2-C-2 pinning E2E: the desktop editor is DECOUPLED from Hocuspocus. An
-// engine-flagged personal/local workspace edits a rich doc THROUGH the engine
-// Y.Doc provider (recordUpdate + debounced settle) with no relay — the editor
-// loads, editing lands on the .md and in engine.db as ydoc.update ops, with ZERO
-// collab-server involvement: no WebSocket is ever opened and the collabToken IPC
-// refuses a non-shared workspace. The former HocuspocusProvider path is no
-// longer instantiated by the editor (G2-C-3 removes its remaining code). The
-// engine.db SQLite readers (engineMomentsOrEmpty / ydocUpdateCount) are shared
-// with workspace-engine-editor.spec via ./helpers/engineDb — one source of truth
-// for the load-bearing "no double-journal" scaffolding.
+// WS-G2-C-2 / G2-C-3 pinning E2E: the desktop editor is DECOUPLED from
+// Hocuspocus — Hocuspocus (and its collab-token IPC) no longer exist at all
+// (G2-C-3 deleted them). An engine-flagged personal/local workspace edits a
+// rich doc THROUGH the engine Y.Doc provider (recordUpdate + debounced settle)
+// with no relay — the editor loads, editing lands on the .md and in engine.db
+// as ydoc.update ops, with ZERO collab-server involvement: no WebSocket is ever
+// opened for the whole session. The engine.db SQLite readers
+// (engineMomentsOrEmpty / ydocUpdateCount) are shared with
+// workspace-engine-editor.spec via ./helpers/engineDb — one source of truth for
+// the load-bearing "no double-journal" scaffolding.
 
 test("engine-flagged local workspace edits a rich doc through the engine provider — no Hocuspocus, editing lands", async () => {
   const temp = await createTempWorkspace();
@@ -105,26 +105,9 @@ test("engine-flagged local workspace edits a rich doc through the engine provide
       )
       .toBeGreaterThan(0);
 
-    // The explicit decoupling pins: collab is REFUSED for this workspace (the
-    // fail-closed collabToken IPC), and no WebSocket was ever opened.
-    const collabToken = await page.evaluate(
-      async (payload) => {
-        const api = (window as unknown as {
-          dohcDesktop: {
-            collabToken(input: {
-              workspaceId: string;
-              relativePath: string;
-            }): Promise<{ available: boolean }>;
-          };
-        }).dohcDesktop;
-        return api.collabToken(payload);
-      },
-      { workspaceId: workspace.workspaceId, relativePath: "notes/solo.md" },
-    );
-    // Exact-shape refusal: available:false and NOTHING else — a token, url,
-    // or partial credential leaking alongside the refusal would defeat the
-    // decoupling this spec pins.
-    expect(collabToken).toEqual({ available: false });
+    // The explicit decoupling pin: there is no collab server and no collab-token
+    // IPC anymore (G2-C-3 deleted them), so the editor can only be engine-native
+    // — and no WebSocket was ever opened for the whole editing session.
     expect(webSockets).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -151,7 +134,7 @@ test("collab-style materializations (bridge text writes) on an engine-flagged wo
     // Coexistence rule 2 (collab design): during a live session the Y.Doc is
     // canonical and the engine records its settle-point MATERIALIZATIONS as
     // ordinary moments. A materialization is exactly a writeWorkspaceText
-    // bridge call (useCollabDoc.writeAndRecord) — drive that same seam and pin
+    // bridge call — drive that same seam and pin
     // that the engine captures it. Engine history of a live-session doc is the
     // history of settle points, not keystrokes — documented, not a bug.
     const materialized = "# Shared doc\n\nBase text.\n\nSettled from a live CRDT session.\n";
