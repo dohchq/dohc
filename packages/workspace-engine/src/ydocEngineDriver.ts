@@ -50,8 +50,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import * as Y from "yjs";
 import {
   markdownToYDoc,
@@ -71,10 +71,10 @@ import type {
 import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
   assertEngineSqliteIntegrity,
-  initializeOrValidateEngineSchema,
+  assertRequiredEngineTables,
   trackEngineDbHandleForTest,
 } from "./engineDbSchema";
-import { VERSIONED_TEXT_STORE_RELATIVE_PATH } from "./versionedTextStore";
+import { canonicalEngineDbPath } from "./versionedTextStore";
 
 export type YDocContentKind = "richdoc" | "plaintext";
 
@@ -125,25 +125,33 @@ function corruptStore(cause?: unknown): YDocEngineDriverError {
   return error;
 }
 
-function openDatabase(rootDir: string): SqliteDb {
-  const path = join(resolve(rootDir), VERSIONED_TEXT_STORE_RELATIVE_PATH);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+// READS-ONLY driver connection (single-writer safety). The store is the SOLE
+// schema + write owner: it creates engine.db and every table (including the
+// lazy-additive ydoc_* tables) on its own connection under one BEGIN IMMEDIATE.
+// This driver handle is opened SQLITE_OPEN_READONLY so it can never run DDL, set
+// journal_mode, or take a write lock — a lazy open on a fresh schema must not
+// reintroduce a second write connection that could deadlock the store's writer.
+// Returns null when engine.db does not exist yet: the store has not initialized
+// it, so there are no ydoc_* rows to read (creating it here would be a write).
+function openReadOnlyDatabase(rootDir: string): SqliteDb | null {
+  const path = canonicalEngineDbPath(rootDir);
+  if (!existsSync(path)) return null;
   const { DatabaseSync } = nodeSqlite();
   let db: SqliteDb;
   try {
-    db = trackEngineDbHandleForTest(new DatabaseSync(path));
+    db = trackEngineDbHandleForTest(new DatabaseSync(path, { readOnly: true }));
   } catch (error) {
     throw corruptStore(error);
   }
   try {
+    // busy_timeout is a connection setting (safe on a read-only handle); we do
+    // NOT set journal_mode (a WAL switch is a write) or run schema DDL here.
     db.exec(`PRAGMA busy_timeout = ${ENGINE_SQLITE_BUSY_TIMEOUT_MS}`);
-    db.exec("PRAGMA foreign_keys = ON");
-    db.exec("PRAGMA journal_mode = WAL");
-    // Same engine.db, same single DDL owner (engineDbSchema.ts). Opening the
-    // ydoc driver on a brand-new workspace creates the identical schema the
-    // text/chat stores would; opening on an existing one gains the lazy-
-    // additive ydoc tables and no-ops the rest.
-    initializeOrValidateEngineSchema(db, corruptStore);
+    // Read-only validation only: assert the store already created a valid engine
+    // schema and quick_check for corruption. Both are pure reads — no DDL, no
+    // write lock. The ydoc_* tables are lazy-additive, so the store's open
+    // (which always runs ENGINE_YDOC_DDL) must precede any driver read.
+    assertRequiredEngineTables(db, corruptStore);
     assertEngineSqliteIntegrity(db, corruptStore);
     return db;
   } catch (error) {
@@ -278,6 +286,12 @@ export interface YDocEngineDriverOptions {
   // bytes. Flip to true for a future persistent-threads layer (no schema
   // change) so suggestion threads / marks survive a close.
   persistClosedSessionState?: boolean;
+  // TEST-ONLY seam. Invoked once inside openSession AFTER the global reservation
+  // is taken and the persisted state is reset, but BEFORE the live session is
+  // installed. Lets a test simulate a mid-open failure in a later step and prove
+  // the reservation is released (never stranded "live") on ANY throw. Undefined
+  // in production.
+  onAfterReserveForTest?: () => void;
 }
 
 const DEFAULT_COMPACTION_THRESHOLD = 64;
@@ -313,7 +327,14 @@ export function createYDocEngineDriver(
   // Rebind to a non-optional const so nested write helpers (closures) see the
   // narrowed, definitely-present type rather than the optional interface member.
   const runInWriteLane = boundWriteLane;
-  const enginePath = join(resolve(rootDir), VERSIONED_TEXT_STORE_RELATIVE_PATH);
+  // Canonical (symlink/alias-resolved) engine.db identity: two drivers whose
+  // rootDirs point at the SAME physical engine.db (via a symlink or case alias)
+  // must share ONE reservation namespace, or each would be free to open the same
+  // object and race two live Y.Docs. Keying by resolve() alone (lexical) would
+  // hand each a private namespace and defeat single-canonical. This MUST match
+  // the store's storeWriteChains key so a store and a driver on one physical DB
+  // agree on identity.
+  const enginePath = canonicalEngineDbPath(rootDir);
   const globalReservationKey = (
     workspaceId: WorkspaceId,
     objectId: WorkspaceObjectId,
@@ -328,10 +349,13 @@ export function createYDocEngineDriver(
   const persistClosedSessionState = options.persistClosedSessionState === true;
 
   let dbHandle: SqliteDb | null = null;
-  function db(): SqliteDb {
-    if (!dbHandle || dbHandle.isOpen === false) {
-      dbHandle = openDatabase(rootDir);
-    }
+  // Read-only handle onto the store-owned engine.db. Null when the store has not
+  // created the DB yet (fresh workspace) — there are no ydoc_* rows to read and
+  // the driver must NOT create the file (that would be a write on a second
+  // connection). Callers treat null as "no ydoc state".
+  function readDb(): SqliteDb | null {
+    if (dbHandle && dbHandle.isOpen !== false) return dbHandle;
+    dbHandle = openReadOnlyDatabase(rootDir);
     return dbHandle;
   }
 
@@ -359,7 +383,9 @@ export function createYDocEngineDriver(
   function readDocRow(key: YDocDocKey):
     | { contentKind: YDocContentKind; headUpdateSeq: number; headSnapshotSeq: number }
     | null {
-    const row = db()
+    const handle = readDb();
+    if (!handle) return null;
+    const row = handle
       .prepare(
         `SELECT content_kind, head_update_seq, head_snapshot_seq
            FROM ydoc_docs
@@ -377,8 +403,12 @@ export function createYDocEngineDriver(
   function loadPersistedDoc(key: YDocDocKey): Y.Doc | null {
     const marker = readDocRow(key);
     if (!marker) return null;
+    // readDocRow returned a marker, so the store-owned engine.db exists and the
+    // read handle is open; capture it once for the snapshot + update reads.
+    const handle = readDb();
+    if (!handle) return null;
     const doc = new Y.Doc();
-    const snapshotRow = db()
+    const snapshotRow = handle
       .prepare(
         `SELECT up_to_seq, snapshot_blob_sha256
            FROM ydoc_snapshots
@@ -390,11 +420,11 @@ export function createYDocEngineDriver(
     let fromSeq = 0;
     let applied = false;
     if (snapshotRow) {
-      Y.applyUpdate(doc, readYDocBlob(db(), String(snapshotRow.snapshot_blob_sha256)));
+      Y.applyUpdate(doc, readYDocBlob(handle, String(snapshotRow.snapshot_blob_sha256)));
       fromSeq = Number(snapshotRow.up_to_seq);
       applied = true;
     }
-    const updates = db()
+    const updates = handle
       .prepare(
         `SELECT update_blob_sha256
            FROM ydoc_updates
@@ -403,7 +433,7 @@ export function createYDocEngineDriver(
       )
       .all(key.workspaceId, key.versionId, key.objectId, fromSeq);
     for (const u of updates) {
-      Y.applyUpdate(doc, readYDocBlob(db(), String(u.update_blob_sha256)));
+      Y.applyUpdate(doc, readYDocBlob(handle, String(u.update_blob_sha256)));
       applied = true;
     }
     // MARKER-ONLY (never a blank doc as content): a default close prunes all
@@ -614,12 +644,18 @@ export function createYDocEngineDriver(
       // Reserve BEFORE the reset write so a concurrent open for the same object
       // (any instance) loses the race here, not after clobbering the log.
       globalLiveYDocReservations.add(reservationKey);
+      // Wrap the ENTIRE post-reservation open path (reset -> project -> build ->
+      // register) so ANY failure before the session is fully installed releases
+      // the reservation. Releasing only on a resetPersistedState throw would let
+      // a throw in a LATER step (e.g. projectMarkdown) strand the object as
+      // "live" forever, blocking every future openSession for it.
+      let sessionInstalled = false;
       try {
         await resetPersistedState(key, kind, doc);
-      } catch (error) {
-        globalLiveYDocReservations.delete(reservationKey);
-        throw error;
-      }
+        // Test seam: simulate a mid-open failure AFTER the reservation is taken
+        // but BEFORE the session installs, proving release-on-any-throw covers
+        // the whole open path (not just the reset step).
+        options.onAfterReserveForTest?.();
 
       // The markdown the file held at open — the three-way base for external
       // edits, and the "already quiesced" comparison for close.
@@ -777,8 +813,15 @@ export function createYDocEngineDriver(
         },
       };
 
-      liveSessions.set(registryKey, session);
-      return session;
+        liveSessions.set(registryKey, session);
+        sessionInstalled = true;
+        return session;
+      } catch (error) {
+        // Release the reservation on ANY failure before the session installed.
+        // Once installed, close() owns releasing it (never double-release).
+        if (!sessionInstalled) globalLiveYDocReservations.delete(reservationKey);
+        throw error;
+      }
     },
 
     async close() {

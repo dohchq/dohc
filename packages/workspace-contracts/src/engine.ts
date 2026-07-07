@@ -58,7 +58,8 @@ export type VersionedTextStoreErrorCode =
   | "target-path-exists"
   | "version-name-conflict"
   | "version-not-found"
-  | "workspace-mismatch";
+  | "workspace-mismatch"
+  | "write-lane-reentry";
 
 export type VersionKind = "main" | "named";
 

@@ -1,7 +1,8 @@
 import { createRequire } from "node:module";
+import { existsSync, symlinkSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
@@ -632,5 +633,157 @@ describe("YDoc engine driver — ON DELETE CASCADE from file_objects", () => {
     expect(rawRows("SELECT 1 FROM ydoc_docs WHERE object_id = ?", [objectId])).toEqual([]);
     expect(rawRows("SELECT 1 FROM ydoc_updates WHERE object_id = ?", [objectId])).toEqual([]);
     expect(rawRows("SELECT 1 FROM ydoc_snapshots WHERE object_id = ?", [objectId])).toEqual([]);
+  });
+});
+
+// ---- Second-fix-round residuals (fixes 1-4) --------------------------------
+
+describe("YDoc engine driver — canonical engine.db identity across path aliases (fix 1)", () => {
+  it("a second root symlinked to the same engine.db is refused a live session", async () => {
+    // Two rootDirs pointing at the SAME physical engine.db via a symlink MUST
+    // share ONE reservation namespace (canonical realpath key). Keying by
+    // resolve() alone is lexical: /root and /root-alias -> /root would get
+    // DIFFERENT keys and each be free to open the same object, racing two live
+    // Y.Docs on one file. The canonical key makes the alias lose the race.
+    const aliasRoot = join(dirname(root), `${basename(root)}-alias`);
+    let symlinked = false;
+    try {
+      symlinkSync(root, aliasRoot, "dir");
+      symlinked = true;
+    } catch {
+      // No symlink support / privilege (e.g. Windows without developer mode):
+      // this residual is covered by inspection on such platforms.
+    }
+    if (!symlinked) return;
+    try {
+      const objectId = await writeFile("doc.md", "# Doc\n");
+      const storeAlias = createVersionedTextStore(aliasRoot);
+      const driverReal = createYDocEngineDriver({ store, rootDir: root });
+      const driverAlias = createYDocEngineDriver({ store: storeAlias, rootDir: aliasRoot });
+
+      const s1 = await driverReal.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+      // The alias root resolves to the SAME physical engine.db -> already-live.
+      await expect(
+        driverAlias.openSession({ workspaceId: WS, versionId, path: "doc.md" }),
+      ).rejects.toMatchObject({ code: "already-live" });
+      // And the alias observes the object as ydoc-canonical (shared namespace).
+      expect(driverAlias.canonicalSourceFor({ workspaceId: WS, objectId })).toBe("ydoc");
+
+      await s1.close();
+      // Once closed, the alias may take ownership (single-canonical handoff).
+      const s2 = await driverAlias.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+      expect(s2.objectId).toBe(objectId);
+      await s2.close();
+
+      await driverReal.close();
+      await driverAlias.close();
+      await storeAlias.close();
+    } finally {
+      await rm(aliasRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("YDoc engine driver — reservation released on mid-open failure (fix 2)", () => {
+  it("a failure after reserve but before session-install releases the reservation", async () => {
+    const objectId = await writeFile("doc.md", "# Doc\n");
+    let boom = true;
+    const driver = createYDocEngineDriver({
+      store,
+      rootDir: root,
+      // Simulate a throw in a LATER open step (after the reservation is taken and
+      // the state reset, before the session installs). The whole post-reservation
+      // path must release, not just the reset step.
+      onAfterReserveForTest: () => {
+        if (boom) throw new Error("simulated mid-open failure after reserve");
+      },
+    });
+
+    await expect(
+      driver.openSession({ workspaceId: WS, versionId, path: "doc.md" }),
+    ).rejects.toThrow("simulated mid-open failure");
+
+    // The reservation is NOT stranded: the object is not seen as live...
+    expect(driver.canonicalSourceFor({ workspaceId: WS, objectId })).toBe("file");
+    // ...and a subsequent open (no injected failure) succeeds.
+    boom = false;
+    const session = await driver.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+    expect(session.canonicalSource()).toBe("ydoc");
+    await session.close();
+    await driver.close();
+  });
+});
+
+describe("YDoc engine driver — driver connection is read-only (fix 3)", () => {
+  it("a driver read never creates engine.db (no DDL / no write lock)", async () => {
+    // The store is the SOLE schema + write owner. On a fresh root the store has
+    // not created engine.db yet; a driver READ must return "no ydoc state"
+    // WITHOUT creating the file (creating it would be lazy DDL + BEGIN IMMEDIATE
+    // on a second connection — the two-writer path this fix removes).
+    const freshRoot = await mkdtemp(join(tmpdir(), "dohc-ydoc-ro-"));
+    try {
+      const freshStore = createVersionedTextStore(freshRoot);
+      const driver = createYDocEngineDriver({ store: freshStore, rootDir: freshRoot });
+      const dbPath = join(freshRoot, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+      expect(existsSync(dbPath)).toBe(false);
+
+      // Reads on the not-yet-created DB report "no ydoc state" and do not write.
+      const key: YDocDocKey = { workspaceId: WS, versionId: "v-fresh", objectId: "obj-fresh" };
+      expect(driver.isYDocDriven(key)).toBe(false);
+      expect(driver.loadPersistedDoc(key)).toBeNull();
+      expect(existsSync(dbPath)).toBe(false);
+
+      await driver.close();
+      await freshStore.close();
+    } finally {
+      await rm(freshRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("after the store creates the DB, driver reads still work over its read-only handle", async () => {
+    // Read-only WAL reads must succeed. openSession seeds through the store; the
+    // driver then reads persisted state over its SQLITE_OPEN_READONLY handle.
+    const objectId = await writeFile("doc.md", "# Doc\n");
+    const driver = createYDocEngineDriver({ store, rootDir: root });
+    const session = await driver.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+    const rec = autoRecord(session);
+    appendParagraph(session.doc, "read-only reload check");
+    await rec.flush();
+    const key: YDocDocKey = { workspaceId: WS, versionId, objectId };
+    expect(driver.isYDocDriven(key)).toBe(true);
+    expect(driver.loadPersistedDoc(key)).not.toBeNull();
+    await session.close();
+    await driver.close();
+  });
+});
+
+describe("YDoc engine driver — write-lane reentry guard (fix 4)", () => {
+  it("a serialized store write called from inside a lane task throws (not a hang)", async () => {
+    // The lane task contract is SQL-only on the passed connection. Calling back
+    // into a serialized store method would queue behind the still-open lane
+    // transaction and deadlock; the guard makes it fail loud instead of hang.
+    const runInEngineWriteLane = store.runInEngineWriteLane;
+    if (!runInEngineWriteLane) throw new Error("store must expose runInEngineWriteLane");
+
+    await expect(
+      runInEngineWriteLane.call(store, async () => {
+        await store.writeTextFile({
+          workspaceId: WS,
+          versionId,
+          path: "reentry.md",
+          text: "must not run",
+          metadata: { origin: "api" },
+        });
+      }),
+    ).rejects.toMatchObject({ code: "write-lane-reentry" });
+
+    // The store is not wedged: the write never landed and it still works after.
+    expect(
+      await store.readTextFile({ workspaceId: WS, versionId, path: "reentry.md" }),
+    ).toBeNull();
+    const after = await writeFile("after-reentry.md", "ok");
+    expect(after).toBeTruthy();
+    const snap = await store.readTextFile({ workspaceId: WS, versionId, path: "after-reentry.md" });
+    expect(snap?.text).toBe("ok");
   });
 });
