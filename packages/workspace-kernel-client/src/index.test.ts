@@ -232,13 +232,20 @@ process.stdin.once("data", () => process.exit(1));
 
   it("does not spawn a new child when disposed during a restart backoff", async () => {
     const marker = await freshMarker();
-    const crashesOnFirstRequest = await writeFakeKernel(`
+    const crashesOnFirstRequest = await writeFakeKernel(
+      `
 printf 'x' >> ${marker}
 IFS= read -r _line
 exit 1
-`);
+`,
+      `
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(marker)}, "x");
+process.stdin.once("data", () => process.exit(1));
+`,
+    );
     const client = new WorkspaceKernelClient({
-      binaryPath: crashesOnFirstRequest,
+      ...crashesOnFirstRequest,
       timeoutMs: 500,
       initialBackoffMs: 500,
       maxBackoffMs: 500,
@@ -256,13 +263,20 @@ exit 1
 
   it("with maxRestarts:0 spawns the binary only once (one-shot reconcile path)", async () => {
     const marker = await freshMarker();
-    const exitsOnRequest = await writeFakeKernel(`
+    const exitsOnRequest = await writeFakeKernel(
+      `
 printf 'x' >> ${marker}
 IFS= read -r _line
 exit 1
-`);
+`,
+      `
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(marker)}, "x");
+process.stdin.once("data", () => process.exit(1));
+`,
+    );
     const client = new WorkspaceKernelClient({
-      binaryPath: exitsOnRequest,
+      ...exitsOnRequest,
       timeoutMs: 500,
       maxRestarts: 0,
     });
