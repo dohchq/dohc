@@ -674,6 +674,98 @@ describe("sync relay handler", () => {
     expect((await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status).toBe(200);
   });
 
+  // 0P sync-hardening GATE FIX (durable log referencing a missing blob). The
+  // grace window keeps a fresh blob alive across the PUT->POST gap, but it does
+  // NOT cover an old blob that ages past the grace, nor a blob GC'd after a
+  // failed /log that a retry re-references. The append validates every
+  // referenced blob IN-TRANSACTION and rejects the whole batch (retryable
+  // 422 blob_missing) rather than pinning the log to content the relay lost.
+  it("rejects a log append referencing a blob the relay never received, atomically", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const contentSha = sha256("never uploaded");
+    const rejected = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "moment.append",
+              payload: { operation: "write", payloadAfterBlobSha256: contentSha },
+              recordedAtMs: 1000,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(rejected.status).toBe(422);
+    expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
+    // No partial append: the log stays empty, so it holds no durable reference
+    // to a blob the relay cannot serve.
+    const log = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
+    expect(log.ops).toEqual([]);
+  });
+
+  it("rejects an append for a blob GC'd after upload, then accepts it once re-uploaded (closes the grace-window hole)", async () => {
+    const clock = { now: 1_000_000 };
+    // blobGraceMs: 0 makes the uploaded blob immediately collectible -- the
+    // exact "aged past the grace before the referencing op arrives" hole the
+    // grace window alone cannot close.
+    const storage = await testStorage({ blobGraceMs: 0 });
+    const h = createSyncRelayHandler({
+      storage,
+      resolveActor: (request, workspaceId) => {
+        const auth = request.headers.get("authorization") ?? "";
+        if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
+        return { userId: auth.slice("Bearer user:".length), workspaceId };
+      },
+      nowMs: () => clock.now,
+    });
+    await createWorkspace(h);
+    const content = Buffer.from("aged-out blob");
+    const contentSha = sha256(content);
+    const op0 = {
+      originSeq: 0,
+      opKind: "moment.append",
+      payload: { operation: "write", payloadAfterBlobSha256: contentSha },
+      recordedAtMs: 1000,
+    };
+    const postOp = () =>
+      h(request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op0] })));
+
+    // Uploaded, then GC'd before any log row references it.
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content }))).status,
+    ).toBe(200);
+    clock.now += 1;
+    const gc = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
+    expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [contentSha] });
+
+    // The append that would resurrect a dangling reference is rejected.
+    const rejected = await postOp();
+    expect(rejected.status).toBe(422);
+    expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
+    expect(
+      (await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })))).ops,
+    ).toEqual([]);
+
+    // Two-phase happy path: re-upload the blob, then the SAME append lands
+    // cleanly against durable content.
+    expect(
+      (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content }))).status,
+    ).toBe(200);
+    const accepted = await postOp();
+    expect(accepted.status).toBe(200);
+    expect(await json(accepted)).toMatchObject({ ok: true, inserted: 1 });
+    expect(
+      (await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })))).ops,
+    ).toHaveLength(1);
+  });
+
   // CodeRabbit Security: openSyncRelayStorage is exported and reused, so it must
   // reject a NaN/Infinity/negative quota itself -- otherwise the quota check
   // (currentUsage + added > NaN) never trips and writes exceed the cap.

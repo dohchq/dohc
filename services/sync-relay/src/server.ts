@@ -7,6 +7,7 @@ import {
   type ShareSelector,
 } from "./shareFilter";
 import {
+  SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
   type SyncRelayLogInput,
@@ -669,6 +670,7 @@ function errorResponse(error: unknown): Response {
     error instanceof HttpError ||
     error instanceof SyncRelayConflictError ||
     error instanceof SyncRelayQuotaExceededError ||
+    error instanceof SyncRelayBlobMissingError ||
     (Number.isInteger(duckStatus) && duckStatus! >= 400 && duckStatus! <= 499);
   if (!classified) {
     console.error("[sync-relay] unhandled error", error);
@@ -677,13 +679,15 @@ function errorResponse(error: unknown): Response {
   const status =
     error instanceof HttpError ||
     error instanceof SyncRelayConflictError ||
-    error instanceof SyncRelayQuotaExceededError
+    error instanceof SyncRelayQuotaExceededError ||
+    error instanceof SyncRelayBlobMissingError
       ? error.statusCode
       : duckStatus!;
   const code =
     error instanceof HttpError ||
     error instanceof SyncRelayConflictError ||
-    error instanceof SyncRelayQuotaExceededError
+    error instanceof SyncRelayQuotaExceededError ||
+    error instanceof SyncRelayBlobMissingError
       ? error.code
       : typeof error === "object" && error && "code" in error
         ? String((error as { code?: unknown }).code)

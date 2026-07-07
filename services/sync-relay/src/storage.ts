@@ -710,6 +710,34 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
       this.assertWorkspaceQuota(input.workspaceId, addedLogBytes);
 
+      // Data-integrity gate (0P sync-hardening): a log op must never be made
+      // durable while it references a blob the relay does not hold. The blob
+      // GC grace window covers the fresh PUT->POST gap, but NOT an old blob
+      // that ages past the grace, nor a blob GC'd after a failed /log that a
+      // retry then re-references via /blobs/have. Validate every referenced
+      // sha IN THIS SAME transaction, before inserting: SQLite serializes
+      // writers (BEGIN IMMEDIATE), so a concurrent GC cannot delete a checked
+      // blob between this probe and the insert that pins it. Only NEW ops are
+      // checked -- a skipped idempotent duplicate is already durable and its
+      // blobs were validated at first append. Any missing blob rejects the
+      // WHOLE batch atomically (no partial append) with a retryable error the
+      // client resolves by re-uploading and re-posting.
+      const referencedShas = new Set<string>();
+      for (const op of newOps) {
+        for (const sha of referencedBlobShas(op.opKind, op.payloadJson)) {
+          referencedShas.add(sha);
+        }
+      }
+      if (referencedShas.size > 0) {
+        const missing = this.missingBlobs(input.workspaceId, [...referencedShas]);
+        if (missing.length > 0) {
+          throw new SyncRelayBlobMissingError(
+            `log append references ${missing.length} blob(s) not stored on the relay ` +
+              `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
+          );
+        }
+      }
+
       const insertStmt = this.db.prepare(
         `INSERT INTO sync_relay_log (
           workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
@@ -922,6 +950,72 @@ function sha256HexUtf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+// Every blob sha an op REQUIRES the relay to already hold before the op may be
+// durably logged. This MUST mirror workspace-engine collectBlobHashesFromOp
+// exactly: the push client uploads precisely this set (text + binary) before
+// POST /log, so validating the same set neither rejects an honest push nor
+// lets a referencing op slip through unvalidated. Enumerated by op kind:
+//   - moment.append:      payloadBefore/After/before blob shas (both content
+//                         kinds ship as uploaded blobs).
+//   - conflict.open:      base/current/incoming state shas, but ONLY for
+//                         binary states -- text conflict states carry their
+//                         bytes INLINE in the payload and are never uploaded,
+//                         so requiring them would wrongly reject a valid op.
+//   - version.create:     every forkSnapshot blob sha (both content kinds).
+//   - secret.file.put:    the ciphertext blob sha.
+//   - secret.version.fork: every row's ciphertext blob sha.
+// All other kinds (workspace.init, secret.file.delete, chat.*, reserved
+// version.rename/chat.thread.update, and any unknown/opaque kind) reference no
+// uploaded blobs. Fully defensive: a malformed payload shape yields no refs
+// for that branch rather than throwing (the store's apply-time validation is
+// the fail-closed backstop for shape).
+export function referencedBlobShas(opKind: string, payloadJson: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return [];
+  }
+  const record = asObject(parsed);
+  if (!record) return [];
+  const shas: string[] = [];
+  const push = (value: unknown): void => {
+    if (typeof value === "string" && value.length > 0) shas.push(value);
+  };
+  if (opKind === "moment.append") {
+    push(record.payloadBeforeBlobSha256);
+    push(record.payloadAfterBlobSha256);
+    push(record.beforeBlobSha256);
+  } else if (opKind === "conflict.open") {
+    for (const key of ["base", "current", "incoming"] as const) {
+      const state = asObject(record[key]);
+      if (state && state.exists === true && state.contentKind === "binary") {
+        push(state.sha256);
+      }
+    }
+  } else if (opKind === "version.create") {
+    const snapshots = Array.isArray(record.forkSnapshots) ? record.forkSnapshots : [];
+    for (const raw of snapshots) {
+      const snapshot = asObject(raw);
+      if (snapshot) push(snapshot.blobSha256);
+    }
+  } else if (opKind === "secret.file.put") {
+    push(record.ciphertextSha256);
+  } else if (opKind === "secret.version.fork") {
+    const rows = Array.isArray(record.rows) ? record.rows : [];
+    for (const raw of rows) {
+      const row = asObject(raw);
+      if (row) push(row.ciphertextSha256);
+    }
+  }
+  return shas;
+}
+
 function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
   return {
     shareId: String(row.share_id),
@@ -964,4 +1058,14 @@ export class SyncRelayConflictError extends Error {
 export class SyncRelayQuotaExceededError extends Error {
   readonly statusCode = 413;
   readonly code = "quota_exceeded";
+}
+
+// A log append referenced a blob the relay does not hold. 422 (not 409): the
+// push client reserves 409 for same-origin log divergence (rewind/probe
+// recovery), so a blob-missing rejection must use a DISTINCT retryable status
+// the client surfaces as a generic failure and retries -- its next push
+// re-uploads the missing blob (via /blobs/have) before re-posting the batch.
+export class SyncRelayBlobMissingError extends Error {
+  readonly statusCode = 422;
+  readonly code = "blob_missing";
 }

@@ -363,6 +363,15 @@ describe("share grants", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
+    // The append validates that every referenced blob is stored, so upload the
+    // content behind each op first (the granter legitimately holds it). The
+    // recipient-side redaction below is independent of blob presence: the
+    // filter drops out-of-selector and secret ops from the RECIPIENT's view
+    // whether or not the granter uploaded their content.
+    await putBlob(h, "shared body");
+    await putBlob(h, "hidden body");
+    await putBlob(h, "deep body");
+    await putBlob(h, "ciphertext");
     await appendOps(h, [
       { originSeq: opSeq++, opKind: "workspace.init", payload: { note: "init" }, recordedAtMs: 999 },
       momentOp("docs/shared.md", "shared body"),
@@ -620,8 +629,13 @@ describe("share grants", () => {
     await createWorkspace(h);
     const ops = [] as unknown[];
     for (let index = 0; index < 5; index += 1) {
+      // Upload the referenced blob first so the append validates; the point of
+      // this test is cursor advancement across FILTERED-OUT (out-of-selector)
+      // rows, which is unaffected by whether the granter's blobs exist.
+      await putBlob(h, `hidden ${index}`);
       ops.push(momentOp(`private/file-${index}.md`, `hidden ${index}`));
     }
+    await putBlob(h, "visible");
     ops.push(momentOp("docs/last.md", "visible"));
     await appendOps(h, ops);
     await createShare(h);
