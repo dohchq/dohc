@@ -1355,6 +1355,72 @@ describe("chat reactions (WS-MU-C2)", () => {
     return { threadId: started.thread.id, messageId: started.message.id };
   }
 
+  // WS-MU-C0 verified authorship (message.append side).
+  it("omits authorUserId on a solo message.append (byte-identical to pre-MU-C0)", async () => {
+    const a = await makeEngine("a");
+    const channel = await a.store.createChannel({ workspaceId: WS, name: "general" });
+    await a.store.startChannelThread({
+      workspaceId: WS,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "solo, no relay identity",
+    });
+    const messageOps = chatOpsFor(a.root).filter((op) => op.opKind === "chat.message.append");
+    expect(messageOps).toHaveLength(1);
+    // The field is absent (not present-and-undefined): the wire bytes match the
+    // shape shipped before MU-C0, so a solo workspace produces identical ops.
+    expect(Object.prototype.hasOwnProperty.call(messageOps[0]!.payload, "authorUserId")).toBe(false);
+  });
+
+  it("stamps and replicates an OPAQUE authorUserId on a signed-in message, persisting it on apply", async () => {
+    const a = await makeEngine("a");
+    const b = await makeEngine("b");
+    const channel = await a.store.createChannel({ workspaceId: WS, name: "general" });
+    const started = await a.store.startChannelThread({
+      workspaceId: WS,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Alice" },
+      authorUserId: "opaque-user-alice",
+      body: "signed in",
+    });
+    expect(started.message.authorUserId).toBe("opaque-user-alice");
+    const follow = await a.store.sendMessage({
+      workspaceId: WS,
+      threadId: started.thread.id,
+      author: { kind: "human", displayName: "Alice" },
+      authorUserId: "opaque-user-alice",
+      body: "second line",
+    });
+    expect(follow.authorUserId).toBe("opaque-user-alice");
+    // The journaled ops carry the opaque id — never the display name, never an
+    // email — so the relay can verify it and peers persist it.
+    const messageOps = chatOpsFor(a.root).filter((op) => op.opKind === "chat.message.append");
+    expect(messageOps).toHaveLength(2);
+    for (const op of messageOps) {
+      expect((op.payload as { authorUserId?: string }).authorUserId).toBe("opaque-user-alice");
+    }
+    // Replicate into a fresh peer through the real apply path; authorUserId is
+    // authoritative there ONLY because the relay verified it (the engine trusts
+    // the verified stream). The peer persists and returns it.
+    for (const op of chatOpsFor(a.root)) await b.store.applyReplicationOp(op);
+    const messagesB = await b.store.listMessages({ workspaceId: WS, threadId: started.thread.id });
+    expect(messagesB.map((m) => m.authorUserId)).toEqual(["opaque-user-alice", "opaque-user-alice"]);
+  });
+
+  it("rejects an invalid (blank/oversized) authorUserId at the store boundary", async () => {
+    const a = await makeEngine("a");
+    const { threadId } = await seedMessage(a);
+    await expect(
+      a.store.sendMessage({
+        workspaceId: WS,
+        threadId,
+        author: { kind: "human", displayName: "Alice" },
+        authorUserId: "   ",
+        body: "bad id",
+      }),
+    ).rejects.toMatchObject({ code: "invalid-sender" });
+  });
+
   it("adds and lists a reaction solo, with no relay", async () => {
     const a = await makeEngine("a");
     const { threadId, messageId } = await seedMessage(a);
