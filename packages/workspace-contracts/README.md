@@ -16,6 +16,6 @@ surface in this slice. `ChangeAuthor` and its branded `NonEmptyLocalAuthorLabel`
 are canonically owned by this package and re-exported by
 `@dohc/workspace-core`. The history/provenance shapes embedded in the
 `VersionedFileWorkspace` surface are structural copies (this package cannot
-depend on `@dohc/workspace-core`/`@dohc/workspace-history` without a cycle),
-pinned to the real types by compile checks in
+depend on `@dohc/workspace-core` or the engine's `changeSetStore` without a
+cycle), pinned to the real types by compile checks in
 `packages/workspace-engine/src/engineContracts.compile.ts`.

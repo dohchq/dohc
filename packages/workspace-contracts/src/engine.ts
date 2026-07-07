@@ -22,8 +22,8 @@
  *   @dohc/workspace-core re-exports them (it depends on this package), which
  *   keeps the branded local-author label one nominal type everywhere.
  * - The Engine*-prefixed private types at the bottom are structural copies of
- *   @dohc/workspace-core / @dohc/workspace-history shapes that this package
- *   cannot import without a dependency cycle. They are pinned to the real
+ *   @dohc/workspace-core / workspace-engine changeSetStore shapes that this
+ *   package cannot import without a dependency cycle. They are pinned to the real
  *   types by exact-identity compile checks in
  *   packages/workspace-engine/src/engineContracts.compile.ts, so drift fails
  *   the engine typecheck.

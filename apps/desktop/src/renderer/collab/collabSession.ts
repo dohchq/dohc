@@ -1,7 +1,8 @@
-// The browser-safe subpath, NOT the barrel: the barrel re-exports
-// changeSetStore (node:fs), which the dev server serves un-tree-shaken into
-// the renderer and crashes the module graph at load (blank window).
-import { mergeMarkdown } from "@dohc/workspace-history/mergeMarkdown";
+// The browser-safe subpath, NOT the barrel: the workspace-core barrel
+// re-exports node:fs modules (databases.ts), which the dev server would serve
+// un-tree-shaken into the renderer and crash the module graph at load (blank
+// window).
+import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 
 // Canonical-state model for live co-editing (plan Phase 10, decision D-07).
 //

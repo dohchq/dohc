@@ -14,11 +14,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { addFileChanges, createChangeSet, createLocalChangeAuthor } from "@dohc/workspace-core";
-import {
-  createChangeSetStore,
-  isDurableChangeSetRecordingSupported,
-} from "@dohc/workspace-history";
 import {
   createWorkspaceDirectory,
   addSiteSdk,
@@ -71,24 +66,6 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
 }
 
 
-// WS-H1 flag flip: the engine is the default; an explicit opt-out disables
-// recording entirely (retirement Phase C removed the legacy recorder). Tests
-// seed this to pin the opted-out shapes: mutating tools report
-// historyRecording: "off" and the chat tools refuse.
-async function seedLegacyOptOut(ctx: ToolContext): Promise<void> {
-  await mkdir(join(ctx.root, ".dohc"), { recursive: true });
-  await writeFile(
-    join(ctx.root, ".dohc", "settings.local.json"),
-    `${JSON.stringify({
-      version: 1,
-      agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
-      sites: { defaultPreviewMode: "auto" },
-      privacy: { confirmExternalLinks: true },
-      experimental: { workspaceEngineAlpha: false },
-    }, null, 2)}\n`,
-  );
-}
-
 async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
@@ -104,7 +81,9 @@ async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promi
   }
 }
 
-const itDurableHistory = isDurableChangeSetRecordingSupported() ? it : it.skip;
+// The engine capture path these tests exercise relies on Linux descriptor-
+// relative fs (the same platform gate the retired durable history used).
+const itDurableHistory = process.platform === "linux" ? it : it.skip;
 
 // The traversal vectors EVERY path-taking tool must refuse: parent escape,
 // percent-encoded escape (single and double), an absolute path, and the
@@ -383,48 +362,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("reads ephemeral watcher history when durable history is unsupported", async () => {
-    await withWorkspace(async (ctx) => {
-      await seedLegacyOptOut(ctx);
-      await withProcessPlatform("darwin", async () => {
-        const store = createChangeSetStore(ctx.root, { ephemeralIfUnsupported: true });
-        const set = addFileChanges(
-          createChangeSet({
-            kind: "user-edit",
-            author: createLocalChangeAuthor("Local file edit"),
-            summary: "Edited note from watcher",
-            provenance: { source: "user-edit" },
-          }),
-          [{ path: "notes/watched.md", operation: "write" }],
-        );
-        await store.record(set, { id: "watcher-record-1", recordedAtMs: 1234 });
-
-        await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
-          count: 1,
-          changes: [
-            expect.objectContaining({
-              id: "watcher-record-1",
-              files: [{ path: "notes/watched.md", operation: "write" }],
-            }),
-          ],
-        });
-        await expect(readChange(ctx, { id: "watcher-record-1" })).resolves.toMatchObject({
-          ok: true,
-          change: expect.objectContaining({ id: "watcher-record-1" }),
-        });
-
-        // Phase C: writes are no longer blocked by the durable-history
-        // platform gate (and they add no legacy records either). This
-        // workspace explicitly opted out of the engine, so the write reports
-        // recording honestly OFF — never a recorder that isn't running.
-        await expect(
-          writeWorkspaceFile(ctx, { path: "notes/unblocked.md", content: "fine\n" }),
-        ).resolves.toMatchObject({ ok: true, historyRecording: "off" });
-        await expect(listChanges(ctx, {})).resolves.toMatchObject({ count: 1 });
-      });
-    });
-  });
-
   it("searches visible paths and text content while hiding workspace internals", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "docs"), { recursive: true });
@@ -579,41 +516,28 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("lists and reads pre-flip legacy change sets as a read-only relic (writes add none)", async () => {
+  it("reads history from engine moments only — legacy .dohc/history relics are ignored", async () => {
     await withWorkspace(async (ctx) => {
-      // A record left behind by a pre-flip version of the app.
-      const store = createChangeSetStore(ctx.root);
-      await store.record(
-        addFileChanges(
-          createChangeSet({
-            kind: "user-edit",
-            author: createLocalChangeAuthor("Local file edit"),
-            summary: "Pre-flip edit",
-            provenance: { source: "user-edit" },
-          }),
-          [{ path: "notes/old.md", operation: "write" }],
-        ),
-        { id: "relic-1", recordedAtMs: 1000 },
+      // A pre-flip legacy change-set relic left on disk is never read: the
+      // engine (moments) is the sole history source now.
+      await mkdir(join(ctx.root, ".dohc", "history"), { recursive: true });
+      await writeFile(
+        join(ctx.root, ".dohc", "history", "relic.json"),
+        JSON.stringify({ id: "relic-1", summary: "Pre-flip edit" }),
       );
 
-      // A new MCP write records NOTHING legacy (Phase C)...
+      // A new MCP write records NOTHING legacy (Phase C).
       await expect(
         writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
       ).resolves.toMatchObject({ ok: true, recordedBy: "workspace-engine" });
 
-      // ...while the read tools still serve the relic.
-      const listed = await listChanges(ctx, { includeFiles: true });
-      expect(listed).toMatchObject({ count: 1, totalAvailable: 1, hasMore: false });
-      expect(listed.changes[0]).toMatchObject({
-        id: "relic-1",
-        summary: "Pre-flip edit",
-        files: [{ path: "notes/old.md", operation: "write" }],
+      // No engine store in this MCP-only workspace, so history is empty — the
+      // relic is not surfaced, and an unknown id is honestly not found.
+      await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
+        count: 0,
+        totalAvailable: 0,
       });
       await expect(readChange(ctx, { id: "relic-1" })).resolves.toMatchObject({
-        ok: true,
-        change: { id: "relic-1" },
-      });
-      await expect(readChange(ctx, { id: "missing" })).resolves.toMatchObject({
         ok: false,
       });
     });

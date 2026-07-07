@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./paths": "./src/paths.ts"
+    "./paths": "./src/paths.ts",
+    "./mergeMarkdown": "./src/mergeMarkdown.ts"
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*"
