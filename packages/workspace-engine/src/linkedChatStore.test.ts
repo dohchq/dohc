@@ -1229,12 +1229,14 @@ describe("chat reactions (WS-MU-C2)", () => {
   }
   const engines: Engine[] = [];
 
-  async function makeEngine(prefix: string, startMs = 1000): Promise<Engine> {
+  async function makeEngine(prefix: string, startMs = 1000, tickMs = 10): Promise<Engine> {
     const engineRoot = await mkdtemp(join(tmpdir(), `dohc-reactions-${prefix}-`));
     let clock = startMs;
     const counters = { channel: 0, message: 0, thread: 0 };
     const store = createLinkedChatStore(engineRoot, {
-      nowMs: () => (clock += 10),
+      // tickMs 0 pins the wall clock (same ms every call), modelling fast local
+      // toggles that land within one millisecond.
+      nowMs: () => (clock += tickMs),
       createId: (kind) => `${prefix}-${kind}-${(counters[kind] += 1)}`,
     });
     const engine: Engine = {
@@ -1510,6 +1512,20 @@ describe("chat reactions (WS-MU-C2)", () => {
     expect(activeCells(tieB.root)).toEqual([]);
   });
 
+  it("a fast local remove → re-add within one ms still lands as added (monotonic local at_ms)", async () => {
+    // A pinned wall clock (tickMs 0) makes all three writes share a millisecond.
+    // Without a per-cell monotonic bump the causally-latest re-add would tie the
+    // remove and LOSE under remove-wins; the bump keeps the user's latest intent.
+    const a = await makeEngine("mono", 5000, 0);
+    const { threadId, messageId } = await seedMessage(a);
+    const author = { authorId: "alice@x", kind: "human" as const, displayName: "Alice" };
+    await a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: "👍", author, state: "added" });
+    await a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: "👍", author, state: "removed" });
+    await a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: "👍", author, state: "added" });
+    const list = await a.store.listReactions({ workspaceId: WS, threadId });
+    expect(list.map((r) => r.author.authorId)).toEqual(["alice@x"]);
+  });
+
   it("converges cross-origin ties (equal at_ms + state, different origin) to one winner", async () => {
     // Same CELL (message, emoji, author), same at_ms, same state 'added', but
     // two DIFFERENT origins carrying different threadId. The (at_ms, state)
@@ -1652,16 +1668,31 @@ describe("chat reactions (WS-MU-C2)", () => {
       if (a.origin !== b.origin) return a.origin > b.origin;
       return a.seq > b.seq;
     };
+    // Seeded PRNG (mulberry32) so a red convergence run is replayable — the seed
+    // is logged on failure below. A fresh random seed each run still explores new
+    // interleavings.
+    const seed = (Math.random() * 2 ** 32) >>> 0;
+    const mulberry32 = (state: number): (() => number) => {
+      let a = state;
+      return () => {
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    };
+    const rng = mulberry32(seed);
+
     const perCellWinner = new Map<string, Winner>();
     const streams: Record<string, SyncReplicationEnvelope[]> = { oX: [], oY: [] };
     let atMs = 1000;
     for (let i = 0; i < 80; i += 1) {
       // Only advance the clock half the time → deliberate at_ms ties across ops.
-      if (Math.random() < 0.5) atMs += 10;
-      const authorId = authors[Math.floor(Math.random() * authors.length)]!;
-      const emoji = emojis[Math.floor(Math.random() * emojis.length)]!;
-      const state = Math.random() < 0.5 ? "added" : "removed";
-      const origin = origins[Math.floor(Math.random() * origins.length)]!;
+      if (rng() < 0.5) atMs += 10;
+      const authorId = authors[Math.floor(rng() * authors.length)]!;
+      const emoji = emojis[Math.floor(rng() * emojis.length)]!;
+      const state = rng() < 0.5 ? "added" : "removed";
+      const origin = origins[Math.floor(rng() * origins.length)]!;
       const seq = seqByOrigin[origin]!++;
       const spec: ReactionOpSpec = {
         origin,
@@ -1692,7 +1723,7 @@ describe("chat reactions (WS-MU-C2)", () => {
       for (;;) {
         const ready = origins.filter((origin) => cursors[origin]! < streams[origin]!.length);
         if (ready.length === 0) break;
-        const origin = ready[Math.floor(Math.random() * ready.length)]!;
+        const origin = ready[Math.floor(rng() * ready.length)]!;
         out.push(streams[origin]![cursors[origin]!++]!);
       }
       return out;
@@ -1703,7 +1734,13 @@ describe("chat reactions (WS-MU-C2)", () => {
     const engine2 = await makeEngine("fuzz2");
     for (const op of mergedOrder()) await engine2.store.applyReplicationOp(op);
 
-    expect(activeCells(engine1.root)).toEqual(expected);
-    expect(activeCells(engine2.root)).toEqual(expected);
+    try {
+      expect(activeCells(engine1.root)).toEqual(expected);
+      expect(activeCells(engine2.root)).toEqual(expected);
+    } catch (error) {
+      // Make the failing interleaving replayable: rerun with this seed.
+      console.error(`reaction fuzz convergence failed — seed=${seed}`);
+      throw error;
+    }
   });
 });

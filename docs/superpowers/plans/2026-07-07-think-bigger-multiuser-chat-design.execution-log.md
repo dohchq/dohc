@@ -195,8 +195,20 @@ round fixed three and DOCUMENTED the fourth (whose real fix is the MU-C0 lane).
    test that an orphan reaction (no matching message) does not appear in
    `listReactions` output while a real reaction does.
 
-Engine suite: 456 → 459 (+3 gate-fix tests: cross-origin tie convergence, clock
-clamp, orphan JOIN; the fuzz was extended in place). `chat_reactions` gained
+Two CodeRabbit findings on the exact reworked code were folded into this round:
+(a) **local at_ms is now strictly monotonic per cell** — `setReaction` bumps
+`atMs` past the stored cell so a fast toggle (remove → re-add within one ms)
+doesn't tie and lose to the remove under the remove-wins rule (the total order
+puts stateRank above origin_seq, so a same-origin causally-later re-add needed
+the bump); (b) the convergence **fuzz is now seeded** (mulberry32, seed logged on
+failure) so a red run is replayable. The remaining CodeRabbit comments are
+pre-existing MU-C2 UI concerns (optimistic-toggle rollback, picker Escape focus,
+emoji content validation) and the email-as-authorId PII question (MU-C0 owns the
+canonical user-id contract) — out of this gate round's scope.
+
+Engine suite: 367 → 371 parallel (+4 gate-fix tests: cross-origin tie
+convergence, clock clamp, orphan JOIN, monotonic local re-add; the fuzz was
+extended in place) + 128/5-skip serial unchanged. `chat_reactions` gained
 `origin_id`/`origin_seq` columns — the table is new in MU-C2 and never shipped,
 so this is part of the initial shape (no migration). Files touched:
 `engineDbSchema.ts`, `linkedChatStore.ts`, `linkedChatStore.test.ts`, and this

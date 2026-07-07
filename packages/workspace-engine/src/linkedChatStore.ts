@@ -1498,6 +1498,21 @@ export function createLinkedChatStore(
         const authorKind = actorKindValue(input.author.kind);
         const authorDisplayName = normalizeDisplayName(input.author.displayName);
         const state = reactionStateValue(input.state);
+        // Local writes are strictly monotonic PER CELL. A fast toggle
+        // (remove → re-add) can reuse the same wall-clock ms; under the
+        // remove-wins tie in the total order, stateRank outranks origin_seq, so
+        // the causally-later re-add would otherwise LOSE to the just-written
+        // remove. Bumping past the stored cell's at_ms keeps the user's latest
+        // local intent winning (and lets a deliberate local re-add override a
+        // newer remote remove, which is what the click means).
+        const priorRow = db
+          .prepare(
+            `SELECT at_ms FROM chat_reactions
+             WHERE workspace_id = ? AND message_id = ? AND emoji = ? AND author_id = ?`,
+          )
+          .get(workspaceId, input.messageId, emoji, authorId);
+        const priorAtMs = priorRow ? numberValue(priorRow.at_ms) : Number.NEGATIVE_INFINITY;
+        const atMs = Math.max(nowMs(), priorAtMs + 1);
         const payload: ChatReactionSetPayload = {
           reactionId: reactionIdFor(input.messageId, emoji, authorId),
           messageId: input.messageId,
@@ -1507,7 +1522,7 @@ export function createLinkedChatStore(
           authorKind,
           authorDisplayName,
           state,
-          atMs: nowMs(),
+          atMs,
         };
         // Mint this device's origin + the seq the op will journal at BEFORE the
         // upsert, so the register stores the same (origin_id, origin_seq) the
