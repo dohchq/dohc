@@ -1204,3 +1204,44 @@ describeAnchoredHistory("listSince (cloud sync cursor)", () => {
     }
   });
 });
+
+// Windows runs the portable durable writer: same on-disk layout and
+// containment refusals as the anchored writer, with parent identity
+// re-checked per mutation instead of descriptor-relative addressing. These
+// pins run only on win32; the Linux anchored suites above are unchanged.
+const describePortableHistory = process.platform === "win32" ? describe : describe.skip;
+
+describePortableHistory("portable durable history (win32)", () => {
+  it("records, lists, and reloads change sets durably on disk", async () => {
+    const store = createChangeSetStore(root);
+    await store.record(userEdit(), { id: "win-1", recordedAtMs: 1000 });
+    await store.record(agentImport(), { id: "win-2", recordedAtMs: 2000 });
+
+    const entries = await readdir(join(root, ".dohc", "history"));
+    expect(entries).toContain("index.json");
+    expect(entries).toContain("1000-win-1.json");
+    expect(entries).toContain("2000-win-2.json");
+
+    const reloaded = createChangeSetStore(root);
+    await expect(reloaded.list()).resolves.toMatchObject([{ id: "win-2" }, { id: "win-1" }]);
+    await expect(reloaded.get("win-1")).resolves.toMatchObject({
+      summary: "Edited today's notes",
+    });
+  });
+
+  it("refuses to record through a history directory replaced by a directory link", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "dohc-history-escape-"));
+    try {
+      await mkdir(join(root, ".dohc"), { recursive: true });
+      await symlink(outside, join(root, ".dohc", "history"), directoryLinkType);
+
+      const store = createChangeSetStore(root);
+      await expect(
+        store.record(userEdit(), { id: "escape-1", recordedAtMs: 1000 }),
+      ).rejects.toThrow(/outside the workspace root/);
+      await expect(readdir(outside)).resolves.toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
