@@ -47,13 +47,6 @@ import {
   type ChangeSetStore,
   type HistoryRecord,
 } from "@dohc/workspace-history";
-import {
-  createMergeSync,
-  ServerBindingMismatchError,
-  UnauthorizedSyncError,
-  type FetchLike,
-  type MergeSyncResult,
-} from "@dohc/workspace-sync";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
@@ -1272,159 +1265,10 @@ export async function workspaceStatus(ctx: ToolContext) {
   };
 }
 
-// --- dohc_sync_now / dohc_sync_cloud ---------------------------------------
-
-// LEGACY cloud path (WS-H1): this reports the pre-flip legacy change sets
-// still pending against the retired cloud-sync cursor — engine moments never
-// appear here. Kept (not rewired) until the engine's folder-based sync (0P-B)
-// replaces the cloud stack; use dohc_list_changes for real history.
-export async function syncNow(ctx: ToolContext, args: { sinceMs?: number }) {
-  const store = historyReadStoreFor(ctx);
-  const pending = await store.listSince(args.sinceMs ?? 0);
-  const latest = pending.at(-1);
-  return {
-    pendingChangeCount: pending.length,
-    clean: pending.length === 0,
-    cursorMs: latest?.recordedAtMs ?? args.sinceMs ?? 0,
-    pending: pending.map((record) => ({
-      id: record.id,
-      recordedAtMs: record.recordedAtMs,
-      summary: record.summary,
-      fileCount: record.files.length,
-    })),
-  };
-}
-
-type SyncCloudDirection = "pull" | "push" | "push-pull";
-
-function emptyMergeResult(): MergeSyncResult {
-  return {
-    pushed: 0,
-    pulled: 0,
-    deletedLocally: 0,
-    pushedPaths: [],
-    pulledPaths: [],
-    deletedLocalPaths: [],
-    conflicts: [],
-    skipped: [],
-  };
-}
-
-function combineMergeResults(...results: MergeSyncResult[]): MergeSyncResult {
-  return results.reduce<MergeSyncResult>(
-    (total, result) => ({
-      pushed: total.pushed + result.pushed,
-      pulled: total.pulled + result.pulled,
-      deletedLocally: total.deletedLocally + result.deletedLocally,
-      pushedPaths: [...total.pushedPaths, ...result.pushedPaths],
-      pulledPaths: [...total.pulledPaths, ...result.pulledPaths],
-      deletedLocalPaths: [...total.deletedLocalPaths, ...result.deletedLocalPaths],
-      conflicts: [...total.conflicts, ...result.conflicts],
-      skipped: [...total.skipped, ...result.skipped],
-    }),
-    emptyMergeResult(),
-  );
-}
-
-async function recordCloudPull(
-  ctx: ToolContext,
-  result: MergeSyncResult,
-): Promise<Awaited<ReturnType<typeof recordedChangeFields>> | { historyError: string } | null> {
-  const files: FileChange[] = [
-    ...result.pulledPaths.map((path) => ({ path, operation: "write" as const })),
-    ...result.deletedLocalPaths.map((path) => ({ path, operation: "delete" as const })),
-  ];
-  if (files.length === 0) return null;
-  // The watcher observes the pulled/deleted files on disk and captures them
-  // as engine moments; no direct history write happens here anymore.
-  return recordedChangeFields(ctx);
-}
-
-export async function syncCloud(
-  ctx: ToolContext,
-  args: { direction?: SyncCloudDirection } = {},
-  options: { fetch?: FetchLike } = {},
-) {
-  const remote = await remoteForCurrentWorkspace(ctx);
-  if (!remote) {
-    return { ok: false as const, reason: "Workspace is local-only; enable dohc Cloud sync first." };
-  }
-
-  const credentials = await loadCloudCredentials(ctx);
-  if (!credentials.ok) {
-    return {
-      ok: false as const,
-      reason: credentials.reason,
-      credentialStatus: credentials.status,
-    };
-  }
-  if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
-    return {
-      ok: false as const,
-      reason: `dohc Cloud session is for ${credentials.serverUrl}, but this workspace is bound to ${remote.serverUrl}.`,
-      credentialStatus: "server-mismatch" as const,
-    };
-  }
-
-  const direction = args.direction ?? "push-pull";
-  if (direction !== "push") {
-    const recordable = await ensureRecordable(ctx);
-    if (recordable) return recordable;
-  }
-  const sync = createMergeSync({
-    rootDir: ctx.root,
-    remoteWorkspaceId: remote.remoteWorkspaceId,
-    serverUrl: remote.serverUrl,
-    token: credentials.token,
-    fetch: options.fetch,
-  });
-
-  try {
-    await sync.initialize();
-    const pull =
-      direction === "pull" || direction === "push-pull"
-        ? await sync.pull()
-        : emptyMergeResult();
-    const history = await recordCloudPull(ctx, pull);
-    const push =
-      direction === "push" || direction === "push-pull"
-        ? await sync.push()
-        : emptyMergeResult();
-    const result = combineMergeResults(pull, push);
-    return {
-      ok: true as const,
-      direction,
-      remoteWorkspaceId: remote.remoteWorkspaceId,
-      serverUrl: remote.serverUrl,
-      pushed: result.pushed,
-      pulled: result.pulled,
-      deletedLocally: result.deletedLocally,
-      pushedPaths: result.pushedPaths,
-      pulledPaths: result.pulledPaths,
-      deletedLocalPaths: result.deletedLocalPaths,
-      conflicts: result.conflicts,
-      skipped: result.skipped,
-      ...(history ?? {}),
-    };
-  } catch (error) {
-    if (error instanceof UnauthorizedSyncError) {
-      return {
-        ok: false as const,
-        reason: error.message,
-        authExpired: true,
-        credentialStatus: "expired" as const,
-      };
-    }
-    if (error instanceof ServerBindingMismatchError) {
-      return {
-        ok: false as const,
-        reason: error.message,
-        serverBindingMismatch: true,
-      };
-    }
-    return { ok: false as const, reason: failureReason(error, "cloud sync failed") };
-  }
-}
+// Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed together with
+// the retired workspace-api file/sync routes (/workspaces/:id/files,
+// /sync/apply). Cloud sync is now automatic per workspace via the sync relay;
+// workspace history is read through dohc_list_changes (engine moments) below.
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 

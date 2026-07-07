@@ -15,7 +15,6 @@
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine": "workspace:*",
     "@dohc/workspace-history": "workspace:*",
-    "@dohc/workspace-sync": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.25.76"
   },

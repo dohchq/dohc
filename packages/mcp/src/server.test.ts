@@ -10,7 +10,6 @@ const WRITE_TOOLS = [
   "dohc_create_directory",
   "dohc_move_path",
   "dohc_delete_path",
-  "dohc_sync_cloud",
   "dohc_create_site",
   "dohc_add_sdk",
   "dohc_import_data",
