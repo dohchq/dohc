@@ -4791,6 +4791,16 @@ function createVersionedTextStoreWithHooks(
       });
     },
 
+    // WS-G2-B engine write lane: the Y.Doc driver's writes share THIS store's
+    // connection + serialized queue + single BEGIN IMMEDIATE, so a settle and a
+    // Y.Doc update-append can never open two concurrent in-process write
+    // transactions (node:sqlite busy-waits block the JS thread). The task runs
+    // inside runTransaction — it must not BEGIN/COMMIT itself; a throw rolls the
+    // lane transaction back.
+    runInEngineWriteLane(task) {
+      return serialize(async () => task(db()));
+    },
+
     writeTextFile(input) {
       return serialize(async () => {
         assertInputEnvelope(input);

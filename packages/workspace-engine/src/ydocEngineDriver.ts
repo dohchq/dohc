@@ -6,8 +6,26 @@
 // shapes the legacy Hocuspocus stack proved (sequential update log + periodic
 // full-state snapshots, services/hocuspocus/src/persistence.ts) onto engine.db,
 // content-addressing every update/snapshot blob into `binary_blobs` exactly
-// like every other engine artifact — so the same bytes replicate over the 0P
-// relay for free at G2-C.
+// like every other engine artifact.
+//
+// REPLICATION SCOPE (G2-B): these ydoc_* blobs are LOCAL-ONLY today — NO
+// replication op references them, so they do NOT ride the 0P relay yet. The
+// content-addressed layout means G2-C can add an `ydoc.update` replication op
+// and get dedup/transport for free, but until that ships a Y.Doc replicates
+// only via its settled .md (markdown-is-the-artifact). The blob GC must still
+// treat a blob referenced by a live ydoc_updates/ydoc_snapshots row as a ROOT
+// (see engineDbSchema.ts ENGINE_YDOC_DDL) so local resume state is never
+// collected out from under a live head.
+//
+// SINGLE-WRITER SAFETY: every engine.db WRITE this driver makes (blob puts,
+// update/snapshot rows, head pointers) is routed through the store's engine
+// write lane (VersionedTextStore.runInEngineWriteLane) so it shares the store's
+// connection, serialized queue, and single BEGIN IMMEDIATE. A settle
+// (writeTextFile) and a Y.Doc update-append therefore can never hold two
+// concurrent in-process write transactions — node:sqlite busy-waits block the
+// JS thread, so two same-process writers on separate connections would deadlock
+// until busy_timeout. The driver keeps its own connection for READS only (WAL
+// readers never block a writer).
 //
 // BINDING DECISION — MARKDOWN-IS-THE-ARTIFACT: the settled .md is the durable,
 // searchable, restorable, diffable artifact of record. Full Y.Doc CRDT state is
@@ -43,6 +61,7 @@ import {
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import type {
   ActorNeutralWriteMetadata,
+  EngineWriteLaneConnection,
   VersionedTextStore,
   VersionId,
   VersionedTextMomentId,
@@ -142,7 +161,10 @@ function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function putYDocBlob(db: SqliteDb, bytes: Uint8Array): string {
+// Both blob helpers take the minimal EngineWriteLaneConnection surface so they
+// serve either the driver's own read connection (SqliteDb, structurally wider)
+// or the shared write-lane connection the store hands the task.
+function putYDocBlob(db: EngineWriteLaneConnection, bytes: Uint8Array): string {
   const content = Buffer.from(bytes);
   const sha256 = sha256Bytes(content);
   db.prepare(
@@ -151,11 +173,20 @@ function putYDocBlob(db: SqliteDb, bytes: Uint8Array): string {
   return sha256;
 }
 
-function readYDocBlob(db: SqliteDb, sha256: string): Uint8Array {
-  const row = db.prepare("SELECT content FROM binary_blobs WHERE sha256 = ?").get(sha256);
+function readYDocBlob(db: EngineWriteLaneConnection, sha256: string): Uint8Array {
+  const row = db
+    .prepare("SELECT content, byte_length FROM binary_blobs WHERE sha256 = ?")
+    .get(sha256);
   const content = row?.content;
   if (!(content instanceof Uint8Array) && !Buffer.isBuffer(content)) throw corruptStore();
-  return new Uint8Array(content as Uint8Array);
+  const bytes = new Uint8Array(content as Uint8Array);
+  // Blob-integrity posture (matches the relay/blob path): the row is keyed by a
+  // sha, but a corrupt/poisoned binary_blobs row could carry bytes that do NOT
+  // hash to that sha. Reconstructing CRDT state from unverified bytes would
+  // silently diverge the doc, so verify the digest (and byte_length) on read.
+  if (bytes.byteLength !== Number(row?.byte_length)) throw corruptStore();
+  if (sha256Bytes(bytes) !== sha256) throw corruptStore();
+  return bytes;
 }
 
 // ---- public shapes ---------------------------------------------------------
@@ -251,12 +282,42 @@ export interface YDocEngineDriverOptions {
 
 const DEFAULT_COMPACTION_THRESHOLD = 64;
 
+// PROCESS-GLOBAL single-canonical reservation. The single-canonical invariant
+// ("never two live Y.Docs for one object") must hold across EVERY driver
+// instance in the process, not just within one createYDocEngineDriver() — two
+// drivers on the same engine.db each with their own in-memory map would both be
+// free to open the same object (even under different versions) and race
+// resets/appends/settles against the same persisted keys. This module-level set
+// is keyed by the normalized engine.db path + workspace + object (version is
+// deliberately excluded: a version switch of one object must close first), so a
+// second openSession for that object from ANY instance throws already-live.
+const globalLiveYDocReservations = new Set<string>();
+
 // ---- driver ----------------------------------------------------------------
 
 export function createYDocEngineDriver(
   options: YDocEngineDriverOptions,
 ): YDocEngineDriver {
   const { store, rootDir } = options;
+  // The Y.Doc driver REQUIRES the store's serialized engine write lane so its
+  // writes can never open a second concurrent in-process write transaction
+  // (see the SINGLE-WRITER SAFETY note above). The real createVersionedTextStore
+  // always provides it; fail loud if handed a store that does not.
+  const boundWriteLane = store.runInEngineWriteLane?.bind(store);
+  if (!boundWriteLane) {
+    throw new YDocEngineDriverError(
+      "invalid-input",
+      "VersionedTextStore does not expose runInEngineWriteLane; the Y.Doc driver requires it for single-writer safety.",
+    );
+  }
+  // Rebind to a non-optional const so nested write helpers (closures) see the
+  // narrowed, definitely-present type rather than the optional interface member.
+  const runInWriteLane = boundWriteLane;
+  const enginePath = join(resolve(rootDir), VERSIONED_TEXT_STORE_RELATIVE_PATH);
+  const globalReservationKey = (
+    workspaceId: WorkspaceId,
+    objectId: WorkspaceObjectId,
+  ) => `${enginePath} ${workspaceId} ${objectId}`;
   const nowMs = options.nowMs ?? (() => Date.now());
   const createMomentId =
     options.createMomentId ?? (() => randomUUID() as VersionedTextMomentId);
@@ -327,9 +388,11 @@ export function createYDocEngineDriver(
       )
       .get(key.workspaceId, key.versionId, key.objectId);
     let fromSeq = 0;
+    let applied = false;
     if (snapshotRow) {
       Y.applyUpdate(doc, readYDocBlob(db(), String(snapshotRow.snapshot_blob_sha256)));
       fromSeq = Number(snapshotRow.up_to_seq);
+      applied = true;
     }
     const updates = db()
       .prepare(
@@ -341,25 +404,47 @@ export function createYDocEngineDriver(
       .all(key.workspaceId, key.versionId, key.objectId, fromSeq);
     for (const u of updates) {
       Y.applyUpdate(doc, readYDocBlob(db(), String(u.update_blob_sha256)));
+      applied = true;
     }
+    // MARKER-ONLY (never a blank doc as content): a default close prunes all
+    // snapshots/updates but keeps the tiny ydoc_docs marker ("this file is a
+    // rich doc; project, don't patch"). With NO persisted CRDT state the doc
+    // would be blank — returning it would let isYDocDriven()+loadPersistedDoc()
+    // treat empty CRDT as canonical content. Signal "seed from the file"
+    // instead: closed => the .md is canonical (markdown-is-the-artifact).
+    if (!applied) return null;
     return doc;
+  }
+
+  // All engine.db WRITES go through the store's serialized lane on the store's
+  // connection so they can never open a second concurrent write transaction
+  // (single-writer safety). The task runs INSIDE the store's BEGIN IMMEDIATE —
+  // no local BEGIN/COMMIT; a throw rolls the whole lane transaction back. Any
+  // throw is surfaced as a corrupt-store error for callers.
+  async function writeLane(task: (conn: EngineWriteLaneConnection) => void): Promise<void> {
+    try {
+      await runInWriteLane(task);
+    } catch (error) {
+      if (error instanceof YDocEngineDriverError) throw error;
+      throw corruptStore(error);
+    }
   }
 
   // Fold the update log into a fresh full-state snapshot and prune everything
   // it covers, keeping loadPersistedDoc byte-identical across the fold.
-  function compact(key: YDocDocKey): void {
+  async function compact(key: YDocDocKey): Promise<void> {
     const marker = readDocRow(key);
     if (!marker) return;
     if (marker.headUpdateSeq - marker.headSnapshotSeq < compactionThreshold) return;
     const doc = loadPersistedDoc(key);
     if (!doc) return;
     const upToSeq = marker.headUpdateSeq;
-    const snapshotSha = putYDocBlob(db(), Y.encodeStateAsUpdate(doc));
-    const stateVectorSha = putYDocBlob(db(), Y.encodeStateVector(doc));
+    const snapshotBytes = Y.encodeStateAsUpdate(doc);
+    const stateVectorBytes = Y.encodeStateVector(doc);
     const now = nowMs();
-    const conn = db();
-    conn.exec("BEGIN IMMEDIATE");
-    try {
+    await writeLane((conn) => {
+      const snapshotSha = putYDocBlob(conn, snapshotBytes);
+      const stateVectorSha = putYDocBlob(conn, stateVectorBytes);
       conn
         .prepare(
           `INSERT OR REPLACE INTO ydoc_snapshots
@@ -395,28 +480,38 @@ export function createYDocEngineDriver(
             WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
         )
         .run(upToSeq, now, key.workspaceId, key.versionId, key.objectId);
-      conn.exec("COMMIT");
-    } catch (error) {
-      try {
-        conn.exec("ROLLBACK");
-      } catch {}
-      throw corruptStore(error);
-    }
+    });
   }
 
   // Reset the persisted log for a key to a single base snapshot of `doc`. Used
   // on open (trust the file: the prior log is dead) and after a merge reseed.
-  function resetPersistedState(
+  async function resetPersistedState(
     key: YDocDocKey,
     contentKind: YDocContentKind,
     doc: Y.Doc,
-  ): void {
-    const snapshotSha = putYDocBlob(db(), Y.encodeStateAsUpdate(doc));
-    const stateVectorSha = putYDocBlob(db(), Y.encodeStateVector(doc));
+  ): Promise<void> {
+    const snapshotBytes = Y.encodeStateAsUpdate(doc);
+    const stateVectorBytes = Y.encodeStateVector(doc);
     const now = nowMs();
-    const conn = db();
-    conn.exec("BEGIN IMMEDIATE");
-    try {
+    await writeLane((conn) => {
+      const snapshotSha = putYDocBlob(conn, snapshotBytes);
+      const stateVectorSha = putYDocBlob(conn, stateVectorBytes);
+      // Upsert the ydoc_docs marker FIRST: ydoc_snapshots/ydoc_updates carry an
+      // ON DELETE CASCADE FK to ydoc_docs, so the parent marker row must exist
+      // before the base snapshot row references it (immediate FK enforcement).
+      conn
+        .prepare(
+          `INSERT INTO ydoc_docs
+             (workspace_id, version_id, object_id, content_kind,
+              head_update_seq, head_snapshot_seq, updated_at_ms)
+           VALUES (?, ?, ?, ?, 0, 0, ?)
+           ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
+             content_kind = excluded.content_kind,
+             head_update_seq = 0,
+             head_snapshot_seq = 0,
+             updated_at_ms = excluded.updated_at_ms`,
+        )
+        .run(key.workspaceId, key.versionId, key.objectId, contentKind, now);
       conn
         .prepare(
           `DELETE FROM ydoc_updates
@@ -437,32 +532,11 @@ export function createYDocEngineDriver(
            VALUES (?, ?, ?, 0, ?, ?, ?)`,
         )
         .run(key.workspaceId, key.versionId, key.objectId, snapshotSha, stateVectorSha, now);
-      conn
-        .prepare(
-          `INSERT INTO ydoc_docs
-             (workspace_id, version_id, object_id, content_kind,
-              head_update_seq, head_snapshot_seq, updated_at_ms)
-           VALUES (?, ?, ?, ?, 0, 0, ?)
-           ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
-             content_kind = excluded.content_kind,
-             head_update_seq = 0,
-             head_snapshot_seq = 0,
-             updated_at_ms = excluded.updated_at_ms`,
-        )
-        .run(key.workspaceId, key.versionId, key.objectId, contentKind, now);
-      conn.exec("COMMIT");
-    } catch (error) {
-      try {
-        conn.exec("ROLLBACK");
-      } catch {}
-      throw corruptStore(error);
-    }
+    });
   }
 
-  function pruneClosedState(key: YDocDocKey): void {
-    const conn = db();
-    conn.exec("BEGIN IMMEDIATE");
-    try {
+  async function pruneClosedState(key: YDocDocKey): Promise<void> {
+    await writeLane((conn) => {
       conn
         .prepare(
           `DELETE FROM ydoc_updates WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
@@ -482,13 +556,7 @@ export function createYDocEngineDriver(
             WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
         )
         .run(nowMs(), key.workspaceId, key.versionId, key.objectId);
-      conn.exec("COMMIT");
-    } catch (error) {
-      try {
-        conn.exec("ROLLBACK");
-      } catch {}
-      throw corruptStore(error);
-    }
+    });
   }
 
   const writeMetadata = (
@@ -501,7 +569,11 @@ export function createYDocEngineDriver(
 
   return {
     canonicalSourceFor({ workspaceId, objectId }) {
-      return liveSessions.has(liveKey(workspaceId, objectId)) ? "ydoc" : "file";
+      // Process-global: an object is canonical-ydoc if ANY driver instance holds
+      // a live session for it, matching the reservation that guards openSession.
+      return globalLiveYDocReservations.has(globalReservationKey(workspaceId, objectId))
+        ? "ydoc"
+        : "file";
     },
 
     isYDocDriven(key) {
@@ -522,10 +594,13 @@ export function createYDocEngineDriver(
       }
       const objectId = snapshot.objectId;
       const registryKey = liveKey(workspaceId, objectId);
-      if (liveSessions.has(registryKey)) {
-        // Structural single-canonical guard: another live Y.Doc already owns
-        // this object (possibly under a different version). Settle+close it
-        // first — a version switch is a closed-session boundary.
+      const reservationKey = globalReservationKey(workspaceId, objectId);
+      // PROCESS-GLOBAL single-canonical guard (re-check + reserve before any
+      // open/reset): a live Y.Doc for this object may be owned by THIS driver OR
+      // ANOTHER createYDocEngineDriver() instance on the same engine.db, possibly
+      // under a different version. Refuse a second — a version switch is a
+      // closed-session boundary; never two live Y.Docs for one object.
+      if (globalLiveYDocReservations.has(reservationKey)) {
         throw new YDocEngineDriverError(
           "already-live",
           `Object ${objectId} already has a live Y.Doc session; close it before opening another (single-canonical).`,
@@ -536,7 +611,15 @@ export function createYDocEngineDriver(
 
       // Flip file -> Y.Doc: seed from the CURRENT file, never a stale cache.
       const doc = seedDoc(snapshot.text, kind);
-      resetPersistedState(key, kind, doc);
+      // Reserve BEFORE the reset write so a concurrent open for the same object
+      // (any instance) loses the race here, not after clobbering the log.
+      globalLiveYDocReservations.add(reservationKey);
+      try {
+        await resetPersistedState(key, kind, doc);
+      } catch (error) {
+        globalLiveYDocReservations.delete(reservationKey);
+        throw error;
+      }
 
       // The markdown the file held at open — the three-way base for external
       // edits, and the "already quiesced" comparison for close.
@@ -589,12 +672,14 @@ export function createYDocEngineDriver(
           if (update.byteLength === 0) {
             throw new YDocEngineDriverError("invalid-input", "Empty Y.Doc update.");
           }
-          const sha = putYDocBlob(db(), update);
           const now = nowMs();
-          const conn = db();
           let seq = 0;
-          conn.exec("BEGIN IMMEDIATE");
-          try {
+          // Blob put + head-advance run in the SAME shared write-lane
+          // transaction as every store write, so an append can never race a
+          // concurrent settle into a two-writer deadlock. Reading the head
+          // inside the transaction keeps seq monotonic under interleaved appends.
+          await writeLane((conn) => {
+            const sha = putYDocBlob(conn, update);
             const head = conn
               .prepare(
                 `SELECT head_update_seq FROM ydoc_docs
@@ -624,14 +709,8 @@ export function createYDocEngineDriver(
                   WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
               )
               .run(seq, now, workspaceId, versionId, objectId);
-            conn.exec("COMMIT");
-          } catch (error) {
-            try {
-              conn.exec("ROLLBACK");
-            } catch {}
-            throw corruptStore(error);
-          }
-          compact(key);
+          });
+          await compact(key);
           return { seq };
         },
 
@@ -653,7 +732,7 @@ export function createYDocEngineDriver(
             // (markdown-is-the-artifact: the projection is the merge surface).
             const merged = seedDoc(merge.content, kind);
             replaceDocContent(doc, merged, kind);
-            resetPersistedState(key, kind, doc);
+            await resetPersistedState(key, kind, doc);
             lastSettledMarkdown = projectMarkdown(doc, kind);
             return { kind: "merged", markdown: lastSettledMarkdown };
           }
@@ -687,12 +766,13 @@ export function createYDocEngineDriver(
           }
           closed = true;
           liveSessions.delete(registryKey);
+          globalLiveYDocReservations.delete(reservationKey);
           // Flip Y.Doc -> file. markdown-is-the-artifact: prune the CRDT bytes
           // unless a persistent-threads layer opted to keep them.
           if (persistClosedSessionState) {
-            compact(key);
+            await compact(key);
           } else {
-            pruneClosedState(key);
+            await pruneClosedState(key);
           }
         },
       };

@@ -318,4 +318,23 @@ describe('hocuspocus markdown import/export', () => {
       ],
     )
   })
+
+  // Projection-fidelity guard: the DohcQueryBlock extension registers the
+  // `code` markdown token and must DEFER (not consume) an ordinary fenced code
+  // block. A regression here would silently DROP code blocks on import.
+  it('round-trips ordinary fenced code blocks without dropping them', () => {
+    expectStableMarkdownRoundTrip(
+      ['```js', 'const x = 1;', '```', '', '```', 'no language here', '```', ''].join('\n'),
+      ['```js\nconst x = 1;\n```', 'no language here'],
+    )
+  })
+
+  it('still parses a dohc query fence as a query block, not plain code', () => {
+    const md = ['```query', 'SELECT title FROM notes', '```', ''].join('\n')
+    const out = yDocToMarkdown(markdownToYDoc(md))
+    expect(out).toContain('SELECT title FROM notes')
+    // Query fences normalize to the `dohc-query` info string (its own node),
+    // proving the extension consumed the query fence while deferring plain ones.
+    expect(out).toContain('```dohc-query')
+  })
 })

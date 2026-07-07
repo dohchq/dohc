@@ -24,6 +24,7 @@ interface RawSqliteStatement {
   run(...params: unknown[]): { changes: number };
 }
 interface RawSqliteDb {
+  exec(sql: string): void;
   prepare(sql: string): RawSqliteStatement;
   close(): void;
 }
@@ -41,6 +42,27 @@ function rawRows(sql: string, params: unknown[] = []): Array<Record<string, unkn
   const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
   try {
     return db.prepare(sql).all(...params);
+  } finally {
+    db.close();
+  }
+}
+
+function rawExec(sql: string, params: unknown[] = []): void {
+  const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+  try {
+    db.prepare(sql).run(...params);
+  } finally {
+    db.close();
+  }
+}
+
+// A raw connection with FK enforcement ON (a fresh node:sqlite handle defaults
+// to OFF), so a DELETE actually fires the schema's ON DELETE CASCADE chains.
+function rawExecWithForeignKeys(sql: string, params: unknown[] = []): void {
+  const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    db.prepare(sql).run(...params);
   } finally {
     db.close();
   }
@@ -433,5 +455,182 @@ describe("YDoc engine driver — open/edit/settle/capture/reopen integration", (
     expect(reopened).toContain("title: Final");
     await s2.close();
     await driver.close();
+  });
+});
+
+describe("YDoc engine driver — PROCESS-GLOBAL single-canonical across instances", () => {
+  it("a SECOND driver instance on the same rootDir cannot open a live object (any version)", async () => {
+    const objectId = await writeFile("doc.md", "# Doc\n");
+    const other = await store.createNamedVersion({
+      workspaceId: WS,
+      name: "draft",
+      fromVersionId: versionId,
+    });
+    // Two independent drivers — even on separate stores — over the SAME
+    // engine.db/rootDir. The per-instance map alone left the second one free to
+    // double-open; the process-global reservation must stop it.
+    const storeB = createVersionedTextStore(root);
+    const driverA = createYDocEngineDriver({ store, rootDir: root });
+    const driverB = createYDocEngineDriver({ store: storeB, rootDir: root });
+
+    const s1 = await driverA.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+
+    // Same object, same version, DIFFERENT driver instance -> already-live.
+    await expect(
+      driverB.openSession({ workspaceId: WS, versionId, path: "doc.md" }),
+    ).rejects.toMatchObject({ code: "already-live" });
+    // Same object, DIFFERENT version, different instance -> ALSO already-live
+    // (version switch is a closed-session boundary; never two live Y.Docs).
+    await expect(
+      driverB.openSession({ workspaceId: WS, versionId: other.id, path: "doc.md" }),
+    ).rejects.toMatchObject({ code: "already-live" });
+    // The second instance also observes the object as ydoc-canonical.
+    expect(driverB.canonicalSourceFor({ workspaceId: WS, objectId })).toBe("ydoc");
+
+    // Once instance A settles+closes, instance B may take ownership.
+    await s1.close();
+    expect(driverB.canonicalSourceFor({ workspaceId: WS, objectId })).toBe("file");
+    const s2 = await driverB.openSession({ workspaceId: WS, versionId: other.id, path: "doc.md" });
+    expect(s2.objectId).toBe(objectId);
+    // And now A is the one locked out.
+    await expect(
+      driverA.openSession({ workspaceId: WS, versionId, path: "doc.md" }),
+    ).rejects.toMatchObject({ code: "already-live" });
+
+    await s2.close();
+    await driverA.close();
+    await driverB.close();
+    await storeB.close();
+  });
+});
+
+describe("YDoc engine driver — SHARED WRITE LANE (no two-writer deadlock)", () => {
+  it("interleaved recordUpdate + settle under load all complete without hanging", async () => {
+    await writeFile("doc.md", "# Doc\n");
+    const driver = createYDocEngineDriver({ store, rootDir: root, compactionThreshold: 8 });
+    const session = await driver.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+
+    // 40 distinct, valid Yjs updates from a scratch doc. recordUpdate stores the
+    // bytes + advances the head (it does not apply them to the live doc), so
+    // arbitrary valid updates exercise the append lane deterministically.
+    const gen = new Y.Doc();
+    const updates: Uint8Array[] = [];
+    gen.on("update", (u: Uint8Array) => updates.push(u));
+    for (let i = 0; i < 40; i++) {
+      gen.transact(() => gen.getMap("m").set(`k${i}`, i));
+    }
+    expect(updates.length).toBe(40);
+
+    // Fire every append WITHOUT awaiting, racing settles between them. If an
+    // append (driver write) and a settle (store write) could ever hold two
+    // concurrent in-process write transactions, node:sqlite's thread-blocking
+    // busy-wait would deadlock until busy_timeout and this Promise.all would
+    // hang. Through the shared serialized lane it simply completes.
+    const ops: Promise<unknown>[] = [];
+    for (let i = 0; i < updates.length; i++) {
+      ops.push(session.recordUpdate(updates[i] as Uint8Array));
+      if (i % 5 === 0) ops.push(session.settle());
+    }
+    await Promise.all(ops);
+
+    // Every append landed exactly once, monotonic under the interleave.
+    const head = rawRows("SELECT head_update_seq FROM ydoc_docs")[0];
+    expect(Number(head.head_update_seq)).toBe(40);
+    // Persisted state still reconstructs (compaction folded some appends).
+    expect(
+      driver.loadPersistedDoc({ workspaceId: WS, versionId, objectId: session.objectId }),
+    ).not.toBeNull();
+
+    await session.close();
+    await driver.close();
+  }, 20000);
+});
+
+describe("YDoc engine driver — loadPersistedDoc never returns a blank doc as content", () => {
+  it("returns null (seed-from-file) after a default close prunes CRDT state", async () => {
+    const objectId = await writeFile("doc.md", "# Doc\n");
+    const driver = createYDocEngineDriver({ store, rootDir: root });
+    const key: YDocDocKey = { workspaceId: WS, versionId, objectId };
+    const session = await driver.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+    const rec = autoRecord(session);
+    appendParagraph(session.doc, "a real edit");
+    await rec.flush();
+    // Live: persisted CRDT state exists and reloads.
+    expect(driver.loadPersistedDoc(key)).not.toBeNull();
+
+    await session.close(); // default prune removes snapshots + updates
+
+    // The marker survives (this file IS a rich doc), but there is NO persisted
+    // CRDT state — loadPersistedDoc must NOT hand back a blank doc that a caller
+    // could treat as canonical empty content. Closed => seed from the file.
+    expect(driver.isYDocDriven(key)).toBe(true);
+    expect(driver.loadPersistedDoc(key)).toBeNull();
+    await driver.close();
+  });
+});
+
+describe("YDoc engine driver — blob integrity on read", () => {
+  it("rejects a ydoc blob whose bytes no longer hash to its sha (tampered row)", async () => {
+    const objectId = await writeFile("doc.md", "# Doc\n");
+    const driver = createYDocEngineDriver({ store, rootDir: root });
+    const key: YDocDocKey = { workspaceId: WS, versionId, objectId };
+    const session = await driver.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+    const rec = autoRecord(session);
+    appendParagraph(session.doc, "an edit");
+    await rec.flush();
+
+    // The seed snapshot blob is referenced by the live head. Overwrite its bytes
+    // under the SAME sha AND matching byte_length so the length guard passes and
+    // the sha256 verification is what rejects it.
+    const snap = rawRows(
+      "SELECT snapshot_blob_sha256 sha FROM ydoc_snapshots WHERE object_id = ? ORDER BY up_to_seq ASC LIMIT 1",
+      [objectId],
+    )[0];
+    const sha = String(snap.sha);
+    const tampered = Buffer.from("not the real crdt bytes at all!!");
+    rawExec("UPDATE binary_blobs SET content = ?, byte_length = ? WHERE sha256 = ?", [
+      tampered,
+      tampered.byteLength,
+      sha,
+    ]);
+
+    expect(() =>
+      driver.loadPersistedDoc({ workspaceId: WS, versionId, objectId }),
+    ).toThrow(YDocEngineDriverError);
+    void key;
+    await session.close().catch(() => undefined);
+    await driver.close();
+  });
+});
+
+describe("YDoc engine driver — ON DELETE CASCADE from file_objects", () => {
+  it("deleting the file object removes its ydoc_docs marker and all ydoc_* rows", async () => {
+    const objectId = await writeFile("doc.md", "# Doc\n");
+    // persistClosedSessionState keeps durable ydoc rows past close, so the
+    // cascade has something to remove.
+    const driver = createYDocEngineDriver({
+      store,
+      rootDir: root,
+      persistClosedSessionState: true,
+    });
+    const session = await driver.openSession({ workspaceId: WS, versionId, path: "doc.md" });
+    const rec = autoRecord(session);
+    appendParagraph(session.doc, "durable edit");
+    await rec.flush();
+    await session.close();
+    await driver.close();
+
+    // Precondition: ydoc rows exist for this object.
+    expect(rawRows("SELECT 1 FROM ydoc_docs WHERE object_id = ?", [objectId]).length).toBe(1);
+    expect(
+      rawRows("SELECT 1 FROM ydoc_snapshots WHERE object_id = ?", [objectId]).length,
+    ).toBeGreaterThan(0);
+
+    // Remove the file object with FK enforcement on -> cascade wipes ydoc_*.
+    rawExecWithForeignKeys("DELETE FROM file_objects WHERE object_id = ?", [objectId]);
+
+    expect(rawRows("SELECT 1 FROM ydoc_docs WHERE object_id = ?", [objectId])).toEqual([]);
+    expect(rawRows("SELECT 1 FROM ydoc_updates WHERE object_id = ?", [objectId])).toEqual([]);
+    expect(rawRows("SELECT 1 FROM ydoc_snapshots WHERE object_id = ?", [objectId])).toEqual([]);
   });
 });

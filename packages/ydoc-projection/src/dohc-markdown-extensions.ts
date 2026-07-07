@@ -420,6 +420,13 @@ const DohcQueryBlock = Node.create({
 
   parseMarkdown: (token, helpers) => {
     const fence = queryFenceInfo(token.lang)
+    // DEFER for a non-query fence so an ordinary ```lang code block falls
+    // through to the default code-fence handler (StarterKit codeBlock) instead
+    // of being dropped. In @tiptap/markdown the type-valid defer signal is an
+    // EMPTY result array: the dispatcher treats a `[]` (or otherwise empty)
+    // parse result as "this handler produced nothing — try the next handler,
+    // then the built-in fallback" (see MarkdownManager.parseToken). `null` is
+    // NOT a permitted MarkdownParseResult. A code-fence round-trip test locks it.
     if (!fence.isQuery) return []
     return helpers.createNode(
       'queryBlock',

@@ -539,6 +539,22 @@ export interface VersionedTextDeleteResult {
   moment: VersionedTextMoment;
 }
 
+// Minimal SQL-execution seam the engine write lane hands to a co-tenant of
+// engine.db (currently the WS-G2-B Y.Doc driver). Intentionally structural (no
+// node:sqlite dependency in contracts): a prepared-statement runner plus raw
+// exec, matching the DatabaseSync surface the store already uses. The task runs
+// INSIDE the store's single BEGIN IMMEDIATE transaction, so it must NOT issue
+// its own BEGIN/COMMIT/ROLLBACK — throwing rolls the whole lane transaction back.
+export interface EngineWriteLaneStatement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes: number };
+}
+export interface EngineWriteLaneConnection {
+  exec(sql: string): void;
+  prepare(sql: string): EngineWriteLaneStatement;
+}
+
 /**
  * Internal server-side storage primitive.
  *
@@ -547,6 +563,16 @@ export interface VersionedTextDeleteResult {
  * authorization boundary.
  */
 export interface VersionedTextStore {
+  // WS-G2-B single-writer safety: run `task` on the store's SAME SQLite
+  // connection, serialized through the store's write queue and wrapped in one
+  // BEGIN IMMEDIATE transaction. The Y.Doc engine driver routes ALL its
+  // engine.db writes through here so a settle (writeTextFile) and a Y.Doc
+  // update-append can never hold two concurrent in-process write transactions —
+  // node:sqlite busy-waits block the JS thread, so two same-process writers on
+  // separate connections would deadlock until busy_timeout. Optional on the
+  // interface (like ensureSearchIndex) so partial mock stores still typecheck;
+  // the real createVersionedTextStore always provides it.
+  runInEngineWriteLane?<T>(task: (connection: EngineWriteLaneConnection) => T): Promise<T>;
   // Internal indexed-search seam (lazy additive in engine.db). Implementations
   // that do not have an engine search index may omit these and callers must
   // fall back to linear search.
