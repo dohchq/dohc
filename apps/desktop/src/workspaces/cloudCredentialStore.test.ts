@@ -63,6 +63,17 @@ describe("cloud credential store", () => {
     expect(await store.load()).toEqual(credentials);
   });
 
+  it("round-trips the opaque Better Auth user id (the reactor identity)", async () => {
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    const withUserId: CloudCredentials = { ...credentials, userId: "usr_opaque-uuid" };
+    await store.save(withUserId);
+    expect(await store.load()).toEqual(withUserId);
+    // An older file with no userId still loads (the field is optional).
+    const legacy = createCloudCredentialStore({ dir: await mkdtemp(join(nativeTmpdir(), "dohc-cloud-legacy-")), cipher: fakeCipher });
+    await legacy.save(credentials);
+    expect((await legacy.load())?.userId).toBeUndefined();
+  });
+
   it("loads null when the file is missing", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
     expect(await store.load()).toBeNull();

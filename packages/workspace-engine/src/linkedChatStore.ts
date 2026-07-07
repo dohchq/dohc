@@ -494,25 +494,25 @@ function reactionFromRow(row: Record<string, unknown>): ChatReaction {
   };
 }
 
-// A reaction op is only ever trusted to be at most this far in the FUTURE of
-// the receiver's clock. A device with a runaway-forward clock could otherwise
-// stamp a cell with an at_ms no correctly-clocked peer can ever exceed, pinning
-// the cell forever (a later remove has a lower at_ms → rejected everywhere).
-// Clamping an implausible-future op back to (localNow + this allowance) at the
-// replicated trust boundary bounds that pin to a few minutes instead of
-// forever. This is a minimal mitigation, NOT a total-order guarantee: two peers
-// clamp against their OWN clocks, so a clamped op can still transiently diverge
-// until a later in-window op settles it. A hybrid logical clock (HLC) would
-// remove that residue; deferred (see MU chat design).
-const REACTION_MAX_FUTURE_SKEW_MS = 5 * 60_000;
-
-// Bound a replicated op's at_ms to (localNow + allowance) so a runaway-future
-// clock cannot pin a cell. Past timestamps pass through untouched (a legitimate
-// older op must still be able to lose to a newer one).
-function clampFutureReactionAtMs(atMs: number, localNowMs: number): number {
-  const ceiling = localNowMs + REACTION_MAX_FUTURE_SKEW_MS;
-  return atMs > ceiling ? ceiling : atMs;
-}
+// ⚠️ CLOCK SKEW — ACCEPTED ALPHA LIMITATION (determinism > the rare skew-pin).
+// A replicated reaction op's at_ms is stored VERBATIM — NEVER re-clamped against
+// the receiver's local clock. An earlier build clamped an implausible-future
+// at_ms back toward (receiverNow + allowance) to stop a runaway-forward remote
+// clock pinning a cell. That clamp REGRESSED convergence: two peers clamp
+// against their OWN clocks, so the SAME op converges to DIFFERENT at_ms on
+// different peers, and a later op sitting between the two clamps wins on one
+// peer and loses on another → permanent divergence. Determinism of the total
+// order (at_ms, stateRank, origin_id, origin_seq) has to be byte-identical on
+// every peer, so the receiver-local clamp is GONE.
+//
+// The re-opened liveness issue: a device with a badly-forward wall clock can
+// stamp a cell with an at_ms no correctly-clocked peer will ever exceed,
+// pinning that cell (a later, lower-at_ms remove is rejected everywhere). This
+// is an accepted alpha limitation. A proper fix is a hybrid logical clock (HLC)
+// or a relay-stamped monotonic time on shared channels; both are deferred (see
+// MU chat design + MU-C0). Note the LOCAL set path keeps a per-cell monotonic
+// at_ms bump — that is local authorship, deterministic per origin, and does not
+// vary by receiver, so it is safe.
 
 // The origin coordinates that make the LWW register a TOTAL order. Read from
 // the replication envelope on the apply path; minted locally (this device's
@@ -1534,8 +1534,9 @@ export function createLinkedChatStore(
         const originSeq = nextOriginSeq(db, workspaceId, originId);
         // The LWW upsert IS the mutation — shared verbatim with the replicated
         // apply path so a local set and an imported op converge identically.
-        // A local op uses its own wall clock unclamped: the clamp is a
-        // trust-boundary defense against REMOTE runaway clocks, not local ones.
+        // Both paths store at_ms verbatim; the only local adjustment is the
+        // per-cell monotonic bump above (deterministic per origin, not
+        // receiver-dependent — see the clock-skew note near upsertReactionLww).
         upsertReactionLww(db, workspaceId, payload, { originId, originSeq });
         // Blob-free, rides the SAME push/pull/apply pipeline as the other chat
         // ops (no new transport). Journaled even for a SOLO workspace so the
@@ -1845,9 +1846,10 @@ export function createLinkedChatStore(
               authorId: payload.authorId,
               authorKind: actorKindValue(payload.authorKind),
               authorDisplayName: stringValue(payload.authorDisplayName),
-              // Clamp an implausible-future at_ms against THIS receiver's clock
-              // so a runaway-forward remote clock can't pin the cell forever.
-              atMs: clampFutureReactionAtMs(payload.atMs, nowMs()),
+              // Store the op's ORIGINAL at_ms verbatim (no receiver-local
+              // clamp) so the total order is byte-identical on every peer. See
+              // the clock-skew note above upsertReactionLww's origin type.
+              atMs: payload.atMs,
               state: reactionStateValue(payload.state),
             },
             // The envelope's origin coordinates are the total-order tie-break;

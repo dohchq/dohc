@@ -5,9 +5,13 @@ import {
   useId,
   useRef,
   useState,
+  type Dispatch,
+  type MutableRefObject,
   type RefObject,
+  type SetStateAction,
 } from "react";
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
+import { bridge } from "../bridge";
 import { toMentionSegments, type MentionCandidate } from "./mentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
@@ -30,6 +34,103 @@ export function ipcErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : "";
   const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
   return message.trim().length > 0 ? message.trim() : fallback;
+}
+
+// Reaction toggle (WS-MU-C2), shared by BOTH chat surfaces (the file-rail
+// LinkedChats panel and the Chats view) so their optimistic behavior can never
+// drift. Optimistically flips the viewer's own reaction on the target cell,
+// then reconciles to the canonical server list. Two guarantees the naive
+// version lacked:
+//   1. ROLLBACK — a failed setChatReaction reverts the optimistic cell, so the
+//      UI never keeps a reaction the server rejected.
+//   2. PER-CELL ORDERING — overlapping toggles on the SAME (message, emoji) can
+//      resolve out of order; a per-cell sequence guard drops every response but
+//      the latest toggle's, so two rapid clicks converge to the correct final
+//      state instead of racing to whichever server round-trip lands last.
+// Both are additionally gated by the caller's existing liveness token, so a
+// thread switch still discards stale repaints.
+export interface ReactionToggleContext {
+  workspaceId: string;
+  threadId: string;
+  viewerAuthorId: string;
+  liveToken: MutableRefObject<number>;
+  // Per-(message, emoji) monotonic sequence; the latest toggle for a cell wins.
+  reactionSeq: MutableRefObject<Map<string, number>>;
+  setReactions: Dispatch<SetStateAction<ChatReactionRecord[]>>;
+  setViewerAuthorId: Dispatch<SetStateAction<string>>;
+  onError: (message: string) => void;
+}
+
+export function runReactionToggle(
+  ctx: ReactionToggleContext,
+  input: { messageId: string; emoji: string; nextState: "added" | "removed" },
+): void {
+  const { workspaceId, threadId, viewerAuthorId } = ctx;
+  if (viewerAuthorId === "") return;
+  const token = ctx.liveToken.current;
+  // NUL-joined so a message id that ends with the emoji (or vice versa) can't
+  // alias another cell's key.
+  const cellKey = `${input.messageId}\u0000${input.emoji}`;
+  const seq = (ctx.reactionSeq.current.get(cellKey) ?? 0) + 1;
+  ctx.reactionSeq.current.set(cellKey, seq);
+
+  // Apply the viewer's OWN presence on this one cell, leaving every other
+  // reaction (and every other reactor) untouched.
+  const setCell = (current: ChatReactionRecord[], present: boolean): ChatReactionRecord[] => {
+    const without = current.filter(
+      (reaction) =>
+        !(
+          reaction.messageId === input.messageId &&
+          reaction.emoji === input.emoji &&
+          reaction.authorId === viewerAuthorId
+        ),
+    );
+    if (!present) return without;
+    return [
+      ...without,
+      {
+        reactionId: `optimistic:${input.messageId}:${input.emoji}:${viewerAuthorId}`,
+        messageId: input.messageId,
+        threadId,
+        emoji: input.emoji,
+        authorId: viewerAuthorId,
+        authorKind: "human",
+        authorDisplayName: viewerAuthorId,
+      },
+    ];
+  };
+
+  const present = input.nextState === "added";
+  ctx.setReactions((current) => setCell(current, present));
+
+  // A response may touch UI state only if the thread is still live AND this is
+  // still the latest toggle for THIS cell (a newer toggle supersedes it).
+  const isCurrent = (): boolean =>
+    token === ctx.liveToken.current && ctx.reactionSeq.current.get(cellKey) === seq;
+
+  void bridge()
+    .setChatReaction({
+      workspaceId,
+      threadId,
+      messageId: input.messageId,
+      emoji: input.emoji,
+      state: input.nextState,
+    })
+    .then(() => bridge().listChatReactions({ workspaceId, threadId }))
+    .then((result) => {
+      if (!isCurrent()) return;
+      ctx.setReactions(result.reactions);
+      ctx.setViewerAuthorId(result.viewerAuthorId);
+    })
+    .catch((error) => {
+      // Roll this cell back to its pre-toggle presence (the inverse of what we
+      // optimistically set) — but only if this is still the live, latest toggle
+      // so a superseded failure never clobbers a newer toggle's state.
+      if (isCurrent()) ctx.setReactions((current) => setCell(current, !present));
+      if (token === ctx.liveToken.current) {
+        ctx.onError(ipcErrorMessage(error, "Could not update that reaction."));
+      }
+    });
 }
 
 export function formatChatTime(createdAtMs: number): { label: string; iso: string } {
@@ -112,6 +213,7 @@ function MessageReactions(props: {
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   const pickerId = useId();
   const choices = props.controls.emojiChoices ?? DEFAULT_REACTION_EMOJIS;
 
@@ -123,6 +225,22 @@ function MessageReactions(props: {
     }
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [pickerOpen]);
+
+  // Dismiss on Escape at the DOCUMENT level (not just on the popup): a keyboard
+  // user who opened via Enter/Space keeps focus on the trigger, so an onKeyDown
+  // scoped to the popup would never fire. Return focus to the trigger on close
+  // so the tab order is preserved. Mirrors the outside-pointerdown dismissal.
+  useEffect(() => {
+    if (!pickerOpen) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setPickerOpen(false);
+        triggerRef.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, [pickerOpen]);
 
   // Group this message's reactions by emoji, preserving first-seen order.
@@ -176,11 +294,13 @@ function MessageReactions(props: {
         </button>
       ))}
       <button
+        ref={triggerRef}
         type="button"
         data-testid={`${props.testIdPrefix}-add-reaction`}
         aria-label="Add reaction"
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={pickerOpen}
+        aria-controls={pickerOpen ? pickerId : undefined}
         title="Add reaction"
         onClick={() => setPickerOpen((open) => !open)}
         className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
@@ -188,17 +308,16 @@ function MessageReactions(props: {
         <SmilePlus size={13} aria-hidden />
       </button>
       {pickerOpen ? (
+        // A lightweight quick-pick, NOT an APG menu: role="group" with plain
+        // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
+        // viewer's state). We deliberately don't claim role="menu"/menuitem*,
+        // which would promise arrow-key roving semantics we don't implement.
+        // Escape (document-level) closes and returns focus to the trigger.
         <div
           id={pickerId}
-          role="menu"
+          role="group"
           data-testid={`${props.testIdPrefix}-reaction-picker`}
           aria-label="Choose a reaction"
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.stopPropagation();
-              setPickerOpen(false);
-            }
-          }}
           className="absolute bottom-full left-0 z-10 mb-1 flex gap-0.5 rounded-md border border-line bg-bg p-1 shadow-md"
         >
           {choices.map((emoji) => {
@@ -207,14 +326,14 @@ function MessageReactions(props: {
               <button
                 key={emoji}
                 type="button"
-                role="menuitemcheckbox"
-                aria-checked={mine}
+                aria-pressed={mine}
                 data-testid={`${props.testIdPrefix}-reaction-choice`}
                 data-emoji={emoji}
                 title={emoji}
                 onClick={() => {
                   toggle(emoji, mine);
                   setPickerOpen(false);
+                  triggerRef.current?.focus();
                 }}
                 className={`grid size-7 place-items-center rounded text-[15px] hover:bg-accent/15 ${
                   mine ? "bg-accent/15" : ""

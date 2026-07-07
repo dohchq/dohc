@@ -1563,28 +1563,43 @@ describe("chat reactions (WS-MU-C2)", () => {
     expect(winner(forward.root)).toMatchObject({ thread_id: "tY", origin_id: "originY" });
   });
 
-  it("clamps an implausible-future at_ms so a runaway clock can't pin a cell", async () => {
+  it("stores a replicated op's ORIGINAL at_ms so the same op stream converges on peers with different clocks", async () => {
+    // Determinism regression guard (CodeRabbit): an earlier build clamped a
+    // replicated at_ms against the RECEIVER's local clock. That made the SAME op
+    // converge to DIFFERENT at_ms on differently-clocked peers, letting a later
+    // op between the two clamps win on one peer and lose on another (divergence).
+    // The register must store each op's ORIGINAL at_ms verbatim so the total
+    // order is byte-identical on every peer.
     const cell = { messageId: "m1", threadId: "t1", emoji: "👍", authorId: "alice@x" };
-    const engine = await makeEngine("skew");
-    const farFuture = 9_000_000_000; // ~+9e9 ms beyond the test's ~1000ms clock
-    await engine.store.applyReplicationOp(
-      reactionEnvelope({ ...cell, origin: "bad", seq: 0, state: "added", atMs: farFuture }),
-    );
-    // Stored at_ms is clamped down toward the receiver's clock, NOT the far
-    // future — that is what stops the cell being pinned forever.
-    const storedAdd = rawDbFor(engine.root, (db) =>
-      db.prepare("SELECT at_ms, state FROM chat_reactions WHERE message_id = ?").get("m1"),
-    ) as { at_ms: number; state: string };
-    expect(storedAdd.state).toBe("added");
-    expect(storedAdd.at_ms).toBeLessThan(farFuture);
-    // A later remove with a LOWER raw at_ms than the add (5e9 < 9e9) would be
-    // REJECTED without the clamp, pinning the cell 'added' forever. With the
-    // clamp both land near the receiver's clock and the later-applied remove
-    // (a strictly higher ceiling) wins.
-    await engine.store.applyReplicationOp(
-      reactionEnvelope({ ...cell, origin: "good", seq: 0, state: "removed", atMs: 5_000_000_000 }),
-    );
-    expect(activeCells(engine.root)).toEqual([]);
+    // An add far in the future, then a remove with a LOWER raw at_ms. Under a
+    // receiver-local clamp the two ops would land at clock-dependent at_ms and
+    // the winner would flip between peers; storing the raw at_ms, the higher
+    // (the add) always wins on every peer.
+    const add = reactionEnvelope({ ...cell, origin: "bad", seq: 0, state: "added", atMs: 9_000_000_000 });
+    const remove = reactionEnvelope({ ...cell, origin: "good", seq: 0, state: "removed", atMs: 5_000_000_000 });
+
+    // Two peers with WILDLY different local wall clocks apply the SAME stream.
+    const slow = await makeEngine("skewSlow", 1_000, 10);
+    const fast = await makeEngine("skewFast", 5_000_000_000, 10);
+    for (const engine of [slow, fast]) {
+      await engine.store.applyReplicationOp(add);
+      await engine.store.applyReplicationOp(remove);
+    }
+
+    const storedCell = (root: string) =>
+      rawDbFor(root, (db) =>
+        db
+          .prepare("SELECT at_ms, state, origin_id FROM chat_reactions WHERE message_id = ?")
+          .get("m1"),
+      ) as { at_ms: number; state: string; origin_id: string };
+
+    // The op's ORIGINAL at_ms is stored verbatim — no receiver-local clamp.
+    expect(storedCell(slow.root).at_ms).toBe(9_000_000_000);
+    // Byte-identical stored register on both peers regardless of local clock.
+    expect(storedCell(fast.root)).toEqual(storedCell(slow.root));
+    // Same winner (the higher-at_ms add) on BOTH peers — no clock-skew flip.
+    expect(activeCells(slow.root)).toEqual(["m1|👍|alice@x"]);
+    expect(activeCells(fast.root)).toEqual(activeCells(slow.root));
   });
 
   it("does not surface an orphan reaction (no matching message) in listReactions", async () => {

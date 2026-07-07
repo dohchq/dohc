@@ -12,6 +12,7 @@ import {
   chatAuthorLabel,
   formatChatTime,
   ipcErrorMessage,
+  runReactionToggle,
 } from "./chatMessages";
 
 // Linked Chats side rail (PR 0M-5, workspace-engine alpha). Per-file Chats
@@ -60,6 +61,9 @@ export function LinkedChatsPanel(props: {
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   const liveToken = useRef(0);
+  // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
+  // in order (see runReactionToggle).
+  const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const refreshThreads = useCallback(async () => {
@@ -202,54 +206,26 @@ export function LinkedChatsPanel(props: {
     }
   }, [activeThread, composer, props, sending, workspaceId]);
 
-  // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction, then
-  // reconcile to the canonical server list. Token-guarded against stale repaint.
+  // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction with
+  // rollback-on-failure and per-cell ordering, then reconcile to the canonical
+  // server list. Shared with the Chats view so behavior can never drift.
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
       const thread = activeThread;
-      if (!thread || viewerAuthorId === "") return;
-      const token = liveToken.current;
-      setReactions((current) => {
-        const withoutMine = current.filter(
-          (reaction) =>
-            !(
-              reaction.messageId === input.messageId &&
-              reaction.emoji === input.emoji &&
-              reaction.authorId === viewerAuthorId
-            ),
-        );
-        if (input.nextState === "removed") return withoutMine;
-        return [
-          ...withoutMine,
-          {
-            reactionId: `optimistic:${input.messageId}:${input.emoji}:${viewerAuthorId}`,
-            messageId: input.messageId,
-            threadId: thread.id,
-            emoji: input.emoji,
-            authorId: viewerAuthorId,
-            authorKind: "human",
-            authorDisplayName: viewerAuthorId,
-          },
-        ];
-      });
-      void bridge()
-        .setChatReaction({
+      if (!thread) return;
+      runReactionToggle(
+        {
           workspaceId,
           threadId: thread.id,
-          messageId: input.messageId,
-          emoji: input.emoji,
-          state: input.nextState,
-        })
-        .then(() => bridge().listChatReactions({ workspaceId, threadId: thread.id }))
-        .then((result) => {
-          if (token !== liveToken.current) return;
-          setReactions(result.reactions);
-          setViewerAuthorId(result.viewerAuthorId);
-        })
-        .catch((error) => {
-          if (token !== liveToken.current) return;
-          props.onError(ipcErrorMessage(error, "Could not update that reaction."));
-        });
+          viewerAuthorId,
+          liveToken,
+          reactionSeq,
+          setReactions,
+          setViewerAuthorId,
+          onError: props.onError,
+        },
+        input,
+      );
     },
     [activeThread, props, viewerAuthorId, workspaceId],
   );

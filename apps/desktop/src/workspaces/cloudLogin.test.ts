@@ -92,6 +92,33 @@ describe("cloud device-flow login", () => {
     });
   });
 
+  it("captures the Better Auth user id as the OPAQUE reactor identity (never the email)", async () => {
+    // WS-MU-C2 security: the reactor author key is a REPLICATED CRDT cell key, so
+    // it must be the opaque Better Auth user id, never the raw email (PII would
+    // otherwise replicate to every peer and persist in the immutable history).
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "ice@dohc.test", id: "usr_9f3a-opaque-uuid" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+    await login.start();
+    await login.poll();
+    expect(store.saved).toMatchObject({
+      email: "ice@dohc.test",
+      userId: "usr_9f3a-opaque-uuid",
+    });
+    // The replicated identity is the opaque id — distinct from the email.
+    expect(store.saved?.userId).not.toBe(store.saved?.email);
+  });
+
   it("persists an explicitly supplied relay URL with the approved session", async () => {
     const store = memoryStore();
     const { impl } = fakeFetch({

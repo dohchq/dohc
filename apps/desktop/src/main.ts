@@ -15,7 +15,8 @@ import {
   shell,
   type IpcMainInvokeEvent,
 } from "electron";
-import { existsSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -1166,12 +1167,43 @@ function localUserDisplayName(): string {
   return cachedCredentials?.email ?? "You";
 }
 
-// The local user's STABLE reactor identity (WS-MU-C2). Solo this anchors on the
-// signed-in email (or a fixed local id when signed out) so a reaction cell is
-// stable across app restarts and, once syncing, distinct per user. Forward-
-// compatible with MU-C0: the relay later stamps/verifies this as actor.userId.
+// The opaque per-install reactor id used when signed out (no cloud user id). A
+// stable uuid persisted in stateDir — NEVER the email — so a signed-out
+// reaction cell is stable across restarts without leaking PII into the CRDT.
+// Memoized after the first read; the sync fs touch happens at most once.
+let cachedLocalReactorId: string | null = null;
+function localReactorFallbackId(): string {
+  if (cachedLocalReactorId) return cachedLocalReactorId;
+  const file = join(stateDir(), "dohc-local-id.json");
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { id?: unknown };
+    if (typeof parsed.id === "string" && parsed.id) {
+      cachedLocalReactorId = parsed.id;
+      return parsed.id;
+    }
+  } catch {
+    // Not created yet (or unreadable) — mint and persist one below.
+  }
+  const id = `local:${randomUUID()}`;
+  try {
+    writeFileSync(file, `${JSON.stringify({ id }, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // Best-effort persistence; the id is still stable for this process run.
+  }
+  cachedLocalReactorId = id;
+  return id;
+}
+
+// The local user's STABLE, OPAQUE reactor identity (WS-MU-C2). This value
+// becomes a replicated CRDT author key, so it must NEVER be the raw email — a
+// raw email would replicate to every peer (PII/GDPR exposure) and persist in
+// the immutable CRDT history. Prefer the Better Auth user id (an opaque uuid)
+// when signed in; that is forward-compatible with MU-C0, which verifies
+// authorId === actor.userId server-side. Signed out (or an older credential
+// file with no userId) falls back to a persisted per-install uuid. The
+// email→display-name mapping stays LOCAL in localUserDisplayName().
 function localUserId(): string {
-  return cachedCredentials?.email ?? "local-user";
+  return cachedCredentials?.userId ?? localReactorFallbackId();
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,

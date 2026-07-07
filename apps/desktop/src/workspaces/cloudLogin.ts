@@ -83,12 +83,18 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         const session = await fetchImpl(`${serverUrl}/api/auth/get-session`, {
           headers: { authorization: `Bearer ${data.access_token}` },
         });
-        const body = (await session.json()) as { user?: { email?: string } } | null;
+        const body = (await session.json()) as {
+          user?: { email?: string; id?: string };
+        } | null;
         const email = body?.user?.email ?? "";
+        // The Better Auth user id (opaque uuid) becomes the reactor author key —
+        // never the email — so no PII replicates into the CRDT.
+        const userId = body?.user?.id;
         await options.store.save({
           serverUrl,
           ...(relayUrl ? { relayUrl } : {}),
           email,
+          ...(userId ? { userId } : {}),
           token: data.access_token,
         });
         pending = null;

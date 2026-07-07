@@ -9,7 +9,12 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { AgentNotification } from "./agentNotifications";
-import { ChatMessageList, formatChatTime, ipcErrorMessage } from "./chatMessages";
+import {
+  ChatMessageList,
+  formatChatTime,
+  ipcErrorMessage,
+  runReactionToggle,
+} from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import { findMentions, type MentionCandidate } from "./mentions";
 
@@ -161,6 +166,9 @@ export function ChatsView(props: {
   const sendingRef = useRef(false);
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
+  // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
+  // in order (see runReactionToggle).
+  const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const refreshOverview = useCallback(async () => {
@@ -353,49 +361,20 @@ export function ChatsView(props: {
   // slow response never repaints a thread the user already left.
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
-      if (nav.level !== "thread" || viewerAuthorId === "") return;
-      const token = liveToken.current;
-      setReactions((current) => {
-        const withoutMine = current.filter(
-          (reaction) =>
-            !(
-              reaction.messageId === input.messageId &&
-              reaction.emoji === input.emoji &&
-              reaction.authorId === viewerAuthorId
-            ),
-        );
-        if (input.nextState === "removed") return withoutMine;
-        return [
-          ...withoutMine,
-          {
-            reactionId: `optimistic:${input.messageId}:${input.emoji}:${viewerAuthorId}`,
-            messageId: input.messageId,
-            threadId: nav.thread.id,
-            emoji: input.emoji,
-            authorId: viewerAuthorId,
-            authorKind: "human",
-            authorDisplayName: viewerAuthorId,
-          },
-        ];
-      });
-      void bridge()
-        .setChatReaction({
+      if (nav.level !== "thread") return;
+      runReactionToggle(
+        {
           workspaceId,
           threadId: nav.thread.id,
-          messageId: input.messageId,
-          emoji: input.emoji,
-          state: input.nextState,
-        })
-        .then(() => bridge().listChatReactions({ workspaceId, threadId: nav.thread.id }))
-        .then((result) => {
-          if (token !== liveToken.current) return;
-          setReactions(result.reactions);
-          setViewerAuthorId(result.viewerAuthorId);
-        })
-        .catch((error) => {
-          if (token !== liveToken.current) return;
-          props.onError(ipcErrorMessage(error, "Could not update that reaction."));
-        });
+          viewerAuthorId,
+          liveToken,
+          reactionSeq,
+          setReactions,
+          setViewerAuthorId,
+          onError: props.onError,
+        },
+        input,
+      );
     },
     [nav, props, viewerAuthorId, workspaceId],
   );

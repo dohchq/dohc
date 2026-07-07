@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { createRef } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { createRef, type Dispatch, type SetStateAction } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
-import { ChatComposer, ChatMessageList, chatAuthorLabel } from "./chatMessages";
+import {
+  ChatComposer,
+  ChatMessageList,
+  chatAuthorLabel,
+  runReactionToggle,
+  type ReactionToggleContext,
+} from "./chatMessages";
 
 // Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
 // view send through THIS composer, so its Enter semantics are load-bearing
@@ -180,12 +186,25 @@ describe("message reactions (WS-MU-C2)", () => {
     expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
   });
 
-  it("closes the quick-pick on Escape without reacting", () => {
+  it("closes the quick-pick on document-level Escape and returns focus to the trigger", () => {
     const { onToggle } = renderList([], "you@x");
-    fireEvent.click(screen.getByTestId("test-chat-add-reaction"));
+    const trigger = screen.getByTestId("test-chat-add-reaction");
+    trigger.focus();
+    fireEvent.click(trigger);
+    // The picker is a lightweight quick-pick: role="group" + plain toggle
+    // buttons (no menu semantics we don't implement).
     const picker = screen.getByTestId("test-chat-reaction-picker");
-    fireEvent.keyDown(picker, { key: "Escape" });
+    expect(picker.getAttribute("role")).toBe("group");
+    const choice = within(picker).getAllByTestId("test-chat-reaction-choice")[0] as HTMLElement;
+    expect(choice.getAttribute("role")).toBeNull();
+    expect(choice.getAttribute("aria-pressed")).toBe("false");
+    // Move focus INTO the popup, then press Escape at the document level — the
+    // dismissal must fire regardless of where focus sits, and return it to the
+    // trigger so the tab order is preserved.
+    choice.focus();
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
     expect(onToggle).not.toHaveBeenCalled();
   });
 
@@ -200,5 +219,114 @@ describe("message reactions (WS-MU-C2)", () => {
       />,
     );
     expect(screen.queryByTestId("test-chat-message-reactions")).toBeNull();
+  });
+});
+
+// WS-MU-C2 fix 4: the shared reaction toggle must roll back on failure and keep
+// overlapping toggles on the same cell from racing into a wrong final state.
+describe("runReactionToggle (rollback + per-cell ordering)", () => {
+  const bridgeMock = {
+    setChatReaction: vi.fn(),
+    listChatReactions: vi.fn(),
+  };
+
+  beforeEach(() => {
+    bridgeMock.setChatReaction.mockReset();
+    bridgeMock.listChatReactions.mockReset();
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // A live mirror of the reactions state plus a real functional setter, so the
+  // helper's optimistic update / rollback are observable exactly as a component
+  // would apply them.
+  function harness() {
+    let reactions: ChatReactionRecord[] = [];
+    let viewerAuthorId = "you@x";
+    const setReactions: Dispatch<SetStateAction<ChatReactionRecord[]>> = (update) => {
+      reactions = typeof update === "function" ? update(reactions) : update;
+    };
+    const setViewerAuthorId: Dispatch<SetStateAction<string>> = (update) => {
+      viewerAuthorId = typeof update === "function" ? update(viewerAuthorId) : update;
+    };
+    const onError = vi.fn();
+    const ctx: ReactionToggleContext = {
+      workspaceId: "ws",
+      threadId: "thread-1",
+      viewerAuthorId: "you@x",
+      liveToken: { current: 0 },
+      reactionSeq: { current: new Map<string, number>() },
+      setReactions,
+      setViewerAuthorId,
+      onError,
+    };
+    return {
+      ctx,
+      onError,
+      get reactions() {
+        return reactions;
+      },
+      mineOn(emoji: string) {
+        return reactions.some((r) => r.emoji === emoji && r.authorId === "you@x");
+      },
+    };
+  }
+
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("rolls the optimistic reaction back when the server write fails", async () => {
+    const h = harness();
+    bridgeMock.setChatReaction.mockRejectedValue(new Error("offline"));
+    runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "added" });
+    // Optimistically shown immediately.
+    expect(h.mineOn("👍")).toBe(true);
+    await tick();
+    // The failed write reverts the cell to its pre-toggle (absent) state.
+    expect(h.mineOn("👍")).toBe(false);
+    expect(h.reactions).toEqual([]);
+    expect(h.onError).toHaveBeenCalledOnce();
+    // The reconcile list is never fetched when the write itself failed.
+    expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
+  });
+
+  it("converges two rapid toggles on the same cell to the LATEST intent despite out-of-order responses", async () => {
+    const h = harness();
+    bridgeMock.setChatReaction.mockResolvedValue(undefined);
+    // Controlled reconcile responses so we can resolve them out of order.
+    const resolvers: Array<(value: unknown) => void> = [];
+    bridgeMock.listChatReactions.mockImplementation(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
+
+    // Toggle ADD then REMOVE — the user's LATEST intent is "removed".
+    runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "added" });
+    runReactionToggle(h.ctx, { messageId: "m1", emoji: "👍", nextState: "removed" });
+    // Optimistic latest intent: removed.
+    expect(h.mineOn("👍")).toBe(false);
+
+    // Both toggles reach their reconcile fetch.
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    const addRecord: ChatReactionRecord = {
+      reactionId: "r1",
+      messageId: "m1",
+      threadId: "thread-1",
+      emoji: "👍",
+      authorId: "you@x",
+      authorKind: "human",
+      authorDisplayName: "you@x",
+    };
+    // The STALE (first, add) reconcile lands LAST — the ordering guard must drop
+    // it so it can't revive the reaction the newer remove already cleared.
+    resolvers[1]?.({ reactions: [], viewerAuthorId: "you@x" });
+    resolvers[0]?.({ reactions: [addRecord], viewerAuthorId: "you@x" });
+    await tick();
+
+    // Final state reflects the LATEST toggle (removed), not the late add reconcile.
+    expect(h.mineOn("👍")).toBe(false);
+    expect(h.reactions).toEqual([]);
+    expect(h.onError).not.toHaveBeenCalled();
   });
 });
