@@ -64,18 +64,20 @@ services:
     ports:
       - "${HOCUSPOCUS_BIND:-127.0.0.1}:${HOCUSPOCUS_PORT:-1234}:1234"
 
+  # Reduced to the collab + auth surface: Better Auth on /api/auth and the
+  # collab-token route the desktop calls to join live co-editing. Needs the
+  # SAME HOCUSPOCUS_JWT_SECRET hocuspocus verifies with; without it the collab
+  # route fails closed (collab-disabled).
   workspace-api:
     image: node:22-bookworm-slim
     working_dir: /workspace
     depends_on:
       postgres:
         condition: service_healthy
-      object-storage:
-        condition: service_healthy
     environment:
-      DOHC_BACKEND: postgres
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
     command: >
@@ -134,7 +136,6 @@ services:
     image: node:22-bookworm-slim
     working_dir: /workspace
     environment:
-      DOHC_BACKEND: postgres
       AGENT_SANDBOX_ROOT: /tmp/dohc-agent-sandbox
       SANDBOX_SAFE_PATH: /usr/local/bin:/usr/bin:/bin
     command: >

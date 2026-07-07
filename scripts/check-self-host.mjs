@@ -4,13 +4,12 @@ import { spawnSync } from 'node:child_process'
 const COMPOSE_FILE = 'docker-compose.self-host.yml'
 const ENV_FILE = '.env.self-host.example'
 const REQUIRED_SERVICES = [
-  'web',
   'workspace-api',
+  'sync-relay',
   'postgres',
   'object-storage',
   'hocuspocus',
   'sqlite-worker',
-  'app-tester',
   'agent-sandbox',
 ]
 
@@ -58,11 +57,10 @@ function checkServiceScripts() {
     'package.json exposes pnpm check:self-host',
   )
   for (const [label, path] of [
-    ['web app package', 'apps/app/package.json'],
     ['workspace API package', 'services/workspace-api/package.json'],
+    ['sync relay package', 'services/sync-relay/package.json'],
     ['Hocuspocus package', 'services/hocuspocus/package.json'],
     ['sqlite worker package', 'services/sqlite-worker/package.json'],
-    ['app tester package', 'services/app-tester/package.json'],
     ['agent sandbox package', 'services/agent-sandbox/package.json'],
   ]) {
     record(label, existsSync(path), path)

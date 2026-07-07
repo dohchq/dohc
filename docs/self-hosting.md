@@ -1,10 +1,16 @@
 # Self-Hosting
 
-Self-hosting runs the opt-in Postgres cloud stack (workspace API, Hocuspocus,
-object storage) for cloud sync and shares. The desktop product itself is
-local-first and needs none of this; the stack below retires per the legacy
-salvage audit's Phase D when engine-native sync replaces it. This is still an
-MVP mode, not the final production runbook.
+Self-hosting runs the opt-in, reduced Postgres cloud stack: **live
+collaboration** (Hocuspocus + the workspace-api collab-token route) and the
+**sync relay**, both authenticated by Better Auth over Postgres. The desktop
+product itself is local-first and needs none of this. The former sharing/
+members/invites/files/sync web surface and the `apps/web` client have been
+retired; engine-native sync (Arc 0P) is the ongoing replacement. This is still
+an MVP mode, not the final production runbook.
+
+Service matrix (see `docker-compose.self-host.yml`): `postgres`,
+`object-storage` (MinIO), `hocuspocus`, `workspace-api` (collab + auth),
+`sync-relay`, `sqlite-worker`, `agent-sandbox`. There is no `web` service.
 
 ## Prerequisites
 
@@ -32,14 +38,17 @@ pnpm check:self-host -- --start
 
 Important variables live in `.env.self-host.example`:
 
-- `DOHC_BACKEND=postgres`
-- `POSTGRES_*` for the SQL core.
+- `POSTGRES_*` for the SQL core (Better Auth's user table + collab membership).
 - `MINIO_*` for S3-compatible object storage.
-- `HOCUSPOCUS_*` for collaborative document sync.
-- `WORKSPACE_API_*` for the backend-neutral workspace API.
+- `HOCUSPOCUS_*` for collaborative document sync. `HOCUSPOCUS_JWT_SECRET` is
+  shared with `workspace-api` so its collab-token route mints tokens hocuspocus
+  can verify.
+- `BETTER_AUTH_SECRET` — shared by `workspace-api` AND `sync-relay` so a bearer
+  token minted by the workspace-api device flow validates at the relay
+  (>=32 chars; `openssl rand -base64 32`).
+- `WORKSPACE_API_*` for the collab + auth service.
+- `SYNC_RELAY_PORT` for the sync relay.
 - `SQLITE_WORKER_*` for SQLite import/query/materialization.
-- `APP_TESTER_*` for app validation.
-- `WEB_PORT` and `VITE_DOHC_BACKEND` for the frontend.
 
 Replace every `change-me` value before starting the stack. Compose refuses to
 start without explicit Postgres and object-storage passwords.
@@ -85,8 +94,9 @@ Upgrade order:
 1. stop agent writes or put the workspace in review-only mode.
 2. back up Postgres and object storage.
 3. run migrations.
-4. run backend conformance tests.
-5. run app tester and backend matrix checks.
+4. run `pnpm check:self-host` to validate the compose/service matrix.
+5. smoke-test the surviving surface: Better Auth sign-in, a collab token, and a
+   sync-relay round-trip.
 6. re-enable writes.
 
 ## Security Notes
