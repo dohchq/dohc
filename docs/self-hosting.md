@@ -57,10 +57,35 @@ start without the explicit Postgres password and the required auth secret.
 2. Replace secrets.
 3. Run `pnpm check:self-host`.
 4. Run `pnpm check:self-host -- --start`.
-5. For local development only, apply Postgres migrations with
-   `pnpm reset:postgres`. Production deployments must run the dedicated
-   migration command from the release runbook, after backups and before
-   re-enabling agent writes; do not run reset commands against production data.
+
+The compose stack bootstraps the database itself: a one-shot `postgres-migrate`
+init container applies every Postgres migration — including
+`0002_better_auth.sql`, the Better Auth `user`/`session`/`deviceCode` schema
+that `workspace-api` and `sync-relay` query — before either auth service
+starts. Both services `depend_on` the migration completing successfully, so a
+fresh Postgres is never served against an absent schema. The container runs the
+same idempotent `pnpm migrate` documented below, so re-running the stack is a
+no-op once the schema is current.
+
+## Migrations
+
+`pnpm migrate` is the dedicated, idempotent Postgres schema command. It applies
+every file under `packages/workspace-postgres/src/db/migrations` in order
+(`0001_initial`, `0002_better_auth`, `0003_partial_path_unique`, …), tracking
+applied ids in a `dohc_migrations` ledger, and is non-destructive — it never
+truncates data:
+
+```bash
+POSTGRES_URL=postgres://user:pass@host:5432/dohc pnpm migrate
+```
+
+- Self-host compose runs it automatically via the `postgres-migrate` init
+  container (above).
+- For local development against `pnpm dev:postgres`, `pnpm migrate` applies the
+  schema and `pnpm reset:postgres` applies the schema then truncates dev data.
+  Do not run reset commands against production data.
+- Production upgrades run `pnpm migrate` after backups and before re-enabling
+  agent writes.
 
 ## Reset Dev Data
 
@@ -89,7 +114,8 @@ Upgrade order:
 
 1. stop agent writes or put the workspace in review-only mode.
 2. back up Postgres.
-3. run migrations.
+3. run migrations with `pnpm migrate` (idempotent; the compose
+   `postgres-migrate` init container runs the same command on stack start).
 4. run `pnpm check:self-host` to validate the compose/service matrix.
 5. smoke-test the surviving surface: Better Auth sign-in and a sync-relay
    round-trip (engine-native co-editing rides the relay).

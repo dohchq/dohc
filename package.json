@@ -20,6 +20,7 @@
     "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
     "dev:postgres": "docker compose -f docker-compose.dev.yml up -d postgres minio",
     "build": "pnpm -r --if-present build",
+    "migrate": "node scripts/migrate-postgres.mjs",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",

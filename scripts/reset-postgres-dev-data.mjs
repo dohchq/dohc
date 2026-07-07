@@ -1,34 +1,19 @@
-import { readFile } from "node:fs/promises";
 import pg from "pg";
+import { applyMigrations } from "./lib/apply-migrations.mjs";
 
 const url =
   process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc_v2";
-const migrationUrl = new URL(
-  "../packages/workspace-postgres/src/db/migrations/0001_initial.sql",
-  import.meta.url,
-);
 
 const client = new pg.Client({ connectionString: url });
 await client.connect();
 
 try {
-  const migrationId = "0001_initial";
-  await client.query(`
-    create table if not exists dohc_migrations (
-      id text primary key,
-      applied_at timestamptz not null default now()
-    )
-  `);
-  const applied = await client.query(
-    "select 1 from dohc_migrations where id = $1",
-    [migrationId],
-  );
-  if (applied.rowCount === 0) {
-    await client.query(await readFile(migrationUrl, "utf8"));
-    await client.query("insert into dohc_migrations (id) values ($1)", [
-      migrationId,
-    ]);
-  }
+  // Ensure the FULL schema is present before truncating — notably the Better
+  // Auth tables in 0002 that the surviving auth/relay stack queries.
+  // Previously this script applied only 0001, so a fresh dev Postgres was left
+  // without the auth schema. applyMigrations is idempotent (create-if-not-
+  // exists SQL + a dohc_migrations ledger), so this is safe to re-run.
+  await applyMigrations(client);
   await client.query(`
     truncate table
       agent_approvals,

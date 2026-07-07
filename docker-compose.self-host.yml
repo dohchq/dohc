@@ -17,6 +17,29 @@ services:
     volumes:
       - dohc_self_host_postgres:/var/lib/postgresql/data
 
+  # Schema bootstrap: a one-shot init container that applies every Postgres
+  # migration (idempotently) BEFORE the auth stack starts — notably
+  # 0002_better_auth, the Better Auth user/session/deviceCode schema that
+  # workspace-api and sync-relay query. Without this, a fresh Postgres would
+  # start the auth services against tables that do not exist yet. It exits 0 on
+  # success; workspace-api and sync-relay gate on that completion.
+  postgres-migrate:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm migrate"
+    volumes:
+      - .:/workspace
+
   # The auth surface: Better Auth on /api/auth (the desktop device sign-in flow
   # that mints the bearer tokens the sync-relay validates). Live co-editing was
   # retired with Hocuspocus (G2-C-3) and is now engine-native over the relay, so
@@ -27,6 +50,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     environment:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
@@ -48,6 +73,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     environment:
       # Must match workspace-api exactly so Better Auth bearer tokens minted by
       # workspace-api's desktop device flow validate at the relay too.
