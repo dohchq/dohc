@@ -18855,3 +18855,85 @@ shared channels -> isolation/self-host sweep), each with BLOCKING adversarial
 cross-user isolation tests mirroring PR-18. Files changed: the plan doc, its
 manifest entry (`2026-06-23-think-bigger-docs.manifest.json`), and this log
 entry. `node scripts/check-think-bigger-doc-links.mjs` passes.
+## Agent Notifications and Mentions
+
+LOCAL, individual-first: the single user + their own agents. No relay/cloud
+replication, presence, DMs, or shared channels (those stay behind the
+collaboration flag). Everything here is derived from the in-process agent
+session and the engine chat store already on this machine.
+
+### Notification model (pure: `agentNotifications.ts`)
+
+- Triggers, one per run: `finished` (status → completed), `needs-input`
+  (status → waiting-permission, i.e. blocked on an approval/question),
+  `asked` (a completion whose latest agent message @mentions the user or ends
+  in a question), `error` (status → failed). Priority error > needs-input >
+  asked > finished.
+- Coalescing: notices key on `${workspaceId}::${runId}::${kind}`. Repeated
+  polls of the same state never duplicate or re-stamp; a transition to a new
+  kind supersedes the old kind's notice for that run; other runs/workspaces
+  are untouched.
+- Auto-clear: a run that resumes (desired kind → null) drops its notice; a
+  `dismissed` key set suppresses re-raising a state the user already saw;
+  `clearAgentNotificationsForWorkspace` (opening the Agent panel) and
+  `clearAgentNotificationsForThread` (opening the chat) are the open-side
+  auto-clears. `deriveAgentActivity` folds a session snapshot into the flat
+  input (latest-assistant summary + addressed-to-user detection).
+- `useAgentNotifications` polls `getAgentSessionState` for the active
+  workspace (1.5s) so a background run finishing off-screen still surfaces.
+  Scope: the currently open workspace only — cross-workspace polling is the
+  one obvious future addition (and the seam multi-user lanes will also want).
+
+### Mentions (pure: `mentions.ts`)
+
+- Parser resolves `@handle` against a candidate roster (the user + agents),
+  email-safe boundary handling, unknown handles stay plain text. Segments for
+  chip rendering; `mentionsAnyCandidate` for addressed-to-user.
+- Autocomplete: `activeMentionQuery` (caret token), `matchMentionCandidates`
+  (prefix/substring ranking, agent-first on ties), `applyMentionCompletion`.
+- `MentionComposer` wires it into the composer: while the menu is open
+  Enter/Tab accept the highlight (never send); Enter sends when closed;
+  IME-safe. combobox/listbox roles + aria-activedescendant.
+- User → agent invoke: a sent message that @mentions an agent calls the
+  shell's `handleAgentMentioned`, which starts an agent session prompting it
+  to `dohc_read_chat` + `dohc_reply_to_chat` in that thread (the existing
+  two-way agent-chat reply path). Guarded when an agent is already busy.
+
+### Surfaces
+
+- NoticeCenter renders agent notices (newest first) with Open + dismiss.
+- `MentionText` chips in the shared `ChatMessageList` (both the workspace
+  Chats view and the file rail can opt in via `mentionCandidates`).
+- "Addressed to me" inbox: a calm section atop ChatsView listing asks /
+  needs-input, hidden when empty — reuses the notification model, no new
+  backend query.
+
+### UI copy inventory
+
+- finished — "Your agent finished" / summary or "Your agent wrapped up its
+  work in <workspace>."
+- needs-input — "Your agent needs you" / "Waiting for your go-ahead: <perm>"
+- asked — "Your agent has a question" / summary or "Your agent asked you
+  something in <workspace>."
+- error — "Your agent hit a problem" / the failure reason.
+- Composer placeholder gains "  @ to mention"; inbox header "Addressed to me";
+  busy-invoke note "Your agent is busy right now — it'll pick up the mention
+  on its next turn."; no-driver note "No agent is set up to mention yet —
+  connect one in the Agent panel."
+
+### Shared-code note (multi-user lanes)
+
+`mentions.ts` is deliberately free of desktop-only imports so member/agent
+handle resolution can move to a shared package when the collaboration lanes
+land; the notification model's coalescing/dismissal keying is per-run and
+reusable for teammate-authored asks too.
+
+### Verification (Linux)
+
+- `pnpm -r typecheck` clean repo-wide; `pnpm --filter @dohc/desktop build` ok.
+- desktop 1017 (was 967: +19 mentions, +19 notifications, +6 mention
+  composer, +2 NoticeCenter agent notices, +4 ChatsView mention/inbox/invoke).
+- workspace-engine 432 (unchanged — no engine changes) + fs-lock 39/5-skip.
+- `git diff --check` clean. e2e: covered by robust unit/integration tests
+  (model + parser + composer + notice center + ChatsView invoke wiring)
+  rather than a new Electron spec.
