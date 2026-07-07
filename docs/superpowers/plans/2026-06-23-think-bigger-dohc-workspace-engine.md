@@ -5,7 +5,12 @@
 > comprehensive automated plus manual QA. Do not start implementation until the
 > user approves the overall direction and branch/PR strategy.
 
-**Status:** mega-plan draft
+**Status:** COMPLETE (2026-07-07) — the engine is the product default; the
+four-wave [Plan Completion Map](#plan-completion-map-2026-07-06) and the
+full roadmap through PR 18 have shipped to main. See the
+[Initiative Completion Record (2026-07-07)](./2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md#initiative-completion-record-2026-07-07)
+in the execution log for the per-arc PR list, what shipped vs. what is
+explicitly deferred, and the remaining alpha caveats.
 
 **Date:** 2026-06-23
 

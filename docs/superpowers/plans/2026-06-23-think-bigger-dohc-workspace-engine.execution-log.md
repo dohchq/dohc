@@ -18012,3 +18012,92 @@ node scripts/check-think-bigger-doc-links.mjs
   createWorkspaceShare/revokeWorkspaceShare IPC + workspace-api routes)
   deleted under WS-H legacy retirement Phase D.
 - Blob-allowlist performance work if usage grows (see Performance Notes).
+
+## Initiative Completion Record (2026-07-07)
+
+The Think Bigger workspace-engine initiative is complete. The engine is the
+default product substrate; the legacy local recorder is retired; multi-machine
+sync, encrypted secret sync, and cross-user shares ship on an engine-native
+relay. Every lane merged through the tightened three-part gate (orchestrator
+verification with independent E2E re-runs + CodeRabbit CLI + codex second-model
+review), with security/data-integrity findings fixed before merge.
+
+### PR ledger (all merged to main)
+
+- Phase 0 proof arc: #46-#54 (landed pre-initiative-review; see the Phase 0
+  Outcome section in the plan).
+- Product Mount Arc (0M): #55 storage baseline (SQLite + content-addressed
+  blobs), #56 portable writer, #57 watcher->engine capture, #58 named-versions
+  wedge, #59 history flip + linked-chat rail, #60 contracts extraction, #61
+  arc gate.
+- Agent Loop (0N): #62 agent-attributed writes + two-way agent chat, #63
+  try-it-in-a-version; 0N-3 legacy salvage audit doc.
+- Wave 1: #64 effective policy resolver + .dohc policy files, #65 Rust
+  workspace kernel sidecar.
+- Wave 2: #66 Arc 0P sync design, #67 secret-backed .env files, #68 secrets
+  hardening, #69 indexed FTS5 search mounted in the desktop.
+- Wave 3: #70 workspace Chats (channels/threads/read-cursors/Chats view), #71
+  collab decouple-and-defer design, #72 capped binary-asset versioning, #73
+  engine sync over a folder (0P-A).
+- Wave 4: #74 engine default-on + legacy retirement Phases A-C, #75 sync relay
+  + desktop sync loop (0P-B), #76 multi-machine sync product flow + offline
+  rejoin (0P-C), #77 encrypted secret replication (0P-D), #78 external
+  read-only shares (PR 18).
+
+### What shipped
+
+Versioned workspace (named versions, history moments, restore, 3-way merge +
+conflict preservation, capped binary versioning) on a per-workspace SQLite
+store with content-addressed blobs; watcher-backed normal-folder capture with
+a tolerant cold-adoption scan; the agent loop (attributed engine writes,
+two-way agent chat, "Try in a version"); effective policy + .dohc policy
+files; secret-backed .env (AES-256-GCM, metadata-only history, materialize-
+only exit); indexed policy-aware FTS5 search across files and chats; workspace
+Chats (channels, threads, monotonic read cursors, the Chats view); a Rust
+workspace-kernel sidecar (JSON-RPC, token-bound, ~40x scan) behind a dev flag;
+engine-native multi-machine sync (multi-origin log, folder bundles + a dumb
+authenticated relay, offline rejoin with P0D-shaped conflicts, join-by-code,
+encrypted secret replication with passphrase-wrapped key envelopes); and
+external read-only shares with a fail-closed server-side selector filter.
+
+### Explicitly deferred (recorded, not forgotten)
+
+- Legacy cloud stack retirement Phase D (workspace-api / hocuspocus /
+  workspace-postgres / apps/web as a coupled unit) — the engine-native relay
+  supersedes it; retirement is mechanical follow-up.
+- Rich-doc live collaboration re-home on the engine (WS-G2 candidate (b):
+  Y.Doc content driver + update-ops over the sync log) — decoupled and
+  deferred to the team wave; solo rich-doc editing works today with zero
+  Hocuspocus.
+- Chats: notifications/mentions (PR 16), DMs UI, presence/typing/reactions,
+  shared channels; PR 18 covers file/version shares, not chat shares.
+- Sync: conflict-id symmetry, conflict coalescing, rollback compensating ops,
+  origin-reset recovery, relay GC/quotas (0P follow-ups).
+- Rust kernel packaging for macOS/Windows; the sidecar stays dev-flagged.
+
+### Remaining alpha caveats
+
+- macOS/Windows real-runner validation is outstanding (the portable writer and
+  the whole suite are logic-verified on Linux). This is the gate before any
+  real Windows release build — the user's daily platform.
+- Passphrase-wrapped secret sync uses scrypt (Argon2id is a dependency-cost
+  upgrade); pre-0P-D secrets replicate on next change.
+- Per-lane CodeRabbit minor/trivial findings were recorded across the lane
+  entries above for a consolidated arc-gate cleanup sweep.
+
+### Validation at completion (main 060fa06b, 2026-07-07)
+
+Local package suites green after a clean install: workspace-engine 389,
+desktop 960, sync-relay 53 (live child-process relay), workspace-contracts 10,
+workspace-core 108, workspace-history 47, workspace-fs 44, mcp 80,
+workspace-api 76 (live Postgres), workspace-postgres 23 (live Postgres);
+repo-wide typecheck clean; docs link checker green. GitHub Actions remain
+disabled by user direction; local Docker Postgres is the enforced integration
+leg.
+
+### The one thing no gate can do
+
+Dogfooding. The engine is the default and every loop is tested and reviewed,
+but the product's promise is a *feel* — flip a real workspace, work in a named
+version for a day, hand a task to an agent with "Try in a version", and let
+the friction reshape the next phase more than any document does.
