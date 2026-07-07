@@ -250,6 +250,17 @@ Rules:
 This makes "who said this" a first-class, spoofing-resistant fact without a
 new identity system.
 
+> **✅ Implemented (MU-C0).** `ChatMessageAppendPayload.authorUserId` (optional)
+> and `ChatMessage.authorUserId` now exist; a signed-in desktop send stamps the
+> OPAQUE Better Auth user id (`relayAuthorUserId()` in desktop main), solo omits
+> it (byte-identical to today). Verification landed at the relay's `POST
+> /sync/:ws/log` append path — NOT only the shared-channel route — so EVERY push
+> is checked (`assertChatAuthorship`): a chat op whose author ≠ the authenticated
+> pusher fails the whole batch atomically with `403 authorship_mismatch`. The
+> shared-channel member-append route (MU-C4) reuses the same gate. The engine's
+> replicated apply persists `author_user_id` (a lazy-additive nullable column)
+> and trusts it ONLY because the relay verified it.
+
 ## Presence / typing (ephemeral — reuse G2-C awareness)
 
 Presence, typing, and "viewing this channel" are ephemeral and MUST NOT enter
@@ -334,21 +345,24 @@ reaction is an authored act). A reaction on a message you can see, you can
 make; you can only remove your OWN reactions (enforced by `reactionId` /
 `userId` identity).
 
-> **⚠️ Security — UNVERIFIED reaction authorship until MU-C0 (as shipped in
-> MU-C2).** The verification above describes the TARGET state. As of the MU-C2
-> lane it is NOT yet in force. `authorId` is part of the reaction CRDT cell key
-> and the replicated apply (`applyReplicationOp`, `chat.reaction.set` branch)
-> trusts it verbatim, because the workspace engine cannot map a replication
-> origin to a user. A malicious or buggy relay collaborator can therefore forge
-> authorship — replicate a reaction op that adds or removes a VICTIM's reaction
-> cell. This is acceptable ONLY for solo workspaces and trusted-relay-
-> collaborator deployments; replicated reaction authorship must NOT be treated
-> as trustworthy yet. The LOCAL react path is safe (desktop main derives
-> `authorId` from the signed-in user, never the renderer). **MU-C0 closes this:**
-> the relay must stamp/verify `authorId === actor.userId` server-side on shared
-> channels before an op is admitted to the replication log — the same
-> origin→user provenance MU-C0 establishes for `message.append`. Until MU-C0
-> lands, do not enable shared reactions across untrusted relay members.
+> **✅ Security — reaction authorship VERIFIED at the relay (closed by MU-C0).**
+> The verification above is now IN FORCE. MU-C0 added a server-side authorship
+> gate to the relay's log-append path (`services/sync-relay/src/server.ts`,
+> `assertChatAuthorship`): before any batch is admitted to `replication_log`,
+> every chat op that names an author is checked against the authenticated pusher
+> (`actor.userId`, server-derived from the Better Auth session). A
+> `chat.reaction.set` whose `authorId`, or a `chat.message.append` whose
+> `authorUserId`, does not equal the pusher — or a reaction op with no `authorId`
+> at all — fails the WHOLE batch atomically with `403 authorship_mismatch`
+> (nothing is admitted). So `authorId`/`authorUserId` remain part of the CRDT
+> cell key and are trusted verbatim on the engine's replicated apply ONLY because
+> the relay verified them first; the engine has no origin→user map and cannot
+> check it itself. A relay collaborator can no longer forge a reaction/message as
+> a VICTIM. The identity is the OPAQUE Better Auth user id (never a raw email —
+> PII must not enter the replicated CRDT). The LOCAL react/send path is safe
+> (desktop main derives the id from the signed-in user, never the renderer), and
+> the no-relay/solo path is a single trusted user. Shared reactions across relay
+> members are therefore safe to enable.
 
 ## DMs
 
