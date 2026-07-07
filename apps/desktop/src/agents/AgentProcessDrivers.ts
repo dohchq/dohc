@@ -61,6 +61,9 @@ async function probeCommand(spec: ProcessSpec): Promise<{ installed: boolean; ve
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      ...(resolved.windowsVerbatimArguments
+        ? { windowsVerbatimArguments: true }
+        : {}),
     });
     let stdout = "";
     let stderr = "";

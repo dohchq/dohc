@@ -104,6 +104,13 @@ describe("package manager helpers", () => {
       args: ["vite", "--host", "127.0.0.1"],
     });
     expect(() => splitCommandLine('"unterminated')).toThrow(/unterminated/);
+    if (process.platform === "win32") {
+      // Backslashes are Windows path separators, never shell escapes.
+      expect(splitCommandLine('node "C:\\ws\\build.mjs"')).toEqual({
+        command: "node",
+        args: ["C:\\ws\\build.mjs"],
+      });
+    }
   });
 
   it("rejects dev server commands that explicitly bind outside loopback", () => {

@@ -72,6 +72,13 @@ function normalizeError(error: unknown): JsonRpcError {
   return new JsonRpcError(-32603, "JSON-RPC handler failed.");
 }
 
+// Quote a token for a cmd.exe /s /c command line. Tokens with embedded
+// double quotes are not representable safely; whitespace-bearing paths (the
+// realistic case, e.g. "C:\Program Files\nodejs\npm.cmd") are.
+function quoteForCmd(token: string): string {
+  return /\s/.test(token) ? `"${token}"` : token;
+}
+
 export function resolveSpawnCommand(
   command: string,
   args: string[],
@@ -80,7 +87,7 @@ export function resolveSpawnCommand(
     platform?: NodeJS.Platform;
     exists?: (path: string) => boolean;
   } = {},
-): { command: string; args: string[] } {
+): { command: string; args: string[]; windowsVerbatimArguments?: boolean } {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32") return { command, args };
 
@@ -107,9 +114,17 @@ export function resolveSpawnCommand(
 
   const extension = win32.extname(resolved).toLowerCase();
   if (extension === ".cmd" || extension === ".bat") {
+    // cmd.exe /s strips the first and last quote of the string after /c, so
+    // the whole command line rides in ONE outer-quoted argument with spaced
+    // tokens quoted individually. windowsVerbatimArguments stops Node from
+    // re-quoting that argument, which would corrupt cmd.exe's parsing (and,
+    // for a spaced shim path like "C:\Program Files\nodejs\npm.cmd", swallow
+    // the child's real exit code behind a cmd.exe launch failure).
+    const line = [resolved, ...args].map(quoteForCmd).join(" ");
     return {
       command: env.ComSpec ?? env.COMSPEC ?? "cmd.exe",
-      args: ["/d", "/s", "/c", resolved, ...args],
+      args: ["/d", "/s", "/c", `"${line}"`],
+      windowsVerbatimArguments: true,
     };
   }
   return { command: resolved, args };
@@ -150,6 +165,9 @@ export class JsonRpcTransport {
       env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      ...(resolved.windowsVerbatimArguments
+        ? { windowsVerbatimArguments: true }
+        : {}),
     });
     return new JsonRpcTransport(child, options);
   }

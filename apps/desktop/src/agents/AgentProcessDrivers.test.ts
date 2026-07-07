@@ -48,13 +48,16 @@ describe("process-backed agent drivers", () => {
 
     expect(resolved).toEqual({
       command: "C:\\Windows\\System32\\cmd.exe",
+      // One outer-quoted /s /c command line, passed verbatim so Node cannot
+      // re-quote it — cmd.exe strips the outer quotes and runs the shim with
+      // its argv intact even when the shim path contains spaces.
       args: [
         "/d",
         "/s",
         "/c",
-        "C:\\Users\\ice\\AppData\\Roaming\\npm\\codex.CMD",
-        "app-server",
+        '"C:\\Users\\ice\\AppData\\Roaming\\npm\\codex.CMD app-server"',
       ],
+      windowsVerbatimArguments: true,
     });
   });
 
