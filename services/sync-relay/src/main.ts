@@ -14,6 +14,30 @@ const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 
+// Reject an unparseable SYNC_RELAY_PORT up front: Number("abc") is NaN and
+// server.listen(NaN) fails with an obscure downstream error. Port 0 is
+// allowed (bind an ephemeral port, used by the integration harness).
+if (
+  process.env.SYNC_RELAY_PORT !== undefined &&
+  (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535)
+) {
+  console.error(
+    `FATAL: SYNC_RELAY_PORT must be an integer in 0-65535, got "${process.env.SYNC_RELAY_PORT}".`,
+  );
+  process.exit(1);
+}
+
+// In production the relay reuses workspace-api's Postgres for session and
+// share-account lookups. Falling back to a localhost default there would
+// silently point auth at the wrong database; fail fast instead. The default
+// stays available for dev/test convenience only.
+if (!isDevOrTest && !testAuthSeam && process.env.POSTGRES_URL === undefined) {
+  console.error(
+    "FATAL: POSTGRES_URL must be set outside development/test (it must match workspace-api's database).",
+  );
+  process.exit(1);
+}
+
 if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
   console.error(
     `FATAL: SYNC_RELAY_TEST_AUTH=1 requires NODE_ENV=development or test, got NODE_ENV=${nodeEnv ?? "(unset)"}. ` +

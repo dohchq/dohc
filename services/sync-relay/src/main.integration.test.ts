@@ -983,3 +983,64 @@ describe("sync relay main process", () => {
     expect(put.status).toBe(200);
   });
 });
+
+// Spawn main.ts expecting it to refuse to start; resolves with the exit code
+// and captured stderr instead of a listening URL.
+async function spawnRelayExpectExit(
+  envOverrides: Record<string, string | undefined>,
+): Promise<{ code: number | null; stderr: string }> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries({ ...process.env, ...envOverrides })) {
+    if (value !== undefined) env[key] = value;
+  }
+  const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
+    cwd: packageRoot(),
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  children.push(child);
+  return await new Promise((resolve, reject) => {
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      reject(new Error(`sync relay did not exit\nstderr:\n${stderr}`));
+    }, 15_000);
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timeout);
+      resolve({ code, stderr });
+    });
+  });
+}
+
+describe("sync relay startup guards", () => {
+  it("refuses to start when SYNC_RELAY_PORT is not a number", async () => {
+    const dbPath = join(await tempRoot("bad-port"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "not-a-port",
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("SYNC_RELAY_PORT must be an integer");
+  });
+
+  it("refuses to start in production when POSTGRES_URL is unset", async () => {
+    const dbPath = join(await tempRoot("no-pg"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "production",
+      SYNC_RELAY_TEST_AUTH: undefined,
+      POSTGRES_URL: undefined,
+      SYNC_RELAY_PORT: "0",
+      // A valid-length secret so the guard under test is the one that fires.
+      BETTER_AUTH_SECRET: "x".repeat(32),
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("POSTGRES_URL must be set");
+  });
+});
