@@ -728,14 +728,21 @@ let ownWin32ProcessStartCache:
   | { pid: number; value: null; retryAtMs: number }
   | undefined;
 
-function readWin32ProcessStartFileTime(pid: number): string | null {
-  if (process.platform !== "win32" || !Number.isInteger(pid) || pid <= 0) return null;
-  if (pid === process.pid && ownWin32ProcessStartCache?.pid === pid) {
-    const cached = ownWin32ProcessStartCache;
-    if (cached.value !== null) return cached.value;
-    if (Date.now() < cached.retryAtMs) return null;
-  }
-  let value: string | null = null;
+// Test seam: lets the win32-gated liveness tests drive identity-lookup success
+// and failure deterministically without spawning a real PowerShell. Undefined
+// in production, where the actual Get-Process query runs.
+let win32ProcessStartResolverForTest: ((pid: number) => string | null) | undefined;
+
+export function __setWin32ProcessStartResolverForTest(
+  resolver: ((pid: number) => string | null) | undefined,
+): void {
+  win32ProcessStartResolverForTest = resolver;
+  // The own-pid cache would otherwise pin a value across resolver swaps.
+  ownWin32ProcessStartCache = undefined;
+}
+
+function queryWin32ProcessStartFileTime(pid: number): string | null {
+  if (win32ProcessStartResolverForTest) return win32ProcessStartResolverForTest(pid);
   try {
     const out = execFileSync(
       "powershell.exe",
@@ -747,10 +754,20 @@ function readWin32ProcessStartFileTime(pid: number): string | null {
       ],
       { encoding: "utf8", timeout: 5_000, windowsHide: true },
     ).trim();
-    value = /^[0-9]+$/u.test(out) ? out : null;
+    return /^[0-9]+$/u.test(out) ? out : null;
   } catch {
-    value = null;
+    return null;
   }
+}
+
+function readWin32ProcessStartFileTime(pid: number): string | null {
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid <= 0) return null;
+  if (pid === process.pid && ownWin32ProcessStartCache?.pid === pid) {
+    const cached = ownWin32ProcessStartCache;
+    if (cached.value !== null) return cached.value;
+    if (Date.now() < cached.retryAtMs) return null;
+  }
+  const value = queryWin32ProcessStartFileTime(pid);
   if (pid === process.pid) {
     ownWin32ProcessStartCache =
       value !== null
@@ -767,14 +784,30 @@ function processIdentityForPid(pid: number): HistoryLockProcessIdentity | null {
   return win32Value ? { kind: "win32-process-starttime", value: win32Value } : null;
 }
 
+// Returns true to VETO reclaim (the owner may still be live), false to permit
+// it. On win32 the liveness check is tri-state and fails safe: a live PID whose
+// identity cannot be verified must never lose its lock to a contender, because
+// a transient PowerShell failure would otherwise let the exact data-loss this
+// veto exists to prevent slip through. Linux keeps its original behavior — a
+// /proc read that fails here means the process just exited, so reclaim is safe.
 function historyLockOwnerProcessStillMatches(owner: HistoryLockOwner): boolean {
-  if (!isProcessAlive(owner.pid) || owner.processIdentity === undefined) return false;
+  // (a) PID dead → reclaim.
+  if (!isProcessAlive(owner.pid)) return false;
+  const failSafeVeto = process.platform === "win32";
+  if (owner.processIdentity === undefined) {
+    // No recorded identity to compare against. On win32 we refuse to persist
+    // identity-less owner files, so this only covers a legacy/foreign file:
+    // veto rather than delete a possibly-live lock. Linux keeps reclaiming.
+    return failSafeVeto;
+  }
   const current = processIdentityForPid(owner.pid);
-  return (
-    current !== null &&
-    current.kind === owner.processIdentity.kind &&
-    current.value === owner.processIdentity.value
-  );
+  if (current === null) {
+    // (d) PID alive but identity UNVERIFIABLE (e.g. a transient PowerShell
+    // failure). Fail safe on win32 — do not delete a possibly-live lock.
+    return failSafeVeto;
+  }
+  // (b) identity matches → veto; (c) identity mismatch → reclaim (pid reuse).
+  return current.kind === owner.processIdentity.kind && current.value === owner.processIdentity.value;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -784,6 +817,18 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 function createHistoryLockOwner(token: string): HistoryLockOwner {
   const nowMs = Date.now();
   const processIdentity = processIdentityForPid(process.pid);
+  // On win32 an owner file with no verifiable identity is unsafe: the tri-state
+  // veto can only fail-safe on a live owner while a contender knows the owner's
+  // identity, and a legitimate owner that later needs to prove liveness cannot.
+  // Refuse to write an identity-less owner file rather than persist one. (The
+  // liveness cost — a transient failure delays acquisition until the query
+  // recovers — is accepted; data safety wins.) Linux always has /proc, so this
+  // only fires on win32 and leaves the Linux path unchanged.
+  if (processIdentity === null && process.platform === "win32") {
+    throw new Error(
+      "Cannot acquire the history index lock: this process's win32 start-time identity is unavailable, and writing an identity-less owner file would let a contender reclaim a live lock.",
+    );
+  }
   return {
     token,
     pid: process.pid,

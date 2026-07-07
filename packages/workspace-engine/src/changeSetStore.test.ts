@@ -20,10 +20,16 @@ import {
   type ChangeSet,
 } from "@dohc/workspace-core";
 import {
+  __setWin32ProcessStartResolverForTest,
   createChangeSetStore,
   humanSummary,
   type HistoryRecord,
 } from "./changeSetStore";
+
+type TestProcessIdentity = {
+  kind: "linux-proc-starttime" | "win32-process-starttime";
+  value: string;
+};
 
 const userAuthor = { kind: "user" as const, userId: "user-1" };
 const localAuthor = createLocalChangeAuthor("Local file edit");
@@ -50,7 +56,7 @@ function historyLockPaths(token: string) {
 async function writeHistoryLockOwner(input: {
   token: string;
   pid: number;
-  processIdentity?: { kind: "linux-proc-starttime"; value: string };
+  processIdentity?: TestProcessIdentity;
   createdAtMs: number;
   heartbeatAtMs: number;
 }) {
@@ -1261,5 +1267,66 @@ describePortableHistory("portable durable history (win32)", () => {
       store.record(userEdit(), { id: "reclaimed-1", recordedAtMs: 1000 }),
     ).resolves.toMatchObject({ id: "reclaimed-1" });
     await expect(store.list()).resolves.toMatchObject([{ id: "reclaimed-1" }]);
+  });
+
+  it("does not reclaim a stale lock whose live owner has an unverifiable identity", async () => {
+    // The exact data-loss class the veto exists to prevent: a live-but-stalled
+    // owner whose win32 identity lookup fails (a transient PowerShell error)
+    // must NOT lose its lock. The tri-state liveness check fails safe.
+    await mkdir(join(root, ".dohc", "history"), { recursive: true });
+    const token = "unverifiable-live-owner";
+    const staleAtMs = Date.now() - 60_000;
+    const { lockDir } = await writeHistoryLockOwner({
+      token,
+      pid: process.pid,
+      processIdentity: { kind: "win32-process-starttime", value: "12345" },
+      createdAtMs: staleAtMs,
+      heartbeatAtMs: staleAtMs,
+    });
+    // Every identity lookup fails — including the stale owner's own live pid.
+    __setWin32ProcessStartResolverForTest(() => null);
+
+    const store = createChangeSetStore(root);
+    let settled = false;
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = store
+        .record(userEdit(), { id: "veto-holds", recordedAtMs: 3000 })
+        .then(() => {
+          settled = true;
+        })
+        .catch(() => undefined);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The stale owner's lock survived: the veto held despite the failed
+      // lookup, so no contender deleted a possibly-live lock.
+      await expect(readdir(lockDir)).resolves.toContain(token);
+      expect(settled).toBe(false);
+    } finally {
+      // Restore a working resolver so the freed lock can be acquired cleanly.
+      __setWin32ProcessStartResolverForTest(() => "999");
+      await rm(lockDir, { recursive: true, force: true });
+      await pending?.catch(() => undefined);
+      __setWin32ProcessStartResolverForTest(undefined);
+    }
+  });
+
+  it("writes no identity-less owner file when its own identity lookup fails", async () => {
+    // On a failed own-identity lookup the store must refuse to acquire rather
+    // than persist an identity-less owner file that a contender could later
+    // reclaim out from under a live process.
+    await mkdir(join(root, ".dohc", "history"), { recursive: true });
+    __setWin32ProcessStartResolverForTest(() => null);
+    const { lockDir } = historyLockPaths("unused");
+    try {
+      const store = createChangeSetStore(root);
+      await expect(
+        store.record(userEdit(), { id: "no-identityless", recordedAtMs: 1000 }),
+      ).rejects.toThrow(/win32 start-time identity is unavailable/);
+      // No lock or owner file was left behind — nothing identity-less persisted.
+      await expect(readdir(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      __setWin32ProcessStartResolverForTest(undefined);
+    }
   });
 });
