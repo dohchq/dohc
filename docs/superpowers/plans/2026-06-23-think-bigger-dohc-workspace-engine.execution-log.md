@@ -18937,3 +18937,104 @@ reusable for teammate-authored asks too.
 - `git diff --check` clean. e2e: covered by robust unit/integration tests
   (model + parser + composer + notice center + ChatsView invoke wiring)
   rather than a new Electron spec.
+## Y.Doc Replication G2-C-1
+
+Makes engine-native Y.Doc rich-doc state (the G2-B substrate) REPLICATE across
+machines over the sync relay: the `ydoc.update` op kind, its commutative CRDT
+apply, driver journaling, blob transport, and GC-root wiring. Substrate +
+replication only — NO editor/renderer binding (G2-C-2), NO Hocuspocus deletion
+(G2-C-3). Tests-first, Linux-verified. Basis:
+`2026-07-07-think-bigger-ydoc-engine-driver-design.md` §G2-C1.
+
+### The `ydoc.update` op design
+
+- **Payload** (`YDocUpdatePayload`, contracts): `versionId`, `objectId`, `path`
+  (projection target + secret-floor gate), `contentKind` (`richdoc`/`plaintext`),
+  `updateBlobSha256` (the Yjs update bytes, content-addressed into
+  `binary_blobs`), and `isBaseState?`. Carried in the standard envelope with
+  `(originId, originSeq, recordedAtMs)` like every op.
+- **Snapshot strategy: reuse the update stream, no separate op kind.** A
+  ydoc.update is any `Y.applyUpdate`-able byte string. The driver emits ONE
+  full-state BASE op (`isBaseState`, `Y.encodeStateAsUpdate(seed)`) when a live
+  session's replication baseline is established (open / merge-reseed), then
+  DELTA ops per edit. The base op makes the stream self-contained (a from-
+  scratch peer with no file reconstructs the doc) and re-bases replay each open;
+  peer-side compaction (threshold 128) folds the log into a fresh snapshot to
+  bound replay.
+
+### The commutative apply (how it differs from P0D, why convergence holds)
+
+`moment.append` carries `before_latest_moment_id` and takes the head-check /
+divergence path (fast-forward or open a P0D conflict). `ydoc.update` is
+different in kind: Yjs updates are **commutative CRDT deltas**, so the apply
+branch (`versionedTextStore.applyReplicationOp`) does NO head check, opens NO
+conflict row, and has NO `before` guard. It: (1) digest-verifies the hydrated
+update blob, (2) reconstructs the converged Y.Doc in memory (existing persisted
+state + `Y.applyUpdate` of the new update), (3) re-projects markdown and
+materializes it as a LOCAL, NON-JOURNALING settle (`writeProjectedTextFile` /
+`suppressReplicationJournal`), (4) persists the CRDT rows (append + advance
+head, pinning the ORIGIN's `objectId` so the file and the `ydoc_docs` marker
+share cross-machine identity). Convergence is guaranteed by Yjs semantics, not
+the log: any arrival order converges, a re-applied update is a Yjs no-op, and
+the log's per-origin `acked_seq` dedup makes re-import a no-op at the log level
+too (CRDT idempotence is the backstop). A live co-edit therefore produces ONLY
+fine-grained ydoc.update ops — the settle NEVER journals moment.append, so two
+peers' independent settles can never collide into a P0D conflict on markdown the
+CRDT already reconciled (this is the single-replication-channel invariant).
+
+### Blob-upload-before-log ordering
+
+`collectBlobHashesFromOp` (engine) and `referencedBlobShas` (relay) now count a
+ydoc.update's `updateBlobSha256` as a binary blob. The existing push path
+(`uploadMissingBlobs` before `appendOriginOps`) therefore ships the update blob
+BEFORE the log op, and the relay's append-time blob-ref validation is satisfied.
+The driver journals the ydoc.update op in the SAME write-lane transaction as the
+`ydoc_updates` append, so the blob is already in `binary_blobs` when the op is
+appended locally.
+
+### GC-root wiring
+
+`referencedBlobShas` counting the update blob makes a blob referenced by a live
+ydoc.update log op a relay GC ROOT — `collectUnreferencedBlobs` never reclaims
+it (proven: survives GC with a zero grace window while a sibling orphan is
+collected). Engine-side, the G2-B invariant holds unchanged (a blob referenced
+by a live `ydoc_updates`/`ydoc_snapshots` head is a root; the pull path adds the
+projected path to `candidateMaterializationPaths` so the on-disk file settles).
+
+### Secret floor
+
+The apply rejects a ydoc.update whose `path` classifies as `secret`
+(`.env` family) BEFORE any materialization — no `ydoc_docs` marker, no file, no
+plaintext-leak path for secret files. Proven by test.
+
+### Verification
+
+- `pnpm -r typecheck` clean repo-wide.
+- workspace-engine 437 (was 432: +5 `ydocReplication.test.ts` — state+markdown
+  convergence, idempotent re-import, fresh-store bootstrap, seeded
+  concurrent/out-of-order fuzz with ZERO conflict rows, secret-path rejection,
+  GC-root blob-ref accounting) + changeSetStore 39/5-skip green.
+- sync-relay 67 (was 65: +1 real relay-child ydoc.update convergence + bootstrap
+  + idempotency in `main.integration.test.ts`, +1 GC-root blob survival in
+  `server.test.ts`).
+- desktop 967 unchanged (additive contract method is optional; no perturbation).
+- `git diff --check` clean.
+
+### G2-C-2 / G2-C-3 handoff
+
+- **G2-C-2 (editor provider).** Replace the renderer `HocuspocusProvider`
+  (`useCollabDoc.ts`) with an engine provider driving
+  `driver.openSession`/`recordUpdate`/`settle`/`close`. Two invariants this lane
+  established that the provider MUST honor: (a) **join-before-edit** — a peer
+  must apply the doc's replicated lineage and open with `resume: true` (seed from
+  `loadPersistedDoc`, NOT re-seed from the file) before editing; two independent
+  `markdownToYDoc` seeds of the same file mint different Yjs item ids and merging
+  them DUPLICATES content (inherent CRDT property). (b) The provider must apply
+  incoming remote ydoc.update deltas into the LIVE Y.Doc (this lane converges
+  PERSISTED state; the live in-memory doc is the provider's responsibility).
+  Awareness (presence/cursors) is ephemeral and MUST NOT journal — a separate
+  non-durable channel (still G2-C-2).
+- **G2-C-3 (Hocuspocus retirement).** Delete `services/hocuspocus`, the
+  collab-token route + IPC, and the hocuspocus provider; cut over at a closed-
+  session boundary. Replication is now engine-native, so nothing in the relay
+  path depends on Hocuspocus.
