@@ -347,14 +347,44 @@ function requireWorkspace(workspaceId: string) {
   return workspace;
 }
 
-// PR 18 read-only shared views: every file-mutating IPC path refuses with the
-// same honest copy the renderer shows. The renderer also hides its edit
-// affordances; this is the enforcement layer that cannot be skipped.
+// PR 18 read-only shared views: a shared view is a read-only local workspace.
+// `sharedViewOf` is the ONE authoritative predicate; every mutation surface
+// (file writes, agent runs, code-executing site previews, and the MCP config)
+// routes through it so a shared view can never be changed, only read. The
+// renderer also hides its edit affordances; this main-process layer is the
+// enforcement that cannot be skipped.
+function sharedViewOf(workspaceId: string): { granterEmail: string | null } | null {
+  return findWorkspace(workspaceId)?.shareView ?? null;
+}
+
 function assertWritableWorkspace(workspace: { workspaceId: string }): void {
-  const entry = findWorkspace(workspace.workspaceId);
-  if (entry?.shareView) {
-    const granter = entry.shareView.granterEmail ?? "the person who shared it";
+  const shareView = sharedViewOf(workspace.workspaceId);
+  if (shareView) {
+    const granter = shareView.granterEmail ?? "the person who shared it";
     throw new Error(`This is a shared view — ask ${granter} for changes.`);
+  }
+}
+
+// Agents may READ a shared view (the copyable MCP config serves a read-only
+// profile), but a MANAGED agent run writes into the workspace, so it is
+// refused with honest copy.
+function assertAgentRunnableWorkspace(workspaceId: string): void {
+  if (sharedViewOf(workspaceId)) {
+    throw new Error("Agents can't run in a shared view — it's read-only.");
+  }
+}
+
+// dev/build/preview site modes execute the folder's own code. A shared view
+// holds someone else's code, so only the static (already-materialized)
+// preview is allowed; the code-executing modes are refused.
+function assertSitePreviewMode(
+  workspaceId: string,
+  mode: "static" | "dev" | "build",
+): void {
+  if (mode !== "static" && sharedViewOf(workspaceId)) {
+    throw new Error(
+      "Live and built site previews run the site's own code, so they're disabled in a shared view. Use the static preview.",
+    );
   }
 }
 
@@ -927,7 +957,10 @@ function deriveHocuspocusUrl(serverUrl: string): string {
 // root (path containment), --home points it at the desktop registry/state dir.
 // DOHC_MCP_COMMAND lets a packaged build override the launcher with its shipped
 // binary; the default `dohc-mcp` is the @dohc/mcp bin on PATH.
-function mcpConfigFor(rootPath: string): {
+function mcpConfigFor(
+  rootPath: string,
+  options: { readOnly?: boolean } = {},
+): {
   command: string;
   args: string[];
   workspacePath: string;
@@ -938,6 +971,10 @@ function mcpConfigFor(rootPath: string): {
   const sdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
   const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
   const args = ["--workspace", rootPath, "--home", home];
+  // Shared views hand out a READ-ONLY MCP profile: the launched server never
+  // registers the mutating tools (PR 18), so an agent can read the shared
+  // view but cannot write into it.
+  if (options.readOnly) args.push("--read-only");
   if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
   if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
@@ -953,8 +990,11 @@ function mcpRuntimeConfigFor(rootPath: string): {
   args: string[];
   env?: Record<string, string>;
 } {
-  const config = mcpConfigFor(rootPath);
   const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
+  // Defense in depth: managed agent runs are already refused on shared views,
+  // but if a runtime MCP is ever spawned for one it must be the read-only
+  // profile — never the write-capable server.
+  const config = mcpConfigFor(rootPath, { readOnly: !!workspace?.shareView });
   const remote = workspace?.remote;
   const env =
     remote && cachedCredentials && credentialMatchesRemote(remote.serverUrl)
@@ -2264,6 +2304,9 @@ function registerIpcHandlers(): void {
     setWorkspaceShareView(created.workspaceId, {
       shareId: parsed.shareId,
       granterEmail: info.granterEmail,
+      // Persist the origin relay so a later refresh signed into a DIFFERENT
+      // relay is skipped instead of misreading a 404 as "share ended".
+      relayUrl: credentials.relayUrl,
     });
     refreshNativeWorkspaceSurfaces();
     try {
@@ -2309,6 +2352,15 @@ function registerIpcHandlers(): void {
     }
     await warmCredentialCache();
     if (!cachedCredentials?.relayUrl) throw new Error("Sign in to dohc Cloud first.");
+    // Only refresh against the share's ORIGIN relay. Signed into a different
+    // relay, a 404 there means "wrong server", not "share ended" — so skip
+    // the refresh (leaving the view active) rather than flip it to ended.
+    if (
+      shareView.relayUrl &&
+      !relayUrlsMatch(cachedCredentials.relayUrl, shareView.relayUrl)
+    ) {
+      return RefreshSharedViewResult.parse({ status: "unchanged", changedPaths: 0 });
+    }
     const outcome = await refreshSharedViewOnce({
       rootDir: workspace.rootPath,
       workspaceId: workspace.workspaceId,
@@ -2537,6 +2589,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = StartSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertSitePreviewMode(workspace.workspaceId, input.mode);
     const site = await getSitePackage(workspace.rootPath, input.siteRoot);
     if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
     return StartSitePreviewResult.parse(
@@ -3061,6 +3114,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertAgentRunnableWorkspace(workspace.workspaceId);
     await activity.open(workspace);
     return StartAgentRunResult.parse(await agentIntegration.startAgentRun(input.workspaceId));
   });
@@ -3085,7 +3139,10 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath));
+    // A shared view hands out the read-only MCP profile so the user's AI tool
+    // can browse the shared files without any write tool existing.
+    const readOnly = !!sharedViewOf(workspace.workspaceId);
+    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, { readOnly }));
   });
 
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
@@ -3109,6 +3166,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = StartAgentSessionPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertAgentRunnableWorkspace(workspace.workspaceId);
     await activity.open(workspace);
     await warmCredentialCache();
     const sessions = await agentSessionManager();

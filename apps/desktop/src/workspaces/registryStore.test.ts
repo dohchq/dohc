@@ -115,6 +115,17 @@ describe("registry store", () => {
     ).toThrow(/Unknown workspace/);
   });
 
+  it("persists the share's origin relay so refresh can reject a foreign relay (PR 18 gate fix)", () => {
+    store.register(personal);
+    store.setShareView("ws-1", {
+      shareId: "share-1",
+      granterEmail: "granter@dohc.test",
+      relayUrl: "https://relay.origin.example",
+    });
+    const reread = createRegistryStore(registryPath);
+    expect(reread.find("ws-1")?.shareView?.relayUrl).toBe("https://relay.origin.example");
+  });
+
   it("refuses to overwrite a corrupt registry instead of collapsing it to empty", async () => {
     await writeFile(registryPath, "{ this is not json");
     const corrupt = createRegistryStore(registryPath);

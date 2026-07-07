@@ -18,6 +18,11 @@ export interface ShareViewIdentity {
   shareId: string;
   granterEmail: string | null;
   ended?: boolean;
+  // The relay this share was opened from. A refresh only ever runs against
+  // this origin relay; signed into a different relay, the refresh is skipped
+  // rather than misreading a 404 as "the share ended" (PR 18 gate fix).
+  // Optional for views registered before this field existed.
+  relayUrl?: string;
 }
 
 export interface RegistryEntry extends CreatedWorkspace {

@@ -214,12 +214,32 @@ export function filterOpForShare(
     if (!paths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }
-    const blobSha256s = [
-      collectString(record.payloadBeforeBlobSha256),
-      collectString(record.payloadAfterBlobSha256),
-      collectString(record.beforeBlobSha256),
-    ].filter((sha): sha is string => sha !== null);
-    return { allowed: true, payload, blobSha256s };
+    // Build a MINIMAL served payload from the allowlist of fields the
+    // recipient's replay actually needs (workspace-engine syncShareView).
+    // Everything else in the stored moment — author, metadata.summary,
+    // metadata.correlationId, moment/object ids, lineage (before* fields),
+    // and raw recorded timestamps — is dropped so nothing beyond the
+    // in-selector change description crosses the share boundary. The author
+    // is replaced with a neutral sync origin.
+    const afterSha = collectString(record.payloadAfterBlobSha256);
+    const served: Record<string, unknown> = {
+      operation: typeof record.operation === "string" ? record.operation : null,
+      metadata: { origin: "sync" },
+    };
+    const inPath = collectString(record.path);
+    if (inPath) served.path = inPath;
+    const afterPath = collectString(record.payloadAfterPath);
+    if (afterPath) served.payloadAfterPath = afterPath;
+    const beforePath = collectString(record.payloadBeforePath);
+    if (beforePath) served.payloadBeforePath = beforePath;
+    if (afterSha) served.payloadAfterBlobSha256 = afterSha;
+    if (record.payloadAfterContentKind === "binary") {
+      served.payloadAfterContentKind = "binary";
+    }
+    // Only the after-blob is ever fetched by the recipient (before-blobs are
+    // never replayed), so it is the only hash we make reachable.
+    const blobSha256s = afterSha ? [afterSha] : [];
+    return { allowed: true, payload: served, blobSha256s };
   }
 
   if (opKind === "version.create") {
@@ -230,6 +250,10 @@ export function filterOpForShare(
     // forkSnapshots carry one row per file of the SOURCE version at fork
     // time — including files far outside the share. Redact to the selector;
     // rows whose shape is not understood are dropped, never passed through.
+    // Each kept row is rebuilt to the MINIMAL replay shape (path, blob sha,
+    // content kind) so snapshot metadata and lineage (objectId,
+    // latestMomentId, updatedAtMs, metadata) never leak, and the version
+    // payload itself is reduced to its id + the redacted snapshots.
     const rawSnapshots = Array.isArray(record.forkSnapshots) ? record.forkSnapshots : [];
     const keptSnapshots: Array<Record<string, unknown>> = [];
     const blobSha256s: string[] = [];
@@ -238,13 +262,18 @@ export function filterOpForShare(
       if (!snapshot) continue;
       const path = collectString(snapshot.path);
       if (!path || !pathVisibleThroughShare(selector, path)) continue;
-      keptSnapshots.push(snapshot);
+      const minimal: Record<string, unknown> = { path };
       const sha = collectString(snapshot.blobSha256);
-      if (sha) blobSha256s.push(sha);
+      if (sha) {
+        minimal.blobSha256 = sha;
+        blobSha256s.push(sha);
+      }
+      if (snapshot.contentKind === "binary") minimal.contentKind = "binary";
+      keptSnapshots.push(minimal);
     }
     return {
       allowed: true,
-      payload: { ...record, forkSnapshots: keptSnapshots },
+      payload: { versionId: selector.versionId, forkSnapshots: keptSnapshots },
       blobSha256s,
     };
   }

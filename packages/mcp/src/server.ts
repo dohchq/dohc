@@ -56,9 +56,11 @@ export function parseArgs(argv: string[]): ToolContext {
     process.env.DOHC_SDK_DEPENDENCY_RANGE,
     "DOHC_SDK_DEPENDENCY_RANGE",
   );
+  let readOnly = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
+    else if (argv[i] === "--read-only") readOnly = true;
     else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
       sdkPackageJsonPath = nonEmptyArg(argv[++i], "--sdk-package-json");
     } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
@@ -70,6 +72,7 @@ export function parseArgs(argv: string[]): ToolContext {
     home,
     ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
     ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
+    ...(readOnly ? { readOnly: true } : {}),
   };
 }
 
@@ -89,6 +92,16 @@ function text(value: unknown) {
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.1.0" });
+
+  // PR 18 read-only shared views: a shared view is a read-only local
+  // workspace, so its MCP server must not expose any mutating tool. In the
+  // read-only profile registerWrite is a no-op — dohc_write_file,
+  // create_directory, move_path, delete_path and the other mutating tools are
+  // never registered, so an agent pointed at a shared view can list/read/
+  // search but cannot change anything. Read tools always register below.
+  const registerWrite: McpServer["registerTool"] = ctx.readOnly
+    ? ((() => undefined) as unknown as McpServer["registerTool"])
+    : server.registerTool.bind(server);
 
   server.registerTool(
     "dohc_list_workspaces",
@@ -112,7 +125,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await syncNow(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_sync_cloud",
     {
       description:
@@ -194,7 +207,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await searchWorkspaceFiles(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_write_file",
     {
       description:
@@ -210,7 +223,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await writeWorkspaceFile(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_create_directory",
     {
       description:
@@ -223,7 +236,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await createWorkspaceDirectory(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_move_path",
     {
       description:
@@ -238,7 +251,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await moveWorkspacePath(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_delete_path",
     {
       description:
@@ -264,7 +277,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await detectSites(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_create_site",
     {
       description:
@@ -314,7 +327,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await previewSite(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_publish_site",
     {
       description:
@@ -326,7 +339,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await publishSite(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_add_sdk",
     {
       description:
@@ -338,7 +351,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await addSiteSdk(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_import_data",
     {
       description: "Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database.",
@@ -363,7 +376,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await queryDatabase(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_share",
     {
       description: "Request sharing a file. Returns needs-confirmation — sharing crosses a boundary and is never auto-applied.",
@@ -409,7 +422,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await listChannels(ctx)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_start_channel_chat",
     {
       description:
@@ -423,7 +436,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await startChannelChat(ctx, args)),
   );
 
-  server.registerTool(
+  registerWrite(
     "dohc_reply_to_chat",
     {
       description:

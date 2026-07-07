@@ -64,24 +64,20 @@ class FakeShareRelay {
     const relaySeq = this.nextSeq++;
     const contentSha = content === null ? null : sha256(content);
     if (content !== null) this.blobs.set(contentSha!, Buffer.from(content, "utf8"));
+    // Mirrors the MINIMAL served payload the relay's shareFilter now emits:
+    // only replay fields, author/metadata neutralized to a sync origin. No
+    // momentId/objectId/versionId/summary ride along.
     this.ops.push({
       relaySeq,
       originId: "origin-granter",
       originSeq: relaySeq,
       opKind: "moment.append",
       payload: {
-        momentId: `moment-${relaySeq}`,
-        versionId: "main",
-        objectId: `object-${path}`,
-        path,
-        recordedAtMs: 1000 + relaySeq,
         operation: content === null ? "delete" : "write",
-        payloadBeforeBlobSha256: null,
-        payloadBeforePath: null,
-        payloadAfterBlobSha256: contentSha ?? sha256(""),
+        metadata: { origin: "sync" },
+        path,
         payloadAfterPath: path,
-        metadata: { origin: "local-file", summary: `edit ${path}` },
-        beforePresent: "null",
+        payloadAfterBlobSha256: contentSha ?? sha256(""),
         ...overrides,
       },
       recordedAtMs: 1000 + relaySeq,
@@ -224,17 +220,50 @@ describe("share view client", () => {
     expect(await readViewFile(rootDir, "docs/b.md")).toBeNull();
 
     // The replay keeps the granter's history visible: the view's moment log
-    // has one moment per replayed op, carrying the original summary.
+    // has one moment per replayed op. The served payload carries no author or
+    // summary, so replayed moments record a neutral sync origin.
     const store = createVersionedTextStore(rootDir);
     try {
       const moments = await store.listMoments({ workspaceId: WORKSPACE });
       expect(moments.moments.length).toBeGreaterThanOrEqual(4);
-      expect(
-        moments.moments.some((moment) => moment.metadata.summary === "edit docs/a.md"),
-      ).toBe(true);
+      expect(moments.moments.every((moment) => moment.metadata.origin === "sync")).toBe(true);
+      expect(moments.moments.every((moment) => moment.metadata.summary === undefined)).toBe(true);
     } finally {
       await store.close();
     }
+  });
+
+  it("keeps a re-fetched but content-identical op in changedPaths so a crash before disk materialization re-materializes", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    relay.addMoment("docs/a.md", "crash body");
+
+    // First pull writes the store and returns the change. Simulate a crash
+    // BETWEEN the store write and disk materialization: neither materialize
+    // nor commitCursor runs.
+    const first = await pullShareView({
+      rootDir,
+      workspaceId: WORKSPACE,
+      relay: relay.connection(),
+      shareId: SHARE_ID,
+    });
+    expect(first.applied).toBe(1);
+    expect(first.changedPaths.map((entry) => entry.path)).toContain("docs/a.md");
+
+    // The retry re-fetches the same op (cursor uncommitted). The store already
+    // holds the content so nothing is applied — but the path MUST stay in the
+    // change set so the caller re-materializes it to disk on retry.
+    const retry = await pullShareView({
+      rootDir,
+      workspaceId: WORKSPACE,
+      relay: relay.connection(),
+      shareId: SHARE_ID,
+    });
+    expect(retry.fetched).toBe(1);
+    expect(retry.applied).toBe(0);
+    expect(retry.changedPaths.map((entry) => [entry.path, entry.operation])).toEqual([
+      ["docs/a.md", "write"],
+    ]);
   });
 
   it("re-replays an uncommitted delta idempotently (crash between apply and cursor commit)", async () => {

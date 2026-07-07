@@ -286,6 +286,43 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     });
     expect(writeAttempt).toContain("This is a shared view — ask e2e-granter@dohc.test for changes.");
 
+    // The other three mutation side-doors are refused at the IPC boundary too:
+    // a managed agent run, a code-executing site preview, and a write-capable
+    // MCP config. All route through the same shared-view guard.
+    const bypassAttempts = await page.evaluate(async () => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
+          startAgentRun(payload: { workspaceId: string }): Promise<unknown>;
+          startSitePreview(payload: {
+            workspaceId: string;
+            siteRoot: string;
+            mode: "static" | "dev" | "build";
+          }): Promise<unknown>;
+          getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
+        };
+      }).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      const capture = async (run: () => Promise<unknown>) => {
+        try {
+          await run();
+          return "allowed";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
+      const agent = await capture(() => api.startAgentRun({ workspaceId }));
+      const sitePreview = await capture(() =>
+        api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev" }),
+      );
+      const mcp = await api.getMcpConfig({ workspaceId });
+      return { agent, sitePreview, mcpArgs: mcp.args };
+    });
+    expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
+    expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
+    // The copyable MCP config for a shared view is the read-only profile.
+    expect(bypassAttempts.mcpArgs).toContain("--read-only");
+
     // The granter keeps working; the recipient refreshes and sees it.
     await granterWrite("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");
     await pushWorkspaceToRelay({

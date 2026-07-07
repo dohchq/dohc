@@ -247,8 +247,18 @@ export async function pullShareView(input: {
       if (existing && (existing.contentKind ?? "text") === contentKind) {
         const existingSha =
           existing.sha256 ?? (contentKind === "text" ? sha256Hex(existing.text) : undefined);
-        // Content-identical replay (idempotent refresh / crash retry): no-op.
-        if (existingSha === blobSha256) return;
+        if (existingSha === blobSha256) {
+          // Content-identical replay: the store already holds this content,
+          // so no engine write is needed. But the caller materializes disk
+          // from changedPaths AFTER the store write and BEFORE committing the
+          // cursor — a crash in that window leaves the store ahead of disk.
+          // On retry this op is re-fetched (cursor uncommitted) and lands
+          // here; keep the path in the change set so materialization re-runs
+          // and the file reaches disk. `applied` is unchanged: nothing was
+          // written to the store.
+          changed.set(path, { path, operation: "write", contentKind });
+          return;
+        }
       }
       const bytes = await fetchShareBlob(input.relay, input.shareId, blobSha256);
       if (contentKind === "binary") {
@@ -278,7 +288,14 @@ export async function pullShareView(input: {
     ): Promise<void> => {
       if (!pathReplayable(path)) return;
       const existing = await currentSnapshot(path);
-      if (!existing) return;
+      if (!existing) {
+        // Already gone from the store. On a crash-retry the file may still be
+        // on disk (delete applied to the store but not yet materialized), so
+        // keep the delete in the change set to re-run materialization. Disk
+        // delete is force-removed, so a truly-absent file is a harmless no-op.
+        changed.set(path, { path, operation: "delete", contentKind: "text" });
+        return;
+      }
       await store.deleteTextFile({
         workspaceId: input.workspaceId,
         versionId: main.id,

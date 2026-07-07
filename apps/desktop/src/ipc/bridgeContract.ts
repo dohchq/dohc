@@ -1299,7 +1299,9 @@ export const RelayShareGrantedRow = z.object({
   // The relay-side workspace id (the remote identity, not necessarily a
   // local registry id).
   workspaceId: z.string().min(1).max(256),
-  recipientUserId: z.string().min(1).max(256),
+  // null for a PENDING email invite (an addressed email that has no dohc
+  // account yet); the recipientEmail carries who it was shared with (PR 18).
+  recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
   selector: RelayShareSelector,
   createdAtMs: z.number().int().nonnegative(),

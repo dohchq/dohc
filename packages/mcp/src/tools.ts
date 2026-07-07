@@ -83,6 +83,11 @@ export interface ToolContext {
   // from the MCP build output path because packaged layouts can differ.
   sdkPackageJsonPath?: string;
   sdkDependencyRange?: string;
+  // READ-ONLY profile (PR 18 shared views): when true the server registers
+  // only read/list/search/status tools — the mutating tools are never
+  // registered, so a shared-view MCP server cannot write, create, move,
+  // delete, import, publish, share, or post chat. Set by the --read-only flag.
+  readOnly?: boolean;
 }
 
 function mergeHistoryRecords(

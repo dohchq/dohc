@@ -86,6 +86,17 @@ export function createSyncRelayHandler({
     return { ...share, selector };
   };
 
+  // Lazy claim of pending email invites (PR 18 gate fix): the first time an
+  // invited account authenticates to the relay, any share addressed to its
+  // email becomes a real grant (recipient_user_id filled in). The session
+  // email is server-derived (never client-supplied), so this cannot be used
+  // to claim someone else's invite.
+  const claimPendingShares = async (userId: string): Promise<void> => {
+    if (!lookupUserEmail) return;
+    const email = await lookupUserEmail(userId);
+    if (email) storage.claimPendingSharesForEmail(email, userId);
+  };
+
   const shareSummary = async (
     share: SyncRelayShareRow,
     side: "granted" | "received",
@@ -97,11 +108,19 @@ export function createSyncRelayHandler({
       createdAtMs: share.createdAtMs,
     };
     if (side === "granted") {
+      // A pending invite has no recipient user id yet; surface the addressed
+      // email the granter typed. A claimed/real share resolves the email from
+      // its recipient id for display.
+      const recipientEmail = share.recipientUserId
+        ? lookupUserEmail
+          ? await lookupUserEmail(share.recipientUserId)
+          : null
+        : share.recipientEmail;
       return {
         ...base,
         workspaceId: share.workspaceId,
         recipientUserId: share.recipientUserId,
-        recipientEmail: lookupUserEmail ? await lookupUserEmail(share.recipientUserId) : null,
+        recipientEmail,
         revokedAtMs: share.revokedAtMs,
       };
     }
@@ -135,6 +154,7 @@ export function createSyncRelayHandler({
       if (route.route === "workspaces") throw methodNotAllowed();
 
       if (route.route === "shares-list" && request.method === "GET") {
+        await claimPendingShares(actor.userId);
         const granted = await Promise.all(
           storage.listSharesGrantedBy(actor.userId).map((share) => shareSummary(share, "granted")),
         );
@@ -148,6 +168,7 @@ export function createSyncRelayHandler({
       if (route.route === "shares-list") throw methodNotAllowed();
 
       if (route.route === "share" && request.method === "GET") {
+        await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
         return jsonResponse({ ok: true, ...(await shareSummary(share, "received")) });
       }
@@ -164,6 +185,7 @@ export function createSyncRelayHandler({
       if (route.route === "share-revoke") throw methodNotAllowed();
 
       if (route.route === "share-log" && request.method === "GET") {
+        await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
         const url = new URL(request.url);
         const since = parseCursor(url.searchParams.get("since"));
@@ -190,6 +212,11 @@ export function createSyncRelayHandler({
             recordedAtMs: row.recordedAtMs,
           });
         }
+        // Re-check revocation immediately before returning the body: a revoke
+        // that raced with this in-flight read (after the entry check, while
+        // the page was assembled) must abort the response, not leak a final
+        // filtered page. Re-loading the share throws the same generic 404.
+        shareForRecipient(route.shareId, actor.userId);
         return jsonResponse({
           ok: true,
           ops,
@@ -200,6 +227,7 @@ export function createSyncRelayHandler({
       if (route.route === "share-log") throw methodNotAllowed();
 
       if (route.route === "share-blob" && request.method === "GET") {
+        await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
         assertSha256(route.sha256);
         // A blob is served to a recipient ONLY when at least one op that
@@ -214,6 +242,10 @@ export function createSyncRelayHandler({
         if (!reachable) throw notFound();
         const blob = storage.getBlob(share.workspaceId, route.sha256);
         if (!blob) throw notFound();
+        // Re-check revocation immediately before returning the blob body: a
+        // revoke that raced with this in-flight read must abort rather than
+        // serve a final shared blob. The re-load throws the same generic 404.
+        shareForRecipient(route.shareId, actor.userId);
         return new Response(arrayBufferForBytes(blob), {
           status: 200,
           headers: { "content-type": "application/octet-stream" },
@@ -232,30 +264,56 @@ export function createSyncRelayHandler({
         if (!validation.ok) {
           throw new HttpError(400, validation.code, validation.message);
         }
-        let recipientUserId: string;
-        if (input.recipientUserId !== undefined) {
-          recipientUserId = parseString(input.recipientUserId, "recipientUserId", MAX_ORIGIN_ID_CHARS);
-        } else {
-          const email = parseString(input.recipientEmail, "recipientEmail", MAX_EMAIL_CHARS);
-          if (!resolveUserIdByEmail) {
-            throw badRequest("recipient email lookup is not available on this relay");
-          }
-          const resolved = await resolveUserIdByEmail(email);
-          if (!resolved) {
-            throw new HttpError(404, "recipient_not_found", "no dohc account matches that email");
-          }
-          recipientUserId = resolved;
-        }
-        if (recipientUserId === actor.userId) {
-          throw badRequest("a share needs a recipient other than yourself");
-        }
         const shareId = newShareId();
         const createdAtMs = nowMs();
+
+        // Sharing by explicit user id: the granter already knows the id, so
+        // there is no account existence to leak — echo it back.
+        if (input.recipientUserId !== undefined) {
+          const recipientUserId = parseString(
+            input.recipientUserId,
+            "recipientUserId",
+            MAX_ORIGIN_ID_CHARS,
+          );
+          if (recipientUserId === actor.userId) throw selfShare();
+          storage.createShare({
+            shareId,
+            workspaceId: route.workspaceId,
+            granterUserId: actor.userId,
+            recipientUserId,
+            recipientEmail: null,
+            selectorJson: JSON.stringify(validation.selector),
+            createdAtMs,
+          });
+          return jsonResponse({
+            ok: true,
+            shareId,
+            workspaceId: route.workspaceId,
+            recipientUserId,
+            selector: validation.selector,
+            createdAtMs,
+          });
+        }
+
+        // Sharing by email. To close the account-enumeration oracle, the
+        // response is IDENTICAL whether or not the email has a dohc account:
+        // a known account becomes an immediate recipient, an unknown email
+        // becomes a PENDING invite (claimed when that account first touches
+        // the relay). Either way the response never echoes a recipient user
+        // id, so the granter cannot distinguish "has an account" from "does
+        // not" by inspecting the reply.
+        const email = parseString(input.recipientEmail, "recipientEmail", MAX_EMAIL_CHARS);
+        if (!resolveUserIdByEmail) {
+          throw badRequest("recipient email lookup is not available on this relay");
+        }
+        const resolved = await resolveUserIdByEmail(email);
+        if (resolved === actor.userId) throw selfShare();
         storage.createShare({
           shareId,
           workspaceId: route.workspaceId,
           granterUserId: actor.userId,
-          recipientUserId,
+          recipientUserId: resolved ?? null,
+          recipientEmail: resolved ? null : email.trim().toLowerCase(),
           selectorJson: JSON.stringify(validation.selector),
           createdAtMs,
         });
@@ -263,7 +321,6 @@ export function createSyncRelayHandler({
           ok: true,
           shareId,
           workspaceId: route.workspaceId,
-          recipientUserId,
           selector: validation.selector,
           createdAtMs,
         });
@@ -635,6 +692,10 @@ class HttpError extends Error {
 
 function badRequest(message: string): HttpError {
   return new HttpError(400, "bad_request", message);
+}
+
+function selfShare(): HttpError {
+  return new HttpError(400, "self_share", "a share needs a recipient other than yourself");
 }
 
 function notFound(): HttpError {

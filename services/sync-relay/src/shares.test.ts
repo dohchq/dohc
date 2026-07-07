@@ -155,14 +155,17 @@ describe("share grants", () => {
     );
     expect(create.status).toBe(200);
     const created = await json(create);
+    // The email-create response deliberately omits recipientUserId so it
+    // cannot be used as an account-enumeration oracle (see the pending-invite
+    // test below): the reply is identical for known and unknown emails.
     expect(created).toMatchObject({
       ok: true,
       shareId: "share-0",
       workspaceId: WORKSPACE,
-      recipientUserId: RECIPIENT,
       selector: { paths: ["docs", "notes.md"], versionId: null },
       createdAtMs: 5555,
     });
+    expect(created).not.toHaveProperty("recipientUserId");
 
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
     expect(granterList.granted).toEqual([
@@ -199,7 +202,7 @@ describe("share grants", () => {
     });
   });
 
-  it("refuses secret paths, traversal, empty selectors, self-shares, and unknown recipients at grant time", async () => {
+  it("refuses secret paths, traversal, empty selectors, and self-shares at grant time", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -240,7 +243,33 @@ describe("share grants", () => {
       request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: GRANTER, paths: ["docs"] })),
     );
     expect(self.status).toBe(400);
+    expect((await json(self)).code).toBe("self_share");
 
+    // A self-share addressed by the granter's OWN email is refused with the
+    // same code (the email resolves to the granter's account).
+    const selfByEmail = await h(
+      request(
+        GRANTER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientEmail: `${GRANTER}@dohc.test`, paths: ["docs"] }),
+      ),
+    );
+    expect(selfByEmail.status).toBe(400);
+    expect((await json(selfByEmail)).code).toBe("self_share");
+  });
+
+  it("does not reveal whether an email has an account: known and unknown emails create indistinguishable pending/real invites", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    const known = await h(
+      request(
+        GRANTER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] }),
+      ),
+    );
     const unknown = await h(
       request(
         GRANTER,
@@ -248,8 +277,66 @@ describe("share grants", () => {
         jsonBody({ recipientEmail: "nobody@elsewhere.example", paths: ["docs"] }),
       ),
     );
-    expect(unknown.status).toBe(404);
-    expect((await json(unknown)).code).toBe("recipient_not_found");
+    expect(known.status).toBe(unknown.status);
+    expect(known.status).toBe(200);
+    const knownBody = await json(known);
+    const unknownBody = await json(unknown);
+    // Neither reply leaks the recipient's account existence: same shape, same
+    // keys, and neither carries a recipientUserId.
+    expect(knownBody).not.toHaveProperty("recipientUserId");
+    expect(unknownBody).not.toHaveProperty("recipientUserId");
+    expect(Object.keys(knownBody).sort()).toEqual(Object.keys(unknownBody).sort());
+
+    // The unknown email is recorded as a PENDING invite: unclaimed, it is not
+    // yet readable by anyone, but it survives as an honest grant.
+    const pendingShareId = unknownBody.shareId as string;
+    const beforeClaim = await h(request(RECIPIENT, `/sync/shares/${pendingShareId}/log?since=0`));
+    expect(beforeClaim.status).toBe(404);
+  });
+
+  it("claims a pending email invite only for the account whose session email matches", async () => {
+    const storage = await testStorage();
+    // LATE_EMAIL has no @dohc.test account, so it is stored as a pending
+    // invite. The reverse lookup maps the LATE user id to that address, so its
+    // first authenticated request claims the invite — but RECIPIENT's does not.
+    const LATE = "late-user";
+    const LATE_EMAIL = "late@corp.example";
+    let nextShare = 0;
+    const h = createSyncRelayHandler({
+      storage,
+      resolveActor: (request, workspaceId) => {
+        const auth = request.headers.get("authorization") ?? "";
+        if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
+        return { userId: auth.slice("Bearer user:".length), workspaceId };
+      },
+      nowMs: () => 5555,
+      resolveUserIdByEmail: (email) =>
+        email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
+      lookupUserEmail: (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`),
+      newShareId: () => `share-${nextShare++}`,
+    });
+    await createWorkspace(h);
+    await putBlob(h, "shared body");
+    await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
+
+    // Grant to an address with no account yet: a pending invite.
+    const create = await h(
+      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: LATE_EMAIL, paths: ["docs"] })),
+    );
+    expect(create.status).toBe(200);
+    const shareId = (await json(create)).shareId as string;
+
+    // A different account (wrong session email) cannot claim or read it.
+    expect((await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
+
+    // The invited account's first recipient request claims the invite.
+    const page = await json(await h(request(LATE, `/sync/shares/${shareId}/log?since=0`)));
+    const ops = page.ops as Array<{ opKind: string; payload: { path?: string } }>;
+    expect(ops.map((op) => op.payload.path ?? null)).toEqual(["docs/shared.md"]);
+
+    // It now appears in the claimant's received list.
+    const received = (await json(await h(request(LATE, "/sync/shares")))).received as unknown[];
+    expect(received).toHaveLength(1);
   });
 
   it("refuses share creation on a workspace the caller does not own, byte-identically to no workspace", async () => {
@@ -438,6 +525,86 @@ describe("share grants", () => {
       await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${sha256("never uploaded")}`)),
     );
     expect(await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${dropSha}`)))).toBe(unknown);
+  });
+
+  it("excludes an allowed path recorded under a different version from a version share (version filtering)", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    await putBlob(h, "v1 body");
+    await putBlob(h, "main body");
+    await appendOps(h, [
+      // Same in-selector path (docs/a.md) written on two versions: only the
+      // version-1 moment belongs to a version-1 share. A regression that
+      // ignored the versionId selector (path-only filtering) would leak the
+      // main-version moment.
+      momentOp("docs/a.md", "v1 body", { versionId: "version-1" }),
+      momentOp("docs/a.md", "main body", { versionId: "main" }),
+    ]);
+    await createShare(h, { recipientUserId: RECIPIENT, paths: ["docs"], versionId: "version-1" });
+
+    const page = await json(await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0")));
+    const ops = page.ops as Array<{ opKind: string; payload: { path?: string } }>;
+    // Exactly one moment.append survives — the version-1 one. The main-version
+    // write of the SAME path is excluded.
+    expect(ops).toHaveLength(1);
+    expect(JSON.stringify(page)).not.toContain(sha256("main body"));
+  });
+
+  it("aborts an in-flight shared-log read when the share is revoked mid-request (revocation race)", async () => {
+    const storage = await testStorage();
+    // Wrap the storage so fetchLogPage revokes the share as a side effect:
+    // this lands AFTER the route's entry check but BEFORE the body is
+    // returned, exactly the race the immediate re-check must catch.
+    const racing = new Proxy(storage, {
+      get(target, prop, receiver) {
+        if (prop === "fetchLogPage") {
+          return (input: Parameters<SyncRelayStorage["fetchLogPage"]>[0]) => {
+            const page = target.fetchLogPage(input);
+            target.revokeShare("share-0", 6000);
+            return page;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(racing);
+    await createWorkspace(h);
+    await putBlob(h, "shared body");
+    await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
+    await createShare(h);
+
+    // The entry check sees a live share, but the revoke fires while the page
+    // is assembled; the re-check before returning turns it into the generic
+    // 404 rather than serving one last filtered page.
+    const raced = await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0"));
+    expect(raced.status).toBe(404);
+  });
+
+  it("aborts an in-flight shared-blob read when the share is revoked mid-request (revocation race)", async () => {
+    const storage = await testStorage();
+    const racing = new Proxy(storage, {
+      get(target, prop, receiver) {
+        if (prop === "getBlob") {
+          return (workspaceId: string, sha256: string) => {
+            const blob = target.getBlob(workspaceId, sha256);
+            target.revokeShare("share-0", 6000);
+            return blob;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(racing);
+    await createWorkspace(h);
+    const sharedSha = await putBlob(h, "shared body");
+    await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
+    await createShare(h);
+
+    const raced = await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`));
+    expect(raced.status).toBe(404);
   });
 
   it("advances the shared-log cursor across filtered-out rows so pagination cannot stall", async () => {

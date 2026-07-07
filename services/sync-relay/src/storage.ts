@@ -50,7 +50,12 @@ export interface SyncRelayShareRow {
   shareId: string;
   workspaceId: string;
   granterUserId: string;
-  recipientUserId: string;
+  // null for a PENDING email invite: the granter addressed an email that has
+  // no dohc account yet. It is claimed (recipient_user_id filled in) the first
+  // time that account touches the relay (see claimPendingSharesForEmail).
+  recipientUserId: string | null;
+  // Set only for a pending email invite; cleared once claimed.
+  recipientEmail: string | null;
   // Validated ShareSelector JSON (shareFilter.ts owns the shape).
   selectorJson: string;
   createdAtMs: number;
@@ -97,6 +102,12 @@ export interface SyncRelayStorage {
   // PR 18 share grants. Shares are append-only rows; revocation stamps
   // revoked_at_ms instead of deleting, so a grant leaves an audit trail.
   createShare(input: Omit<SyncRelayShareRow, "revokedAtMs">): void;
+  // Claims any pending email invites addressed to `email` for `userId`,
+  // filling recipient_user_id and clearing recipient_email. Idempotent; the
+  // email match is exact on the normalized (lowercased) address. Returns the
+  // number of rows claimed. This is the lazy claim path: an invited account
+  // becomes a real recipient the first time it authenticates to the relay.
+  claimPendingSharesForEmail(email: string, userId: string): number;
   getShare(shareId: string): SyncRelayShareRow | null;
   listSharesGrantedBy(granterUserId: string): SyncRelayShareRow[];
   // Received listings exclude revoked shares entirely: after revocation the
@@ -210,11 +221,16 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
 
       -- PR 18 share grants: one row per grant. Revocation stamps
       -- revoked_at_ms (rows are never deleted while the workspace lives).
+      -- recipient_user_id is NULL for a pending email invite (an email with
+      -- no dohc account yet); recipient_email holds the addressed email until
+      -- the invite is claimed. Exactly one of the two identifies the
+      -- recipient at any time.
       CREATE TABLE IF NOT EXISTS sync_relay_shares (
         share_id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
         granter_user_id TEXT NOT NULL,
-        recipient_user_id TEXT NOT NULL,
+        recipient_user_id TEXT,
+        recipient_email TEXT,
         selector_json TEXT NOT NULL,
         created_at_ms INTEGER NOT NULL,
         revoked_at_ms INTEGER,
@@ -226,6 +242,8 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         ON sync_relay_shares(granter_user_id, created_at_ms);
       CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient
         ON sync_relay_shares(recipient_user_id, created_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
+        ON sync_relay_shares(recipient_email, created_at_ms);
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -534,23 +552,38 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     this.db
       .prepare(
         `INSERT INTO sync_relay_shares (
-          share_id, workspace_id, granter_user_id, recipient_user_id, selector_json, created_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
+          share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
+          selector_json, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.shareId,
         input.workspaceId,
         input.granterUserId,
         input.recipientUserId,
+        input.recipientEmail,
         input.selectorJson,
         Math.trunc(input.createdAtMs),
       );
   }
 
+  claimPendingSharesForEmail(email: string, userId: string): number {
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return 0;
+    const result = this.db
+      .prepare(
+        `UPDATE sync_relay_shares
+         SET recipient_user_id = ?, recipient_email = NULL
+         WHERE recipient_user_id IS NULL AND recipient_email = ?`,
+      )
+      .run(userId, normalized);
+    return Number(result.changes ?? 0);
+  }
+
   getShare(shareId: string): SyncRelayShareRow | null {
     const row = this.db
       .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id,
+        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
                 selector_json, created_at_ms, revoked_at_ms
          FROM sync_relay_shares WHERE share_id = ?`,
       )
@@ -561,7 +594,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listSharesGrantedBy(granterUserId: string): SyncRelayShareRow[] {
     return this.db
       .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id,
+        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
                 selector_json, created_at_ms, revoked_at_ms
          FROM sync_relay_shares
          WHERE granter_user_id = ?
@@ -574,7 +607,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareRow[] {
     return this.db
       .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id,
+        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
                 selector_json, created_at_ms, revoked_at_ms
          FROM sync_relay_shares
          WHERE recipient_user_id = ? AND revoked_at_ms IS NULL
@@ -654,7 +687,14 @@ function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
     shareId: String(row.share_id),
     workspaceId: String(row.workspace_id),
     granterUserId: String(row.granter_user_id),
-    recipientUserId: String(row.recipient_user_id),
+    recipientUserId:
+      row.recipient_user_id === null || row.recipient_user_id === undefined
+        ? null
+        : String(row.recipient_user_id),
+    recipientEmail:
+      row.recipient_email === null || row.recipient_email === undefined
+        ? null
+        : String(row.recipient_email),
     selectorJson: String(row.selector_json),
     createdAtMs: Number(row.created_at_ms),
     revokedAtMs:

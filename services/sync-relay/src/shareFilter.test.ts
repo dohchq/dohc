@@ -92,6 +92,99 @@ describe("share op filter", () => {
     }
   });
 
+  it("serves a MINIMAL moment.append payload with no author, summary, ids, or lineage", () => {
+    const decision = filterOpForShare(
+      pathShare,
+      "moment.append",
+      momentPayload({
+        momentId: "LEAK-moment-id",
+        objectId: "LEAK-object-id",
+        recordedAtMs: 1234567,
+        payloadBeforePath: "docs/a.md",
+        payloadBeforeBlobSha256: "b".repeat(64),
+        beforePath: "docs/a.md",
+        beforeBlobSha256: "b".repeat(64),
+        beforeLatestMomentId: "LEAK-latest-moment",
+        beforeObjectId: "LEAK-before-object",
+        metadata: {
+          origin: "user",
+          summary: "LEAK-summary about a private thing",
+          correlationId: "LEAK-correlation-id",
+          author: "LEAK-author",
+        },
+        author: { kind: "agent", agentRunId: "LEAK-agent-run-id", displayName: "LEAK-agent" },
+      }),
+    );
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    const serialized = JSON.stringify(decision.payload);
+    for (const leak of [
+      "LEAK-moment-id",
+      "LEAK-object-id",
+      "LEAK-summary",
+      "LEAK-correlation-id",
+      "LEAK-author",
+      "LEAK-agent-run-id",
+      "LEAK-latest-moment",
+      "LEAK-before-object",
+    ]) {
+      expect(serialized, leak).not.toContain(leak);
+    }
+    // The author is neutralized to a plain sync origin, and only replay
+    // fields survive.
+    expect(decision.payload).toEqual({
+      operation: "write",
+      metadata: { origin: "sync" },
+      path: "docs/a.md",
+      payloadAfterPath: "docs/a.md",
+      payloadBeforePath: "docs/a.md",
+      payloadAfterBlobSha256: "a".repeat(64),
+    });
+    // Only the after-blob is reachable; the before-blob hash is not served.
+    expect(decision.blobSha256s).toEqual(["a".repeat(64)]);
+  });
+
+  it("serves a MINIMAL version.create payload with redacted, metadata-free snapshots", () => {
+    const selector: ShareSelector = { paths: ["docs"], versionId: "version-1" };
+    const decision = filterOpForShare(
+      selector,
+      "version.create",
+      JSON.stringify({
+        versionId: "version-1",
+        name: "LEAK-version-name",
+        kind: "named",
+        createdAtMs: 7,
+        parentVersionId: "LEAK-parent",
+        forkSnapshots: [
+          {
+            path: "docs/a.md",
+            blobSha256: "a".repeat(64),
+            updatedAtMs: 9,
+            latestMomentId: "LEAK-latest",
+            objectId: "LEAK-object",
+            metadata: { summary: "LEAK-snap-summary" },
+          },
+        ],
+      }),
+    );
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect(decision.payload).toEqual({
+      versionId: "version-1",
+      forkSnapshots: [{ path: "docs/a.md", blobSha256: "a".repeat(64) }],
+    });
+    const serialized = JSON.stringify(decision.payload);
+    for (const leak of [
+      "LEAK-version-name",
+      "LEAK-parent",
+      "LEAK-latest",
+      "LEAK-object",
+      "LEAK-snap-summary",
+    ]) {
+      expect(serialized, leak).not.toContain(leak);
+    }
+  });
+
   it("denies moments outside the selector, on prefix look-alikes, and on other versions", () => {
     expect(
       filterOpForShare(pathShare, "moment.append", momentPayload({ path: "src/app.ts", payloadAfterPath: "src/app.ts" }))
