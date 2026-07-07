@@ -126,13 +126,14 @@ export async function wrapWorkspaceDataKey(input: {
   workspaceId: WorkspaceId;
 }): Promise<{ envelopeJson: string }> {
   const dataKey = Buffer.from(input.dataKey);
-  const salt = randomBytes(SALT_BYTES);
-  const iv = randomBytes(IV_BYTES);
   let kek: Buffer | null = null;
   try {
-    // Inside the try so the `finally` still zeros the copied dataKey on an
-    // early length rejection.
+    // Everything that can throw stays inside the try so the `finally` always
+    // zeros the copied dataKey — including an early length rejection and a
+    // synchronous randomBytes() failure.
     if (dataKey.length !== KEY_BYTES) throw new SecretKeyEnvelopeError();
+    const salt = randomBytes(SALT_BYTES);
+    const iv = randomBytes(IV_BYTES);
     kek = await deriveKek({
       passphrase: input.passphrase,
       salt,
