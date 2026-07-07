@@ -185,7 +185,10 @@ export async function openEngineYDocProviderSession(
     cancelSettle?.();
     cancelSettle = scheduleSettle(() => {
       cancelSettle = null;
-      void runSettle();
+      // The debounced path stays resilient: a background settle failure must
+      // never become an unhandled rejection that wedges main. (Explicit
+      // settleNow/close callers still see the error — see runSettle.)
+      void runSettle().catch(() => undefined);
     }, settleDebounceMs);
   }
   let settleChain: Promise<void> = Promise.resolve();
@@ -194,15 +197,23 @@ export async function openEngineYDocProviderSession(
     // edit, then settle. Chained so two settles never overlap the write lane.
     await journalChain.catch(() => undefined);
     let result!: YDocSettleResult;
+    // Capture (never swallow) a settle failure: an EXPLICIT settleNow/close
+    // caller must see it — a version/rename op that flushes a live session
+    // before vacating it (WS-G2-C-2 gate fixes 2/3) MUST fail loudly if that
+    // flush fails, rather than silently proceed to close and lose the edit. The
+    // settleChain itself still resolves via its own .catch, so the DEBOUNCED
+    // trigger below stays resilient and close()'s settleChain await never wedges.
+    let settleError: unknown;
     settleChain = settleChain
       .then(async () => {
         result = await session.settle(summary !== undefined ? { summary } : undefined);
         await onSettled?.(result);
       })
       .catch((error) => {
-        void error;
+        settleError = error;
       });
     await settleChain;
+    if (settleError !== undefined) throw settleError;
     return result;
   }
 

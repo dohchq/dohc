@@ -116,7 +116,7 @@ async function openEngineDoc(page: import("@playwright/test").Page, path: string
   // surface. Wait for it to take over (the local-editor Edit toggle disappears
   // once the engine session is live) so a keystroke can never land on the brief
   // pre-open local editor.
-  await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
+  await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
 }
 

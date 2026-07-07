@@ -3349,6 +3349,14 @@ function registerIpcHandlers(): void {
       // Secret path, missing file, or already-live: fall back gracefully.
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
+    // The renderer can die DURING the await above: the destroyed-cleanup hook is
+    // attached below, so a window that closed mid-open would otherwise leave the
+    // session stored forever — stranding the single-canonical reservation and
+    // blocking every reopen of this file. Close it now and report unavailable.
+    if (sender.isDestroyed()) {
+      await session.close().catch(() => undefined);
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
     if (!engineYDocCleanupHooked.has(sender)) {
       engineYDocCleanupHooked.add(sender);
       sender.once("destroyed", () => closeEngineYDocSessionsForSender(sender.id));

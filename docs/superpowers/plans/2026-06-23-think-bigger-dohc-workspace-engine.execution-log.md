@@ -19316,15 +19316,36 @@ xvfb Electron e2e). The editor now binds to the engine Y.Doc, not Hocuspocus.
    WORKSPACE change (releasing the reservation so the object reopens), and no
    flicker/cursor-jump (the `ENGINE_SOURCED_ORIGIN` seed guard). E2E reopen
    resumes the rich content, and the capture/versions/secret-env e2e regress
-   clean. KNOWN FOLLOW-UP (G2-C-3): the renderer does not yet close the live
-   session when the ACTIVE VERSION switches while the SAME rich file stays open
-   in the editor — `useEngineDoc` keys on (workspaceId, path, enabled), not the
-   active version, so a `switchVersion` that materializes different content for
-   that path would race the live CRDT. The versions e2e edits on disk (no live
-   editor during a switch), so it is green; the fix is to also close/reopen on
-   active-version change (key `useEngineDoc` on it, or gate the version-switch
-   button on a session flush). Single-canonical still holds — this is a
-   same-object-across-versions coexistence gap, not a two-live-docs one.
+   clean. KNOWN FOLLOW-UP (G2-C-3): the RENDERER does not yet close/reopen the
+   live session when the ACTIVE VERSION switches while the SAME rich file stays
+   open — `useEngineDoc` keys on (workspaceId, path, enabled), not the active
+   version. Single-canonical always held; this was a same-object-across-versions
+   coexistence gap, not a two-live-docs one.
+
+   GATE FIX (WS-G2-C-2 gate round — the data-integrity half of that follow-up is
+   now CLOSED server-side): the coarse `liveYDocPaths` SET was replaced with an
+   AUTHORITATIVE live-session registry on `WorkspaceEngineCapture`
+   (path → {versionId, session, status, close}) and every lifecycle op now
+   coordinates through it. `switchVersion` / `createVersion` (create-and-switch) /
+   `mergeVersionIntoMain` SYNCHRONOUSLY settle+close ALL live sessions before
+   materializing (no stale projection into the now-active version — the
+   two-lineage corruption is gone); `beginFileRename` and the delete IPC
+   settle+close any session at/under the touched path first (no resurrection/
+   orphan); and `captureOnePath` no longer blanket-skips a live path — the
+   settle's own self-write is suppressed PRECISELY by its expected-event sha, so
+   a GENUINE external edit is captured as a moment instead of silently dropped.
+   Close is now retryable (a failing close retains a `failing-close` guard;
+   capture stays suppressed + a retry is possible instead of stranding the
+   reservation), `engineYDocOpen`/`applyUpdate` enforce the shared-view read-only
+   guard, and a settle failure now propagates from the explicit `settleNow`/close
+   path (a failed flush fails the version/rename op instead of losing the edit).
+   STILL FUTURE for G2-C-3: (a) the renderer closing/reopening on active-version
+   change (server-side is safe, but the open editor still needs to re-bind — key
+   `useEngineDoc` on the version or flush-on-switch in the UI); (b) folding an
+   external edit into a LIVE replicated doc as CRDT deltas (today it lands as a
+   separate moment — not dropped, but not merged into the live lineage); and
+   (c) an in-session rename protocol (today rename settles+closes then reopens
+   under the new path, rather than moving the live session's object in place).
 
 Verify (Linux-green): `pnpm -r typecheck`; `@dohc/desktop` unit suite (1063
 pass / 2 skip) incl. `workspaceEngineYDocSession.test.ts` + the channels parser;
