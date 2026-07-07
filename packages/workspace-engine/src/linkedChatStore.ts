@@ -11,6 +11,9 @@ import type {
   ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
+  ChatReaction,
+  ChatReactionAuthor,
+  ChatReactionState,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -53,6 +56,7 @@ import {
   skippedApplyResult,
   type ChatChannelCreatePayload,
   type ChatMessageAppendPayload,
+  type ChatReactionSetPayload,
   type ChatThreadCreatePayload,
 } from "./syncReplication";
 
@@ -68,6 +72,9 @@ export type {
   ChatChannelSummary,
   ChatMessage,
   ChatMessageId,
+  ChatReaction,
+  ChatReactionAuthor,
+  ChatReactionState,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -429,6 +436,95 @@ function actorKindValue(value: unknown): ChatActor["kind"] {
   const kind = stringValue(value);
   if (kind !== "human" && kind !== "agent") throw corruptStore();
   return kind;
+}
+
+// --- Reactions (WS-MU-C2) --------------------------------------------------
+
+// The emoji allowlist bound: a reaction emoji is a short grapheme, never a
+// message body. Emojis normalize to NFC so the same glyph is one cell.
+const REACTION_EMOJI_MAX_CHARS = 32;
+
+function normalizeReactionEmoji(emoji: string): string {
+  if (typeof emoji !== "string") {
+    throw new LinkedChatStoreError("invalid-message-body", "Reaction emoji must be a string.");
+  }
+  const normalized = emoji.normalize("NFC").trim();
+  if (normalized.length === 0 || normalized.length > REACTION_EMOJI_MAX_CHARS) {
+    throw new LinkedChatStoreError(
+      "invalid-message-body",
+      "Reaction emoji must be a short non-empty grapheme.",
+    );
+  }
+  return normalized;
+}
+
+function reactionStateValue(value: unknown): ChatReactionState {
+  const state = stringValue(value);
+  if (state !== "added" && state !== "removed") throw corruptStore();
+  return state;
+}
+
+// Stable cross-machine reaction id: a deterministic function of the CELL
+// coordinates. Same (message, emoji, author) => same id on every machine, so
+// an add and its later remove address ONE register. NUL separators keep the
+// join unambiguous (no emoji/id can contain a NUL).
+function reactionIdFor(messageId: string, emoji: string, authorId: string): string {
+  const digest = createHash("sha256")
+    .update(`${messageId}\u0000${emoji}\u0000${authorId}`, "utf8")
+    .digest();
+  return `reaction_${base32LowercaseNoPadding(digest.subarray(0, 16))}`;
+}
+
+function reactionFromRow(row: Record<string, unknown>): ChatReaction {
+  return {
+    reactionId: stringValue(row.reaction_id),
+    threadId: stringValue(row.thread_id),
+    messageId: stringValue(row.message_id),
+    emoji: stringValue(row.emoji),
+    author: {
+      authorId: stringValue(row.author_id),
+      kind: actorKindValue(row.author_kind),
+      displayName: stringValue(row.author_display_name),
+    },
+    atMs: numberValue(row.at_ms),
+  };
+}
+
+// The whole CRDT apply, as ONE conflict-target upsert. The cell is an LWW
+// register: the incoming op wins iff it is strictly newer by the total order
+// (at_ms, then 'removed' > 'added' on a tie — remove-wins). Equal (at_ms,
+// state) is not strictly newer, so a re-apply is a no-op (idempotent). Because
+// the winner is `max` over a total order, applying the same ops in ANY order
+// converges (commutative). Shared verbatim by the local set path and the
+// replicated apply path so their semantics can never drift.
+function upsertReactionLww(db: SqliteDb, workspaceId: WorkspaceId, payload: ChatReactionSetPayload): void {
+  db.prepare(
+    `INSERT INTO chat_reactions (
+       workspace_id, reaction_id, thread_id, message_id, emoji,
+       author_id, author_kind, author_display_name, state, at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(workspace_id, message_id, emoji, author_id) DO UPDATE SET
+       reaction_id = excluded.reaction_id,
+       thread_id = excluded.thread_id,
+       author_kind = excluded.author_kind,
+       author_display_name = excluded.author_display_name,
+       state = excluded.state,
+       at_ms = excluded.at_ms
+     WHERE excluded.at_ms > chat_reactions.at_ms
+        OR (excluded.at_ms = chat_reactions.at_ms
+            AND excluded.state > chat_reactions.state)`,
+  ).run(
+    workspaceId,
+    payload.reactionId,
+    payload.threadId,
+    payload.messageId,
+    payload.emoji,
+    payload.authorId,
+    payload.authorKind,
+    payload.authorDisplayName,
+    payload.state,
+    payload.atMs,
+  );
 }
 
 function stringValue(value: unknown): string {
@@ -1324,6 +1420,90 @@ export function createLinkedChatStore(
       });
     },
 
+    setReaction(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        // requireWorkspaceThread fails closed on a foreign-workspace thread;
+        // the message must live in THIS thread so a reaction can never target a
+        // message the caller cannot see.
+        const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+        const messageExists = db
+          .prepare(
+            "SELECT 1 FROM chat_messages WHERE workspace_id = ? AND thread_id = ? AND message_id = ?",
+          )
+          .get(workspaceId, thread.id, input.messageId);
+        if (!messageExists) {
+          throw new LinkedChatStoreError(
+            "message-not-found",
+            `Message ${input.messageId} was not found in thread ${thread.id}.`,
+          );
+        }
+        const emoji = normalizeReactionEmoji(input.emoji);
+        const authorId = stringValue(input.author.authorId).trim();
+        if (!authorId || authorId.length > 200) {
+          throw new LinkedChatStoreError("invalid-sender", "Reaction author id is invalid.");
+        }
+        const authorKind = actorKindValue(input.author.kind);
+        const authorDisplayName = normalizeDisplayName(input.author.displayName);
+        const state = reactionStateValue(input.state);
+        const payload: ChatReactionSetPayload = {
+          reactionId: reactionIdFor(input.messageId, emoji, authorId),
+          messageId: input.messageId,
+          threadId: thread.id,
+          emoji,
+          authorId,
+          authorKind,
+          authorDisplayName,
+          state,
+          atMs: nowMs(),
+        };
+        // The LWW upsert IS the mutation — shared verbatim with the replicated
+        // apply path so a local set and an imported op converge identically.
+        upsertReactionLww(db, workspaceId, payload);
+        // Blob-free, rides the SAME push/pull/apply pipeline as the other chat
+        // ops (no new transport). Journaled even for a SOLO workspace so the
+        // reaction replicates the moment the workspace starts syncing.
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.reaction.set",
+          payload,
+          recordedAtMs: payload.atMs,
+        });
+        // Return the RESOLVED cell (the winning register): for a local set that
+        // is always this call's op, but reading it back keeps the contract
+        // honest under a future clock skew.
+        const row = db
+          .prepare(
+            `SELECT * FROM chat_reactions
+             WHERE workspace_id = ? AND message_id = ? AND emoji = ? AND author_id = ?`,
+          )
+          .get(workspaceId, input.messageId, emoji, authorId);
+        if (!row) throw corruptStore();
+        return cloneJson(reactionFromRow(row));
+      });
+    },
+
+    listReactions(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+          // Active membership only — tombstones ('removed') stay in the table
+          // for LWW convergence but never surface. Oldest cell first so pills
+          // render in a stable order.
+          return db
+            .prepare(
+              `SELECT * FROM chat_reactions
+               WHERE workspace_id = ? AND thread_id = ? AND state = 'added'
+               ORDER BY at_ms, reaction_id`,
+            )
+            .all(workspaceId, thread.id)
+            .map(reactionFromRow)
+            .map(cloneJson);
+        });
+      });
+    },
+
     applyReplicationOp(input): Promise<SyncApplyResult> {
       return serialize(async (db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
@@ -1525,6 +1705,42 @@ export function createLinkedChatStore(
               body: payload.body,
             });
           }
+        } else if (input.opKind === "chat.reaction.set") {
+          const payload = input.payload;
+          // A COMMUTATIVE, head-check-free apply — like ydoc.update, not
+          // message.append. There is NO thread/message existence gate: a
+          // cross-origin reaction can arrive before the message it targets, and
+          // the LWW register converges regardless of arrival order (the missing
+          // message just means the pill has nothing to render on yet). The
+          // per-origin acked_seq dedup above is the re-apply backstop; the LWW
+          // WHERE clause makes a stale replay a no-op even if it slips through.
+          if (
+            typeof payload.reactionId !== "string" ||
+            !payload.reactionId ||
+            typeof payload.messageId !== "string" ||
+            !payload.messageId ||
+            typeof payload.threadId !== "string" ||
+            !payload.threadId ||
+            typeof payload.emoji !== "string" ||
+            !payload.emoji ||
+            typeof payload.authorId !== "string" ||
+            !payload.authorId ||
+            typeof payload.atMs !== "number" ||
+            !Number.isFinite(payload.atMs)
+          ) {
+            throw corruptStore();
+          }
+          upsertReactionLww(db, workspaceId, {
+            reactionId: payload.reactionId,
+            messageId: payload.messageId,
+            threadId: payload.threadId,
+            emoji: payload.emoji,
+            authorId: payload.authorId,
+            authorKind: actorKindValue(payload.authorKind),
+            authorDisplayName: stringValue(payload.authorDisplayName),
+            state: reactionStateValue(payload.state),
+            atMs: payload.atMs,
+          });
         } else {
           throw new LinkedChatStoreError(
             "state-corrupt",

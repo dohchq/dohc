@@ -225,6 +225,11 @@ export type SyncReplicationOpKind =
   // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
   | "chat.thread.update"
   | "chat.message.append"
+  // WS-MU-C2: an emoji reaction on a chat message. A set-membership CRDT keyed
+  // by (messageId, emoji, authorId) — add/remove COMMUTE and re-apply is a
+  // no-op. It rides the SAME 0P chat replication transport as the other chat
+  // kinds (blob-free). See ChatReactionSetPayload.
+  | "chat.reaction.set"
   // WS-G2-C1: a Yjs CRDT update for a rich-doc object. UNLIKE moment.append it
   // is a COMMUTATIVE delta — apply carries NO head-check and opens NO P0D
   // conflict (Yjs guarantees convergence). See YDocUpdatePayload.
@@ -388,6 +393,51 @@ export interface ChatMessageAppendPayload {
   createdAtMs: number;
 }
 
+/**
+ * WS-MU-C2 — one emoji reaction membership change. A reaction is the relation
+ * "author A reacted with emoji E to message M": a member of a set. State is an
+ * observed register per `(messageId, emoji, authorId)` CELL.
+ *
+ * CRDT semantics — LWW-per-cell (last-writer-wins register per cell). Each cell
+ * holds the winning op by a TOTAL order on `(atMs, then remove-wins on tie)`.
+ * Apply keeps the op maximizing that order, so:
+ * - COMMUTATIVE: max over a total order is arrival-order independent — applying
+ *   the same set of ops in ANY interleaving (across incremental sync passes,
+ *   not just within one merged pass) yields the same winner.
+ * - IDEMPOTENT: re-applying an op is never strictly newer than the value it
+ *   already produced, so it is a no-op.
+ * Different authors never share a cell (distinct rows), so cross-user
+ * add/remove never conflict. This is the same "convergence by op semantics, not
+ * by head check" property `ydoc.update` relies on — no conflict row, no before
+ * guard. Chosen over the plan's op-order 2P-set because LWW converges under
+ * arbitrary ARRIVAL order, which the two-store fuzz gate exercises.
+ *
+ * Forward-compat (MU-C0 verified authorship): `authorId` is the field the relay
+ * later stamps/verifies as `actor.userId`. Solo it is the local user identity
+ * chat messages already attribute by; `authorKind`/`authorDisplayName` ride
+ * along so replicated reactions render "<User>" / "<User>'s agent" without a
+ * separate lookup.
+ */
+export interface ChatReactionSetPayload {
+  // Stable cross-machine identity: a deterministic function of
+  // (messageId, emoji, authorId). Same cell => same reactionId on every machine,
+  // which is what makes an add and its later remove address the same register.
+  reactionId: string;
+  messageId: ChatMessageId;
+  threadId: ChatThreadId;
+  // Normalized unicode emoji (NFC). Callers pass a short allowlist member.
+  emoji: string;
+  // The reactor's stable identity: relay user id in multi-user, local user id
+  // solo. The relay verifies `authorId === actor.userId` on shared channels.
+  authorId: string;
+  authorKind: ChatActor["kind"];
+  authorDisplayName: string;
+  // The cell's observed membership after this op.
+  state: ChatReactionState;
+  // LWW clock for this cell (the op's wall time). Ties break remove-wins.
+  atMs: number;
+}
+
 // The driver dimension for a replicated rich doc: does its projection read the
 // XmlFragment body (richdoc) or the plain Y.Text (plaintext). Mirrors the
 // engine's ydoc_docs.content_kind column.
@@ -456,6 +506,7 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"chat.thread.create", ChatThreadCreatePayload>
   | SyncReplicationEnvelopeOf<"chat.thread.update", unknown>
   | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>
+  | SyncReplicationEnvelopeOf<"chat.reaction.set", ChatReactionSetPayload>
   | SyncReplicationEnvelopeOf<"ydoc.update", YDocUpdatePayload>;
 
 /**
@@ -951,6 +1002,7 @@ export type LinkedChatStoreErrorCode =
   | "invalid-channel-kind"
   | "invalid-channel-name"
   | "invalid-message-body"
+  | "message-not-found"
   | "invalid-path"
   | "invalid-read-cursor"
   | "invalid-sender"
@@ -1039,6 +1091,32 @@ export interface ChatMessage {
   createdAtMs: number;
 }
 
+// Reactions (WS-MU-C2). The observed cell state — an emoji reaction by an
+// author is either present ("added") or tombstoned ("removed"). Tombstones are
+// retained so a stale re-add cannot win the LWW register.
+export type ChatReactionState = "added" | "removed";
+
+// Who reacted. Solo this is the local user/agent; the design's verified relay
+// authorUserId (MU-C0) later fills authorId. displayName/kind render the
+// reaction ("<User>" / "<User>'s agent") without a separate lookup.
+export interface ChatReactionAuthor {
+  authorId: string;
+  kind: ChatActor["kind"];
+  displayName: string;
+}
+
+// One ACTIVE ("added") reaction as the store returns it for display. Removed
+// cells (tombstones) are never surfaced. The UI groups these by
+// (messageId, emoji) into pills with a count and the reactors' names.
+export interface ChatReaction {
+  reactionId: string;
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  emoji: string;
+  author: ChatReactionAuthor;
+  atMs: number;
+}
+
 export type LinkedChatProjectionFileAccess =
   | { kind: "allowed"; path: string }
   | { kind: "denied" }
@@ -1119,6 +1197,28 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  // --- Reactions (WS-MU-C2) ------------------------------------------------
+  // Set (add or remove) one author's emoji reaction on a message. A
+  // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
+  // LWW-per-cell by (atMs, remove-wins tie), so the op is commutative and
+  // re-applying is a no-op. Solo it persists with no relay; it journals a
+  // `chat.reaction.set` op that replicates when the workspace syncs. Returns
+  // the resolved cell after the LWW upsert (state reflects the winning op —
+  // which, for a local set, is always this call's).
+  setReaction(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    messageId: ChatMessageId;
+    emoji: string;
+    author: ChatReactionAuthor;
+    state: ChatReactionState;
+  }): Promise<ChatReaction>;
+  // Every ACTIVE ("added") reaction in a thread, oldest-first per cell. The UI
+  // groups by (messageId, emoji). Tombstones are never returned.
+  listReactions(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+  }): Promise<ChatReaction[]>;
   // Same replication contract as VersionedTextStore.applyReplicationOp:
   // idempotent skip on duplicate originSeq, fail-closed on per-origin gaps,
   // journal + ack in the same transaction as the mutation. Chat ops never

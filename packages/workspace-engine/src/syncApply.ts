@@ -349,7 +349,8 @@ export async function applySyncQueues(
       const result =
         op.opKind === "chat.channel.create" ||
         op.opKind === "chat.thread.create" ||
-        op.opKind === "chat.message.append"
+        op.opKind === "chat.message.append" ||
+        op.opKind === "chat.reaction.set"
           ? await chats.applyReplicationOp(op)
           : op.opKind === "secret.file.put" ||
               op.opKind === "secret.file.delete" ||
