@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import {
   LINKED_CHAT_STORE_RELATIVE_PATH,
   LinkedChatStoreError,
@@ -37,6 +38,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await rm(root, { recursive: true, force: true });
 });
 

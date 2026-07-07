@@ -652,6 +652,14 @@ describe("mcp tools operate on allowed paths", () => {
       await mkdir(dirname(modePath), { recursive: true });
       await writeFile(modePath, "old\n");
       await chmod(modePath, 0o744);
+      // Windows has no POSIX modes (chmod only toggles the read-only bit), so
+      // pin what the platform can express: whatever stat reported before the
+      // write must survive the engine overwrite. On POSIX that value is the
+      // full 0o744 asserted below.
+      const modeBefore = (await stat(modePath)).mode & 0o777;
+      if (process.platform !== "win32") {
+        expect(modeBefore).toBe(0o744);
+      }
 
       const overwritten = await writeWorkspaceFile(ctx, {
         path: "scripts/run.sh",
@@ -659,7 +667,7 @@ describe("mcp tools operate on allowed paths", () => {
       });
 
       expect(overwritten).toMatchObject({ ok: true });
-      expect((await stat(modePath)).mode & 0o777).toBe(0o744);
+      expect((await stat(modePath)).mode & 0o777).toBe(modeBefore);
 
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-symlink-target-"));
       try {

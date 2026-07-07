@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import {
   MAX_VERSIONED_BINARY_FILE_BYTES,
   MAX_VERSIONED_TEXT_FILE_BYTES,
@@ -43,6 +44,7 @@ afterEach(async () => {
   if (!root) return;
   const currentRoot = root;
   root = "";
+  closeTrackedEngineDbHandlesForTest();
   await rm(currentRoot, { recursive: true, force: true });
 });
 

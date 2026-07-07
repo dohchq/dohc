@@ -13,12 +13,17 @@ import {
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 let roots: string[] = [];
+let storages: SyncRelayStorage[] = [];
 
 beforeEach(() => {
   roots = [];
+  storages = [];
 });
 
 afterEach(async () => {
+  // Close sqlite handles before removing temp dirs: Windows cannot unlink
+  // files that still have open handles (EBUSY).
+  for (const storage of storages) storage.close();
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -30,7 +35,9 @@ async function tempRoot(label: string): Promise<string> {
 
 async function testStorage(): Promise<SyncRelayStorage> {
   const root = await tempRoot("db");
-  return openSyncRelayStorage(join(root, "relay.sqlite"));
+  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
+  storages.push(storage);
+  return storage;
 }
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {

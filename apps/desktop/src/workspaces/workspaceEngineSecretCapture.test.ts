@@ -1,5 +1,6 @@
 import type { SecretFileStore, VersionedTextStore } from "@dohc/workspace-engine";
 import { createSecretFileStore, createVersionedTextStore } from "@dohc/workspace-engine";
+import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -36,6 +37,9 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
+  // so release every tracked engine handle before removing the temp roots.
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 

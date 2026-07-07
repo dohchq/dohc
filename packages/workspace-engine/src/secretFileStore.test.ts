@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SecretFileStore, VersionedTextStore } from "@dohc/workspace-contracts/engine";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import {
   MAX_SECRET_FILE_BYTES,
   SECRET_FILE_STORE_RELATIVE_PATH,
@@ -47,6 +48,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -324,7 +326,14 @@ describe("secretFileStore key custody", () => {
         metadata: { origin: "local-file" },
       });
       const info = await stat(keyPath);
-      expect(info.mode & 0o777).toBe(0o600);
+      if (process.platform === "win32") {
+        // Windows has no POSIX modes: the 0o600 create mode is ignored and
+        // protection comes from the workspace directory's inherited NTFS
+        // ACLs. The store's chmod healing is a guarded no-op there.
+        expect(info.isFile()).toBe(true);
+      } else {
+        expect(info.mode & 0o777).toBe(0o600);
+      }
       const content = await readFile(keyPath, "utf8");
       expect(content.startsWith("dohc-secret-key-v1:")).toBe(true);
       // The key file must not contain the secret itself.

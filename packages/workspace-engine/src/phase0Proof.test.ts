@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createLinkedChatStore } from "./linkedChatStore";
 import { createVersionedFileWorkspace } from "./versionedFileWorkspace";
 import { createVersionedTextStore } from "./versionedTextStore";
@@ -16,6 +17,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await rm(root, { recursive: true, force: true });
 });
 

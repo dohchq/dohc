@@ -3,6 +3,7 @@ import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import {
   SECRET_KEY_RELATIVE_PATH,
   createSecretFileStore,
@@ -28,6 +29,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
