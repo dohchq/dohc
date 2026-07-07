@@ -27,13 +27,30 @@
 // until busy_timeout. The driver keeps its own connection for READS only (WAL
 // readers never block a writer).
 //
-// BINDING DECISION — MARKDOWN-IS-THE-ARTIFACT: the settled .md is the durable,
-// searchable, restorable, diffable artifact of record. Full Y.Doc CRDT state is
-// NOT persisted past a closed session (the update log is a fast-resume cache; a
-// closed session prunes it and reopening reseeds from the file with zero loss).
-// The storage is nonetheless ADDITIVE-COMPATIBLE with a future persistent-
-// threads layer: flip `persistClosedSessionState` and close keeps the CRDT
-// bytes durable — no schema change (see engineDbSchema.ts ENGINE_YDOC_DDL).
+// LIFECYCLE SPLIT — REPLICATED vs LOCAL-ONLY (WS-G2-C1, the durable-resume fix):
+// a REPLICATED Y.Doc (`replicated: true`) is ONE durable CRDT lineage that all
+// peers converge to. Its lifecycle is:
+//   - First creation (no persisted lineage yet): seed from the file's markdown
+//     and emit the full-state BASE ydoc.update op EXACTLY ONCE.
+//   - Every subsequent open: RESUME from the persisted/replicated CRDT
+//     (loadPersistedDoc) — NEVER re-seed from markdown. Two independent
+//     markdownToYDoc seeds mint DIFFERENT Yjs item ids for the same text, so a
+//     re-seed forks a second lineage; a peer replaying base1+deltas+base2 then
+//     merges two lineages and DUPLICATES content. Resume keeps the single
+//     lineage, so every peer's replay converges with no duplication.
+//   - Close: settle the projection but DO NOT prune the CRDT rows — they must
+//     stay durable for the next resume AND for a peer bootstrapping from the log.
+//     A replicated doc therefore never prunes and never re-emits a base.
+//
+// LOCAL-ONLY (`replicated: false`, the G2-B default) keeps MARKDOWN-IS-THE-
+// ARTIFACT for the solo case: the settled .md is the durable, searchable,
+// restorable, diffable artifact of record, the object journals NO ydoc.update
+// op (it does not replicate), the update log is only a fast-resume cache, and a
+// closed session PRUNES it and reopening reseeds from the file with zero loss.
+// Prune-on-close stays ONLY here — a doc that never replicated cannot diverge a
+// peer. The storage is ADDITIVE-COMPATIBLE with a future persistent-threads
+// layer: flip `persistClosedSessionState` and even a local-only close keeps the
+// CRDT bytes durable — no schema change (see engineDbSchema.ts ENGINE_YDOC_DDL).
 //
 // SINGLE-CANONICAL HANDOFF (never two canonical at once): at any instant a rich
 // doc has exactly one canonical source. Closed -> the file is canonical; live
@@ -74,9 +91,14 @@ import {
   assertRequiredEngineTables,
   trackEngineDbHandleForTest,
 } from "./engineDbSchema";
-import { canonicalEngineDbPath } from "./versionedTextStore";
+import { canonicalEngineDbPath, MAX_VERSIONED_BINARY_FILE_BYTES } from "./versionedTextStore";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { journalLocalReplicationOp } from "./syncReplication";
+import {
+  liveYDocKey,
+  registerLiveYDoc,
+  unregisterLiveYDoc,
+} from "./liveYDocRegistry";
 import type { YDocUpdatePayload } from "@dohc/workspace-contracts/engine";
 
 export type YDocContentKind = "richdoc" | "plaintext";
@@ -290,10 +312,20 @@ export interface YDocEngineDriverOptions {
   // snapshot. The legacy Hocuspocus stack NEVER compacted; the engine driver
   // must (design Risk 3).
   compactionThreshold?: number;
-  // MARKDOWN-IS-THE-ARTIFACT default false: a closed session prunes its CRDT
-  // bytes. Flip to true for a future persistent-threads layer (no schema
-  // change) so suggestion threads / marks survive a close.
+  // MARKDOWN-IS-THE-ARTIFACT default false: a LOCAL-ONLY closed session prunes
+  // its CRDT bytes. Flip to true for a future persistent-threads layer (no
+  // schema change) so suggestion threads / marks survive a close. Ignored when
+  // `replicated` is set — a replicated doc is always durable.
   persistClosedSessionState?: boolean;
+  // WS-G2-C1 REPLICATED LIFECYCLE (default false). When true this driver treats
+  // every doc as a shared, replicated CRDT lineage (the co-editing path): it
+  // JOURNALS the ydoc.update base+delta ops, ALWAYS resumes an existing lineage
+  // instead of re-seeding from markdown (base-once), NEVER prunes on close (the
+  // CRDT stays durable for the next resume and for peers), and registers the
+  // live doc so a remote ydoc.update applied mid-session converges into it.
+  // When false the doc is LOCAL-ONLY: no ydoc.update journaling, reseed from the
+  // file on open, prune on close (markdown-is-the-artifact for the solo case).
+  replicated?: boolean;
   // TEST-ONLY seam. Invoked once inside openSession AFTER the global reservation
   // is taken and the persisted state is reset, but BEFORE the live session is
   // installed. Lets a test simulate a mid-open failure in a later step and prove
@@ -368,6 +400,10 @@ export function createYDocEngineDriver(
     options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
   );
   const persistClosedSessionState = options.persistClosedSessionState === true;
+  // WS-G2-C1: when true, this doc participates in replication — journal ops,
+  // always resume (base-once), never prune on close. See the LIFECYCLE SPLIT
+  // note at the top of this file.
+  const replicated = options.replicated === true;
 
   let dbHandle: SqliteDb | null = null;
   // Read-only handle onto the store-owned engine.db. Null when the store has not
@@ -589,12 +625,18 @@ export function createYDocEngineDriver(
         .run(key.workspaceId, key.versionId, key.objectId, snapshotSha, stateVectorSha, now);
       // Journal the full-state BASE op in the SAME transaction (the snapshot
       // blob is already in binary_blobs above, satisfying blob-before-log).
-      journalLocalReplicationOp(conn, {
-        workspaceId: key.workspaceId,
-        opKind: "ydoc.update",
-        payload: ydocUpdatePayload(key, contentKind, path, snapshotSha, true),
-        recordedAtMs: now,
-      });
+      // ONLY a replicated doc journals — and resetPersistedState runs only on
+      // FIRST creation for a replicated doc (open always resumes an existing
+      // lineage), so the base op is emitted EXACTLY ONCE per lineage. A local-
+      // only doc journals nothing (it does not replicate).
+      if (replicated) {
+        journalLocalReplicationOp(conn, {
+          workspaceId: key.workspaceId,
+          opKind: "ydoc.update",
+          payload: ydocUpdatePayload(key, contentKind, path, snapshotSha, true),
+          recordedAtMs: now,
+        });
+      }
     });
   }
 
@@ -705,7 +747,13 @@ export function createYDocEngineDriver(
       // concurrent edits converge. Falls back to file-seed when there is no
       // persisted lineage yet (the origin, or a doc never replicated here).
       const persistedMarker = readDocRow(key);
-      const persistedDoc = resume ? loadPersistedDoc(key) : null;
+      // A REPLICATED doc ALWAYS resumes an existing lineage — the caller can no
+      // longer accidentally re-seed it by omitting `resume`. Re-seeding a
+      // replicated doc would fork a second lineage (a fresh markdownToYDoc mints
+      // new Yjs ids) and duplicate content on a replaying peer. Only a local-
+      // only doc honors the opt-in `resume` flag (default: reseed from file).
+      const wantResume = replicated || resume === true;
+      const persistedDoc = wantResume ? loadPersistedDoc(key) : null;
       const resumed = persistedDoc !== null;
       const kind: YDocContentKind =
         contentKind ?? (resumed ? persistedMarker?.contentKind ?? "richdoc" : "richdoc");
@@ -785,6 +833,19 @@ export function createYDocEngineDriver(
           if (update.byteLength === 0) {
             throw new YDocEngineDriverError("invalid-input", "Empty Y.Doc update.");
           }
+          // WS-G2-C1 SIZE FLOOR (fix 4): a Yjs update over the versioned-binary
+          // blob cap would be stored + pushed through the relay's larger cap and
+          // then REJECTED by every peer on hydrate (readYDocUpdateBlobBytes /
+          // MAX_VERSIONED_BINARY_FILE_BYTES), so the doc could never replicate.
+          // Reject it locally BEFORE the blob put + journal so nothing that can
+          // only fail on a peer is ever recorded. (An editor should batch/chunk
+          // its updates below this bound; a single oversized op is malformed.)
+          if (replicated && update.byteLength > MAX_VERSIONED_BINARY_FILE_BYTES) {
+            throw new YDocEngineDriverError(
+              "invalid-input",
+              `Y.Doc update is ${update.byteLength} bytes, over the ${MAX_VERSIONED_BINARY_FILE_BYTES}-byte replication cap; it would be rejected by every peer on hydrate.`,
+            );
+          }
           const now = nowMs();
           let seq = 0;
           // Blob put + head-advance run in the SAME shared write-lane
@@ -827,13 +888,16 @@ export function createYDocEngineDriver(
             // binary_blobs above — blob-before-log holds). This is what makes a
             // live edit replicate; the settle's markdown never journals a
             // moment.append (writeProjection), so the ydoc.update stream is this
-            // object's sole replication channel.
-            journalLocalReplicationOp(conn, {
-              workspaceId,
-              opKind: "ydoc.update",
-              payload: ydocUpdatePayload(key, kind, path, sha, false),
-              recordedAtMs: now,
-            });
+            // object's sole replication channel. A LOCAL-ONLY doc journals
+            // nothing (it does not replicate; its .md is the artifact).
+            if (replicated) {
+              journalLocalReplicationOp(conn, {
+                workspaceId,
+                opKind: "ydoc.update",
+                payload: ydocUpdatePayload(key, kind, path, sha, false),
+                recordedAtMs: now,
+              });
+            }
           });
           await compact(key);
           return { seq };
@@ -892,9 +956,16 @@ export function createYDocEngineDriver(
           closed = true;
           liveSessions.delete(registryKey);
           globalLiveYDocReservations.delete(reservationKey);
-          // Flip Y.Doc -> file. markdown-is-the-artifact: prune the CRDT bytes
-          // unless a persistent-threads layer opted to keep them.
-          if (persistClosedSessionState) {
+          // No longer live: drop the live-doc registration so a later remote
+          // ydoc.update apply persists rows only (there is no in-memory doc to
+          // converge into until the next open resumes them).
+          unregisterLiveYDoc(reservationKey);
+          // Flip Y.Doc -> file. A REPLICATED doc is ONE durable lineage: NEVER
+          // prune its CRDT rows — they must survive close for the next resume
+          // and for a peer bootstrapping from the log. Prune-on-close is ONLY
+          // for a LOCAL-ONLY doc (markdown-is-the-artifact solo case), unless a
+          // persistent-threads layer asked to keep even those durable.
+          if (replicated || persistClosedSessionState) {
             await compact(key);
           } else {
             await pruneClosedState(key);
@@ -903,12 +974,20 @@ export function createYDocEngineDriver(
       };
 
         liveSessions.set(registryKey, session);
+        // Register the live in-memory doc so a remote ydoc.update applied while
+        // this session is open converges INTO it (fix 3) — the close then
+        // settles the converged state, never a stale doc over newer CRDT. Only
+        // a replicated doc receives remote updates, so only it registers.
+        if (replicated) registerLiveYDoc(reservationKey, doc);
         sessionInstalled = true;
         return session;
       } catch (error) {
         // Release the reservation on ANY failure before the session installed.
         // Once installed, close() owns releasing it (never double-release).
-        if (!sessionInstalled) globalLiveYDocReservations.delete(reservationKey);
+        if (!sessionInstalled) {
+          globalLiveYDocReservations.delete(reservationKey);
+          unregisterLiveYDoc(reservationKey);
+        }
         throw error;
       }
     },

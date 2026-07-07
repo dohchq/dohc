@@ -547,7 +547,7 @@ describe("sync relay main process", () => {
     let clock = 1000;
     const aStore = createVersionedTextStore(a, { nowMs: () => (clock += 5) });
     const bStore = createVersionedTextStore(b, { nowMs: () => (clock += 5) });
-    const aDriver = createYDocEngineDriver({ store: aStore, rootDir: a, persistClosedSessionState: true });
+    const aDriver = createYDocEngineDriver({ store: aStore, rootDir: a, replicated: true });
     const richPath = "docs/rich.md";
 
     // Play the editor: capture each Yjs update the doc emits and journal it via
@@ -584,12 +584,32 @@ describe("sync relay main process", () => {
       await drive(session, "a second rich line\n");
       await session.settle();
       await session.close();
+
+      // FIX 1 (durable-resume): reopen the SAME lineage with NO resume flag — a
+      // replicated doc must ALWAYS resume, never re-seed. A re-seed here would
+      // emit a SECOND base op and, on the fresh-store replay below, duplicate the
+      // shared text. Edit again to prove post-reopen deltas ride the same lineage.
+      const reopened = await aDriver.openSession({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: richPath,
+      });
+      await drive(reopened, "a third line after reopen\n");
+      await reopened.close();
       await aDriver.close();
 
-      // The object's replication is PURELY ydoc.update ops (no moment.append).
-      const kinds = replicationOps(a).map((operation) => operation.opKind);
-      expect(kinds.filter((k) => k === "ydoc.update").length).toBeGreaterThanOrEqual(3);
+      // The object's replication is PURELY ydoc.update ops (no moment.append),
+      // and EXACTLY ONE of them is a base op no matter the close/reopen cycle.
+      const ops = replicationOps(a);
+      const kinds = ops.map((operation) => operation.opKind);
+      expect(kinds.filter((k) => k === "ydoc.update").length).toBeGreaterThanOrEqual(4);
       expect(kinds).not.toContain("moment.append");
+      const baseOps = ops.filter(
+        (operation) =>
+          operation.opKind === "ydoc.update" &&
+          (operation.payload as { isBaseState?: boolean }).isBaseState === true,
+      );
+      expect(baseOps).toHaveLength(1);
 
       // Converge A <-> B through the real relay.
       await syncQuiescent(baseUrl, a, b);
@@ -606,6 +626,19 @@ describe("sync relay main process", () => {
       expect(bMarkdown?.text).toBe(aMarkdown?.text);
       expect(bMarkdown?.text).toContain("hello through the relay");
       expect(bMarkdown?.text).toContain("a second rich line");
+      // The post-reopen edit rode the SAME lineage across the relay.
+      expect(bMarkdown?.text).toContain("a third line after reopen");
+      // NO duplication: the single durable lineage never forked, so each line
+      // the doc ever held appears exactly once on the replaying peer.
+      const occurrences = (haystack: string, needle: string): number =>
+        haystack.split(needle).length - 1;
+      for (const line of [
+        "hello through the relay",
+        "a second rich line",
+        "a third line after reopen",
+      ]) {
+        expect(occurrences(bMarkdown?.text ?? "", line)).toBe(1);
+      }
 
       // Idempotent re-pull applies nothing new.
       const again = await pullWorkspaceFromRelay({ rootDir: b, workspaceId: WORKSPACE_ID, relay });

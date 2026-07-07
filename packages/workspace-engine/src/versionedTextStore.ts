@@ -53,6 +53,7 @@ import {
   type EngineIntegrityCheckMode,
 } from "./engineDbSchema";
 import { classifyEngineFilePath } from "./enginePathFloor";
+import { getLiveYDoc, liveYDocKey } from "./liveYDocRegistry";
 import {
   deleteFileSearchIndex,
   ensureSearchIndexForVersion,
@@ -1297,7 +1298,7 @@ function projectYDocUpdate(
   db: SqliteDb,
   workspaceId: WorkspaceId,
   payload: YDocUpdatePayload,
-): { markdown: string; doc: Y.Doc } {
+): { markdown: string; doc: Y.Doc; update: Uint8Array } {
   // SECRET FLOOR (never a plaintext leak path): a secret-classified path must
   // never be opened/materialized as a replicated Y.Doc. Reject the op outright.
   if (classifyEngineFilePath(payload.path).kind === "secret") {
@@ -1309,6 +1310,29 @@ function projectYDocUpdate(
   // The target version must exist locally (its workspace.init/version.create op
   // orders before this one). Same contract as applyRemoteMomentAppend.
   requireWorkspaceVersionRow(db, workspaceId, payload.versionId);
+  // OBJECT/PATH INTEGRITY (fix 2 — never write through a path occupant): the
+  // materialization below (writeTextFileInDb) uses the EXISTING snapshot at
+  // payload.path as its object when one exists, IGNORING payload.objectId. A
+  // malformed/hostile op for object A carrying object B's occupied path would
+  // otherwise project A's CRDT into B's markdown file while recording ydoc rows
+  // under A — a sync payload silently mutating the WRONG plaintext file. There
+  // is no rename protocol for Y.Docs, so require the identity to be pinned both
+  // ways before materializing: any snapshot at this path must already be this
+  // object, and any snapshot for this object must already be at this path.
+  const byPath = selectSnapshotByPath(db, workspaceId, payload.versionId, payload.path);
+  if (byPath && byPath.objectId !== payload.objectId) {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      `Refusing ydoc.update for object ${payload.objectId}: path ${payload.path} is already occupied by object ${byPath.objectId}.`,
+    );
+  }
+  const byObject = selectSnapshotByObject(db, workspaceId, payload.versionId, payload.objectId);
+  if (byObject && byObject.path !== payload.path) {
+    throw new VersionedTextStoreError(
+      "invalid-input",
+      `Refusing ydoc.update for object ${payload.objectId}: it already occupies path ${byObject.path}, not ${payload.path}.`,
+    );
+  }
   // The update bytes were hydrated into binary_blobs before this transaction
   // (applySyncQueues / the caller's blob transport). Read + digest-verify them.
   const update = readYDocUpdateBlobBytes(db, payload.updateBlobSha256);
@@ -1316,7 +1340,7 @@ function projectYDocUpdate(
   // apply the new update in memory — Y.applyUpdate is commutative + idempotent.
   const doc = reconstructEngineYDoc(db, workspaceId, payload.versionId, payload.objectId);
   Y.applyUpdate(doc, update);
-  return { markdown: yDocToMarkdown(doc), doc };
+  return { markdown: yDocToMarkdown(doc), doc, update };
 }
 
 // PHASE 2: persist the CRDT rows once the file_object exists (created by the
@@ -5326,6 +5350,21 @@ function createVersionedTextStoreWithHooks(
               input.originId,
               input.recordedAtMs,
             );
+            // LIVE-SESSION CONVERGENCE (fix 3 — never drop a remote edit on
+            // close): if this object is OPEN in a Y.Doc session, the persisted
+            // rows + re-projected file above are not enough — the live in-memory
+            // doc would stay stale and, on close, settle OVER this projection and
+            // (formerly) prune the newer CRDT, silently losing the remote edit.
+            // Route the update straight into the live doc so it converges now;
+            // Y.applyUpdate is commutative + idempotent, so the eventual close
+            // settles the CONVERGED state. No live doc (closed object) => the
+            // next open resumes the persisted rows, so nothing is lost either.
+            {
+              const liveDoc = getLiveYDoc(
+                liveYDocKey(stateFilePath, workspaceId, input.payload.objectId),
+              );
+              if (liveDoc) Y.applyUpdate(liveDoc, projection.update);
+            }
             break;
           }
           case "version.rename":

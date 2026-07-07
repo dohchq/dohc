@@ -483,6 +483,23 @@ Depends on G2-B + 0P-B (the relay).
   allowed); concurrent edits to one doc converge with NO conflict rows;
   re-import is a no-op; a property/fuzz test over random update interleavings
   asserts convergence.
+  - **DURABLE-RESUME LIFECYCLE (gate-fix correction).** A replicated doc
+    (`createYDocEngineDriver({ replicated: true })`) is ONE durable lineage:
+    seed + emit the BASE op EXACTLY ONCE on first creation, then ALWAYS resume
+    the persisted CRDT on reopen (never re-seed from markdown — a fresh
+    `markdownToYDoc` mints new Yjs ids and a second base op, which duplicates on
+    a peer's replay), and NEVER prune the CRDT on close (keep it durable for the
+    next resume and for peers). Prune-on-close + reseed-on-open + NO journaling
+    stays ONLY for `replicated: false` LOCAL-ONLY docs (§markdown-is-the-artifact
+    for the solo case). The §"discarded resume cache, reopen reseeds from file
+    with zero loss" note above applies ONLY to a local-only doc — a replicated
+    doc's CRDT is durable canonical state, not a discardable cache. Additional
+    invariants: (a) apply REJECTS a `ydoc.update` whose path is occupied by a
+    different object (or whose object sits at a different path) — no
+    write-through the wrong file; (b) a remote update applied while a session is
+    LIVE is routed into the in-memory Y.Doc (process-global live-doc registry) so
+    close settles the converged state, not a stale one; (c) `recordUpdate` caps
+    an update at `MAX_VERSIONED_BINARY_FILE_BYTES` before storing/journaling.
 - **G2-C2 — Awareness + relay push.** The ephemeral awareness channel
   (pub/sub, never journaled) and relay push fan-out for low-latency co-edit.
   Test gate: presence appears and clears on disconnect; awareness is provably
