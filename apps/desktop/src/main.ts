@@ -15,8 +15,7 @@ import {
   shell,
   type IpcMainInvokeEvent,
 } from "electron";
-import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -189,6 +188,7 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import { validateSecretPassphrase } from "./workspaces/secretPassphrase";
@@ -1174,22 +1174,7 @@ function localUserDisplayName(): string {
 let cachedLocalReactorId: string | null = null;
 function localReactorFallbackId(): string {
   if (cachedLocalReactorId) return cachedLocalReactorId;
-  const file = join(stateDir(), "dohc-local-id.json");
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { id?: unknown };
-    if (typeof parsed.id === "string" && parsed.id) {
-      cachedLocalReactorId = parsed.id;
-      return parsed.id;
-    }
-  } catch {
-    // Not created yet (or unreadable) — mint and persist one below.
-  }
-  const id = `local:${randomUUID()}`;
-  try {
-    writeFileSync(file, `${JSON.stringify({ id }, null, 2)}\n`, { mode: 0o600 });
-  } catch {
-    // Best-effort persistence; the id is still stable for this process run.
-  }
+  const id = readOrCreateLocalReactorId(join(stateDir(), "dohc-local-id.json"));
   cachedLocalReactorId = id;
   return id;
 }

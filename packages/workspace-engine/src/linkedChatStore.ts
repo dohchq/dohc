@@ -447,6 +447,32 @@ function actorKindValue(value: unknown): ChatActor["kind"] {
 // message body. Emojis normalize to NFC so the same glyph is one cell.
 const REACTION_EMOJI_MAX_CHARS = 32;
 
+// Defense in depth for REPLICATED ops: the desktop bridge (bridgeContract.ts)
+// already rejects non-emoji at the IPC trust boundary, but a reaction op can
+// arrive from another peer that never passed through that check. Validate the
+// codepoints here too so a hostile/buggy peer cannot land arbitrary short
+// strings (URLs, text) as reaction pills. This mirrors EMOJI_GRAPHEME_PATTERN:
+// one emoji grapheme cluster — a pictographic (optional variation selector /
+// skin-tone / keycap) or a regional-indicator pair, plus ZWJ sequences. Unicode
+// property escapes with the `u` flag are ES2018 and supported by every runtime
+// this engine ships on.
+const REACTION_EMOJI_ATOM =
+  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+const REACTION_EMOJI_PATTERN = new RegExp(
+  `^${REACTION_EMOJI_ATOM}(?:\\u200D${REACTION_EMOJI_ATOM})*$`,
+  "u",
+);
+
+// True iff `value` is a bounded, single emoji grapheme cluster. Used both by the
+// LOCAL setReaction normalizer and by the REPLICATED-op apply path — the latter
+// validates verbatim (no re-normalization) so the total-order cell key stays
+// byte-identical across peers.
+function isReactionEmoji(value: string): boolean {
+  return (
+    value.length > 0 && value.length <= REACTION_EMOJI_MAX_CHARS && REACTION_EMOJI_PATTERN.test(value)
+  );
+}
+
 function normalizeReactionEmoji(emoji: string): string {
   if (typeof emoji !== "string") {
     throw new LinkedChatStoreError("invalid-message-body", "Reaction emoji must be a string.");
@@ -456,6 +482,12 @@ function normalizeReactionEmoji(emoji: string): string {
     throw new LinkedChatStoreError(
       "invalid-message-body",
       "Reaction emoji must be a short non-empty grapheme.",
+    );
+  }
+  if (!isReactionEmoji(normalized)) {
+    throw new LinkedChatStoreError(
+      "invalid-message-body",
+      "Reaction emoji must be a single emoji grapheme.",
     );
   }
   return normalized;
@@ -1833,6 +1865,16 @@ export function createLinkedChatStore(
             typeof payload.atMs !== "number" ||
             !Number.isFinite(payload.atMs)
           ) {
+            throw corruptStore();
+          }
+          // Defense in depth for a REPLICATED write: the emoji is the CRDT cell
+          // key and renders as a pill, but this op may come from a peer that
+          // never passed the desktop IPC schema. Reject anything that isn't a
+          // single emoji grapheme so a hostile/buggy peer can't land arbitrary
+          // short strings (URLs, text) as reaction pills. Validated verbatim (no
+          // NFC re-normalization): the origin already normalized, and mutating
+          // here would desync the byte-identical total-order key across peers.
+          if (!isReactionEmoji(payload.emoji)) {
             throw corruptStore();
           }
           upsertReactionLww(

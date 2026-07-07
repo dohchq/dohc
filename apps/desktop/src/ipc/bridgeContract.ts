@@ -697,7 +697,29 @@ export type MarkChatThreadReadResult = z.infer<typeof MarkChatThreadReadResult>;
 // emoji reaction by an author on a message. The renderer never supplies
 // identity: main derives the reactor from the local user, exactly like a sent
 // message. Emojis are short graphemes, never message bodies.
-const CHAT_EMOJI = z.string().min(1).max(32);
+//
+// This schema is the TRUST BOUNDARY for chat.reaction.set payloads — including
+// future replicated writes from other peers per the PR's forward-compat design.
+// A length bound alone accepts URLs, profanity, and arbitrary ASCII text as an
+// "emoji"; a hostile/buggy peer could inject those to render as reaction pills.
+// So we validate the actual codepoints: a single emoji grapheme cluster — one
+// pictographic (with optional variation selector / skin-tone modifier /
+// keycap), a regional-indicator pair (flag), and ZWJ sequences thereof.
+//
+// Unicode property escapes (\p{…}) with the `u` flag are ES2018 and supported by
+// every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
+// ES2022), so `\p{Extended_Pictographic}` is safe here.
+const EMOJI_ATOM =
+  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+export const EMOJI_GRAPHEME_PATTERN = new RegExp(
+  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
+  "u",
+);
+const CHAT_EMOJI = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
 
 // One ACTIVE reaction as the renderer paints it. The UI groups these by
 // (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.

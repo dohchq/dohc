@@ -1373,6 +1373,24 @@ describe("chat reactions (WS-MU-C2)", () => {
     expect(list[0]).toMatchObject({ emoji: "👍", author: { authorId: "alice@x" } });
   });
 
+  it("rejects a non-emoji reaction at APPLY (defense in depth for replicated ops)", async () => {
+    // The desktop IPC schema already refuses non-emoji, but a reaction op can
+    // arrive from another peer that never passed that check. The engine must
+    // reject arbitrary short strings (URLs, text) so they never land as pills.
+    const a = await makeEngine("a");
+    const { threadId, messageId } = await seedMessage(a);
+    const author = { authorId: "alice@x", kind: "human" as const, displayName: "Alice" };
+    for (const bad of ["hello", "http://evil.com", "not-an-emoji", "👍 nice"]) {
+      await expect(
+        a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: bad, author, state: "added" }),
+      ).rejects.toMatchObject({ code: "invalid-message-body" });
+    }
+    // A real multi-codepoint emoji (a flag) still passes.
+    await expect(
+      a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: "🇺🇸", author, state: "added" }),
+    ).resolves.toMatchObject({ emoji: "🇺🇸" });
+  });
+
   it("reacts to an AGENT message as a first-class case (individual-first)", async () => {
     const a = await makeEngine("a");
     const channel = await a.store.createChannel({ workspaceId: WS, name: "general" });
@@ -1510,6 +1528,21 @@ describe("chat reactions (WS-MU-C2)", () => {
     await tieB.store.applyReplicationOp(tieAdd);
     expect(activeCells(tieA.root)).toEqual([]);
     expect(activeCells(tieB.root)).toEqual([]);
+  });
+
+  it("rejects a REPLICATED reaction op whose emoji is not an emoji (hostile peer)", async () => {
+    // The inbound apply path is the trust boundary for peer writes. A buggy or
+    // hostile origin could ship a reaction op carrying an arbitrary short string
+    // as its cell key; it must never land as a pill.
+    const b = await makeEngine("guard");
+    const cell = { messageId: "m1", threadId: "t1", authorId: "mallory@x" };
+    for (const bad of ["hello", "http://evil.com", "not-an-emoji"]) {
+      const op = reactionEnvelope({ ...cell, emoji: bad, origin: "mallory", seq: 0, state: "added", atMs: 100 });
+      await expect(b.store.applyReplicationOp(op)).rejects.toBeTruthy();
+    }
+    // A real multi-codepoint emoji (a flag) is accepted through the same path.
+    const good = reactionEnvelope({ ...cell, emoji: "🇺🇸", origin: "peer", seq: 0, state: "added", atMs: 100 });
+    expect((await b.store.applyReplicationOp(good)).status).toBe("applied");
   });
 
   it("a fast local remove → re-add within one ms still lands as added (monotonic local at_ms)", async () => {

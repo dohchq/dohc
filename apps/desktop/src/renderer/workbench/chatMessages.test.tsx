@@ -150,6 +150,16 @@ describe("message reactions (WS-MU-C2)", () => {
     expect(pill.getAttribute("data-emoji")).toBe("👍");
     expect(pill.textContent).toContain("2");
     expect(pill.getAttribute("title")).toBe("Alice, Bob reacted with 👍");
+    // The glyph is aria-hidden, so the button's accessible name must come from
+    // an aria-label that exposes the emoji + count + reactors — otherwise a
+    // screen reader announces only the count. aria-label wins over content, so
+    // getByRole's name match is the real accessible name.
+    const accessibleName = pill.getAttribute("aria-label") ?? "";
+    expect(accessibleName).toContain("👍");
+    expect(accessibleName).toContain("2");
+    expect(accessibleName).toContain("Alice");
+    expect(accessibleName).toContain("Bob");
+    expect(screen.getByRole("button", { name: "👍 2 — Alice, Bob" })).toBe(pill);
     // Not the viewer's reaction — not highlighted, aria-pressed false.
     expect(pill.getAttribute("data-mine")).toBe("false");
     expect(pill.getAttribute("aria-pressed")).toBe("false");
@@ -198,11 +208,14 @@ describe("message reactions (WS-MU-C2)", () => {
     const choice = within(picker).getAllByTestId("test-chat-reaction-choice")[0] as HTMLElement;
     expect(choice.getAttribute("role")).toBeNull();
     expect(choice.getAttribute("aria-pressed")).toBe("false");
-    // Move focus INTO the popup, then press Escape at the document level — the
-    // dismissal must fire regardless of where focus sits, and return it to the
-    // trigger so the tab order is preserved.
+    // Move focus INTO the popup, then press Escape FROM the focused choice —
+    // dispatching on the real event target (not `document`) exercises the
+    // genuine propagation path the document-level handler relies on, so a parent
+    // onKeyDownCapture that swallowed the event would be caught. The dismissal
+    // must fire regardless of where focus sits, and return it to the trigger so
+    // the tab order is preserved.
     choice.focus();
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(choice, { key: "Escape" });
     expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
     expect(document.activeElement).toBe(trigger);
     expect(onToggle).not.toHaveBeenCalled();
