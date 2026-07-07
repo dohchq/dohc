@@ -59,8 +59,6 @@
     "@dohc/workspace-engine": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
     "@dohc/workspace-kernel-client": "workspace:*",
-    "@dohc/workspace-history": "workspace:*",
-    "@dohc/workspace-sync": "workspace:*",
     "@fontsource-variable/inter": "^5.2.8",
     "@hocuspocus/provider": "^4.1.0",
     "@tiptap/core": "^3.23.6",

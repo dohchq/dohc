@@ -18278,3 +18278,82 @@ Y.Doc as an engine content driver, so live collab can retire off Hocuspocus.
   test gate. Three user questions: markdown-fidelity-vs-full-Y.Doc-state;
   solo-on-Y.Doc-now vs plain-autosave-until-G2-C; re-home vs retire the
   suggestions/semantic-api surfaces.
+## Retire workspace-history and workspace-sync
+
+The deferred full retirement: `packages/workspace-history` and
+`packages/workspace-sync` are deleted entirely after salvaging the pieces the
+KEEP side still needed. The engine 3-way merge hot path is UNCHANGED — merge
+code was moved verbatim, proven by its tests moving with it.
+
+- **`mergeMarkdown` (the load-bearing salvage) → `@dohc/workspace-core`.** The
+  pure, browser-safe 3-way text merge moved verbatim to
+  `packages/workspace-core/src/mergeMarkdown.ts`, exposed as the
+  `@dohc/workspace-core/mergeMarkdown` subpath (mirroring the old dedicated
+  subpath; deliberately NOT on the core barrel, which pulls node:fs via
+  databases.ts and would blank the renderer). workspace-core is already a
+  universal dependency, so this adds ZERO new cross-package edges. Its merge
+  tests moved into `packages/workspace-core/src/mergeMarkdown.test.ts` and prove
+  the behavior is byte-identical. Re-pointed the three consumers:
+  `versionedTextStore.ts` (engine runtime hot path), `collabSession.ts` (desktop
+  renderer, browser-safe), and `mcp/tools.ts` (the `dohc_resolve_conflict` tool).
+- **History store (`createChangeSetStore` / `ChangeSetStore` / `HistoryRecord`)
+  → engine-internal.** `changeSetStore.ts` (+ its test) moved verbatim to
+  `packages/workspace-engine/src/changeSetStore.ts`; it imports only node: and
+  `@dohc/workspace-core`, so co-locating it in the engine (its only real runtime
+  caller, via the quarantined `versionedFileWorkspace.ts`) is edge-free.
+  `versionedFileWorkspace.ts` and `engineContracts.compile.ts` now import it
+  relatively (`./changeSetStore`), keeping the contract drift-gates intact with
+  no cross-package import. The engine index re-exports `createChangeSetStore` +
+  the two types (documented as a read-only relic/drift-guard export — no
+  production surface records through it) for the two remaining external readers:
+  the desktop capture guard test and the phase0m QA script, both re-pointed to
+  `@dohc/workspace-engine`.
+- **History record TYPES for the compile gates.** Handled by the move above —
+  `engineContracts.compile.ts`'s `HistoryDriftChecks` now pin against
+  `./changeSetStore` types in-package. Drift-gate intent preserved verbatim.
+- **`conflictResolution.ts` was dead beyond re-exporting mergeMarkdown.** No live
+  consumer imported `describeConflict`/`storeProposal`/`resolveConflict`/
+  `FileConflict`/`ConflictProposal` from the package (the same-named symbols in
+  workspace-core, mcp, and desktop are unrelated locals). Deleted with the
+  package; only its mergeMarkdown tests were salvaged.
+- **MCP relic reading: DROPPED (the engine is the history now).** Removed the
+  legacy `.dohc/history` relic branch from `mcp/tools.ts` —
+  `mergeHistoryRecords`, `mergedReadStore`, `historyReadStoreFor`,
+  `changeSummary`, the dead `isStaleRecordedAtError`, and the
+  `createChangeSetStore`/`isDurableChangeSetRecordingSupported`/`ChangeSetStore`/
+  `HistoryRecord` imports. `dohc_list_changes`/`dohc_read_change` now read engine
+  moments ONLY. MCP tests updated: the two relic-reading tests were removed (they
+  covered the removed feature); one replacement asserts history reads engine
+  moments only and ignores an on-disk relic; the `itDurableHistory` gate is now a
+  plain `process.platform === "linux"` (same semantics as the retired
+  descriptor-anchored predicate). MCP suite 74 → 73.
+- **`versionedFileWorkspace.ts` was NOT dead — kept.** It remains quarantined
+  (its `createVersionedFileWorkspace` runtime is tests-only; the index re-exports
+  only its types + capability helpers), but its types are part of the engine's
+  contract surface and its tests are live, so it stays; only its history import
+  was re-pointed to `./changeSetStore`.
+- **Deleted** `packages/workspace-history` and `packages/workspace-sync`
+  entirely (workspace-sync had zero live callers after the legacy-cloud cleanup —
+  clean deletion, no salvage), removed their deps from `@dohc/workspace-engine`,
+  `@dohc/mcp`, and `@dohc/desktop` (package.json) plus the two
+  `electron.vite.config.ts` `mainBundledWorkspaceDeps` entries. De-staled the
+  `@dohc/workspace-history` mentions in `packages/workspace-contracts/README.md`,
+  `engine.ts`, and `engineContracts.compile.ts` (historical point-in-time plan/
+  spec records were left untouched).
+- **Engine test isolation.** Added `packages/workspace-engine/vitest.config.ts`
+  with `fileParallelism: false` (the repo's sanctioned pattern, per
+  `services/hocuspocus/vitest.integration.config.ts`) so the moved, timing-
+  sensitive `changeSetStore` fs-lock concurrency tests are not destabilised by
+  the engine's other fs-heavy files racing them. No test logic weakened.
+
+Net: ~2,100 lines net removed from the repo (workspace-sync ~1,740 src LOC
+deleted outright; workspace-history's `conflictResolution` + boilerplate ~170
+deleted; the MCP relic branch ~190 net; changeSetStore ~2,800 and mergeMarkdown
+~130 lines were MOVED, not deleted).
+
+Verification: repo-wide `pnpm -r typecheck` clean; suites green — workspace-core
+113 (+5 merge), workspace-contracts 10, workspace-engine 428 (389 + 39 moved
+changeSetStore), mcp 73, workspace-fs 44, desktop 935; `pnpm --filter
+@dohc/desktop build` green; the load-bearing e2e green (workspace-collab-
+decoupling, workspace-engine-history, workspace-versions — 8 tests, collab/
+merge/history/restore paths survive); `git diff --check` clean.

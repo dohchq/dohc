@@ -18,7 +18,6 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
-    "@dohc/workspace-history": "workspace:*",
     "smol-toml": "^1.7.0"
   },
   "devDependencies": {
