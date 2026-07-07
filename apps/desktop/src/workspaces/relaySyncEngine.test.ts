@@ -1,7 +1,9 @@
 import {
+  RelayOriginDivergedError,
   RelayUnauthorizedError,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  recoverRelayOrigin,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,11 +20,13 @@ vi.mock("@dohc/workspace-engine", async (importOriginal) => {
     ...actual,
     pushWorkspaceToRelay: vi.fn(),
     pullWorkspaceFromRelay: vi.fn(),
+    recoverRelayOrigin: vi.fn(),
   };
 });
 
 const pushMock = vi.mocked(pushWorkspaceToRelay);
 const pullMock = vi.mocked(pullWorkspaceFromRelay);
+const recoverMock = vi.mocked(recoverRelayOrigin);
 
 function pullResult(
   overrides: Partial<PullWorkspaceFromRelayResult> = {},
@@ -90,8 +94,15 @@ beforeEach(() => {
   vi.useFakeTimers();
   pushMock.mockReset();
   pullMock.mockReset();
+  recoverMock.mockReset();
   pushMock.mockImplementation(async () => ({ pushed: 0, originsPushed: [] }));
   pullMock.mockImplementation(async () => pullResult());
+  recoverMock.mockImplementation(async () => ({
+    oldOriginId: "origin_old",
+    newOriginId: "origin_new",
+    sharedPrefixLength: 0,
+    preservedOps: 0,
+  }));
 });
 
 afterEach(() => {
@@ -122,6 +133,32 @@ describe("relaySyncEngine", () => {
     // and its conflictsOpened landed in the snapshot.
     expect(commit).toHaveBeenCalledTimes(1);
     expect(sync.snapshot().conflictCount).toBe(2);
+    expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
+  });
+
+  // 0P sync-hardening item 3: a RelayOriginDivergedError (restored/cloned
+  // engine.db) is not a dead end — the pass recovers onto a fresh origin,
+  // re-pushes, and completes normally instead of failing the pass.
+  it("recovers and re-pushes when the origin diverged (restored/cloned engine.db)", async () => {
+    const cap = capture();
+    pushMock
+      .mockRejectedValueOnce(new RelayOriginDivergedError())
+      .mockResolvedValue({ pushed: 1, originsPushed: ["origin_new"] });
+    const sync = engine({ capture: cap });
+    await sync.start();
+
+    const expectedInput = {
+      rootDir: "/tmp/workspace",
+      workspaceId: "workspace-a",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+    };
+    // Divergence detected → recovery ran once → push retried → pull ran.
+    expect(recoverMock).toHaveBeenCalledWith(expectedInput);
+    expect(recoverMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    // The pass completed cleanly — no auth-expiry, no failure notice.
+    expect(sync.snapshot().authExpired).toBe(false);
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
 

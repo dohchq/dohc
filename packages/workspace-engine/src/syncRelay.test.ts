@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
   createVersionedTextStore,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  recoverRelayOrigin,
   uploadKeyEnvelope,
   type SyncReplicationEnvelope,
 } from ".";
@@ -705,6 +706,110 @@ describe("sync relay client", () => {
     // Nothing landed and the local op is still marked unpushed.
     expect(relay.log).toHaveLength(logBefore);
     expect(readPersistedPushedSeq(a)).toBe(0);
+  });
+
+  // 0P sync-hardening item 3: a restored-older engine.db diverges from the
+  // relay's authoritative record for its origin. recoverRelayOrigin must
+  // re-baseline onto a fresh origin so the machine syncs again, PRESERVING
+  // local-only work made while diverged — as a conflict when it clashes,
+  // never silently lost.
+  it("recovers a restored-older engine.db onto a fresh origin, preserving divergent local work as a conflict", async () => {
+    const relay = new FakeRelay();
+    const a = await tempRoot("recover-a");
+    const snap = await tempRoot("recover-snap");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(a, "docs/a.md", "hello\n");
+    await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    // Snapshot the pre-v2 engine state (this is the copy a "restores" to).
+    await cp(a, snap, { recursive: true });
+
+    // a advances with a v2 write and pushes it: the relay now authoritatively
+    // holds origin seq 2 = "v2\n".
+    const advance = createVersionedTextStore(a, { nowMs: () => 2000 });
+    try {
+      await advance.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/a.md",
+        text: "v2\n",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await advance.close();
+    }
+    await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    const relayOriginId = relay.log.at(-1)!.originId;
+
+    // Restore a to the pre-v2 snapshot: the v2 moment is GONE from a's engine
+    // (it was made after the snapshot), but the relay still holds it.
+    closeTrackedEngineDbHandlesForTest();
+    await rm(a, { recursive: true, force: true });
+    await cp(snap, a, { recursive: true });
+
+    // Local-only work made while diverged: a new write reuses origin seq 2
+    // with DIFFERENT content than the relay holds there.
+    const postRestore = createVersionedTextStore(a, { nowMs: () => 3000 });
+    try {
+      await postRestore.writeTextFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: "docs/a.md",
+        text: "post-restore work\n",
+        metadata: { origin: "api" },
+      });
+    } finally {
+      await postRestore.close();
+    }
+
+    // Push fails closed: the relay is authoritative and divergent at seq 2.
+    await expect(
+      pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
+    ).rejects.toBeInstanceOf(RelayOriginDivergedError);
+
+    // Recover: re-baseline onto a fresh origin, preserving the divergent op.
+    const recovery = await recoverRelayOrigin({
+      rootDir: a,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    expect(recovery.oldOriginId).toBe(relayOriginId);
+    expect(recovery.newOriginId).not.toBe(relayOriginId);
+    expect(recovery.sharedPrefixLength).toBe(2); // init + "hello" write
+    expect(recovery.preservedOps).toBe(1); // the divergent "post-restore" write
+
+    // Now the machine syncs again: push the preserved work under the fresh
+    // origin (no divergence), then pull the relay's authoritative tail.
+    const pushed = await pushWorkspaceToRelay({
+      rootDir: a,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    expect(pushed.pushed).toBeGreaterThanOrEqual(1);
+    // The preserved work reached the relay under the NEW origin (a peer would
+    // see it) — never silently lost.
+    expect(relay.log.some((op) => op.originId === recovery.newOriginId)).toBe(true);
+
+    const pull = await pullWorkspaceFromRelay({
+      rootDir: a,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    await pull.commitFetchCursor();
+
+    // Local work is NOT clobbered, and the relay's divergent version surfaces
+    // as an open conflict for review — preserved on BOTH sides.
+    const check = createVersionedTextStore(a);
+    try {
+      const live = await check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/a.md" });
+      expect(live?.text).toBe("post-restore work\n");
+      const open = await check.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open).toHaveLength(1);
+      expect(open[0]?.current.text).toBe("post-restore work\n");
+      expect(open[0]?.incoming.text).toBe("v2\n");
+    } finally {
+      await check.close();
+    }
   });
 
   it("aborts a pull when relay pagination stops advancing", async () => {

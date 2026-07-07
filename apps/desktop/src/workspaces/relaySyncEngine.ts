@@ -1,7 +1,9 @@
 import {
+  RelayOriginDivergedError,
   RelayUnauthorizedError,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  recoverRelayOrigin,
   type PendingConflictResolve,
   type SyncRelayConnection,
 } from "@dohc/workspace-engine";
@@ -147,11 +149,29 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       // A join-bootstrap engine is pull-only until its first pull succeeds:
       // a fresh join must never append ops before it has the remote state.
       if (!bootstrapPass) {
-        await pushWorkspaceToRelay({
-          rootDir: options.rootDir,
-          workspaceId: options.remoteWorkspaceId,
-          relay: options.relay,
-        });
+        try {
+          await pushWorkspaceToRelay({
+            rootDir: options.rootDir,
+            workspaceId: options.remoteWorkspaceId,
+            relay: options.relay,
+          });
+        } catch (error) {
+          if (!(error instanceof RelayOriginDivergedError)) throw error;
+          // The local engine.db was restored-from-older or cloned, so its
+          // origin diverged from the relay's authoritative record. Re-baseline
+          // onto a fresh origin — preserving local-only work as conflicts where
+          // it clashes, never dropping it — then push under the fresh origin.
+          await recoverRelayOrigin({
+            rootDir: options.rootDir,
+            workspaceId: options.remoteWorkspaceId,
+            relay: options.relay,
+          });
+          await pushWorkspaceToRelay({
+            rootDir: options.rootDir,
+            workspaceId: options.remoteWorkspaceId,
+            relay: options.relay,
+          });
+        }
       }
       return pullWorkspaceFromRelay({
         rootDir: options.rootDir,
