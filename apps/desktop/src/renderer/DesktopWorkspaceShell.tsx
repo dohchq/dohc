@@ -64,6 +64,10 @@ import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-o
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
+import type { AgentNotification } from "./workbench/agentNotifications";
+import type { MentionCandidate } from "./workbench/mentions";
+import { useAgentNotifications } from "./workbench/useAgentNotifications";
+import { usePendingAgentMention, type AgentMentionInput } from "./workbench/usePendingAgentMention";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   UnifiedDiffLines,
@@ -756,6 +760,9 @@ export function DesktopWorkspaceShell(props: {
   const [folders, setFolders] = useState<string[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
+  // Synchronous guard against a mention-invoke race: two quick @agent sends
+  // must start ONE session, not overlap into two (see handleAgentMentioned).
+  const agentMentionStartingRef = useRef(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -771,6 +778,10 @@ export function DesktopWorkspaceShell(props: {
   } | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
+  // Non-error, informational shell banner (e.g. "your agent is busy — the
+  // mention is queued"). Kept separate from shellError so a benign "come back
+  // later" is never painted as a red danger failure.
+  const [shellNotice, setShellNotice] = useState<string | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -821,7 +832,43 @@ export function DesktopWorkspaceShell(props: {
   const workspaceId = props.workspace.workspaceId;
   useEffect(() => {
     setShellError(null);
+    setShellNotice(null);
   }, [workspaceId]);
+
+  // @-mention roster + agent notifications (Agent Notifications & Mentions).
+  // The renderer has no identity source yet, so the user shows as "You" —
+  // the same fallback main uses for local authorship.
+  const LOCAL_USER_LABEL = "You";
+  const mentionCandidates = useMemo<MentionCandidate[]>(
+    () => [
+      {
+        id: "agent:default",
+        kind: "agent",
+        handle: "agent",
+        label: `${LOCAL_USER_LABEL}'s agent`,
+        description: "your agent",
+      },
+      { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
+    ],
+    [],
+  );
+  const userMentionCandidates = useMemo(
+    () => mentionCandidates.filter((candidate) => candidate.kind === "user"),
+    [mentionCandidates],
+  );
+  const agentNotifs = useAgentNotifications({
+    workspaceId,
+    workspaceName: workspaceName(props.workspace),
+    agentName: `${LOCAL_USER_LABEL}'s agent`,
+    userCandidates: userMentionCandidates,
+  });
+  const addressedToMe = useMemo(
+    () =>
+      agentNotifs.notifications.filter(
+        (notification) => notification.kind === "asked" || notification.kind === "needs-input",
+      ),
+    [agentNotifs.notifications],
+  );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
   }, [workspaceId]);
@@ -1421,8 +1468,88 @@ export function DesktopWorkspaceShell(props: {
     }));
   }, [mutateWb]);
   const openAgentView = useCallback(() => {
+    // Opening the Agent panel means the user is now looking at the run, so
+    // its finished/error/ask notices auto-clear.
+    agentNotifs.clearForCurrentWorkspace();
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
-  }, [mutateWb]);
+  }, [agentNotifs, mutateWb]);
+
+  // A NoticeCenter / inbox item was opened: land on the run and clear it.
+  // openAgentView() clears every notice for this workspace, so opening the run
+  // is the single, obvious clear — there is no per-thread clear because the
+  // agent session isn't tied to a specific chat thread (see agentNotifications).
+  const openAgentNotification = useCallback(
+    (_notification: AgentNotification) => {
+      openAgentView();
+    },
+    [openAgentView],
+  );
+
+  // Actually deliver an @-mention to the agent: pull it into the thread through
+  // the existing agent-chat reply path (dohc_read_chat + dohc_reply_to_chat).
+  // Only called when the agent is free (the busy case queues — see below).
+  const deliverAgentMention = useCallback(
+    async (input: AgentMentionInput) => {
+      // `agentActive` is React state and stays false until startAgentSession
+      // resolves, so two quick mention-invokes could both race into overlapping
+      // session starts. The synchronous ref closes that window BEFORE the first
+      // await; it's cleared in finally.
+      agentMentionStartingRef.current = true;
+      try {
+        const panel = await bridge().probeAgentDrivers({ workspaceId });
+        const driver = panel.drivers.find((entry) => entry.installed) ?? panel.drivers[0];
+        if (!driver) {
+          reportShellError(
+            "No agent is set up to mention yet — connect one in the Agent panel.",
+            new Error("no agent driver"),
+          );
+          return;
+        }
+        const prompt =
+          `You were @-mentioned in a dohc chat. Read chat thread "${input.threadId}" with ` +
+          `dohc_read_chat, then reply in that same thread with dohc_reply_to_chat. ` +
+          `The message that mentioned you: ${JSON.stringify(input.body)}. ` +
+          `Keep your reply concise and on-topic.`;
+        await bridge().startAgentSession({ workspaceId, driverId: driver.id, prompt });
+        setAgentActive(true);
+        setAgentPanelRefreshKey((key) => key + 1);
+        mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
+      } catch (error) {
+        reportShellError("Could not reach your agent for that mention.", error);
+      } finally {
+        agentMentionStartingRef.current = false;
+      }
+    },
+    [mutateWb, reportShellError, workspaceId],
+  );
+
+  // Holds mentions that arrive mid-run and delivers them when the agent frees
+  // up. Clearing the "busy" notice on delivery keeps the banner honest — it
+  // disappears exactly when the queued mention actually goes out.
+  const { enqueue: enqueueAgentMention } = usePendingAgentMention({
+    agentActive,
+    deliver: (input) => {
+      setShellNotice(null);
+      void deliverAgentMention(input);
+    },
+  });
+
+  // A sent chat message @-mentioned an agent. If the agent is free, deliver now;
+  // if it's mid-run, queue it (delivered the moment the run ends) and say so
+  // through the NON-error notice — the mention is never silently dropped.
+  const handleAgentMentioned = useCallback(
+    (input: AgentMentionInput) => {
+      if (agentActive || agentMentionStartingRef.current) {
+        enqueueAgentMention(input);
+        setShellNotice(
+          "Your agent is busy right now — this mention is queued and will send as soon as it's free.",
+        );
+        return;
+      }
+      void deliverAgentMention(input);
+    },
+    [agentActive, deliverAgentMention, enqueueAgentMention],
+  );
   const checkForDesktopUpdates = useCallback(async () => {
     try {
       const result = await bridge().checkForUpdates();
@@ -1867,6 +1994,22 @@ export function DesktopWorkspaceShell(props: {
           </button>
         </div>
       ) : null}
+      {shellNotice ? (
+        <div
+          data-testid="workspace-shell-notice"
+          className="flex min-h-8 items-center gap-2 border-b border-line bg-panel-2 px-3 text-[12px] text-muted"
+        >
+          <span className="min-w-0 flex-1 truncate">{shellNotice}</span>
+          <button
+            type="button"
+            aria-label="Dismiss notice"
+            onClick={() => setShellNotice(null)}
+            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
+          >
+            <X size={12} aria-hidden />
+          </button>
+        </div>
+      ) : null}
       {shareView ? (
         <div
           data-testid="shared-view-banner"
@@ -2001,6 +2144,10 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     onOpenFileChat={openFileChatInRail}
                     onError={(message) => setShellError(message)}
+                    mentionCandidates={mentionCandidates}
+                    onAgentMentioned={handleAgentMentioned}
+                    addressedToMe={addressedToMe}
+                    onOpenAddressed={openAgentNotification}
                   />
                 </Suspense>
               ) : (
@@ -2310,6 +2457,9 @@ export function DesktopWorkspaceShell(props: {
         onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
+        agentNotifications={agentNotifs.notifications}
+        onOpenAgentNotification={openAgentNotification}
+        onDismissAgentNotification={agentNotifs.dismiss}
       />
 
       {paletteOpen ? (

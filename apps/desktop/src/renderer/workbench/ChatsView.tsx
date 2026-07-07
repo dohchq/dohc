@@ -1,4 +1,4 @@
-import { ArrowLeft, FileText, Hash, MessagesSquare, Plus } from "lucide-react";
+import { ArrowLeft, Bot, FileText, Hash, MessagesSquare, Plus } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -7,12 +7,10 @@ import type {
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import {
-  ChatComposer,
-  ChatMessageList,
-  formatChatTime,
-  ipcErrorMessage,
-} from "./chatMessages";
+import type { AgentNotification } from "./agentNotifications";
+import { ChatMessageList, formatChatTime, ipcErrorMessage } from "./chatMessages";
+import { MentionComposer } from "./MentionComposer";
+import { findMentions, type MentionCandidate } from "./mentions";
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
 // a read-only "Files" grouping that cross-links to the per-file rail. Built
@@ -78,13 +76,69 @@ function BackHeader(props: {
   );
 }
 
+// "Addressed to me" inbox: the calm, in-context list of things the agent is
+// waiting on the user for (asks + needs-input). It reuses the agent
+// notification model rather than a heavy new surface, and stays hidden when
+// there's nothing to answer.
+function AddressedToMe(props: {
+  notifications: readonly AgentNotification[];
+  onOpen?: (notification: AgentNotification) => void;
+}) {
+  const waiting = props.notifications.filter(
+    (notification) => notification.kind === "asked" || notification.kind === "needs-input",
+  );
+  if (waiting.length === 0) return null;
+  return (
+    <section
+      data-testid="chats-addressed-to-me"
+      aria-label="Addressed to me"
+      className="border-b border-line bg-panel-2/40"
+    >
+      <p className="mb-0 px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+        Addressed to me
+      </p>
+      <ul className="m-0 list-none p-0">
+        {waiting.map((notification) => (
+          <li key={notification.id}>
+            <button
+              type="button"
+              data-testid="chats-addressed-item"
+              onClick={() => props.onOpen?.(notification)}
+              className="flex w-full cursor-pointer items-start gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+            >
+              <Bot size={13} aria-hidden className="mt-0.5 shrink-0 text-accent" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[12px] font-medium text-ink">
+                  {notification.title}
+                </span>
+                <span className="block truncate text-[11px] text-muted">{notification.body}</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function ChatsView(props: {
   workspaceId: string;
   // Jump a file-linked Chat to where it lives: the file's side rail.
   onOpenFileChat: (thread: FileChatThreadRecord) => void;
   onError: (message: string) => void;
+  // @-mention roster for this workspace (the user + available agents). When
+  // provided, the composer offers autocomplete and messages render chips.
+  mentionCandidates?: readonly MentionCandidate[];
+  // Called after a message that @-mentions an agent is sent, so the shell can
+  // pull that agent into the thread (the existing agent-chat reply path).
+  onAgentMentioned?: (input: { threadId: string; mentioned: MentionCandidate[]; body: string }) => void;
+  // "Addressed to me" inbox: agent asks / requests waiting on the user.
+  addressedToMe?: readonly AgentNotification[];
+  onOpenAddressed?: (notification: AgentNotification) => void;
 }) {
   const { workspaceId } = props;
+  const mentionCandidates = props.mentionCandidates ?? [];
+  const agentCandidates = mentionCandidates.filter((candidate) => candidate.kind === "agent");
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<Nav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
@@ -96,6 +150,13 @@ export function ChatsView(props: {
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
+  // and stay false until the next render, so a double-send (two Enters in one
+  // tick) can fire TWO IPC sends — and two agent invocations — before the state
+  // flips. These refs flip synchronously BEFORE the first await, so the second
+  // call is ignored immediately.
+  const sendingRef = useRef(false);
+  const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -201,14 +262,33 @@ export function ChatsView(props: {
     [props, workspaceId],
   );
 
+  // After a human message is sent, pull any @-mentioned agent into the thread
+  // through the shell (which wires the existing agent-chat reply path). Deduped
+  // by candidate id so "@agent @agent" invokes once.
+  const notifyAgentMention = useCallback(
+    (threadId: string, body: string) => {
+      if (!props.onAgentMentioned || agentCandidates.length === 0) return;
+      // Invoke path is code-aware: an @agent typed inside inline code or a
+      // fenced block (e.g. `npm install @agent/pkg`) must NOT invoke the agent.
+      const mentioned = findMentions(body, agentCandidates, { ignoreCode: true }).map(
+        (match) => match.candidate,
+      );
+      if (mentioned.length === 0) return;
+      const unique = Array.from(new Map(mentioned.map((c) => [c.id, c])).values());
+      props.onAgentMentioned({ threadId, mentioned: unique, body });
+    },
+    [agentCandidates, props],
+  );
+
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
   const startThread = useCallback(async () => {
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
-    if (body.length === 0 || startingThread) return;
+    if (body.length === 0 || startingThread || startingThreadRef.current) return;
     const channel = nav.channel;
     const token = liveToken.current;
+    startingThreadRef.current = true;
     setStartingThread(true);
     try {
       const result = await bridge().startChannelThread({
@@ -221,19 +301,22 @@ export function ChatsView(props: {
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
       setChannelThreads((current) => [result.thread, ...current]);
+      notifyAgentMention(result.thread.id, body);
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that chat."));
     } finally {
+      startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props, startingThread, workspaceId]);
+  }, [nav, newThreadBody, notifyAgentMention, props, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
     const body = composer.trim();
-    if (body.length === 0 || sending) return;
+    if (body.length === 0 || sending || sendingRef.current) return;
     const token = liveToken.current;
+    sendingRef.current = true;
     setSending(true);
     try {
       const result = await bridge().sendChatMessage({
@@ -245,6 +328,7 @@ export function ChatsView(props: {
       setMessages((current) => [...current, result.message]);
       setComposer("");
       messagesEndRef.current?.scrollIntoView({ block: "end" });
+      notifyAgentMention(nav.thread.id, body);
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
@@ -252,9 +336,10 @@ export function ChatsView(props: {
       // Unconditional reset (LinkedChats precedent): navigation bumps the
       // token without resetting `sending`, and the token guard on the READ
       // above already prevents concurrent sends.
+      sendingRef.current = false;
       setSending(false);
     }
-  }, [composer, nav, props, sending, workspaceId]);
+  }, [composer, nav, notifyAgentMention, props, sending, workspaceId]);
 
   const createChannel = useCallback(
     async (name: string) => {
@@ -355,14 +440,16 @@ export function ChatsView(props: {
           loading={messagesLoading}
           emptyLabel="No messages yet."
           endRef={messagesEndRef}
+          mentionCandidates={mentionCandidates}
         />
-        <ChatComposer
+        <MentionComposer
           testIdPrefix="chats"
           composerId="chats-composer"
           value={composer}
           sending={sending}
-          placeholder="Write a message…"
+          placeholder="Write a message…  @ to mention"
           sendLabel="Send message"
+          candidates={mentionCandidates}
           onChange={setComposer}
           onSend={() => void sendMessage()}
         />
@@ -426,13 +513,14 @@ export function ChatsView(props: {
             </ul>
           )}
         </div>
-        <ChatComposer
+        <MentionComposer
           testIdPrefix="chats-new-thread"
           composerId="chats-new-thread-composer"
           value={newThreadBody}
           sending={startingThread}
-          placeholder={`Message #${nav.channel.name}…`}
+          placeholder={`Message #${nav.channel.name}…  @ to mention`}
           sendLabel="Start a new chat"
+          candidates={mentionCandidates}
           onChange={setNewThreadBody}
           onSend={() => void startThread()}
         />
@@ -447,6 +535,10 @@ export function ChatsView(props: {
       onKeyDownCapture={onKeyDownCapture}
     >
       <div className="min-h-0 flex-1 overflow-y-auto">
+        <AddressedToMe
+          notifications={props.addressedToMe ?? []}
+          onOpen={props.onOpenAddressed}
+        />
         <ul className="m-0 list-none p-0">
           {overview.channels.map((channel) => (
             <li key={channel.id} className="border-b border-line">

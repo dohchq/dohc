@@ -3,24 +3,24 @@ import {
   Bell,
   Bot,
   Check,
+  CheckCircle2,
   CloudOff,
   Download,
+  MessageSquare,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import type {
+  AgentNotification,
+  AgentNotificationKind,
+} from "./agentNotifications";
 
 type Notice = {
-  id:
-    | "sync-conflict"
-    | "sync-review"
-    | "cloud-disconnected"
-    | "cloud-sync-failing"
-    | "history-capture-failed"
-    | "history-recording-off"
-    | "agent-active"
-    | "update-ready";
+  // Sync/update notices use a fixed id; agent notices carry their own
+  // per-(workspace, run, kind) id.
+  id: string;
   tone: "danger" | "warning" | "success" | "neutral";
   title: string;
   body: string;
@@ -33,6 +33,20 @@ type Notice = {
   // row. Only notices whose underlying state has a real ack path expose it.
   onDismiss?: () => void;
   Icon: typeof Bell;
+};
+
+const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
+  finished: CheckCircle2,
+  "needs-input": Bot,
+  asked: MessageSquare,
+  error: AlertTriangle,
+};
+
+const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
+  finished: "success",
+  "needs-input": "warning",
+  asked: "neutral",
+  error: "danger",
 };
 
 function toneClass(tone: Notice["tone"]): string {
@@ -54,6 +68,12 @@ export function NoticeCenter(props: {
   // Dismisses the sync-review notice (0P-C gate fix): clears the engine's
   // pending remote-resolve set after the user has taken their look.
   onDismissSyncReview?: () => void;
+  // Agent -> user notifications (finished / needs-input / asked / error).
+  // Opening one lands the user on the relevant run or chat thread and
+  // auto-clears it; dismiss acknowledges the state.
+  agentNotifications?: readonly AgentNotification[];
+  onOpenAgentNotification?: (notification: AgentNotification) => void;
+  onDismissAgentNotification?: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
@@ -141,10 +161,32 @@ export function NoticeCenter(props: {
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
 
+  const agentNotifications = props.agentNotifications ?? [];
   const notices = useMemo<Notice[]>(() => {
     const next: Notice[] = [];
     const state = props.syncStatus?.state;
     const conflictCount = props.syncStatus?.conflictCount ?? 0;
+
+    // Agent -> user notices lead: a run that finished, is blocked, asked a
+    // question, or failed is the thing the user most needs to see. Newest
+    // first so a fresh ask isn't buried under an older "finished".
+    for (const notification of [...agentNotifications].sort(
+      (a, b) => b.createdAtMs - a.createdAtMs,
+    )) {
+      next.push({
+        id: notification.id,
+        tone: AGENT_NOTICE_TONE[notification.kind],
+        title: notification.title,
+        body: notification.body,
+        Icon: AGENT_NOTICE_ICON[notification.kind],
+        ...(props.onOpenAgentNotification
+          ? { action: { label: "Open", onClick: () => props.onOpenAgentNotification?.(notification) } }
+          : {}),
+        ...(props.onDismissAgentNotification
+          ? { onDismiss: () => props.onDismissAgentNotification?.(notification.id) }
+          : {}),
+      });
+    }
 
     if (state === "conflict") {
       next.push({
@@ -258,9 +300,12 @@ export function NoticeCenter(props: {
 
     return next;
   }, [
+    agentNotifications,
     props.agentActive,
     props.conflictSummaries,
     props.onOpenAgent,
+    props.onOpenAgentNotification,
+    props.onDismissAgentNotification,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onDismissSyncReview,

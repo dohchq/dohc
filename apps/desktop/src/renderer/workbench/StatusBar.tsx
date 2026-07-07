@@ -1,5 +1,6 @@
 import { Bot, Cloud, Settings, SunMoon } from "lucide-react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
+import type { AgentNotification } from "./agentNotifications";
 import { NoticeCenter } from "./NoticeCenter";
 
 // Extracted shell footer (Phase E2). The sync-status testid + data-state,
@@ -37,6 +38,9 @@ export function StatusBar(props: {
   onOpenSettings: () => void;
   onToggleTheme: () => void;
   onContextMenu: () => void;
+  agentNotifications?: readonly AgentNotification[];
+  onOpenAgentNotification?: (notification: AgentNotification) => void;
+  onDismissAgentNotification?: (id: string) => void;
 }) {
   const state = props.syncStatus?.state ?? "synced";
   const conflictCount = props.syncStatus?.conflictCount ?? 0;
@@ -88,6 +92,13 @@ export function StatusBar(props: {
           onOpenConflicts={props.onOpenConflicts}
           {...(props.onDismissSyncReview
             ? { onDismissSyncReview: props.onDismissSyncReview }
+            : {})}
+          {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
+          {...(props.onOpenAgentNotification
+            ? { onOpenAgentNotification: props.onOpenAgentNotification }
+            : {})}
+          {...(props.onDismissAgentNotification
+            ? { onDismissAgentNotification: props.onDismissAgentNotification }
             : {})}
         />
         <button

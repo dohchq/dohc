@@ -1,4 +1,5 @@
 import type {
+  AgentDriver,
   AgentDriverId,
   AgentDriverRegistry,
   AgentEvent,
@@ -174,6 +175,11 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   const now = options.now ?? (() => Date.now());
   const sessions = new Map<string, ManagedSession>();
   const finalizedRuns = new Set<string>();
+  // Per-workspace start mutex. startSession does stop-then-create, so two
+  // CONCURRENT starts for the same workspace would race into duplicate sessions
+  // (each stopping the other's half-built session). This set marks a workspace
+  // whose start is in flight; a second concurrent start is rejected outright.
+  const startingWorkspaces = new Set<string>();
   let cachedDrivers: AgentDriverProbeSummary[] | null = null;
 
   async function finalizeRun(
@@ -341,6 +347,26 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     if (!root) throw new Error(`Unknown workspace: ${input.workspaceId}`);
     const driver = options.registry.get(input.driverId);
     if (!driver) throw new Error(`Unknown agent driver: ${input.driverId}`);
+    // Reject a concurrent start for the same workspace (checked + claimed
+    // synchronously, before the first await, so the race window is closed).
+    if (startingWorkspaces.has(input.workspaceId)) {
+      throw new Error(
+        `An agent session is already starting for workspace ${input.workspaceId}.`,
+      );
+    }
+    startingWorkspaces.add(input.workspaceId);
+    try {
+      return await startSessionLocked(input, root, driver);
+    } finally {
+      startingWorkspaces.delete(input.workspaceId);
+    }
+  }
+
+  async function startSessionLocked(
+    input: { workspaceId: string; driverId: AgentDriverId; prompt: string; model?: string },
+    root: string,
+    driver: AgentDriver,
+  ): Promise<AgentPanelSnapshot> {
     await stopSession(input.workspaceId);
     const state: ManagedSession = {
       driverId: driver.id,

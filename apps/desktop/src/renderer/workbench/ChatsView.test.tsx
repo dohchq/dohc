@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -97,16 +97,24 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderView(onOpenFileChat = vi.fn(), onError = vi.fn()) {
+type ExtraProps = Partial<Parameters<typeof ChatsView>[0]>;
+
+function renderView(onOpenFileChat = vi.fn(), onError = vi.fn(), extra: ExtraProps = {}) {
   render(
     <ChatsView
       workspaceId="workspace-a"
       onOpenFileChat={onOpenFileChat}
       onError={onError}
+      {...extra}
     />,
   );
   return { onOpenFileChat, onError };
 }
+
+const mentionRoster = [
+  { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Your agent", description: "your agent" },
+  { id: "user:you", kind: "user" as const, handle: "you", label: "You", description: "you" },
+];
 
 describe("ChatsView channels", () => {
   it("lists channels with unread badges and thread counts", async () => {
@@ -240,6 +248,166 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     );
     const bodies = await screen.findAllByTestId("chats-message-body");
     expect(bodies[bodies.length - 1].textContent).toBe("Great, thanks!");
+  });
+});
+
+describe("ChatsView mentions", () => {
+  it("renders @-mention chips in message bodies", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "m-ask",
+          authorKind: "agent",
+          authorDisplayName: "ice@dohc.ai",
+          body: "@you which draft should I keep?",
+        }),
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const chip = await screen.findByTestId("chats-message-body-mention");
+    expect(chip.textContent).toBe("@you");
+    expect(chip.getAttribute("data-mention-kind")).toBe("user");
+  });
+
+  it("invokes a mentioned agent after a message is sent", async () => {
+    const user = userEvent.setup();
+    const onAgentMentioned = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "m-new", body: "@agent can you check this?" }),
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster, onAgentMentioned });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.type(
+      screen.getByTestId("chats-composer"),
+      "@agent can you check this?{Enter}",
+    );
+
+    await waitFor(() => expect(onAgentMentioned).toHaveBeenCalledTimes(1));
+    const call = onAgentMentioned.mock.calls[0]![0];
+    expect(call.threadId).toBe("thread-1");
+    expect(call.mentioned.map((c: { id: string }) => c.id)).toEqual(["agent:default"]);
+  });
+
+  it("does not invoke the agent for an @agent typed inside inline code", async () => {
+    const user = userEvent.setup();
+    const onAgentMentioned = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "m-code", body: "run `npm i @agent/pkg` please" }),
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster, onAgentMentioned });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    // The @agent sits inside backticks, so the invoke path must ignore it.
+    await user.type(
+      screen.getByTestId("chats-composer"),
+      "run `npm i @agent/pkg` please{Enter}",
+    );
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+    expect(onAgentMentioned).not.toHaveBeenCalled();
+  });
+
+  it("does not render a mention chip for an @handle inside inline code", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "m-code",
+          authorKind: "agent",
+          authorDisplayName: "ice@dohc.ai",
+          body: "set `@you = owner` in the config",
+        }),
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-message-body");
+    // No chip is rendered for the backticked handle.
+    expect(screen.queryByTestId("chats-message-body-mention")).toBeNull();
+  });
+
+  it("fires a single send (one agent invoke) for a synchronous double-Enter", async () => {
+    const user = userEvent.setup();
+    const onAgentMentioned = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    let resolveSend!: (value: { message: ChatMessageRecord }) => void;
+    bridgeMock.sendChatMessage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster, onAgentMentioned });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@agent look");
+
+    // Two Enter keydowns in the SAME tick (no await between): the synchronous
+    // in-flight ref must swallow the second so only ONE send goes out.
+    fireEvent.keyDown(composer, { key: "Enter" });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    resolveSend({ message: message({ id: "m-new", body: "@agent look" }) });
+
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onAgentMentioned).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not invoke an agent when only the user is mentioned", async () => {
+    const user = userEvent.setup();
+    const onAgentMentioned = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "m-new", body: "note to @you" }),
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster, onAgentMentioned });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    // Trailing space closes the mention menu so Enter sends (rather than
+    // accepting the highlighted candidate).
+    await user.type(screen.getByTestId("chats-composer"), "note to @you {Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+    expect(onAgentMentioned).not.toHaveBeenCalled();
+  });
+
+  it("shows an 'Addressed to me' inbox for agent asks and opens them", async () => {
+    const user = userEvent.setup();
+    const onOpenAddressed = vi.fn();
+    const notice = {
+      id: "workspace-a::run-1::asked",
+      kind: "asked" as const,
+      workspaceId: "workspace-a",
+      workspaceName: "Personal",
+      agentName: "You's agent",
+      runId: "run-1",
+      title: "Your agent has a question",
+      body: "Which draft should I keep?",
+      createdAtMs: NOW,
+    };
+    renderView(vi.fn(), vi.fn(), { addressedToMe: [notice], onOpenAddressed });
+
+    const item = await screen.findByTestId("chats-addressed-item");
+    expect(item.textContent).toContain("Which draft should I keep?");
+    await user.click(item);
+    expect(onOpenAddressed).toHaveBeenCalledWith(notice);
   });
 });
 
