@@ -286,4 +286,33 @@ describe("CloudLogin", () => {
     );
     await waitFor(() => expect(screen.getByTestId("cloud-protect-secrets")).toBeTruthy());
   });
+
+  it("surfaces an unlock failure and keeps the passphrase prompt open", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+      workspaceSecretState: "protected-key-missing",
+    });
+    // The main-process wording the renderer keys off (/passphrase/ + /could not/).
+    bridgeMock.cloudEnableSync.mockRejectedValue(
+      new Error("Passphrase could not unlock synced secrets."),
+    );
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-unlock-secrets"));
+
+    const input = await screen.findByTestId("cloud-sync-passphrase");
+    fireEvent.change(input, { target: { value: "wrong passphrase" } });
+    fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cloud-sync-error").textContent).toContain(
+        "couldn't unlock synced secrets",
+      ),
+    );
+    // The prompt stays open for a retry rather than vanishing on failure.
+    expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-protect-secrets")).toBeNull();
+  });
 });
