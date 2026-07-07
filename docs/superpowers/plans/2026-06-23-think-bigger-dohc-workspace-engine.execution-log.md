@@ -19005,7 +19005,9 @@ projected path to `candidateMaterializationPaths` so the on-disk file settles).
 
 The apply rejects a ydoc.update whose `path` classifies as `secret`
 (`.env` family) BEFORE any materialization — no `ydoc_docs` marker, no file, no
-plaintext-leak path for secret files. Proven by test.
+plaintext-leak path for secret files. Defense in depth: the driver's
+`openSession` independently rejects secret-classified paths, so a secret file
+can never be opened as a live Y.Doc either. Both proven by test.
 
 ### Verification
 

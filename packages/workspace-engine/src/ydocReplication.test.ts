@@ -51,9 +51,14 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
   DatabaseSync: new (path: string) => RawDb;
 };
 
+// Every raw handle is tracked so afterEach can close it before rm(root) —
+// leaked DatabaseSync handles accumulate FDs and race the temp-dir cleanup
+// (SQLite file locks) across the suite.
+const openRawDbs: RawDb[] = [];
 function rawDb(root: string): RawDb {
   const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
   db.exec("PRAGMA busy_timeout = 5000");
+  openRawDbs.push(db);
   return db;
 }
 
@@ -161,6 +166,13 @@ afterEach(async () => {
   for (const node of nodes) {
     await node.driver.close().catch(() => {});
     await node.store.close().catch(() => {});
+  }
+  for (const db of openRawDbs.splice(0)) {
+    try {
+      db.close();
+    } catch {
+      // best-effort — a handle may already be closed
+    }
   }
   closeTrackedEngineDbHandlesForTest();
   await Promise.all(nodes.map((n) => rm(n.root, { recursive: true, force: true })));
