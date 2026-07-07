@@ -1953,10 +1953,15 @@ function registerIpcHandlers(): void {
     notifyRenderer();
   });
 
-  // Enabling sync claims the workspace id on the server (first claimant owns
-  // it; members re-enable idempotently; strangers are refused), records the
-  // remote identity, and starts the merge engine: pull, then push everything
-  // local. Requires a signed-in session.
+  // Enabling sync claims the workspace id on the RELAY (first claimant owns
+  // it; members re-enable idempotently; strangers get the relay's fixed 404 →
+  // "already claimed"), records the remote identity, and starts the merge
+  // engine: pull, then push everything local. Requires a signed-in session.
+  //
+  // The relay's POST /sync/workspaces is the SOLE claim authority: workspace-api
+  // is now auth-only and 404s every non-auth route, so there is no separate
+  // preclaim to make — the relay owns ownership end to end (create / idempotent
+  // same-owner / foreign-refused).
   ipcMain.handle(CHANNELS.cloudEnableSync, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudEnableSyncPayload.parse(payload);
@@ -1966,24 +1971,7 @@ function registerIpcHandlers(): void {
     if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
     setCachedCredentials(credentials);
 
-    const response = await fetch(`${credentials.serverUrl}/workspaces`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${credentials.token}`,
-      },
-      body: JSON.stringify({ workspaceId: workspace.workspaceId, kind: workspace.kind }),
-    });
-    const body = (await response.json()) as { ok?: boolean; error?: string };
-    if (!response.ok || body.ok === false) {
-      throw new Error(
-        response.status === 403
-          ? "This workspace id is already claimed by another account"
-          : (body.error ?? `Enabling sync failed (${response.status})`),
-      );
-    }
-
-    if (credentials.relayUrl) {
+    {
       try {
         await claimRelayWorkspace({
           workspaceId: workspace.workspaceId,
