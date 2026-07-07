@@ -135,8 +135,23 @@ function anchoredHistoryMutationSupported(): boolean {
   return descriptorRelativeFdDir() !== null;
 }
 
+// Windows has no /proc-style descriptor-relative paths, so history mutations
+// run in portable mode there: the parent directory is still opened and
+// identity-verified immediately before each mutating syscall, but the syscall
+// itself addresses the verified real path, and directory fsync degrades to
+// best-effort (EPERM on Windows directory handles). Linux keeps the anchored
+// descriptor-relative writer byte-identically; macOS stays unsupported
+// (ephemeral fallback) as before.
+function portableHistoryMutationSupported(): boolean {
+  return process.platform === "win32";
+}
+
+function historyMutationSupported(): boolean {
+  return anchoredHistoryMutationSupported() || portableHistoryMutationSupported();
+}
+
 export function isDurableChangeSetRecordingSupported(): boolean {
-  return anchoredHistoryMutationSupported();
+  return historyMutationSupported();
 }
 
 export function isDurableChangeSetRecordingUnsupportedError(error: unknown): boolean {
@@ -146,8 +161,8 @@ export function isDurableChangeSetRecordingUnsupportedError(error: unknown): boo
   );
 }
 
-function assertAnchoredHistoryMutationSupported(): void {
-  if (!anchoredHistoryMutationSupported()) {
+function assertHistoryMutationSupported(): void {
+  if (!historyMutationSupported()) {
     throw new Error(
       "History recording is restricted to platforms with descriptor-relative filesystem support.",
     );
@@ -396,8 +411,15 @@ function pathInOpenDirectory(
   targetPath: string,
 ): string {
   const descriptorDir = descriptorRelativeFdDir();
-  if (!descriptorDir) throw new Error("Descriptor-relative filesystem support is unavailable.");
-  return join(descriptorDir, String(directory.fd), basename(targetPath));
+  if (descriptorDir) return join(descriptorDir, String(directory.fd), basename(targetPath));
+  if (portableHistoryMutationSupported()) {
+    // Portable (win32) mode: the open parent handle above still pins and
+    // verifies directory identity immediately before the mutation, but the
+    // mutating syscall addresses the verified real path because no
+    // descriptor-relative path exists.
+    return targetPath;
+  }
+  throw new Error("Descriptor-relative filesystem support is unavailable.");
 }
 
 async function syncDirectoryHandleBestEffort(
@@ -425,7 +447,7 @@ async function removeDirectoryTreeWithVerifiedIdentity(
   targetDir: string,
   expectedIdentity: DirectoryIdentity,
 ): Promise<boolean> {
-  assertAnchoredHistoryMutationSupported();
+  assertHistoryMutationSupported();
   const parentDir = dirname(targetDir);
   await assertHistoryPathContained(rootRealPath, parentDir);
   await assertHistoryPathContained(rootRealPath, targetDir);
@@ -483,7 +505,7 @@ async function mkdirWithVerifiedParent(
   path: string,
   mode = 0o700,
 ): Promise<void> {
-  assertAnchoredHistoryMutationSupported();
+  assertHistoryMutationSupported();
   const parentDir = dirname(path);
   await assertHistoryPathContained(rootRealPath, parentDir);
   await assertHistoryPathContained(rootRealPath, path);
@@ -509,7 +531,7 @@ async function writeContainedFileAtomic(
   path: string,
   data: string,
 ): Promise<void> {
-  assertAnchoredHistoryMutationSupported();
+  assertHistoryMutationSupported();
   const parentDir = dirname(path);
   await assertHistoryPathContained(rootRealPath, parentDir);
   const parentIdentity = await readDirectoryIdentity(parentDir);
@@ -612,7 +634,7 @@ async function ensureContainedHistoryDir(
   rootRealPath: string,
   historyDir: string,
 ): Promise<void> {
-  assertAnchoredHistoryMutationSupported();
+  assertHistoryMutationSupported();
   await assertHistoryPathContained(rootRealPath, historyDir);
   const relativeHistoryDir = relative(rootPath, historyDir);
   if (
@@ -857,7 +879,7 @@ async function removeEmptyLockDir(
   lockDir: string,
   expectedIdentity?: DirectoryIdentity,
 ): Promise<void> {
-  assertAnchoredHistoryMutationSupported();
+  assertHistoryMutationSupported();
   const parentDir = dirname(lockDir);
   await assertHistoryPathContained(rootRealPath, parentDir);
   await assertHistoryPathContained(rootRealPath, lockDir);
@@ -1173,7 +1195,7 @@ export function createChangeSetStore(
   const historyDir = options.namespace !== undefined
     ? join(rootPath, ".dohc", "history", "namespaces", namespace!)
     : join(rootPath, ".dohc", "history");
-  const mutationSupported = anchoredHistoryMutationSupported();
+  const mutationSupported = historyMutationSupported();
   if (!mutationSupported) {
     if (options.ephemeralIfUnsupported) {
       return createEphemeralChangeSetStore(`${rootPath}\0${namespace ?? ""}`);
