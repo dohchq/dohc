@@ -11,7 +11,7 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config vitest.fs-lock.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

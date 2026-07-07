@@ -548,7 +548,7 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       await expect(store.get("corrupt")).resolves.toBeNull();
       await expect(store.list()).resolves.toEqual([]);
       expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining("[workspace-history] skipping unreadable record corrupt:"),
+        expect.stringContaining("[workspace-engine] skipping unreadable record corrupt:"),
         expect.any(Error),
       );
     } finally {
@@ -611,7 +611,7 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       ]);
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining(
-          "[workspace-history] skipping unreadable index entry corrupt-index:",
+          "[workspace-engine] skipping unreadable index entry corrupt-index:",
         ),
         expect.any(Error),
       );
@@ -676,7 +676,7 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       await expect(store.maxRecordedAtMs()).resolves.toBe(2000);
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining(
-          "[workspace-history] skipping unreadable index entry corrupt-time:",
+          "[workspace-engine] skipping unreadable index entry corrupt-time:",
         ),
         expect.any(Error),
       );
@@ -728,7 +728,7 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       await expect(store.get("bad-boundary")).resolves.toBeNull();
       await expect(store.list()).resolves.toEqual([]);
       expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining("[workspace-history] skipping unreadable record bad-boundary:"),
+        expect.stringContaining("[workspace-engine] skipping unreadable record bad-boundary:"),
         expect.any(Error),
       );
     } finally {
@@ -780,7 +780,7 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       await expect(store.get("bad-provenance")).resolves.toBeNull();
       await expect(store.list()).resolves.toEqual([]);
       expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining("[workspace-history] skipping unreadable record bad-provenance:"),
+        expect.stringContaining("[workspace-engine] skipping unreadable record bad-provenance:"),
         expect.any(Error),
       );
     } finally {

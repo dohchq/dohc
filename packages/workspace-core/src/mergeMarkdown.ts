@@ -54,7 +54,19 @@ export function mergeMarkdown(input: {
         l.baseStart === l.baseEnd &&
         r.baseStart === r.baseEnd &&
         l.baseStart === r.baseStart;
-      if (bothInsertAtSameOffset || (l.baseStart < r.baseEnd && r.baseStart < l.baseEnd)) {
+      // A replacement and an insertion anchored at the same base offset also
+      // contest: the stable sort can apply the replacement then let the
+      // zero-length insertion reset the cursor backwards, reintroducing the
+      // stale base line the replacement was meant to overwrite (silent data
+      // loss). Flag when exactly one of the two hunks is a pure insertion.
+      const sameStartWithInsertion =
+        l.baseStart === r.baseStart &&
+        ((l.baseStart === l.baseEnd) !== (r.baseStart === r.baseEnd));
+      if (
+        bothInsertAtSameOffset ||
+        sameStartWithInsertion ||
+        (l.baseStart < r.baseEnd && r.baseStart < l.baseEnd)
+      ) {
         return { kind: "conflict" };
       }
     }

@@ -45,4 +45,25 @@ describe("mergeMarkdown (safe auto-merge)", () => {
     const remote = BASE.replace("## Costs", "REMOTE insert\n## Costs");
     expect(mergeMarkdown({ base: BASE, local, remote })).toEqual({ kind: "conflict" });
   });
+
+  it("conflicts when a local replacement shares a base offset with a remote insertion", () => {
+    // Local REPLACES B at base offset 1; remote INSERTS a new line at the same
+    // offset 1. Applying both blindly lets the stable sort reset the cursor
+    // backwards and reintroduce the stale base line B — data loss. Must conflict.
+    const result = mergeMarkdown({
+      base: "A\nB\nC",
+      local: "A\nLOCAL B\nC",
+      remote: "A\nREMOTE INSERT\nB\nC",
+    });
+    expect(result).toEqual({ kind: "conflict" });
+  });
+
+  it("conflicts symmetrically when the insertion is local and the replacement remote", () => {
+    const result = mergeMarkdown({
+      base: "A\nB\nC",
+      local: "A\nLOCAL INSERT\nB\nC",
+      remote: "A\nREMOTE B\nC",
+    });
+    expect(result).toEqual({ kind: "conflict" });
+  });
 });
