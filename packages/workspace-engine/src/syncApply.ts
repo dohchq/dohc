@@ -368,8 +368,9 @@ export async function applySyncQueues(
       skippedOps,
     };
   } finally {
-    await secrets.close();
-    await chats.close();
-    await versions.close();
+    // Close every store even if one close() rejects — a sequential
+    // `await a.close(); await b.close();` would leak the remaining handles on
+    // the first throw.
+    await Promise.allSettled([secrets.close(), chats.close(), versions.close()]);
   }
 }

@@ -989,9 +989,11 @@ describe("sync folder replication", () => {
         text: "RESTORE=new\n",
         metadata: { origin: "local-file" },
       });
+      const updatedMomentId = updated.moment?.id;
+      expect(updatedMomentId).toBeTruthy();
       await secrets.restoreSecretFileToBeforeMoment({
         workspaceId: WORKSPACE_ID,
-        momentId: updated.moment?.id ?? "",
+        momentId: updatedMomentId!,
         metadata: { origin: "restore" },
       });
     } finally {
