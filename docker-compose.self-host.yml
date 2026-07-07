@@ -17,27 +17,6 @@ services:
     volumes:
       - dohc_self_host_postgres:/var/lib/postgresql/data
 
-  object-storage:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dohc}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.self-host}
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null || exit 1",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    ports:
-      - "${OBJECT_STORAGE_BIND:-127.0.0.1}:${OBJECT_STORAGE_PORT:-9000}:9000"
-      - "${OBJECT_STORAGE_CONSOLE_BIND:-127.0.0.1}:${OBJECT_STORAGE_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - dohc_self_host_object_storage:/data
-
   hocuspocus:
     build:
       context: .
@@ -49,7 +28,7 @@ services:
       HOCUSPOCUS_ADMIN_TOKEN: ${HOCUSPOCUS_ADMIN_TOKEN}
       HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-false}
       HOCUSPOCUS_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
-      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET}
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:?Set HOCUSPOCUS_JWT_SECRET in .env.self-host}
       HOCUSPOCUS_PORT: "1234"
       HOCUSPOCUS_QUIET: ${HOCUSPOCUS_QUIET:-true}
     healthcheck:
@@ -77,7 +56,7 @@ services:
     environment:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
-      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET}
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:?Set HOCUSPOCUS_JWT_SECRET in .env.self-host}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
     command: >
@@ -150,6 +129,5 @@ services:
 
 volumes:
   dohc_self_host_postgres:
-  dohc_self_host_object_storage:
   dohc_self_host_sync_relay:
   dohc_self_host_agent_sandbox:

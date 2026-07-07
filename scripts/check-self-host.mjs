@@ -7,7 +7,6 @@ const REQUIRED_SERVICES = [
   'workspace-api',
   'sync-relay',
   'postgres',
-  'object-storage',
   'hocuspocus',
   'sqlite-worker',
   'agent-sandbox',
