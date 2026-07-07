@@ -147,29 +147,6 @@ services:
       - .:/workspace
       - dohc_self_host_agent_sandbox:/tmp/dohc-agent-sandbox
 
-  web:
-    image: node:22-bookworm-slim
-    working_dir: /workspace
-    depends_on:
-      workspace-api:
-        condition: service_started
-      hocuspocus:
-        condition: service_healthy
-    environment:
-      DOHC_BACKEND: postgres
-      VITE_DOHC_BACKEND: postgres
-      VITE_WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://127.0.0.1:1786}
-      VITE_HOCUSPOCUS_URL: ${HOCUSPOCUS_PUBLIC_URL:-ws://127.0.0.1:1234}
-    command: >
-      sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
-      pnpm install --frozen-lockfile &&
-      pnpm --filter @dohc/web dev --host 0.0.0.0"
-    ports:
-      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
-    volumes:
-      - .:/workspace
-
 volumes:
   dohc_self_host_postgres:
   dohc_self_host_object_storage:
