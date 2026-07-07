@@ -342,6 +342,28 @@ importers:
         specifier: 4.1.9
         version: 4.1.9(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.2)(jsdom@29.1.1(@noble/hashes@2.2.0))(vite@8.0.14(@types/node@24.13.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))
 
+  packages/workspace-auth:
+    dependencies:
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../workspace-contracts
+      better-auth:
+        specifier: ^1.6.16
+        version: 1.6.19(@opentelemetry/api@1.9.1)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3)))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(kysely@0.29.2)(pg@8.21.0))(pg@8.21.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vitest@2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0))
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
+      '@types/pg':
+        specifier: ^8.20.0
+        version: 8.20.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
+
   packages/workspace-contracts:
     dependencies:
       zod:
@@ -602,9 +624,9 @@ importers:
 
   services/sync-relay:
     dependencies:
-      '@dohc/workspace-api':
+      '@dohc/workspace-auth':
         specifier: workspace:*
-        version: link:../workspace-api
+        version: link:../../packages/workspace-auth
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core
@@ -642,6 +664,9 @@ importers:
       '@dohc/hocuspocus':
         specifier: workspace:*
         version: link:../hocuspocus
+      '@dohc/workspace-auth':
+        specifier: workspace:*
+        version: link:../../packages/workspace-auth
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../../packages/workspace-contracts

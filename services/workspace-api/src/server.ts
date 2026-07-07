@@ -1,6 +1,6 @@
 import { isApprovalErrorReason } from "@dohc/workspace-contracts";
 import type { Actor, WorkspaceBackend, WorkspaceErrorCode } from "@dohc/workspace-contracts";
-import type { ResolveActor } from "./auth/session";
+import type { ResolveActor } from "@dohc/workspace-auth/session";
 import {
   listWorkspaceFiles,
   readWorkspaceFile,

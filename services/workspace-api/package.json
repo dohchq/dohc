@@ -3,9 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/server.ts",
-    "./auth/betterAuth": "./src/auth/betterAuth.ts",
-    "./auth/session": "./src/auth/session.ts"
+    ".": "./src/server.ts"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -16,6 +14,7 @@
   },
   "dependencies": {
     "@dohc/hocuspocus": "workspace:*",
+    "@dohc/workspace-auth": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-postgres": "workspace:*",
     "better-auth": "^1.6.16",

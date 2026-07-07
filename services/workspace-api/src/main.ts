@@ -4,8 +4,9 @@ import { createPostgresWorkspaceProvisioner } from "@dohc/workspace-postgres/ser
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
-import { createWorkspaceAuth } from "./auth/betterAuth";
-import { createSessionActorResolver } from "./auth/session";
+import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { createSessionActorResolver } from "@dohc/workspace-auth/session";
+import { claimWorkspaceInvitations } from "./routes/invites";
 import { withCors } from "./cors";
 import { createWorkspaceApiHandler } from "./server";
 import type { HocuspocusAdminClient } from "./routes/shared";
@@ -57,6 +58,11 @@ const auth = createWorkspaceAuth({
   baseURL,
   secret: secret || "dev-test-only-secret-0123456789abcdef",
   ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
+  // Post-verification workspace-invitation claim, injected so workspace-auth
+  // owns no edge into this service's routes (the callback that used to be a
+  // direct import inside betterAuth.ts). A rejected claim is swallowed and
+  // logged by the hook wrapper — it never fails the auth flow.
+  onEmailVerified: (user) => claimWorkspaceInvitations(pool, user),
 });
 const backend = createPostgresWorkspaceBackend(pool, {
   blobStore: createLocalBlobStore(),

@@ -3,7 +3,7 @@ import type { WorkspaceBackend } from "@dohc/workspace-contracts";
 import { defaultPostgresUrl } from "@dohc/workspace-postgres";
 import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createWorkspaceAuth } from "../auth/betterAuth";
+import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { claimWorkspaceInvitations } from "./invites";
 import { createWorkspaceApiHandler } from "../server";
 
@@ -70,6 +70,10 @@ function authHarness() {
     sendEmail: async (to, _subject, body) => {
       verifyUrls.set(to, body);
     },
+    // workspace-auth no longer hard-wires the claim; the service injects it
+    // (mirrors main.ts). Without this the afterEmailVerification hook is a
+    // no-op and no pending invitation is ever claimed.
+    onEmailVerified: (user) => claimWorkspaceInvitations(pool, user),
   });
   const signUp = async (email: string) => {
     const response = await auth.handler(

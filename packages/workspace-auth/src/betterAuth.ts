@@ -1,15 +1,18 @@
 import type { Actor } from "@dohc/workspace-contracts";
 import { betterAuth } from "better-auth";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
-import { Pool } from "pg";
-import { claimWorkspaceInvitations } from "../routes/invites";
+import type { Pool } from "pg";
 
-// dohc Cloud auth: Better Auth mounted inside workspace-api on the SAME
-// Postgres the workspace backend uses (self-host = one database, no auth
-// vendor). Email/password for accounts, the organization plugin for team
-// workspaces, and the OAuth device-authorization grant for desktop login
-// (the desktop shows a code, the browser approves, the desktop polls).
-// WorkOS remains the deferred enterprise-SSO path BEHIND this surface (D-01).
+// dohc Cloud auth: Better Auth mounted on the SAME Postgres the workspace
+// backend uses (self-host = one database, no auth vendor). Email/password for
+// accounts, the organization plugin for team workspaces, and the OAuth
+// device-authorization grant for desktop login (the desktop shows a code, the
+// browser approves, the desktop polls). WorkOS remains the deferred
+// enterprise-SSO path BEHIND this surface (D-01).
+//
+// This package owns ONLY the auth surface. It has no edge into workspace-api's
+// routes: the post-verification workspace-invitation claim is injected by the
+// caller via `onEmailVerified` so nothing here imports application code.
 export interface WorkspaceAuthOptions {
   pool: Pool;
   baseURL: string;
@@ -25,20 +28,26 @@ export interface WorkspaceAuthOptions {
   // Dev/self-host email delivery is console logging; production providers
   // plug in here later without touching callers.
   sendEmail?: (to: string, subject: string, body: string) => Promise<void>;
+  // Invoked from the emailVerification.afterEmailVerification hook once a
+  // signer has PROVEN control of the address. The relay wires today's
+  // behavior by passing claimWorkspaceInvitations; unset means no claim step.
+  // A rejected callback logs but never fails the auth flow (see below).
+  onEmailVerified?: (user: { id: string; email: string }) => Promise<void>;
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   const sendEmail =
     options.sendEmail ??
     (async (to: string, subject: string, body: string) => {
-      console.log(`[workspace-api] email to ${to}: ${subject}\n${body}`);
+      console.log(`[workspace-auth] email to ${to}: ${subject}\n${body}`);
     });
-  // A failed claim logs but never fails the auth flow itself.
-  const claimInvitations = async (user: { id: string; email: string }) => {
+  // A failed post-verification hook logs but never fails the auth flow itself.
+  const onEmailVerified = async (user: { id: string; email: string }) => {
+    if (!options.onEmailVerified) return;
     try {
-      await claimWorkspaceInvitations(options.pool, user);
+      await options.onEmailVerified(user);
     } catch (error) {
-      console.error("[workspace-api] invitation claim failed:", error);
+      console.error("[workspace-auth] afterEmailVerification hook failed:", error);
     }
   };
   return betterAuth({
@@ -58,7 +67,7 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         await sendEmail(user.email, "Verify your dohc email", url);
       },
       afterEmailVerification: async (user) => {
-        await claimInvitations(user);
+        await onEmailVerified(user);
       },
     },
     ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
