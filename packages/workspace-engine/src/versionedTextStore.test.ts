@@ -2439,6 +2439,20 @@ describe("engine schema bootstrap (shared with linkedChatStore)", () => {
     await expect(
       store.readTextFile({ workspaceId: "workspace-a", versionId: main.id, path: "notes/today.md" }),
     ).resolves.toMatchObject({ text: "Survives the sweep\n" });
+
+    // Writes exercise the transactional path (BEGIN IMMEDIATE) on the
+    // reopened handle, not just plain reads.
+    closeTrackedEngineDbHandlesForTest();
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Written after the sweep\n",
+      metadata: { origin: "api" },
+    });
+    await expect(
+      store.readTextFile({ workspaceId: "workspace-a", versionId: main.id, path: "notes/today.md" }),
+    ).resolves.toMatchObject({ text: "Written after the sweep\n" });
     await store.close();
   });
 });

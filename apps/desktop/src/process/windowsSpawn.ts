@@ -22,7 +22,11 @@ function quoteForCmd(token: string): string {
       "Command argument contains a double quote, which cannot be represented safely on a cmd.exe command line.",
     );
   }
-  return `"${token}"`;
+  // A trailing backslash run would combine with the closing quote into
+  // CommandLineToArgvW's backslash-quote escape (\" = literal quote), so
+  // double it — 2n backslashes before a quote parse back to n literal ones.
+  const escaped = token.replace(/(\\+)$/, "$1$1");
+  return `"${escaped}"`;
 }
 
 export interface ResolvedSpawnCommand {

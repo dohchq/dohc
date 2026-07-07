@@ -56,6 +56,20 @@ describe("resolveSpawnCommand", () => {
     ).toThrow(/double quote/);
   });
 
+  it("doubles a trailing backslash run so it cannot escape the closing quote", () => {
+    const resolved = resolveSpawnCommand("npm", ["C:\\site\\", "C:\\deep\\\\"], {
+      platform: "win32",
+      env: { Path: "C:\\npm", PATHEXT: ".CMD", ComSpec: "cmd.exe" },
+      exists: (candidate) => candidate === "C:\\npm\\npm.CMD",
+    });
+    // CommandLineToArgvW parses 2n backslashes before a quote as n literal
+    // backslashes; without doubling, \" would read as a literal quote and
+    // swallow the argument boundary.
+    expect(resolved.args[3]).toBe(
+      '""C:\\npm\\npm.CMD" "C:\\site\\\\" "C:\\deep\\\\\\\\""',
+    );
+  });
+
   it("resolves relative path-segment commands against the spawn cwd, not the process cwd", () => {
     const seen: string[] = [];
     const resolved = resolveSpawnCommand("node_modules/.bin/vite", ["dev"], {
@@ -90,7 +104,7 @@ describeWin32("real .cmd shim topology (win32)", () => {
       `@echo off\r\nnode "%~dp0echo-args.mjs" %*\r\nexit /b %errorlevel%\r\n`,
     );
 
-    const args = ["run", "dev", "--url=http://x/?a=1&b=2", "with space"];
+    const args = ["run", "dev", "--url=http://x/?a=1&b=2", "with space", "C:\\ends\\in\\backslash\\"];
     const resolved = resolveSpawnCommand("fake", args, {
       env: { ...process.env, Path: dir },
     });

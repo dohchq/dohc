@@ -718,12 +718,22 @@ function readLinuxProcessStartTicks(pid: number): string | null {
 // debugger pause) could lose its lock mid-write. Queried lazily and cached
 // for the own pid (the heartbeat rewrites the owner file every 5s); the
 // reclaim path queries a foreign pid at most once per reclaim attempt.
-let ownWin32ProcessStartCache: { pid: number; value: string | null } | undefined;
+// Successful lookups are cached forever (a process's start time is constant);
+// failures only briefly, so a transient PowerShell hiccup cannot permanently
+// strip this process of its identity — while still not paying a PowerShell
+// spawn on every 5s heartbeat when the query keeps failing.
+const OWN_WIN32_IDENTITY_FAILURE_RETRY_MS = 60_000;
+let ownWin32ProcessStartCache:
+  | { pid: number; value: string }
+  | { pid: number; value: null; retryAtMs: number }
+  | undefined;
 
 function readWin32ProcessStartFileTime(pid: number): string | null {
   if (process.platform !== "win32" || !Number.isInteger(pid) || pid <= 0) return null;
   if (pid === process.pid && ownWin32ProcessStartCache?.pid === pid) {
-    return ownWin32ProcessStartCache.value;
+    const cached = ownWin32ProcessStartCache;
+    if (cached.value !== null) return cached.value;
+    if (Date.now() < cached.retryAtMs) return null;
   }
   let value: string | null = null;
   try {
@@ -742,7 +752,10 @@ function readWin32ProcessStartFileTime(pid: number): string | null {
     value = null;
   }
   if (pid === process.pid) {
-    ownWin32ProcessStartCache = { pid, value };
+    ownWin32ProcessStartCache =
+      value !== null
+        ? { pid, value }
+        : { pid, value: null, retryAtMs: Date.now() + OWN_WIN32_IDENTITY_FAILURE_RETRY_MS };
   }
   return value;
 }
