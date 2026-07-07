@@ -18357,3 +18357,188 @@ changeSetStore), mcp 73, workspace-fs 44, desktop 935; `pnpm --filter
 @dohc/desktop build` green; the load-bearing e2e green (workspace-collab-
 decoupling, workspace-engine-history, workspace-versions — 8 tests, collab/
 merge/history/restore paths survive); `git diff --check` clean.
+## Turn On The Rust Kernel
+
+Status: implemented on branch, awaiting review/merge
+Branch: codex/kernel-turn-on
+Worktree: /home/ice/dev/dohc-r3-kernel-on
+Implementation workstream: codex CLI (gpt-5.5) drove the bulk implementation
+in one `codex exec` round per the codex-implementation skill; a Claude lane
+(fable-5) scoped the self-contained prompt, reviewed the fail-open resolution
+wrapper and the build gating line-by-line (the whole safety argument is "every
+error falls back to TS"), added the `.gitignore` for the staged host binary,
+and ran every verification command itself (codex's sandbox blocked the bench
+and the full desktop suite; both are green unsandboxed).
+Date started: 2026-07-07
+Date completed: 2026-07-07
+
+### Scope
+
+- [x] PACKAGING/BUILD: new `apps/desktop/scripts/build-workspace-kernel.mjs`
+      runs `cargo build --release --manifest-path
+      <repoRoot>/crates/workspace-kernel/Cargo.toml` and stages the host
+      binary to `apps/desktop/resources/workspace-kernel/
+      dohc-workspace-kernel[.exe]`. GATED TO DEGRADE, NEVER FAIL: exits 0 with
+      a warning on `DOHC_SKIP_WORKSPACE_KERNEL_BUILD=1`, missing cargo
+      (spawn ENOENT), a nonzero cargo build, or a missing build artifact — so
+      a machine/CI job with no Rust toolchain still produces a working JS
+      build that ships without a bundled binary and runs the TS path at
+      runtime. Wired into the desktop `build` and `package` npm scripts before
+      `electron-vite build` (mirrors the existing
+      `ensure-electron-installed.mjs` chaining). electron-builder ships the
+      staged directory as an unpacked `extraResources` entry (`from:
+      resources/workspace-kernel` -> `to: workspace-kernel`), outside
+      `app.asar` (a native binary must never live inside asar). The staged dir
+      is `.gitignore`d (platform-specific, rebuilt per machine/CI job).
+- [x] RUNTIME RESOLUTION: `@dohc/workspace-kernel-client` gains
+      `defaultWorkspaceKernelPackagedBinaryPath({isPackaged, resourcesPath,
+      platform})` and stays framework-agnostic (zero Electron import — the
+      desktop side injects `app.isPackaged` + `process.resourcesPath` via
+      `configureWorkspaceKernelRuntime`). Dev-path defaults switched from
+      `process.cwd()` to `repoRootFromPackage()`. Resolution order: packaged
+      resource path, `DOHC_KERNEL_BINARY_PATH` override, repo release, repo
+      debug — first existing wins.
+- [x] TURN ON (safely): replaced the opt-in `DOHC_KERNEL_SIDECAR !== "1"` gate
+      in `scanWorkspaceFilesForReconcile` with default-on selection. The
+      kernel is used when a candidate binary EXISTS on disk; any error class
+      (spawn failure, ENOENT, wrong platform/arch, timeout, crash, protocol
+      error, or a kernel-side scan error) is caught and falls open to
+      `scanWorkspaceFilesTolerant`. `DOHC_KERNEL_SIDECAR=0` is an explicit
+      force-off escape hatch (straight to TS, no resolution, no spawn). No
+      candidate binary = silent TS path with NO fallback-log noise (so every
+      Windows machine without a bundled binary stays quiet until the CI
+      matrix ships one).
+- [x] ROBUSTNESS: process-lifetime disable-after-N guard. Module-level
+      `WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD = 3`: three consecutive
+      attempted-kernel failures trip `workspaceKernelDisabledForProcess`, after
+      which every workspace's reconcile scan in that process goes straight to
+      TS until restart (no thrashing a broken binary each reconcile). A
+      successful kernel scan resets the counter to 0. Missing-binary and
+      force-off do not count as failures.
+- [x] KERNEL SCAN CORRECTNESS (required for default-on): `kernel.scan` now
+      returns a JSON-RPC error on a walkdir/metadata/hash IO failure instead
+      of silently skipping the entry. Without this, a racy/unreadable file
+      would be absent from the kernel result with `failedPaths: []`, and the
+      desktop would record it as a DELETE. Erroring forces the fail-open to the
+      tolerant TS scan, which reports the failed path and degrades correctly —
+      preserving pre-existing reconciliation semantics. Wire protocol, method
+      set, and auth model unchanged; symlink/sidecar/ignored-segment skips
+      unchanged (still `continue`, not errors).
+
+### Files Changed
+
+- apps/desktop/scripts/build-workspace-kernel.mjs (new: degradable host-binary
+  build+stage step)
+- apps/desktop/package.json (run the kernel build step before build/package)
+- apps/desktop/electron-builder.yml (ship resources/workspace-kernel as
+  unpacked extraResources)
+- apps/desktop/electron.vite.config.ts (bundle @dohc/workspace-kernel-client
+  into the main process)
+- apps/desktop/.gitignore (ignore the staged host binary dir)
+- apps/desktop/scripts/package-smoke.mjs (assert the extraResource wiring)
+- apps/desktop/src/main.ts (inject app.isPackaged + process.resourcesPath into
+  the capture module)
+- apps/desktop/src/workspaces/engineCaptureGate.ts (re-export
+  configureWorkspaceKernelRuntime)
+- apps/desktop/src/workspaces/workspaceEngineCapture.ts (default-on fail-open
+  resolution + force-off + disable-after-N guard)
+- apps/desktop/src/workspaces/workspaceEngineCapture.test.ts (default-on,
+  quiet-no-binary, broken-binary fallback, disable-after-N, force-off)
+- packages/workspace-kernel-client/src/index.ts (packaged-resource resolver;
+  package-root dev defaults)
+- packages/workspace-kernel-client/src/index.test.ts (packaged-resolver test)
+- crates/workspace-kernel/src/main.rs (scan errors on IO failure so desktop
+  fails open to the tolerant TS scan)
+
+### Tests Added Or Updated
+
+- Desktop (net +4, 935 -> 939): uses-the-kernel-by-default (spied scan called
+  with the root, no fallback log); quiet TS fallback when no binary exists (no
+  fallback log); TS fallback when the default-on binary crashes on spawn
+  (fallback log fired); disable-after-N (scan attempted exactly N times across
+  N+1 opens, then stops); DOHC_KERNEL_SIDECAR=0 force-off (scan never called).
+- workspace-kernel-client (net +1, 8 -> 9): packaged-resource resolver returns
+  the resources path when packaged, null when not, honors platform, no
+  Electron import.
+- crates/workspace-kernel: 9 unchanged tests still green (scan error-on-IO
+  change does not regress the symlink/sidecar/ignored skip test or the shared
+  contract fixtures).
+
+### Commands Run (all in the worktree, unsandboxed)
+
+```bash
+cargo fmt --manifest-path crates/workspace-kernel/Cargo.toml --check          # clean
+cargo clippy --manifest-path crates/workspace-kernel/Cargo.toml --all-targets -- -D warnings  # clean
+cargo test --manifest-path crates/workspace-kernel/Cargo.toml                 # 9 passed
+pnpm --filter @dohc/workspace-kernel-client test                              # 9 passed
+pnpm --filter @dohc/workspace-kernel-client typecheck                         # clean
+pnpm --filter @dohc/desktop test                                              # 939 passed (935 + 4)
+pnpm --filter @dohc/desktop typecheck                                         # clean
+pnpm --filter @dohc/workspace-engine test                                     # 389 passed
+node scripts/workspace-kernel-spike/bench-kernel.mjs --files 1000,10000 --iterations 3
+pnpm --filter @dohc/desktop build                                             # stages binary + builds
+DOHC_SKIP_WORKSPACE_KERNEL_BUILD=1 pnpm --filter @dohc/desktop build          # degrades, builds
+PATH=/usr/bin:/bin node apps/desktop/scripts/build-workspace-kernel.mjs       # no-cargo degrade, exit 0
+node apps/desktop/scripts/package-smoke.mjs                                    # passed (extraResource asserted)
+```
+
+### Benchmarks (host: AMD Ryzen 9 7950X, 3 iterations, avg)
+
+| op        | files  | TypeScript | Kernel   | speedup |
+|-----------|--------|------------|----------|---------|
+| scan      | 1,000  | 368.93ms   | 8.23ms   | 44.8x   |
+| reconcile | 1,000  | 375.07ms   | 9.13ms   | 41.1x   |
+| scan      | 10,000 | 3987.26ms  | 83.62ms  | 47.7x   |
+| reconcile | 10,000 | 3749.26ms  | 96.44ms  | 38.9x   |
+
+Consistent with the WS-I ~40x baseline.
+
+### Fail-Open Line-Level Review (Claude)
+
+`scanWorkspaceFilesForReconcile` branches, each verified:
+1. `DOHC_KERNEL_SIDECAR === "0"` -> TS, no resolution/spawn/log.
+2. `workspaceKernelDisabledForProcess` (guard tripped) -> TS, no spawn/log.
+3. no existing candidate binary -> TS, no spawn, NO fallback log.
+4. binary exists + scan succeeds -> kernel files, `failedPaths: []`, failure
+   counter reset to 0.
+5. binary exists + scan/spawn throws (any class) -> increment counter, trip
+   the guard at >= 3, `onError("kernel scan fallback", error)`, TS fallback.
+`client.dispose()` runs in a `.catch`-guarded `finally` on every client path
+(no leaked child). The only unwrapped calls are `existsSync`-based resolution
+(non-throwing) and the TS fallback itself (identical to the pre-existing path).
+The call site runs inside the serialized `enqueue`/`enqueueResult` chain, whose
+own try/catch routes to `onError` and keeps the chain alive — a second safety
+layer, so even a hypothetical propagated error cannot break capture on any
+platform.
+
+### Cross-Platform / CI-Matrix Follow-Up (NOT done here, by design)
+
+- No cross-compilation: `build-workspace-kernel.mjs` produces the HOST binary
+  only. macOS and Windows binaries come from running the same step on those
+  OSes.
+- Follow-up: a CI build matrix (one job per OS: linux/macOS/Windows) that runs
+  the kernel build and uploads each OS's own `dohc-workspace-kernel[.exe]` into
+  that OS's packaged `extraResources`, so a released app on every platform
+  ships a working sidecar. Until then, platforms without a locally-built binary
+  simply run the TS path (fail-open) with no user-visible impact. The kernel
+  remains outside the parallel Windows validation merge bar; default-on is safe
+  there precisely because a missing/broken Windows binary silently degrades.
+
+### E2E / Visual / Manual QA
+
+- No UI surface changed; the seam is main-process only. The default-on kernel
+  path is exercised by the client suite against the real binary and by the new
+  desktop unit tests; fail-open is unit-tested (missing + broken binary, both
+  land reconciliation green).
+
+### Unresolved Findings
+
+- In un-packaged `electron-vite dev`, the repo release/debug dev path resolves
+  via `repoRootFromPackage()` against the bundled main output, which may not
+  land on the repo `crates/.../target` dir; dev users set
+  `DOHC_KERNEL_BINARY_PATH` to engage the kernel locally. No safety/behavior
+  impact on the shipped product (packaged apps resolve via
+  `process.resourcesPath`; dev without a resolvable binary fails open to TS).
+- Full `electron-builder package` with an empty resource dir was validated via
+  package-smoke (static config gate) rather than a full package run (the
+  packaging run is network-gated in this environment).

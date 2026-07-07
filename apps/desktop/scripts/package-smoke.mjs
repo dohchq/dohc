@@ -45,6 +45,15 @@ if (config) {
   check(config.executableName === "dohc", "executableName is filesystem-safe");
   check(config.asar === true, "asar is enabled");
   check(Array.isArray(config.files) && config.files.includes("dist/**"), "files ship the built dist tree");
+  const extraResources = Array.isArray(config.extraResources) ? config.extraResources : [];
+  check(
+    extraResources.some(
+      (entry) =>
+        entry?.from === "resources/workspace-kernel" &&
+        entry?.to === "workspace-kernel",
+    ),
+    "workspace kernel ships as an unpacked extraResource",
+  );
 
   // Fuse hardening intent: electron-builder >=24.12 flips these itself via
   // @electron/fuses at package time — no afterPack hook needed.
