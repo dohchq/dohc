@@ -8,6 +8,7 @@
     "./enginePathFloor": "./src/enginePathFloor.ts",
     "./linkedChatStore": "./src/linkedChatStore.ts",
     "./workspaceSearch": "./src/workspaceSearch.ts",
+    "./ydocEngineDriver": "./src/ydocEngineDriver.ts",
     "./testing": "./src/testing.ts"
   },
   "scripts": {
@@ -18,7 +19,9 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
-    "smol-toml": "^1.7.0"
+    "@dohc/ydoc-projection": "workspace:*",
+    "smol-toml": "^1.7.0",
+    "yjs": "^13.6.30"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

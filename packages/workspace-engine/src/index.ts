@@ -84,6 +84,20 @@ export type {
   SyncReplicationEnvelope,
   SyncReplicationOpKind,
 } from "./syncReplication";
+export {
+  YDocEngineDriverError,
+  createYDocEngineDriver,
+} from "./ydocEngineDriver";
+export type {
+  YDocContentKind,
+  YDocDocKey,
+  YDocEngineDriver,
+  YDocEngineDriverErrorCode,
+  YDocEngineDriverOptions,
+  YDocExternalEditResult,
+  YDocSession,
+  YDocSettleResult,
+} from "./ydocEngineDriver";
 export { compareVersionFiles } from "./versionCompare";
 export type {
   VersionFileChange,
