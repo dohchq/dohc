@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
+import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 
@@ -137,11 +138,17 @@ if (testAuthSeam) {
   };
 }
 
+// One in-memory presence hub for the whole process: the ephemeral awareness
+// transport is never persisted, so it lives only here and is lost on restart
+// (by design — presence is not durable).
+const presence = new PresenceHub();
+
 const relayHandler = createSyncRelayHandler({
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
+  presence,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
