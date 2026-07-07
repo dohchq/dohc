@@ -5,6 +5,7 @@ import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
   assertEngineSqliteIntegrity,
   initializeOrValidateEngineSchema,
+  trackEngineDbHandleForTest,
   type EngineSqliteDb,
 } from "./engineDbSchema";
 import { createLinkedChatStore } from "./linkedChatStore";
@@ -74,7 +75,7 @@ export function openEngineDb(rootDir: string): EngineSqliteDb {
   const dbPath = join(resolve(rootDir), VERSIONED_TEXT_STORE_RELATIVE_PATH);
   mkdirSync(dirname(dbPath), { recursive: true });
   const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(dbPath);
+  const db = trackEngineDbHandleForTest(new DatabaseSync(dbPath));
   try {
     db.exec(`PRAGMA busy_timeout = ${ENGINE_SQLITE_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
