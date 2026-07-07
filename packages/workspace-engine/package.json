@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./effectivePolicy": "./src/effectivePolicy.ts",
+    "./enginePathFloor": "./src/enginePathFloor.ts",
     "./linkedChatStore": "./src/linkedChatStore.ts",
     "./workspaceSearch": "./src/workspaceSearch.ts",
     "./testing": "./src/testing.ts"

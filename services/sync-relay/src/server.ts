@@ -1,8 +1,15 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ResolveActor } from "@dohc/workspace-api/auth/session";
+import {
+  filterOpForShare,
+  parseShareSelectorJson,
+  validateShareSelector,
+  type ShareSelector,
+} from "./shareFilter";
 import {
   SyncRelayConflictError,
   type SyncRelayLogInput,
+  type SyncRelayShareRow,
   type SyncRelayStorage,
 } from "./storage";
 
@@ -12,6 +19,13 @@ export interface CreateSyncRelayHandlerOptions {
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   nowMs?: () => number;
+  // Share-grant recipient lookup: maps an email to the relay account id, or
+  // null when no account matches. Absent means email-addressed grants are
+  // unavailable (grants by user id still work).
+  resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
+  // Display-only reverse lookup for share listings; never used for authz.
+  lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  newShareId?: () => string;
 }
 
 type SyncRelayRoute =
@@ -19,7 +33,13 @@ type SyncRelayRoute =
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
   | { route: "keys"; workspaceId: string }
-  | { route: "log"; workspaceId: string };
+  | { route: "log"; workspaceId: string }
+  | { route: "shares-create"; workspaceId: string }
+  | { route: "shares-list" }
+  | { route: "share"; shareId: string }
+  | { route: "share-revoke"; shareId: string }
+  | { route: "share-log"; shareId: string }
+  | { route: "share-blob"; shareId: string; sha256: string };
 
 // Transport cap, deliberately LARGER than the engine's 5 MiB binary-file
 // limit (MAX_VERSIONED_BINARY_FILE_BYTES): text blobs need the headroom and
@@ -38,16 +58,67 @@ const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
+const MAX_EMAIL_CHARS = 320;
+const MAX_SHARE_ID_CHARS = 128;
 
 export function createSyncRelayHandler({
   storage,
   resolveActor,
   nowMs = () => Date.now(),
+  resolveUserIdByEmail,
+  lookupUserEmail,
+  newShareId = () => randomUUID(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+  // Loads a share for RECIPIENT access. Every failure mode — no such share,
+  // revoked share, caller is not the recipient, granter lost the workspace —
+  // is the same generic 404 the relay uses for absent workspaces, so probing
+  // recipients cannot distinguish "never existed" from "exists but not
+  // yours" from "was revoked".
+  const shareForRecipient = (shareId: string, userId: string): SyncRelayShareRow & { selector: ShareSelector } => {
+    const share = storage.getShare(shareId);
+    if (!share) throw notFound();
+    if (share.recipientUserId !== userId) throw notFound();
+    if (share.revokedAtMs !== null) throw notFound();
+    // Defensive: the grant is only as good as the granter's own standing.
+    if (!storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) throw notFound();
+    const selector = parseShareSelectorJson(share.selectorJson);
+    if (!selector) throw notFound();
+    return { ...share, selector };
+  };
+
+  const shareSummary = async (
+    share: SyncRelayShareRow,
+    side: "granted" | "received",
+  ): Promise<Record<string, unknown>> => {
+    const selector = parseShareSelectorJson(share.selectorJson);
+    const base = {
+      shareId: share.shareId,
+      selector: selector ?? { paths: [], versionId: null },
+      createdAtMs: share.createdAtMs,
+    };
+    if (side === "granted") {
+      return {
+        ...base,
+        workspaceId: share.workspaceId,
+        recipientUserId: share.recipientUserId,
+        recipientEmail: lookupUserEmail ? await lookupUserEmail(share.recipientUserId) : null,
+        revokedAtMs: share.revokedAtMs,
+      };
+    }
+    // Received summaries deliberately omit the workspace id: the recipient's
+    // access is share-scoped, and the granter's workspace identity is not
+    // theirs to see.
+    return {
+      ...base,
+      granterUserId: share.granterUserId,
+      granterEmail: lookupUserEmail ? await lookupUserEmail(share.granterUserId) : null,
+    };
+  };
+
   return async (request) => {
     try {
       const route = parseRoute(request);
-      const actor = await resolveActor(request, route.route === "workspaces" ? "" : route.workspaceId);
+      const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
 
       if (route.route === "workspaces" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -63,7 +134,141 @@ export function createSyncRelayHandler({
 
       if (route.route === "workspaces") throw methodNotAllowed();
 
+      if (route.route === "shares-list" && request.method === "GET") {
+        const granted = await Promise.all(
+          storage.listSharesGrantedBy(actor.userId).map((share) => shareSummary(share, "granted")),
+        );
+        const received = await Promise.all(
+          storage
+            .listSharesReceivedBy(actor.userId)
+            .map((share) => shareSummary(share, "received")),
+        );
+        return jsonResponse({ ok: true, granted, received });
+      }
+      if (route.route === "shares-list") throw methodNotAllowed();
+
+      if (route.route === "share" && request.method === "GET") {
+        const share = shareForRecipient(route.shareId, actor.userId);
+        return jsonResponse({ ok: true, ...(await shareSummary(share, "received")) });
+      }
+      if (route.route === "share") throw methodNotAllowed();
+
+      if (route.route === "share-revoke" && request.method === "POST") {
+        const share = storage.getShare(route.shareId);
+        // Only the granter may revoke; anyone else (including the recipient)
+        // sees the byte-identical generic 404.
+        if (!share || share.granterUserId !== actor.userId) throw notFound();
+        storage.revokeShare(route.shareId, nowMs());
+        return jsonResponse({ ok: true, shareId: route.shareId });
+      }
+      if (route.route === "share-revoke") throw methodNotAllowed();
+
+      if (route.route === "share-log" && request.method === "GET") {
+        const share = shareForRecipient(route.shareId, actor.userId);
+        const url = new URL(request.url);
+        const since = parseCursor(url.searchParams.get("since"));
+        const limit = parseLimit(url.searchParams.get("limit"));
+        const page = storage.fetchLogPage({
+          workspaceId: share.workspaceId,
+          sinceRelaySeq: since,
+          limit,
+        });
+        // THE share security boundary: each op passes the fail-closed filter
+        // or is dropped from the response. The cursor still advances over
+        // dropped rows (the recipient sees a sparser page, never a stalled
+        // one), and payloads are the filter's (possibly redacted) copy.
+        const ops: Array<Record<string, unknown>> = [];
+        for (const row of page.rows) {
+          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson);
+          if (!decision.allowed) continue;
+          ops.push({
+            relaySeq: row.relaySeq,
+            originId: row.originId,
+            originSeq: row.originSeq,
+            opKind: row.opKind,
+            payload: decision.payload,
+            recordedAtMs: row.recordedAtMs,
+          });
+        }
+        return jsonResponse({
+          ok: true,
+          ops,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+        });
+      }
+      if (route.route === "share-log") throw methodNotAllowed();
+
+      if (route.route === "share-blob" && request.method === "GET") {
+        const share = shareForRecipient(route.shareId, actor.userId);
+        assertSha256(route.sha256);
+        // A blob is served to a recipient ONLY when at least one op that
+        // passes the share filter legitimately references it. Everything
+        // else — a blob of an unshared file, a secret ciphertext blob, a
+        // random hash — is the same generic 404 as a nonexistent share.
+        const candidates = storage.listLogRowsReferencing(share.workspaceId, route.sha256);
+        const reachable = candidates.some((row) => {
+          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson);
+          return decision.allowed && decision.blobSha256s.includes(route.sha256);
+        });
+        if (!reachable) throw notFound();
+        const blob = storage.getBlob(share.workspaceId, route.sha256);
+        if (!blob) throw notFound();
+        return new Response(arrayBufferForBytes(blob), {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        });
+      }
+      if (route.route === "share-blob") throw methodNotAllowed();
+
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      if (route.route === "shares-create" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const validation = validateShareSelector({
+          paths: input.paths,
+          versionId: input.versionId,
+        });
+        if (!validation.ok) {
+          throw new HttpError(400, validation.code, validation.message);
+        }
+        let recipientUserId: string;
+        if (input.recipientUserId !== undefined) {
+          recipientUserId = parseString(input.recipientUserId, "recipientUserId", MAX_ORIGIN_ID_CHARS);
+        } else {
+          const email = parseString(input.recipientEmail, "recipientEmail", MAX_EMAIL_CHARS);
+          if (!resolveUserIdByEmail) {
+            throw badRequest("recipient email lookup is not available on this relay");
+          }
+          const resolved = await resolveUserIdByEmail(email);
+          if (!resolved) {
+            throw new HttpError(404, "recipient_not_found", "no dohc account matches that email");
+          }
+          recipientUserId = resolved;
+        }
+        if (recipientUserId === actor.userId) {
+          throw badRequest("a share needs a recipient other than yourself");
+        }
+        const shareId = newShareId();
+        const createdAtMs = nowMs();
+        storage.createShare({
+          shareId,
+          workspaceId: route.workspaceId,
+          granterUserId: actor.userId,
+          recipientUserId,
+          selectorJson: JSON.stringify(validation.selector),
+          createdAtMs,
+        });
+        return jsonResponse({
+          ok: true,
+          shareId,
+          workspaceId: route.workspaceId,
+          recipientUserId,
+          selector: validation.selector,
+          createdAtMs,
+        });
+      }
+      if (route.route === "shares-create") throw methodNotAllowed();
 
       if (route.route === "blob" && request.method === "PUT") {
         assertSha256(route.sha256);
@@ -217,6 +422,19 @@ function parseRoute(request: Request): SyncRelayRoute {
     return { route: "workspaces" };
   }
   if (parts[0] !== "sync" || !parts[1]) throw notFound();
+  // "/sync/shares/..." is the share-scoped namespace; "shares" is reserved as
+  // a workspace id (parseWorkspaceId below) so the two can never collide.
+  if (parts[1] === "shares") {
+    if (parts.length === 2) return { route: "shares-list" };
+    const shareId = parseShareId(parts[2]);
+    if (parts.length === 3) return { route: "share", shareId };
+    if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
+    if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
+    if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
+      return { route: "share-blob", shareId, sha256: parts[4] };
+    }
+    throw notFound();
+  }
   const workspaceId = parseWorkspaceId(parts[1]);
   if (parts.length === 4 && parts[2] === "blobs" && parts[3] === "have") {
     return { route: "blob-have", workspaceId };
@@ -230,7 +448,22 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 3 && parts[2] === "keys") {
     return { route: "keys", workspaceId };
   }
+  if (parts.length === 3 && parts[2] === "shares") {
+    return { route: "shares-create", workspaceId };
+  }
   throw notFound();
+}
+
+function parseShareId(value: string | undefined): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(value)
+  ) {
+    throw notFound();
+  }
+  return value;
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
@@ -255,7 +488,12 @@ async function readBytes(request: Request, maxBytes: number): Promise<Uint8Array
 }
 
 function parseWorkspaceId(value: unknown): string {
-  return parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
+  const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
+  // Reserved: "/sync/shares/..." is the share-route namespace (PR 18). A
+  // workspace with this id could never be addressed, so refuse the claim
+  // rather than strand it.
+  if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
+  return workspaceId;
 }
 
 function parseString(value: unknown, name: string, maxChars: number): string {

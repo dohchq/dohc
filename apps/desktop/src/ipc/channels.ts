@@ -49,6 +49,7 @@ export const EXPLORER_MENU_COMMANDS = [
   "export-zip",
   "open-externally",
   "import-files",
+  "share",
 ] as const;
 
 export type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
@@ -435,6 +436,11 @@ export const CHANNELS = {
   createWorkspaceInvite: "desktop:create-workspace-invite",
   revokeWorkspaceInvite: "desktop:revoke-workspace-invite",
   collabToken: "desktop:collab-token",
+  createRelayShare: "desktop:create-relay-share",
+  listRelayShares: "desktop:list-relay-shares",
+  revokeRelayShare: "desktop:revoke-relay-share",
+  openSharedView: "desktop:open-shared-view",
+  refreshSharedView: "desktop:refresh-shared-view",
   openWorkspace: "desktop:open-workspace",
   listWorkspaceVersions: "desktop:list-workspace-versions",
   createWorkspaceVersion: "desktop:create-workspace-version",

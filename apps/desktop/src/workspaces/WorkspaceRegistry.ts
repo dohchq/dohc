@@ -58,3 +58,10 @@ export function setWorkspaceRemote(
 ): void {
   store().setRemote(workspaceId, remote);
 }
+
+export function setWorkspaceShareView(
+  workspaceId: string,
+  shareView: { shareId: string; granterEmail: string | null; ended?: boolean },
+): void {
+  store().setShareView(workspaceId, shareView);
+}

@@ -39,6 +39,14 @@ import {
   ApplyDatabaseEditPayload,
   CloudEnableSyncPayload,
   CloudJoinWorkspacePayload,
+  CreateRelaySharePayload,
+  CreateRelayShareResult,
+  ListRelaySharesResult,
+  RevokeRelaySharePayload,
+  OpenSharedViewPayload,
+  OpenSharedViewResult,
+  RefreshSharedViewPayload,
+  RefreshSharedViewResult,
   CloudJoinWorkspaceResult,
   CloudLoginPollResult,
   CloudLoginStartPayload,
@@ -189,6 +197,7 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
+  setWorkspaceShareView,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
@@ -200,7 +209,13 @@ import {
 } from "./workspaces/cloudDataFragments";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
-import { parseSyncCode, relayUrlsMatch } from "./workspaces/syncCode";
+import {
+  buildShareCode,
+  parseShareCode,
+  parseSyncCode,
+  relayUrlsMatch,
+} from "./workspaces/syncCode";
+import { refreshSharedViewOnce } from "./workspaces/sharedView";
 import {
   createLinkedChatStore,
   createVersionedTextStore,
@@ -215,6 +230,8 @@ import {
   RelayWorkspaceUnavailableError,
   searchWorkspaceEngine,
   SecretKeyEnvelopeError,
+  ShareUnavailableError,
+  fetchShareViewInfo,
   unwrapWorkspaceDataKey,
   uploadKeyEnvelope,
   wrapWorkspaceDataKey,
@@ -328,6 +345,17 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
+}
+
+// PR 18 read-only shared views: every file-mutating IPC path refuses with the
+// same honest copy the renderer shows. The renderer also hides its edit
+// affordances; this is the enforcement layer that cannot be skipped.
+function assertWritableWorkspace(workspace: { workspaceId: string }): void {
+  const entry = findWorkspace(workspace.workspaceId);
+  if (entry?.shareView) {
+    const granter = entry.shareView.granterEmail ?? "the person who shared it";
+    throw new Error(`This is a shared view — ask ${granter} for changes.`);
+  }
 }
 
 type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
@@ -825,6 +853,54 @@ async function cloudJson<T>(
   return data as T;
 }
 
+// Relay-share HTTP (PR 18): grant-side calls go to the SYNC RELAY (not the
+// legacy workspace-api). The token is the same signed-in session bearer and
+// only ever goes to the relay this machine signed in with.
+function relayShareErrorCopy(
+  status: number,
+  data: { error?: string; code?: string } | null,
+): string {
+  switch (data?.code) {
+    case "secret_path":
+      return "Secret files can't be shared.";
+    case "recipient_not_found":
+      return "No dohc account matches that email. Ask them to sign in to dohc Cloud once, then share again.";
+    case "empty_selector":
+      return "Pick a file, folder, or version to share.";
+    case "invalid_path":
+      return "That path can't be shared.";
+    case "not_found":
+      return "That share isn't available anymore.";
+    default:
+      return data?.error ?? `Sharing failed (${status}).`;
+  }
+}
+
+async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
+  await warmCredentialCache();
+  if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
+  if (!cachedCredentials.relayUrl) {
+    throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+  }
+  const headers = new Headers(init?.headers);
+  if (init?.body) headers.set("content-type", "application/json");
+  headers.set("authorization", `Bearer ${cachedCredentials.token}`);
+  const response = await fetch(
+    `${normalizeServerUrl(cachedCredentials.relayUrl)}${path}`,
+    { ...init, headers },
+  );
+  if (response.status === 401) {
+    throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+  }
+  const data = (await response.json().catch(() => null)) as
+    | { ok?: boolean; error?: string; code?: string }
+    | null;
+  if (!response.ok || data?.ok === false) {
+    throw new Error(relayShareErrorCopy(response.status, data));
+  }
+  return data as T;
+}
+
 // Where the Hocuspocus websocket lives. Decision: an explicit
 // DOHC_HOCUSPOCUS_URL env wins (self-host points it at their collab server);
 // otherwise we derive it from the cloud serverUrl that issued the session by
@@ -955,7 +1031,12 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   engineFor: engineForWorkspace,
   // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
   // arc-gate QA harness so the harness asserts against the REAL gate).
-  captureFor: captureForFlaggedWorkspace,
+  // Shared views (PR 18) never get capture: they are fed exclusively by the
+  // share's filtered pull, and a watcher would re-journal materialized files.
+  captureFor: async (workspace, hooks) =>
+    findWorkspace(workspace.workspaceId)?.shareView
+      ? null
+      : captureForFlaggedWorkspace(workspace, hooks),
 });
 // Local agent integration: owns the per-workspace MCP child + active-run slot
 // and persists agent-run records. The run slot is wired into the watcher
@@ -1402,6 +1483,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = CreateWorkspaceFilePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     const path = await createFile(workspace.rootPath, input.relativePath);
     return CreateWorkspaceFileResult.parse({ path });
   });
@@ -1410,6 +1492,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = CreateWorkspaceFolderPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     const path = await createFolder(workspace.rootPath, input.relativePath);
     return CreateWorkspaceFileResult.parse({ path });
   });
@@ -1418,6 +1501,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = MoveWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     // Flagged workspaces coordinate single-file renames through the engine
     // FIRST so the file keeps its stable object id (linked Chats survive the
     // rename). Anything the engine declines — folders, binary, untracked —
@@ -1440,6 +1524,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = DeleteWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     // shell.trashItem first (recoverable on every platform); deletePath
     // falls back to the workspace's .dohc/trash where the OS rejects
     // (cross-filesystem mounts) — never a hard delete either way.
@@ -1514,8 +1599,23 @@ function registerIpcHandlers(): void {
         },
       });
       const separator = { type: "separator" as const };
-      const template: Electron.MenuItemConstructorOptions[] =
-        input.kind === "root"
+      // Shared views (PR 18) get a READ-ONLY menu: no create/rename/delete/
+      // import — main owns the menu, so the reduction cannot be bypassed by
+      // the renderer. Sharing itself is offered only on synced, non-shared
+      // workspaces (a share needs a relay-side workspace to grant from).
+      const registryEntry = findWorkspace(input.workspaceId);
+      const isSharedView = !!registryEntry?.shareView;
+      const canShare = !isSharedView && !!registryEntry?.remote && input.kind !== "root";
+      const template: Electron.MenuItemConstructorOptions[] = isSharedView
+        ? input.kind === "root"
+          ? [item("Export Workspace as Zip…", "export-zip")]
+          : [
+              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
+              separator,
+              item("Export as Zip…", "export-zip"),
+              item("Reveal in File Manager", "open-externally"),
+            ]
+        : input.kind === "root"
           ? [
               item("New File", "new-file"),
               item("New Folder", "new-folder"),
@@ -1525,6 +1625,7 @@ function registerIpcHandlers(): void {
               item("Export Workspace as Zip…", "export-zip"),
             ]
           : [
+              ...(canShare ? [item("Share…", "share"), separator] : []),
               ...(input.kind === "folder"
                 ? [
                     item("New File", "new-file"),
@@ -1642,6 +1743,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = ImportWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
     // note on the payload) re-validated by importDroppedPaths — regular
     // files only, never any registered workspace's .dohc metadata.
@@ -1725,6 +1827,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     await writeWorkspaceText(workspace.rootPath, input.relativePath, input.text);
   });
 
@@ -2040,6 +2143,188 @@ function registerIpcHandlers(): void {
     return CloudJoinWorkspaceResult.parse({ workspace: summary });
   });
 
+  // ---- Relay shares (PR 18) ----
+
+  // Grant side: create a share on the SYNC RELAY for a synced workspace.
+  // Selector validation (secret refusal, traversal, caps) is server-side —
+  // the relay is the security boundary; this handler only adds product copy.
+  ipcMain.handle(CHANNELS.createRelayShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateRelaySharePayload.parse(payload);
+    if (!input.paths?.length && !input.versionId) {
+      throw new Error("Pick a file, folder, or version to share.");
+    }
+    const entry = requireWorkspace(input.workspaceId);
+    if (entry.shareView) {
+      throw new Error("This is a shared view — only the original workspace can be shared.");
+    }
+    const { remote } = await remoteForWorkspace(input.workspaceId);
+    const created = await relayShareJson<{ shareId: string }>(
+      `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          recipientEmail: input.recipientEmail,
+          ...(input.paths ? { paths: input.paths } : {}),
+          ...(input.versionId ? { versionId: input.versionId } : {}),
+        }),
+      },
+    );
+    const shareCode = buildShareCode({
+      shareId: created.shareId,
+      relayUrl: cachedCredentials!.relayUrl!,
+    });
+    return CreateRelayShareResult.parse({
+      shareId: created.shareId,
+      shareCode,
+      recipientEmail: input.recipientEmail,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.listRelayShares, async (event) => {
+    assertTrustedSender(event);
+    const result = await relayShareJson<{
+      granted: Array<Record<string, unknown>>;
+    }>("/sync/shares");
+    const relayUrl = cachedCredentials?.relayUrl;
+    const granted = (result.granted ?? []).map((row) => ({
+      ...row,
+      shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
+    }));
+    return ListRelaySharesResult.parse({ granted });
+  });
+
+  ipcMain.handle(CHANNELS.revokeRelayShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeRelaySharePayload.parse(payload);
+    await relayShareJson(`/sync/shares/${encodeURIComponent(input.shareId)}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    return undefined;
+  });
+
+  // Receive side: open a pasted share code as a READ-ONLY shared view.
+  // Mirrors the join flow's ordering guarantees: everything is validated
+  // BEFORE local state exists, the token only ever goes to the signed-in
+  // relay, and a failed first pull rolls the whole thing back.
+  ipcMain.handle(CHANNELS.openSharedView, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = OpenSharedViewPayload.parse(payload);
+    const parsed = parseShareCode(input.shareCode);
+    if (!parsed) {
+      throw new Error("That doesn't look like a share code. Copy it again and retry.");
+    }
+    const credentials = await cloudLogin().credentials();
+    if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
+      // Security gate, not cosmetics: the session token is only ever sent to
+      // the relay this machine signed in with — never to a URL that arrived
+      // inside a pasted code.
+      throw new Error(
+        "This share lives on a different server than the one you're signed in to. " +
+          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
+      );
+    }
+    setCachedCredentials(credentials);
+    const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+    // Pre-flight against the relay BEFORE creating anything locally; also
+    // learns who shared it for the honest read-only copy.
+    let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
+    try {
+      info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
+    } catch (error) {
+      if (error instanceof ShareUnavailableError) {
+        throw new Error(
+          "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
+        );
+      }
+      if (error instanceof RelayUnauthorizedError) {
+        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+      }
+      throw error;
+    }
+    const rootPath = usableRoot(input.rootPath);
+    const existingEntries = await readdir(rootPath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    if (existingEntries.length > 0) {
+      throw new Error("Choose an empty folder — the shared files will be placed inside it.");
+    }
+    // Identity/metadata only (the join bootstrap): the shared content
+    // arrives with the first pull below, and a shared view must never seed
+    // starter files of its own.
+    const created = await createWorkspaceFolder({
+      rootPath,
+      kind: "personal",
+      bootstrap: "join",
+    });
+    registerWorkspace(created);
+    setWorkspaceShareView(created.workspaceId, {
+      shareId: parsed.shareId,
+      granterEmail: info.granterEmail,
+    });
+    refreshNativeWorkspaceSurfaces();
+    try {
+      const outcome = await refreshSharedViewOnce({
+        rootDir: created.rootPath,
+        workspaceId: created.workspaceId,
+        relay,
+        shareId: parsed.shareId,
+      });
+      if (outcome.status === "ended") {
+        throw new ShareUnavailableError();
+      }
+    } catch (error) {
+      console.error(`[desktop] open-share rollback for ${rootPath}:`, error);
+      try {
+        removeWorkspace(created.workspaceId);
+      } catch {}
+      await resetFailedJoinFolder(rootPath).catch(() => undefined);
+      refreshNativeWorkspaceSurfaces();
+      notifyRenderer();
+      if (error instanceof ShareUnavailableError) {
+        throw new Error(
+          "This share was ended before it could be opened. Nothing was added on this machine.",
+        );
+      }
+      throw new Error(
+        "Couldn't open the share. Nothing was added on this machine — check your connection and try again.",
+      );
+    }
+    notifyRenderer();
+    const summary = WorkspaceSummary.parse(findWorkspace(created.workspaceId));
+    return OpenSharedViewResult.parse({ workspace: summary });
+  });
+
+  ipcMain.handle(CHANNELS.refreshSharedView, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RefreshSharedViewPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const shareView = workspace.shareView;
+    if (!shareView) throw new Error("This workspace is not a shared view.");
+    if (shareView.ended) {
+      return RefreshSharedViewResult.parse({ status: "ended", changedPaths: 0 });
+    }
+    await warmCredentialCache();
+    if (!cachedCredentials?.relayUrl) throw new Error("Sign in to dohc Cloud first.");
+    const outcome = await refreshSharedViewOnce({
+      rootDir: workspace.rootPath,
+      workspaceId: workspace.workspaceId,
+      relay: { baseUrl: cachedCredentials.relayUrl, token: cachedCredentials.token },
+      shareId: shareView.shareId,
+    });
+    if (outcome.status === "ended") {
+      // Persist the honest end state: the view stays readable and stops
+      // refreshing; the notice survives restarts.
+      setWorkspaceShareView(workspace.workspaceId, { ...shareView, ended: true });
+      refreshNativeWorkspaceSurfaces();
+    }
+    notifyRenderer();
+    return RefreshSharedViewResult.parse(outcome);
+  });
+
   // Explicit dismissal of the "a choice made on another machine needs a
   // look" notice (0P-C gate fix): the pending remote-resolve set otherwise
   // clears itself when the referenced conflict resolves or converges.
@@ -2205,6 +2490,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = ApplyDatabaseEditPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     return DatabaseSnapshotResult.parse(
       await applyDatabaseEdit(
         workspace.rootPath,
@@ -2220,6 +2506,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = ImportToDatabasePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     return ImportToDatabaseResult.parse(
       await importToDatabase(
         workspace.rootPath,

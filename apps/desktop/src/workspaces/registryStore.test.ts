@@ -95,6 +95,26 @@ describe("registry store", () => {
     expect(store.find("ws-1")?.rootPath).toBe(personal.rootPath);
   });
 
+  it("persists a shared-view identity and its ended state (PR 18)", () => {
+    store.register(personal);
+    store.setShareView("ws-1", { shareId: "share-1", granterEmail: "granter@dohc.test" });
+    expect(store.find("ws-1")?.shareView).toEqual({
+      shareId: "share-1",
+      granterEmail: "granter@dohc.test",
+    });
+    // Marking ended survives a fresh read of the same file.
+    store.setShareView("ws-1", {
+      shareId: "share-1",
+      granterEmail: "granter@dohc.test",
+      ended: true,
+    });
+    const reread = createRegistryStore(registryPath);
+    expect(reread.find("ws-1")?.shareView?.ended).toBe(true);
+    expect(() =>
+      store.setShareView("ws-unknown", { shareId: "s", granterEmail: null }),
+    ).toThrow(/Unknown workspace/);
+  });
+
   it("refuses to overwrite a corrupt registry instead of collapsing it to empty", async () => {
     await writeFile(registryPath, "{ this is not json");
     const corrupt = createRegistryStore(registryPath);

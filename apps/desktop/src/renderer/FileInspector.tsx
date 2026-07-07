@@ -453,6 +453,9 @@ function MarkdownView(props: {
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
   onPendingUndoConsumed?: (token: number) => void;
+  // Read-only shared views (PR 18): editing is disabled regardless of size,
+  // and live collab never activates.
+  forceReadOnly?: boolean;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -557,9 +560,9 @@ function MarkdownView(props: {
     // The on-disk text so the collab session can reconcile external changes
     // (agent edits, sync pulls) into the live doc instead of clobbering them.
     onDiskText: props.body,
-    enabled: !props.truncated,
+    enabled: !props.truncated && !props.forceReadOnly,
   });
-  const readOnly = props.truncated && !collab.enabled;
+  const readOnly = !!props.forceReadOnly || (props.truncated && !collab.enabled);
 
   useEffect(() => {
     if (!readOnly) return;
@@ -1570,6 +1573,8 @@ export function FileInspector(props: {
   onSharePath?: (path: string) => void;
   pendingUndo?: PendingFileUndo;
   onPendingUndoConsumed?: (token: number) => void;
+  // Read-only shared views (PR 18): every editable view refuses edits.
+  readOnly?: boolean;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -1643,6 +1648,7 @@ export function FileInspector(props: {
             knownFiles={props.knownMarkdownFiles}
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
+            forceReadOnly={props.readOnly}
           />
         </div>
       );
@@ -1661,7 +1667,7 @@ export function FileInspector(props: {
             workspaceId={props.workspaceId}
             path={props.path}
             onOpenPath={props.onOpenPath}
-            truncated={truncated}
+            truncated={truncated || !!props.readOnly}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
           />
@@ -1684,7 +1690,7 @@ export function FileInspector(props: {
             language={kind === "json" ? "json" : extensionOf(props.path) || "text"}
             workspaceId={props.workspaceId}
             path={props.path}
-            truncated={truncated}
+            truncated={truncated || !!props.readOnly}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             scrollLine={

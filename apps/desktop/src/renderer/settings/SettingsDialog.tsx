@@ -29,6 +29,7 @@ import { bridge } from "../bridge";
 import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { SegmentedControl, SettingRow, SwitchControl } from "./SettingRow";
+import { SharedByMeList } from "./SharedByMeList";
 import {
   DEFAULT_SETTINGS_SECTION,
   isSettingsSectionId,
@@ -527,6 +528,15 @@ export function SettingsDialog(props: {
                 Open Cloud
               </button>
             </SettingRow>
+            <SettingRow
+              title="Shared by me"
+              description="Read-only views you've shared with other dohc accounts. Ending a share stops their access on their next refresh."
+            >
+              <span aria-hidden />
+            </SettingRow>
+            <div className="px-1 pb-2">
+              <SharedByMeList />
+            </div>
           </div>
         );
       case "workbench":

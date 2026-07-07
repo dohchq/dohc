@@ -54,6 +54,17 @@ export type {
   SyncRelayConnection,
   SyncRelayInput,
 } from "./syncRelay";
+export {
+  ShareUnavailableError,
+  fetchShareViewInfo,
+  pullShareView,
+} from "./syncShareView";
+export type {
+  PullShareViewResult,
+  ShareViewChangedPath,
+  ShareViewInfo,
+  ShareViewSelector,
+} from "./syncShareView";
 export type {
   PendingConflictResolve,
   SyncApplyResult,
