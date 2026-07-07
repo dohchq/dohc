@@ -1,6 +1,7 @@
 import { Send } from "lucide-react";
-import type { RefObject } from "react";
+import { Fragment, type RefObject } from "react";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
+import { toMentionSegments, type MentionCandidate } from "./mentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these SAME
@@ -37,13 +38,47 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
   };
 }
 
+// Renders a message body with @-mention chips. A mention that resolves to a
+// known candidate gets a calm inline chip; everything else is plain text, so
+// the message reads exactly as written. Whitespace/newlines are preserved by
+// the parent's `whitespace-pre-wrap`.
+export function MentionText(props: {
+  body: string;
+  candidates: readonly MentionCandidate[];
+  testId?: string;
+}) {
+  const segments = toMentionSegments(props.body, props.candidates);
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === "mention" ? (
+          <span
+            // Segments are positional; index is a stable key within one body.
+            key={`m${index}`}
+            data-testid={props.testId ? `${props.testId}-mention` : undefined}
+            data-mention-kind={segment.candidate.kind}
+            className="rounded bg-accent/15 px-1 font-medium text-accent"
+          >
+            {segment.text}
+          </span>
+        ) : (
+          <Fragment key={`t${index}`}>{segment.text}</Fragment>
+        ),
+      )}
+    </>
+  );
+}
+
 export function ChatMessageList(props: {
   testIdPrefix: string;
   messages: ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
   endRef: RefObject<HTMLDivElement | null>;
+  // When provided, message bodies render @-mention chips for these handles.
+  mentionCandidates?: readonly MentionCandidate[];
 }) {
+  const candidates = props.mentionCandidates ?? [];
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       {props.loading ? (
@@ -78,7 +113,15 @@ export function ChatMessageList(props: {
                   data-testid={`${props.testIdPrefix}-message-body`}
                   className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
                 >
-                  {message.body}
+                  {candidates.length > 0 ? (
+                    <MentionText
+                      body={message.body}
+                      candidates={candidates}
+                      testId={`${props.testIdPrefix}-message-body`}
+                    />
+                  ) : (
+                    message.body
+                  )}
                 </p>
               </li>
             );

@@ -13,6 +13,7 @@
 // for the active workspace so a run finishing off-screen still surfaces.
 
 import type { AgentSessionStatus } from "../../agents/AgentSessionManager";
+import { mentionsAnyCandidate, type MentionCandidate } from "./mentions";
 
 export type AgentNotificationKind = "finished" | "needs-input" | "asked" | "error";
 
@@ -54,6 +55,57 @@ export interface AgentActivityInput {
   addressedToUser?: boolean;
   // A chat thread the ask is tied to, if any.
   threadId?: string;
+}
+
+// The minimal slice of an agent-session snapshot the notification model needs.
+// Kept structural so both the live bridge snapshot and tests can supply it.
+export interface AgentSessionLike {
+  status: AgentSessionStatus;
+  runId?: string;
+  lastError?: string;
+  messages: ReadonlyArray<{ role: "assistant" | "reasoning"; text: string }>;
+  pendingPermissions: ReadonlyArray<{ title: string }>;
+}
+
+function firstLine(text: string): string {
+  const line = text.split("\n").find((entry) => entry.trim().length > 0) ?? "";
+  return line.trim();
+}
+
+// Turns a polled session snapshot into the flat activity input, deciding
+// whether the agent's latest message reads as directed at the user (an
+// @mention of the user, or a trailing question). Returns null when there is no
+// session to describe.
+export function deriveAgentActivity(params: {
+  workspaceId: string;
+  workspaceName: string;
+  agentName: string;
+  session: AgentSessionLike | null;
+  userCandidates: readonly MentionCandidate[];
+}): AgentActivityInput | null {
+  const { session } = params;
+  if (!session) return null;
+  const latestAssistant = [...session.messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.text.trim().length > 0);
+  const latestText = latestAssistant?.text ?? "";
+  const latestSummary = firstLine(latestText);
+  const addressedToUser =
+    latestText.trim().length > 0 &&
+    (mentionsAnyCandidate(latestText, params.userCandidates) || /\?\s*$/.test(latestText.trim()));
+  return {
+    workspaceId: params.workspaceId,
+    workspaceName: params.workspaceName,
+    agentName: params.agentName,
+    runId: session.runId ?? null,
+    status: session.status,
+    ...(session.lastError ? { lastError: session.lastError } : {}),
+    ...(session.pendingPermissions[0]?.title
+      ? { pendingPermissionTitle: session.pendingPermissions[0].title }
+      : {}),
+    ...(latestSummary ? { latestSummary } : {}),
+    addressedToUser,
+  };
 }
 
 export function agentNotificationId(

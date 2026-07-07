@@ -3,11 +3,28 @@ import {
   agentNotificationId,
   clearAgentNotificationsForThread,
   clearAgentNotificationsForWorkspace,
+  deriveAgentActivity,
   dismissAgentNotification,
   reduceAgentNotifications,
   type AgentActivityInput,
   type AgentNotification,
+  type AgentSessionLike,
 } from "./agentNotifications";
+import type { MentionCandidate } from "./mentions";
+
+const userCandidates: MentionCandidate[] = [
+  { id: "user:you", kind: "user", handle: "you", label: "You" },
+];
+
+function session(overrides: Partial<AgentSessionLike> = {}): AgentSessionLike {
+  return {
+    status: "running",
+    runId: "run-1",
+    messages: [],
+    pendingPermissions: [],
+    ...overrides,
+  };
+}
 
 const NOW = 1_700_000_000_000;
 
@@ -126,6 +143,61 @@ describe("reduceAgentNotifications auto-clear", () => {
     const newRun = reduce(cleared, input({ runId: "run-2", status: "completed", latestSummary: "again" }), dismissed);
     expect(newRun).toHaveLength(1);
     expect(newRun[0]!.runId).toBe("run-2");
+  });
+});
+
+describe("deriveAgentActivity", () => {
+  const base = {
+    workspaceId: "ws-a",
+    workspaceName: "Personal",
+    agentName: "You's agent",
+    userCandidates,
+  };
+
+  it("returns null when there is no session", () => {
+    expect(deriveAgentActivity({ ...base, session: null })).toBeNull();
+  });
+
+  it("summarizes the latest assistant message's first line", () => {
+    const activity = deriveAgentActivity({
+      ...base,
+      session: session({
+        status: "completed",
+        messages: [
+          { role: "reasoning", text: "thinking..." },
+          { role: "assistant", text: "Reorganized /notes.\nDetails below." },
+        ],
+      }),
+    });
+    expect(activity?.latestSummary).toBe("Reorganized /notes.");
+    expect(activity?.addressedToUser).toBe(false);
+  });
+
+  it("flags a message that @mentions the user as addressed", () => {
+    const activity = deriveAgentActivity({
+      ...base,
+      session: session({ messages: [{ role: "assistant", text: "@you which draft wins" }] }),
+    });
+    expect(activity?.addressedToUser).toBe(true);
+  });
+
+  it("flags a trailing question as addressed", () => {
+    const activity = deriveAgentActivity({
+      ...base,
+      session: session({ messages: [{ role: "assistant", text: "Should I delete the old draft?" }] }),
+    });
+    expect(activity?.addressedToUser).toBe(true);
+  });
+
+  it("carries the pending permission title through", () => {
+    const activity = deriveAgentActivity({
+      ...base,
+      session: session({
+        status: "waiting-permission",
+        pendingPermissions: [{ title: "Run: rm old.md" }],
+      }),
+    });
+    expect(activity?.pendingPermissionTitle).toBe("Run: rm old.md");
   });
 });
 

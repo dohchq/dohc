@@ -64,6 +64,9 @@ import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-o
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
+import type { AgentNotification } from "./workbench/agentNotifications";
+import type { MentionCandidate } from "./workbench/mentions";
+import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   UnifiedDiffLines,
@@ -822,6 +825,41 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setShellError(null);
   }, [workspaceId]);
+
+  // @-mention roster + agent notifications (Agent Notifications & Mentions).
+  // The renderer has no identity source yet, so the user shows as "You" —
+  // the same fallback main uses for local authorship.
+  const LOCAL_USER_LABEL = "You";
+  const mentionCandidates = useMemo<MentionCandidate[]>(
+    () => [
+      {
+        id: "agent:default",
+        kind: "agent",
+        handle: "agent",
+        label: `${LOCAL_USER_LABEL}'s agent`,
+        description: "your agent",
+      },
+      { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
+    ],
+    [],
+  );
+  const userMentionCandidates = useMemo(
+    () => mentionCandidates.filter((candidate) => candidate.kind === "user"),
+    [mentionCandidates],
+  );
+  const agentNotifs = useAgentNotifications({
+    workspaceId,
+    workspaceName: workspaceName(props.workspace),
+    agentName: `${LOCAL_USER_LABEL}'s agent`,
+    userCandidates: userMentionCandidates,
+  });
+  const addressedToMe = useMemo(
+    () =>
+      agentNotifs.notifications.filter(
+        (notification) => notification.kind === "asked" || notification.kind === "needs-input",
+      ),
+    [agentNotifs.notifications],
+  );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
   }, [workspaceId]);
@@ -1421,8 +1459,57 @@ export function DesktopWorkspaceShell(props: {
     }));
   }, [mutateWb]);
   const openAgentView = useCallback(() => {
+    // Opening the Agent panel means the user is now looking at the run, so
+    // its finished/error/ask notices auto-clear.
+    agentNotifs.clearForCurrentWorkspace();
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
-  }, [mutateWb]);
+  }, [agentNotifs, mutateWb]);
+
+  // A NoticeCenter / inbox item was opened: land on the run and clear it.
+  const openAgentNotification = useCallback(
+    (notification: AgentNotification) => {
+      if (notification.threadId) agentNotifs.clearForThread(notification.threadId);
+      openAgentView();
+    },
+    [agentNotifs, openAgentView],
+  );
+
+  // A sent chat message @-mentioned an agent: pull it into the thread through
+  // the existing agent-chat reply path (dohc_read_chat + dohc_reply_to_chat).
+  const handleAgentMentioned = useCallback(
+    async (input: { threadId: string; mentioned: MentionCandidate[]; body: string }) => {
+      if (agentActive) {
+        reportShellError(
+          "Your agent is busy right now — it'll pick up the mention on its next turn.",
+          new Error("agent busy"),
+        );
+        return;
+      }
+      try {
+        const panel = await bridge().probeAgentDrivers({ workspaceId });
+        const driver = panel.drivers.find((entry) => entry.installed) ?? panel.drivers[0];
+        if (!driver) {
+          reportShellError(
+            "No agent is set up to mention yet — connect one in the Agent panel.",
+            new Error("no agent driver"),
+          );
+          return;
+        }
+        const prompt =
+          `You were @-mentioned in a dohc chat. Read chat thread "${input.threadId}" with ` +
+          `dohc_read_chat, then reply in that same thread with dohc_reply_to_chat. ` +
+          `The message that mentioned you: ${JSON.stringify(input.body)}. ` +
+          `Keep your reply concise and on-topic.`;
+        await bridge().startAgentSession({ workspaceId, driverId: driver.id, prompt });
+        setAgentActive(true);
+        setAgentPanelRefreshKey((key) => key + 1);
+        mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
+      } catch (error) {
+        reportShellError("Could not reach your agent for that mention.", error);
+      }
+    },
+    [agentActive, mutateWb, reportShellError, workspaceId],
+  );
   const checkForDesktopUpdates = useCallback(async () => {
     try {
       const result = await bridge().checkForUpdates();
@@ -2001,6 +2088,10 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     onOpenFileChat={openFileChatInRail}
                     onError={(message) => setShellError(message)}
+                    mentionCandidates={mentionCandidates}
+                    onAgentMentioned={(input) => void handleAgentMentioned(input)}
+                    addressedToMe={addressedToMe}
+                    onOpenAddressed={openAgentNotification}
                   />
                 </Suspense>
               ) : (
@@ -2310,6 +2401,9 @@ export function DesktopWorkspaceShell(props: {
         onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
+        agentNotifications={agentNotifs.notifications}
+        onOpenAgentNotification={openAgentNotification}
+        onDismissAgentNotification={agentNotifs.dismiss}
       />
 
       {paletteOpen ? (
