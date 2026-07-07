@@ -223,6 +223,48 @@ describe("engine Y.Doc provider session — contract heart", () => {
     await session.close();
   });
 
+  it("a close whose settle throws is retryable: the reservation stays held until a retry succeeds (gate fix 5)", async () => {
+    // A store whose projection write (the settle) fails on demand. The driver's
+    // session.close settles by default, so this forces close() to reject.
+    let failProjection = true;
+    const proxy = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === "writeProjectedTextFile") {
+          return async (...args: unknown[]) => {
+            if (failProjection) throw new Error("disk full during settle");
+            return (
+              target as unknown as {
+                writeProjectedTextFile: (...a: unknown[]) => unknown;
+              }
+            ).writeProjectedTextFile(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as VersionedTextStore;
+
+    const { session } = await open({ store: proxy });
+    const editor = mirrorEditor(session);
+    typeIntoBody(editor, "Edit that must survive a failed close.");
+
+    // Close settles by default → the projection write throws → close REJECTS and
+    // does NOT complete teardown. The error is surfaced, never swallowed.
+    await expect(session.close()).rejects.toThrow("disk full during settle");
+
+    // Proof the single-canonical reservation is STILL held (not stranded as
+    // released): a fresh open of the same object is refused as already-live.
+    await expect(open({ store: proxy })).rejects.toMatchObject({ code: "already-live" });
+
+    // Clear the fault and RETRY the close: it now completes teardown and
+    // releases the reservation, so the object reopens cleanly.
+    failProjection = false;
+    await session.close();
+    const reopened = await open();
+    expect(reopened.session.path).toBe("notes/solo.md");
+    await reopened.session.close();
+  });
+
   it("refuses to open a secret-classified path (surfaced, not crashed)", async () => {
     await expect(open({ path: ".env.local" })).rejects.toMatchObject({
       code: "invalid-input",

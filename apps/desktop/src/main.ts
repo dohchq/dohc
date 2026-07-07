@@ -1580,6 +1580,13 @@ function registerIpcHandlers(): void {
     const input = DeleteWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
+    // WS-G2-C-2 (gate fix 3): a live Y.Doc session over the path being removed
+    // would, on a later settle, resurrect the file / orphan the object. Flush +
+    // release it (and any session under a deleted folder) BEFORE the disk delete
+    // so no stale settle can write the old path afterward.
+    await activity
+      .engineCaptureFor(workspace.workspaceId)
+      ?.settleAndCloseLiveSessionsForPath(input.relativePath);
     // shell.trashItem first (recoverable on every platform); deletePath
     // falls back to the workspace's .dohc/trash where the OS rejects
     // (cross-filesystem mounts) — never a hard delete either way.
@@ -3298,6 +3305,14 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    // WS-G2-C-2 (gate fix 4): a shared view is read-only, but a live engine
+    // Y.Doc session is WRITABLE (applyLocalUpdate journals edits + settles to
+    // disk). Refuse it at the IPC boundary — same class as the PR-18 shared-view
+    // write bypass — so a read-only recipient can never open a writable session.
+    // The renderer falls back to the read-only rendered markdown.
+    if (sharedViewOf(workspace.workspaceId)) {
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
     const sender = event.sender;
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     // Only engine-flagged workspaces have a capture; only rich (markdown) files
@@ -3356,6 +3371,11 @@ function registerIpcHandlers(): void {
     // Owner-scoped: only the renderer that opened the session can drive it; a
     // no-op for an unknown/closed/foreign session (never throws to the caller).
     if (!entry || entry.senderId !== event.sender.id) return;
+    // WS-G2-C-2 (gate fix 4): RE-CHECK the shared-view guard before applying — a
+    // workspace can become a read-only shared view after a session opened, and
+    // an update must never write into a shared view. Refuse silently (matches
+    // the unknown-session no-op above).
+    if (sharedViewOf(entry.workspaceId)) return;
     entry.session.applyLocalUpdate(input.update);
   });
 

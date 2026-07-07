@@ -300,6 +300,15 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
             mode: "static" | "dev" | "build";
           }): Promise<unknown>;
           getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
+          openEngineYDocSession(payload: {
+            workspaceId: string;
+            sessionId: string;
+            path: string;
+          }): Promise<{ available: boolean }>;
+          applyEngineYDocUpdate(payload: {
+            sessionId: string;
+            update: Uint8Array;
+          }): Promise<void>;
         };
       }).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
@@ -316,12 +325,34 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev" }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
-      return { agent, sitePreview, mcpArgs: mcp.args };
+      // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is WRITABLE, so opening
+      // one in a read-only shared view must be refused at the IPC boundary (same
+      // class as the write bypass above). applyEngineYDocUpdate on the refused
+      // session must be an inert no-op — it must never throw AND never write.
+      const engineYDoc = await api.openEngineYDocSession({
+        workspaceId,
+        sessionId: "shared-view-bypass",
+        path: "docs/shared.md",
+      });
+      const engineYDocApply = await capture(() =>
+        api.applyEngineYDocUpdate({ sessionId: "shared-view-bypass", update: new Uint8Array([1, 2, 3]) }),
+      );
+      return {
+        agent,
+        sitePreview,
+        mcpArgs: mcp.args,
+        engineYDocAvailable: engineYDoc.available,
+        engineYDocApply,
+      };
     });
     expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
     expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
     // The copyable MCP config for a shared view is the read-only profile.
     expect(bypassAttempts.mcpArgs).toContain("--read-only");
+    // The engine Y.Doc editor session is refused (never opens a writable session
+    // in a shared view), and applying an update to it is an inert no-op.
+    expect(bypassAttempts.engineYDocAvailable).toBe(false);
+    expect(bypassAttempts.engineYDocApply).toBe("allowed");
 
     // The granter keeps working; the recipient refreshes and sees it.
     await granterWrite("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");

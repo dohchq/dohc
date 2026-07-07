@@ -156,6 +156,11 @@ export async function openEngineYDocProviderSession(
 
   const doc = session.doc;
   let closed = false;
+  // Teardown is complete ONLY after session.close (reservation release) AND
+  // driver.close both succeed. A throw before then leaves this false so a retry
+  // re-attempts the release instead of no-opping and stranding the reservation
+  // (gate fix 5).
+  let closeComplete = false;
 
   // Serialize journaling so ydoc_updates seq stays in emission order even under
   // rapid keystrokes (Yjs updates are commutative, but an ordered log replays
@@ -269,7 +274,11 @@ export async function openEngineYDocProviderSession(
     },
 
     async close(opts) {
-      if (closed) return;
+      // Already fully torn down: nothing to do (idempotent). A PARTIALLY-closed
+      // session (close threw) is NOT short-circuited here — it retries below.
+      if (closeComplete) return;
+      // Stop the observer + reject new local edits immediately, even across a
+      // retry (doc.off is idempotent).
       closed = true;
       cancelSettle?.();
       cancelSettle = null;
@@ -277,13 +286,14 @@ export async function openEngineYDocProviderSession(
       // Drain pending journaling so close settles the fully-recorded state.
       await journalChain.catch(() => undefined);
       await settleChain.catch(() => undefined);
-      try {
-        await session.close(opts);
-      } finally {
-        // Release the driver's read handle. session.close already released the
-        // single-canonical reservation, so the object can be reopened.
-        await driver.close().catch(() => undefined);
-      }
+      // session.close releases the single-canonical reservation. A throw here
+      // PROPAGATES (never swallowed): the reservation may still be held, so the
+      // caller must retain a failing-close guard and retry — reaching
+      // driver.close + closeComplete only once the release actually succeeds.
+      await session.close(opts);
+      // Release the driver's read handle only after a successful release.
+      await driver.close().catch(() => undefined);
+      closeComplete = true;
     },
   };
 }

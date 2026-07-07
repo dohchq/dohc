@@ -189,6 +189,65 @@ it("editing a live ydoc doc journals ONLY ydoc.update (no double moment.append, 
   await capture.stop();
 });
 
+it("captures a GENUINE external edit to a live doc — NOT silently dropped (gate fix 1)", async () => {
+  const capture = makeCapture();
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Owner's live edit.");
+  await session.settleNow();
+
+  const momentsBefore = momentCountForPath(PATH);
+
+  // An external editor/agent writes DIFFERENT content to the .md while the
+  // session is live (a sha that matches NO settle self-write). The OLD blanket
+  // live-path skip dropped every such event → the edit was lost and the next
+  // settle overwrote it from the CRDT. It must now be captured normally.
+  await seedDiskFile(PATH, "# Solo\n\nExternal agent wrote this line.\n");
+  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  await capture.flush();
+
+  // The external edit became a moment (content preserved in history) instead of
+  // being silently dropped, and the projection reflects it.
+  expect(momentCountForPath(PATH)).toBeGreaterThan(momentsBefore);
+  const projected = await store.readTextFile({ workspaceId: WS, versionId, path: PATH });
+  expect(projected?.text).toContain("External agent wrote this line.");
+
+  await session.close();
+  await capture.stop();
+});
+
+it("switchVersion settles + closes a live session BEFORE materializing (no stale projection, no two-lineage) (gate fix 2)", async () => {
+  const capture = makeCapture();
+  const mainId = versionId;
+  const snapshot = await capture.createVersion("v2");
+  const v2Id = snapshot.versions.find((v) => v.name === "v2")!.id;
+
+  // Open on the now-active v2 and type WITHOUT a manual settle: the switch must
+  // flush it (or the unsettled edit would be lost / a later settle would write a
+  // stale projection into the version the session no longer owns).
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Live edit on v2 before switching.");
+
+  await capture.switchVersion(mainId);
+
+  // The unsettled edit was flushed into v2 (the version the session was on) by
+  // the forced settle-on-close — not lost — and NOT written into Main after the
+  // switch (Main keeps its own content).
+  const v2Projected = await store.readTextFile({ workspaceId: WS, versionId: v2Id, path: PATH });
+  expect(v2Projected?.text).toContain("Live edit on v2 before switching.");
+  const mainProjected = await store.readTextFile({ workspaceId: WS, versionId: mainId, path: PATH });
+  expect(mainProjected?.text ?? "").not.toContain("Live edit on v2 before switching.");
+
+  // The session's reservation was released: reopening (now on Main) succeeds —
+  // proof the switch closed it, not left two live docs / a leaked reservation.
+  const reopened = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });
+  await reopened.close();
+
+  await session.close(); // idempotent — the switch already closed it
+  await capture.stop();
+});
+
 it("shares one store instance: the ydoc session's edits are visible through the injected store", async () => {
   const capture = makeCapture();
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => {} });

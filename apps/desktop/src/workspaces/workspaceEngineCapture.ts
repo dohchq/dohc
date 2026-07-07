@@ -266,6 +266,12 @@ export interface WorkspaceEngineCapture {
     onRemoteUpdate: (update: Uint8Array) => void;
     contentKind?: YDocContentKind;
   }): Promise<EngineYDocProviderSession>;
+  // WS-G2-C-2 (gate fix 3): flush + release any live Y.Doc session at OR under a
+  // path before a destructive op that does NOT run through the capture chain
+  // itself (the delete IPC deletes on disk directly). Without this, a later
+  // settle would resurrect the deleted file / orphan the object. No-op when
+  // nothing is live at the path.
+  settleAndCloseLiveSessionsForPath(pathOrPrefix: string): Promise<void>;
   // Version operations (PR 0M-4). Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
@@ -753,12 +759,59 @@ export function createWorkspaceEngineCapture(
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
 
-  // Paths with a LIVE engine Y.Doc session (WS-G2-C-2). While a path is here
-  // the editor's Y.Doc is canonical and its settle writes both engine.db (a
-  // non-journaling projection) and the on-disk .md; the watcher's observation
-  // of that self-write is deferred (captureOnePath skips a live path) so the
-  // settle is never double-journaled as an ordinary moment.append.
-  const liveYDocPaths = new Set<string>();
+  // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
+  // path with a LIVE engine Y.Doc session; the single-canonical reservation
+  // guarantees at most one session per path. Every lifecycle op that rewrites
+  // or removes a path (version switch/merge/create, rename, delete) coordinates
+  // through this registry — flushing + releasing the session FIRST — so a later
+  // settle can never write a stale projection into a new version, resurrect a
+  // moved/deleted path, or orphan the object.
+  //
+  // Capture coexistence is now sha-precise, NOT a blanket skip: a healthy live
+  // session's own settle .md self-write is suppressed by its expected-event sha
+  // (registered in onSettled BEFORE the disk write), so a GENUINE external edit
+  // to a live path is captured normally instead of silently dropped. Only a
+  // session whose teardown is FAILING is blanket-deferred (its reservation may
+  // still be held and the on-disk state is indeterminate).
+  interface LiveYDocSession {
+    path: string;
+    // The version active when the session opened. A version op invalidates it,
+    // which is exactly why every version op must vacate live sessions first.
+    versionId: string;
+    session: EngineYDocProviderSession;
+    // "live": healthy; sha-precise suppression, external edits captured.
+    // "failing-close": close/settle threw during teardown; capture is
+    // blanket-deferred for the path until a retry/force-close completes it.
+    status: "live" | "failing-close";
+    // Flush + tear down, releasing the reservation, then drop the registry
+    // entry — ONLY on success. On failure the entry is retained as
+    // failing-close and the error propagates (never swallowed on this
+    // data-integrity-critical teardown). Reused by the returned session's
+    // close(), the renderer close IPC, and every lifecycle op below.
+    close: (opts?: { settle?: boolean; summary?: string }) => Promise<void>;
+  }
+  const liveYDocSessions = new Map<string, LiveYDocSession>();
+
+  // Flush (settle) + release every live Y.Doc session whose path matches, so a
+  // destructive/rewriting op can never collide with a later stale settle.
+  // Propagates the first teardown failure: the op fails and the entry is
+  // retained as failing-close for a retry. Callers already inside enqueueResult
+  // (version ops, beginFileRename) call this directly; external callers go
+  // through the enqueued settleAndCloseLiveSessionsForPath method.
+  async function settleAndCloseLiveYDocSessions(
+    match: (path: string) => boolean,
+    summary: string,
+  ): Promise<void> {
+    for (const entry of [...liveYDocSessions.values()]) {
+      if (!match(entry.path)) continue;
+      // A healthy session flushes the CRDT to disk + projection first; a
+      // failing-close entry already attempted its flush, so just retry release.
+      if (entry.status === "live") {
+        await entry.session.settleNow({ summary });
+      }
+      await entry.close({ settle: false });
+    }
+  }
 
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
   // workspaces without secret files never touch the key path.
@@ -1048,16 +1101,20 @@ export function createWorkspaceEngineCapture(
       await captureSecretPath(versionId, event.path, metadata);
       return;
     }
-    // WS-G2-C-2 watcher coexistence: a path with a LIVE engine Y.Doc session is
-    // canonical as a Y.Doc. Its settle already recorded ONE history moment via
-    // the driver's non-journaling projection write and its markdown is on disk;
-    // re-capturing that self-write here would append a DUPLICATE moment.append
-    // op that, on a shared workspace, collides (P0D) with the ydoc.update stream
-    // the object already replicates through. Defer — the session owns capture
-    // for this path until it closes (the close-boundary self-write is caught by
-    // the content-equality no-op in writeIfChanged, since the final projection
-    // already updated engine.db).
-    if (liveYDocPaths.has(event.path)) return;
+    // WS-G2-C-2 watcher coexistence (gate fix 1). The settle's OWN .md self-write
+    // is suppressed PRECISELY below by consumeExpectedEvent (onSettled registers
+    // the settled sha BEFORE the disk write): a matching sha is our own write and
+    // never re-journals. A watcher event on a live path whose sha does NOT match
+    // an expected settle self-write is a GENUINE external edit (agent/other
+    // editor) and MUST NOT be dropped — it is captured normally below (it becomes
+    // a moment; on a shared workspace that surfaces as a real conflict, which is
+    // correct, NOT silent loss). Folding an external edit into the live doc as
+    // CRDT deltas is G2-C-3; here the bar is simply not-dropping.
+    //
+    // The ONLY blanket defer is a session whose teardown is FAILING: its
+    // reservation may still be held and the on-disk state is indeterminate, so a
+    // partial write must not be journaled until a retry/force-close resolves it.
+    if (liveYDocSessions.get(event.path)?.status === "failing-close") return;
     if (!policyTracksPath(event.path, policy)) return;
     // Deletes trust the watcher's confirmed-absent check; updates re-read the
     // CURRENT disk state so rapid successive writes coalesce to the final
@@ -1507,10 +1564,43 @@ export function createWorkspaceEngineCapture(
           }
         },
       });
-      // Mark the path live only after the open succeeds (a secret/not-found/
-      // already-live rejection propagates to the caller and never guards a path
-      // that has no session).
-      liveYDocPaths.add(input.path);
+      // Register the live session only after the open succeeds (a secret/
+      // not-found/already-live rejection propagates to the caller and never
+      // guards a path that has no session). The close below drops the entry
+      // ONLY when teardown succeeds (gate fix 5): a failing close retains a
+      // failing-close entry so the reservation/retry are not lost and capture
+      // stays deferred for the path.
+      const closeEntry = async (opts?: {
+        settle?: boolean;
+        summary?: string;
+      }): Promise<void> => {
+        try {
+          await session.close(opts);
+        } catch (error) {
+          // The reservation may still be held and the on-disk state is
+          // indeterminate — retain a failing-close guard so a retry/force-close
+          // can complete the teardown, and DO NOT swallow (data-integrity
+          // teardown). captureOnePath keeps deferring this path meanwhile.
+          if (liveYDocSessions.get(input.path) === entry) {
+            entry.status = "failing-close";
+          }
+          throw error;
+        }
+        // Lift the guard exactly when the session tears down (releasing the
+        // single-canonical reservation), so ordinary capture of this path
+        // resumes for the next opener / external editor.
+        if (liveYDocSessions.get(input.path) === entry) {
+          liveYDocSessions.delete(input.path);
+        }
+      };
+      const entry: LiveYDocSession = {
+        path: input.path,
+        versionId,
+        session,
+        status: "live",
+        close: closeEntry,
+      };
+      liveYDocSessions.set(input.path, entry);
       return {
         doc: session.doc,
         initialUpdate: session.initialUpdate,
@@ -1520,17 +1610,22 @@ export function createWorkspaceEngineCapture(
         settleNow: (opts) => session.settleNow(opts),
         applyExternalMarkdownEdit: (markdown) =>
           session.applyExternalMarkdownEdit(markdown),
-        async close(opts) {
-          try {
-            await session.close(opts);
-          } finally {
-            // Lift the guard exactly when the session tears down (releasing the
-            // single-canonical reservation), so ordinary capture of this path
-            // resumes for the next opener / external editor.
-            liveYDocPaths.delete(input.path);
-          }
-        },
+        close: closeEntry,
       };
+    },
+
+    settleAndCloseLiveSessionsForPath(pathOrPrefix) {
+      // Public seam for destructive ops that DON'T run through the capture chain
+      // themselves (the delete IPC deletes on disk directly). Enqueued so it is
+      // ordered against pending capture batches and version ops. Flushes +
+      // releases every live session at OR under the path so no stale settle can
+      // resurrect a deleted file / orphan the object afterward.
+      return enqueueResult("close live session for destructive op", async () => {
+        await settleAndCloseLiveYDocSessions(
+          (p) => p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`),
+          "Saved latest edits before removing the file",
+        );
+      });
     },
 
     async listVersions() {
@@ -1543,6 +1638,14 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const fromVersionId = await activeVersionIdOf(engine);
+        // WS-G2-C-2 (gate fix 2): create-and-switch makes the new fork active,
+        // so a session still live on the old version would settle a stale
+        // projection into a version it no longer owns. Vacate live sessions
+        // first, exactly as switchVersion does.
+        await settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before creating a version",
+        );
         // Fork from exactly what's on disk right now — capture the latest
         // edits first so the new version starts as a faithful copy.
         await reconcileDiskIntoVersion(
@@ -1585,6 +1688,16 @@ export function createWorkspaceEngineCapture(
         }
         // Fail closed before any mutation: an unknown target throws here.
         await engine.listTextFiles({ workspaceId, versionId });
+        // WS-G2-C-2 (gate fix 2): a live Y.Doc session pins its OLD versionId+
+        // path. Materializing another version into the same folder while it
+        // stays live would let a later settle write a STALE projection into the
+        // now-active version (two-canonical / two-lineage corruption). Flush +
+        // release EVERY live session first so the switch starts from a quiesced,
+        // single-canonical folder. A teardown failure fails the switch.
+        await settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before switching versions",
+        );
         // Nothing is ever lost: the current disk state (including edits still
         // inside the watcher settle window) is captured into the version the
         // user is leaving.
@@ -1680,6 +1793,13 @@ export function createWorkspaceEngineCapture(
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         const correlationId = `version-merge-${randomUUID()}`;
+        // WS-G2-C-2 (gate fix 2): a merge materializes results into the active
+        // folder. Vacate live sessions first so a later settle can't overwrite
+        // the merged result / reopen a stale lineage.
+        await settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before merging",
+        );
         // Capture the latest disk edits so the merge sees them (whichever
         // side is active).
         await reconcileDiskIntoVersion(
@@ -2164,6 +2284,14 @@ export function createWorkspaceEngineCapture(
 
     beginFileRename(fromPath, toPath) {
       return enqueueResult("prepare rename", async () => {
+        // WS-G2-C-2 (gate fix 3): a live Y.Doc session over either endpoint must
+        // be flushed + released before the file moves, or a later settle would
+        // write the OLD path — resurrecting the moved-from file / orphaning the
+        // object. Vacate first (a teardown failure fails the rename).
+        await settleAndCloseLiveYDocSessions(
+          (p) => p === fromPath || p === toPath,
+          "Saved latest edits before renaming",
+        );
         const policy = await readPolicyForTask();
         const noop: WorkspaceEngineRenameFinisher = async () => {};
         // Only a clean single-file rename between two engine-owned text paths
