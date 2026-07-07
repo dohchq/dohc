@@ -439,6 +439,12 @@ export function createSyncRelayHandler({
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
         if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
         const ops = input.ops.map(parseLogOp);
+        // MU-C0 verified authorship — the trust boundary. Every chat op that
+        // carries an author identity must claim the AUTHENTICATED pusher; a
+        // client can no longer forge a message/reaction as another user. Runs
+        // BEFORE appendLogBatch so a batch mixing one forged op with valid ones
+        // is rejected atomically (nothing is admitted to the log).
+        assertChatAuthorship(input.ops, actor.userId);
         const result = storage.appendLogBatch({
           workspaceId: route.workspaceId,
           originId,
@@ -598,6 +604,55 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
   return { originSeq, opKind, payloadJson, recordedAtMs };
 }
 
+// MU-C0 verified authorship. The relay authenticates WHO is pushing
+// (actor.userId, server-derived from the Better Auth session — a client cannot
+// assert it). For every chat op that names an author, that author MUST be the
+// pusher, or the whole batch is rejected. This is the one place the relay reads
+// into a chat payload (a second narrow, tested relaxation of "payloads are
+// opaque", after PR-18's share filter), scoped to the author field, fail-closed.
+//
+// Two shapes of chat author identity, both the OPAQUE relay user id (never a raw
+// email — PII must not enter the replicated CRDT):
+//  - chat.message.append.authorUserId — OPTIONAL. Absent = a solo/legacy send
+//    (no verified identity); present = a signed-in send, verified here.
+//  - chat.reaction.set.authorId       — REQUIRED. A reaction is inherently an
+//    authored act, so a missing/non-string author id is a malformed op and is
+//    rejected (fail-closed), same as a mismatch.
+//
+// Any future authored chat op is verified by adding it to CHAT_AUTHOR_FIELDS.
+type ChatAuthorField = { field: string; required: boolean };
+const CHAT_AUTHOR_FIELDS: Record<string, ChatAuthorField> = {
+  "chat.message.append": { field: "authorUserId", required: false },
+  "chat.reaction.set": { field: "authorId", required: true },
+};
+
+export function assertChatAuthorship(rawOps: unknown[], actorUserId: string): void {
+  for (const rawOp of rawOps) {
+    if (!rawOp || typeof rawOp !== "object" || Array.isArray(rawOp)) continue;
+    const op = rawOp as Record<string, unknown>;
+    const opKind = op.opKind;
+    if (typeof opKind !== "string") continue;
+    const spec = CHAT_AUTHOR_FIELDS[opKind];
+    if (!spec) continue;
+    const payload = op.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      // A malformed authored op: parseLogOp will reject non-object payloads for
+      // its own reasons, but a required-author op with no payload is an
+      // authorship failure regardless.
+      if (spec.required) throw authorshipMismatch();
+      continue;
+    }
+    const claimed = (payload as Record<string, unknown>)[spec.field];
+    if (claimed === undefined || claimed === null) {
+      if (spec.required) throw authorshipMismatch();
+      continue; // optional author absent — an unattributed solo op, allowed.
+    }
+    if (typeof claimed !== "string" || claimed !== actorUserId) {
+      throw authorshipMismatch();
+    }
+  }
+}
+
 function stableJsonStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJsonStringify).join(",")}]`;
   if (value && typeof value === "object") {
@@ -719,6 +774,14 @@ function badRequest(message: string): HttpError {
 
 function selfShare(): HttpError {
   return new HttpError(400, "self_share", "a share needs a recipient other than yourself");
+}
+
+// MU-C0: a chat op claimed an author other than the authenticated pusher (or a
+// required author was missing). 403 (not 404): the caller IS authenticated and
+// owns the bucket — the request is forbidden, not hidden. Non-retryable; the
+// client must send its OWN identity. Deliberately does not name which op failed.
+function authorshipMismatch(): HttpError {
+  return new HttpError(403, "authorship_mismatch", "chat op author does not match the authenticated actor");
 }
 
 function notFound(): HttpError {
