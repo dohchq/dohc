@@ -447,6 +447,8 @@ export const CHANNELS = {
   listChannelThreads: "desktop:list-channel-threads",
   startChannelThread: "desktop:start-channel-thread",
   markChatThreadRead: "desktop:mark-chat-thread-read",
+  listChatReactions: "desktop:list-chat-reactions",
+  setChatReaction: "desktop:set-chat-reaction",
   getSyncStatus: "desktop:get-sync-status",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",

@@ -4,6 +4,7 @@ import type {
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
+  ChatReactionRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -145,6 +146,8 @@ export function ChatsView(props: {
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [reactions, setReactions] = useState<ChatReactionRecord[]>([]);
+  const [viewerAuthorId, setViewerAuthorId] = useState("");
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
@@ -226,14 +229,17 @@ export function ChatsView(props: {
       const token = ++liveToken.current;
       setNav({ level: "thread", channel, thread });
       setMessages([]);
+      setReactions([]);
       setMessagesLoading(true);
       try {
-        const result = await bridge().listChatMessages({
-          workspaceId,
-          threadId: thread.id,
-        });
+        const [result, reactionResult] = await Promise.all([
+          bridge().listChatMessages({ workspaceId, threadId: thread.id }),
+          bridge().listChatReactions({ workspaceId, threadId: thread.id }),
+        ]);
         if (token !== liveToken.current) return;
         setMessages(result.messages);
+        setReactions(reactionResult.reactions);
+        setViewerAuthorId(reactionResult.viewerAuthorId);
         requestAnimationFrame(() =>
           messagesEndRef.current?.scrollIntoView({ block: "end" }),
         );
@@ -341,6 +347,59 @@ export function ChatsView(props: {
     }
   }, [composer, nav, notifyAgentMention, props, sending, workspaceId]);
 
+  // Reactions (WS-MU-C2): optimistic add/remove of the viewer's own reaction,
+  // then reconcile to the server's canonical list (which carries the real
+  // reactionId and any peer reactions). Guarded by the liveness token so a
+  // slow response never repaints a thread the user already left.
+  const toggleReaction = useCallback(
+    (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
+      if (nav.level !== "thread" || viewerAuthorId === "") return;
+      const token = liveToken.current;
+      setReactions((current) => {
+        const withoutMine = current.filter(
+          (reaction) =>
+            !(
+              reaction.messageId === input.messageId &&
+              reaction.emoji === input.emoji &&
+              reaction.authorId === viewerAuthorId
+            ),
+        );
+        if (input.nextState === "removed") return withoutMine;
+        return [
+          ...withoutMine,
+          {
+            reactionId: `optimistic:${input.messageId}:${input.emoji}:${viewerAuthorId}`,
+            messageId: input.messageId,
+            threadId: nav.thread.id,
+            emoji: input.emoji,
+            authorId: viewerAuthorId,
+            authorKind: "human",
+            authorDisplayName: viewerAuthorId,
+          },
+        ];
+      });
+      void bridge()
+        .setChatReaction({
+          workspaceId,
+          threadId: nav.thread.id,
+          messageId: input.messageId,
+          emoji: input.emoji,
+          state: input.nextState,
+        })
+        .then(() => bridge().listChatReactions({ workspaceId, threadId: nav.thread.id }))
+        .then((result) => {
+          if (token !== liveToken.current) return;
+          setReactions(result.reactions);
+          setViewerAuthorId(result.viewerAuthorId);
+        })
+        .catch((error) => {
+          if (token !== liveToken.current) return;
+          props.onError(ipcErrorMessage(error, "Could not update that reaction."));
+        });
+    },
+    [nav, props, viewerAuthorId, workspaceId],
+  );
+
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -441,6 +500,11 @@ export function ChatsView(props: {
           emptyLabel="No messages yet."
           endRef={messagesEndRef}
           mentionCandidates={mentionCandidates}
+          reactionControls={{
+            reactions,
+            viewerAuthorId,
+            onToggle: toggleReaction,
+          }}
         />
         <MentionComposer
           testIdPrefix="chats"

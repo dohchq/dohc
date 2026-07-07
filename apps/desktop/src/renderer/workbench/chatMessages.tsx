@@ -1,6 +1,13 @@
-import { Send } from "lucide-react";
-import { Fragment, type RefObject } from "react";
-import type { ChatMessageRecord } from "../../ipc/bridgeContract";
+import { SmilePlus, Send } from "lucide-react";
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { toMentionSegments, type MentionCandidate } from "./mentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
@@ -71,6 +78,158 @@ export function MentionText(props: {
   );
 }
 
+// Reactions (WS-MU-C2). A small, calm quick-pick — obvious, not a full emoji
+// keyboard. Reacting to an agent's message is a first-class move, so this set
+// leans toward acknowledging work.
+export const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
+
+export interface ChatReactionControls {
+  // Every ACTIVE reaction in the open thread (all messages).
+  reactions: ChatReactionRecord[];
+  // The viewer's own reactor id, so pills can highlight "yours" and toggle.
+  viewerAuthorId: string;
+  onToggle: (input: {
+    messageId: string;
+    emoji: string;
+    nextState: "added" | "removed";
+  }) => void;
+  emojiChoices?: readonly string[];
+}
+
+// "Alice, Bob's agent reacted" — agent reactors read as "<name>'s agent".
+function reactionerNames(records: readonly ChatReactionRecord[]): string {
+  return records.map((record) => chatAuthorLabel(record)).join(", ");
+}
+
+// One message's reaction row: existing pills (grouped by emoji) plus an
+// add-reaction affordance. Kept obvious — pills show emoji + count, yours are
+// highlighted, and the picker is a short quick-pick.
+function MessageReactions(props: {
+  testIdPrefix: string;
+  messageId: string;
+  records: readonly ChatReactionRecord[];
+  controls: ChatReactionControls;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const pickerId = useId();
+  const choices = props.controls.emojiChoices ?? DEFAULT_REACTION_EMOJIS;
+
+  // Dismiss the picker on an outside pointer press (calm, no modal scrim).
+  useEffect(() => {
+    if (!pickerOpen) return;
+    function onPointerDown(event: PointerEvent) {
+      if (!containerRef.current?.contains(event.target as Node)) setPickerOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [pickerOpen]);
+
+  // Group this message's reactions by emoji, preserving first-seen order.
+  const byEmoji: Array<{ emoji: string; records: ChatReactionRecord[]; mine: boolean }> = [];
+  const index = new Map<string, number>();
+  for (const record of props.records) {
+    let at = index.get(record.emoji);
+    if (at === undefined) {
+      at = byEmoji.length;
+      index.set(record.emoji, at);
+      byEmoji.push({ emoji: record.emoji, records: [], mine: false });
+    }
+    const group = byEmoji[at];
+    if (!group) continue;
+    group.records.push(record);
+    if (record.authorId === props.controls.viewerAuthorId) group.mine = true;
+  }
+
+  const toggle = (emoji: string, mine: boolean) => {
+    props.controls.onToggle({
+      messageId: props.messageId,
+      emoji,
+      nextState: mine ? "removed" : "added",
+    });
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      data-testid={`${props.testIdPrefix}-message-reactions`}
+      className="relative mt-1 flex flex-wrap items-center gap-1"
+    >
+      {byEmoji.map((group) => (
+        <button
+          key={group.emoji}
+          type="button"
+          data-testid={`${props.testIdPrefix}-reaction-pill`}
+          data-emoji={group.emoji}
+          data-mine={group.mine ? "true" : "false"}
+          aria-pressed={group.mine}
+          title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
+          onClick={() => toggle(group.emoji, group.mine)}
+          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors ${
+            group.mine
+              ? "border-accent bg-accent/15 text-accent"
+              : "border-line bg-bg text-muted hover:border-accent/60"
+          }`}
+        >
+          <span aria-hidden>{group.emoji}</span>
+          <span className="tabular-nums">{group.records.length}</span>
+        </button>
+      ))}
+      <button
+        type="button"
+        data-testid={`${props.testIdPrefix}-add-reaction`}
+        aria-label="Add reaction"
+        aria-haspopup="menu"
+        aria-expanded={pickerOpen}
+        title="Add reaction"
+        onClick={() => setPickerOpen((open) => !open)}
+        className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        <SmilePlus size={13} aria-hidden />
+      </button>
+      {pickerOpen ? (
+        <div
+          id={pickerId}
+          role="menu"
+          data-testid={`${props.testIdPrefix}-reaction-picker`}
+          aria-label="Choose a reaction"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              setPickerOpen(false);
+            }
+          }}
+          className="absolute bottom-full left-0 z-10 mb-1 flex gap-0.5 rounded-md border border-line bg-bg p-1 shadow-md"
+        >
+          {choices.map((emoji) => {
+            const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
+            return (
+              <button
+                key={emoji}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={mine}
+                data-testid={`${props.testIdPrefix}-reaction-choice`}
+                data-emoji={emoji}
+                title={emoji}
+                onClick={() => {
+                  toggle(emoji, mine);
+                  setPickerOpen(false);
+                }}
+                className={`grid size-7 place-items-center rounded text-[15px] hover:bg-accent/15 ${
+                  mine ? "bg-accent/15" : ""
+                }`}
+              >
+                <span aria-hidden>{emoji}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatMessageList(props: {
   testIdPrefix: string;
   messages: ChatMessageRecord[];
@@ -79,8 +238,19 @@ export function ChatMessageList(props: {
   endRef: RefObject<HTMLDivElement | null>;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
+  // When provided, each message gets a reaction row (pills + quick-pick).
+  reactionControls?: ChatReactionControls;
 }) {
   const candidates = props.mentionCandidates ?? [];
+  // Group active reactions by message once per render.
+  const reactionsByMessage = new Map<string, ChatReactionRecord[]>();
+  if (props.reactionControls) {
+    for (const reaction of props.reactionControls.reactions) {
+      const list = reactionsByMessage.get(reaction.messageId);
+      if (list) list.push(reaction);
+      else reactionsByMessage.set(reaction.messageId, [reaction]);
+    }
+  }
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       {props.loading ? (
@@ -94,7 +264,11 @@ export function ChatMessageList(props: {
           {props.messages.map((message) => {
             const time = formatChatTime(message.createdAtMs);
             return (
-              <li key={message.id} data-testid={`${props.testIdPrefix}-message`}>
+              <li
+                key={message.id}
+                data-testid={`${props.testIdPrefix}-message`}
+                className="group"
+              >
                 <span className="flex items-baseline gap-1.5">
                   <span
                     data-testid={`${props.testIdPrefix}-message-author`}
@@ -125,6 +299,14 @@ export function ChatMessageList(props: {
                     message.body
                   )}
                 </p>
+                {props.reactionControls ? (
+                  <MessageReactions
+                    testIdPrefix={props.testIdPrefix}
+                    messageId={message.id}
+                    records={reactionsByMessage.get(message.id) ?? []}
+                    controls={props.reactionControls}
+                  />
+                ) : null}
               </li>
             );
           })}

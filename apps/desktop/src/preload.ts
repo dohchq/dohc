@@ -172,6 +172,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.startChannelThread, payload),
   markChatThreadRead: (payload) =>
     ipcRenderer.invoke(CHANNELS.markChatThreadRead, payload),
+  listChatReactions: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChatReactions, payload),
+  setChatReaction: (payload) =>
+    ipcRenderer.invoke(CHANNELS.setChatReaction, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   startAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.startAgentRun, payload),
   endAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.endAgentRun, payload),

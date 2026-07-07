@@ -112,6 +112,10 @@ import {
   StartChannelThreadResult,
   MarkChatThreadReadPayload,
   MarkChatThreadReadResult,
+  ListChatReactionsPayload,
+  ListChatReactionsResult,
+  SetChatReactionPayload,
+  SetChatReactionResult,
   ChatThreadRecord,
   ChatMessageRecord,
   OpenFileExternallyPayload,
@@ -216,6 +220,7 @@ import {
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
+  type ChatReaction,
   type ChatThread,
   type LinkedChatStore,
   type VersionedTextMomentSummary,
@@ -1159,6 +1164,14 @@ function engineSearchStoreFor(workspace: {
 // workspaces fall back to "You".
 function localUserDisplayName(): string {
   return cachedCredentials?.email ?? "You";
+}
+
+// The local user's STABLE reactor identity (WS-MU-C2). Solo this anchors on the
+// signed-in email (or a fixed local id when signed out) so a reaction cell is
+// stable across app restarts and, once syncing, distinct per user. Forward-
+// compatible with MU-C0: the relay later stamps/verifies this as actor.userId.
+function localUserId(): string {
+  return cachedCredentials?.email ?? "local-user";
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
@@ -2927,6 +2940,64 @@ function registerIpcHandlers(): void {
     return MarkChatThreadReadResult.parse({
       lastReadSequence: state.lastReadSequence,
       revision: state.revision,
+    });
+  });
+
+  // --- Reactions (WS-MU-C2) ------------------------------------------------
+  // Durable, commutative emoji reactions. Identity is main-derived: the viewer
+  // reacts as the local user (never renderer-supplied), so a reaction is an
+  // authored act attributable and, once syncing, relay-verifiable.
+  function chatReactionForIpc(reaction: ChatReaction) {
+    return {
+      reactionId: reaction.reactionId,
+      messageId: reaction.messageId,
+      threadId: reaction.threadId,
+      emoji: reaction.emoji,
+      authorId: reaction.author.authorId,
+      authorKind: reaction.author.kind,
+      authorDisplayName: reaction.author.displayName,
+    };
+  }
+
+  ipcMain.handle(CHANNELS.listChatReactions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatReactionsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const reactions = await linkedChatStoreFor(workspace).listReactions({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+    });
+    return ListChatReactionsResult.parse({
+      reactions: reactions.map(chatReactionForIpc),
+      viewerAuthorId: localUserId(),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.setChatReaction, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetChatReactionPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const reaction = await linkedChatStoreFor(workspace).setReaction({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      emoji: input.emoji,
+      author: {
+        authorId: localUserId(),
+        kind: "human",
+        displayName: localUserDisplayName(),
+      },
+      state: input.state,
+    });
+    return SetChatReactionResult.parse({
+      reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
+      viewerAuthorId: localUserId(),
     });
   });
 
