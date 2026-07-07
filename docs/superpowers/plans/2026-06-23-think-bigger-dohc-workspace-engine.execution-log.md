@@ -18821,3 +18821,37 @@ the append-only log and the key-envelope history are never pruned.
 - Relay child-process integration tests, `pnpm --filter @dohc/desktop build`,
   and the workspace-sync-rejoin e2e (conflict round trip) all green.
 - `git diff --check` clean.
+
+## Multi-User Chat Design
+
+Design-only lane (no product code). Wrote
+`docs/superpowers/plans/2026-07-07-think-bigger-multiuser-chat-design.md`:
+an implementable spec for multi-user chat — presence/typing, reactions, DMs,
+and shared channels — behind the SINGLE collaboration flag that gates G2-C
+co-editing (sign in + connect a relay). Solo/local Chats are unchanged; a
+signed-out user gets zero of this. Everything is fully self-hostable on the
+existing relay + Better Auth + Postgres; dohc cloud is just a hosted instance
+of that same relay.
+
+Key decisions, grounded in shipped code:
+- Member model REUSES the PR-18 grant/recipient rows (`sync_relay_shares`,
+  `storage.ts:256-274`) widened with a `chat-channel` selector — never the
+  retired workspace-api members/invites routes. Authz is server-derived from
+  `actor.userId` (`session.ts:20`), fail-closed via `shareForRecipient`
+  (`server.ts:80-90`).
+- Presence/typing REUSE G2-C's ephemeral awareness channel (never journaled),
+  keyed by channel/DM instead of doc; MU-C1 depends on G2-C landing it.
+- Reactions are a new commutative `chat.reaction.set` op (set-membership CRDT:
+  add/remove commute, re-apply is a no-op) riding 0P chat replication.
+- DMs are `kind:"dm"` channels (`engine.ts:887`) with a grant-expressed
+  recipient set; shared channels are read-write/read-only channel grants with a
+  new member-scoped append route and a fail-closed chat branch added to
+  `filterOpForShare` (`shareFilter.ts:181-282`, which excludes chat today).
+- Authorship gap closed: a new verified `authorUserId` on the message payload
+  (today it is only a display string, `engine.ts:378`).
+
+Milestones MU-C0..C5 (authorship+gate -> presence -> reactions -> DMs ->
+shared channels -> isolation/self-host sweep), each with BLOCKING adversarial
+cross-user isolation tests mirroring PR-18. Files changed: the plan doc, its
+manifest entry (`2026-06-23-think-bigger-docs.manifest.json`), and this log
+entry. `node scripts/check-think-bigger-doc-links.mjs` passes.
