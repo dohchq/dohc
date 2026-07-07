@@ -19265,3 +19265,78 @@ The provider exposes the live `session.doc`; MU-C1 presence can bind Yjs
 awareness to it as the ephemeral channel (never journaled), replacing the
 Hocuspocus awareness the old `useCollabDoc` used. Awareness updates must NOT go
 through `recordUpdate` (they are not `ydoc.update` ops).
+
+### REMAINING WIRING — LANDED (the runtime-sensitive integration, tests-first + real Electron e2e)
+
+The five deferred items are DONE, committed, and proven Linux-green (unit +
+xvfb Electron e2e). The editor now binds to the engine Y.Doc, not Hocuspocus.
+
+1. **Store sharing** — `WorkspaceEngineCapture.openYDocSession({ path,
+   onRemoteUpdate, contentKind? })` constructs the provider session with the
+   capture's OWN `VersionedTextStore` (its `engineStore()`), so the driver writes
+   only through that store's `runInEngineWriteLane` / `writeProjectedTextFile` —
+   one write connection, one lane, no second `engine.db` handle (the deadlock the
+   plan warned of). `activeVersionIdOf(store)` supplies the version. main.ts calls
+   this; it never constructs a store. Proven: `workspaceEngineYDocSession.test.ts`
+   ("shares one store instance" — a second store would have deadlocked the
+   settle).
+2. **Watcher coexistence (data integrity)** — a `liveYDocPaths` set on the
+   capture; `openYDocSession` adds the path, the wrapped `close()` removes it.
+   `captureOnePath` DEFERS a live path (after the secret check, before policy), so
+   the watcher's observation of the settle's own `.md` self-write is never
+   re-captured as a `moment.append` — which on a shared workspace would collide
+   (P0D) with the `ydoc.update` stream. `onSettled` also registers the settled
+   sha as an expected-engine-event before writing the `.md` (belt) so the
+   close-boundary self-write is recognized too. Proven: the unit test asserts a
+   live path's `captureBatch` adds ZERO `moment.append`/`conflict.open` ops, and
+   the E2E (`workspace-engine-editor.spec.ts`) asserts the typed sentinel appears
+   in NO `moment.append` replication op (only opaque `ydoc.update` ops) with no
+   `conflict.open` — the load-bearing no-double-journal / no-P0D proof.
+3. **IPC** — `engineYDocOpen` / `engineYDocApplyUpdate` / `engineYDocClose`
+   invokes + an `engineYDocRemoteUpdate` main→renderer event, mirroring
+   searchWorkspace/onSearchResults. Zod payloads (binary as `z.custom<Uint8Array>`
+   so the inferred type matches yjs), the dependency-free
+   `parseEngineYDocRemoteUpdateEvent` at the preload boundary (unit-tested),
+   main-side handlers gated on `activity.engineCaptureFor` + `isRichEnginePath`
+   (markdown only). Sessions keyed by a renderer-minted `sessionId`, owner-scoped
+   (a foreign/stale session is a no-op), closed on renderer-destroyed and (before
+   the engine stores stop) on app quit. Secret/not-found/already-live →
+   `{ available: false }`.
+4. **useEngineDoc + FileInspector flip** — `useEngineDoc` (sibling to
+   `useCollabDoc`) binds an `EngineYDocTransport` over the bridge, guarded by a
+   per-open request token (the async-state invariant: a slow A response never
+   repaints B). FileInspector's markdown branch binds Tiptap to the engine doc
+   with a `markdown-save-state` settle indicator. Undo/redo is intact: the
+   Collaboration extension (v3.23.6) bundles the yjs `yUndoPlugin` +
+   Mod-z/Mod-y, so `COLLAB_STARTER_KIT`'s disabled history is covered for free.
+   Solo local works with no relay; secret paths never open (graceful fallback).
+   Hocuspocus code stays present; the editor no longer instantiates it.
+5. **Version-switch / lifecycle** — opening takes the single-canonical
+   reservation; `useEngineDoc`'s effect cleanup settles+closes on PATH or
+   WORKSPACE change (releasing the reservation so the object reopens), and no
+   flicker/cursor-jump (the `ENGINE_SOURCED_ORIGIN` seed guard). E2E reopen
+   resumes the rich content, and the capture/versions/secret-env e2e regress
+   clean. KNOWN FOLLOW-UP (G2-C-3): the renderer does not yet close the live
+   session when the ACTIVE VERSION switches while the SAME rich file stays open
+   in the editor — `useEngineDoc` keys on (workspaceId, path, enabled), not the
+   active version, so a `switchVersion` that materializes different content for
+   that path would race the live CRDT. The versions e2e edits on disk (no live
+   editor during a switch), so it is green; the fix is to also close/reopen on
+   active-version change (key `useEngineDoc` on it, or gate the version-switch
+   button on a session flush). Single-canonical still holds — this is a
+   same-object-across-versions coexistence gap, not a two-live-docs one.
+
+Verify (Linux-green): `pnpm -r typecheck`; `@dohc/desktop` unit suite (1063
+pass / 2 skip) incl. `workspaceEngineYDocSession.test.ts` + the channels parser;
+`@dohc/workspace-engine` (parallel + serial 128/5-skip); `@dohc/desktop` build;
+E2E under xvfb — the two engine-editor specs + capture/versions/secret-env/history
+regression (all green, no double-capture, no P0D).
+
+### G2-C-3 go-list (now safe to delete — the editor no longer instantiates Hocuspocus)
+
+Confirmed unblocked by the FileInspector flip: the `HocuspocusProvider` code path
+in `renderer/collab/useCollabDoc.ts` + `collabSession.ts`; the `services/hocuspocus`
+service; the `collab-token` route + the `collabToken` IPC + `deriveHocuspocusUrl`.
+`useCollabDoc` is no longer imported by any editor surface (only its own test +
+`collabSession.test.ts` reference it). Ship the closed-boundary shared-workspace
+migration (file == re-projection, else preserve-both) as part of the retirement.

@@ -26,7 +26,10 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
     path: string,
     options?: { readOnly?: boolean },
   ) => {
-    prepare(sql: string): { all(...params: unknown[]): Array<Record<string, unknown>> };
+    prepare(sql: string): {
+      all(...params: unknown[]): Array<Record<string, unknown>>;
+      get(...params: unknown[]): Record<string, unknown> | undefined;
+    };
     close(): void;
   };
 };
