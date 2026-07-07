@@ -2848,15 +2848,61 @@ function insertConflictRow(db: SqliteDb, conflict: VersionedTextConflictRecord):
 // FIRST divergent op each side sees (per-origin FIFO makes that the same M0 on
 // both machines). Later ops in the episode coalesce, so the id never
 // re-derives from their differing bases.
+//
+// N-WAY BRANCH IDENTITY (0P sync-hardening item 1 gate fix): the fork point
+// alone is NOT enough. If machines A/B/C all fork the SAME object O from the
+// SAME base moment M0, every pairwise divergence (A-vs-B, A-vs-C, B-vs-C)
+// hashes to the SAME id -- so C's op coalesces onto A-vs-B's row, or a
+// resolve-by-id closes the wrong mirror, and a branch is silently dropped from
+// the actionable conflict set. The id therefore also folds in the identity of
+// the TWO diverging branches: each branch's FIRST divergent op after M0 (its
+// "branch root"). The pair is order-independent (min,max) so the SAME pairwise
+// conflict still mints the SAME id on both machines (they see the same two
+// root op ids, just with current/incoming swapped), while two DIFFERENT
+// pairwise conflicts on one object get DIFFERENT ids.
 function syncConflictId(
   workspaceId: WorkspaceId,
   versionId: VersionId,
   objectId: WorkspaceObjectId,
   baseMomentId: string | null,
+  branchRoots?: { local: string | null; incoming: string | null },
 ): string {
+  let branchPart = "";
+  if (branchRoots) {
+    const local = branchRoots.local ?? " absent-local-root";
+    const incoming = branchRoots.incoming ?? " absent-incoming-root";
+    const [low, high] = local <= incoming ? [local, incoming] : [incoming, local];
+    branchPart = ` ${low} ${high}`;
+  }
   return `conflict_sync_${sha256Text(
-    `${workspaceId} ${versionId} ${objectId} ${baseMomentId ?? " absent-base"}`,
+    `${workspaceId} ${versionId} ${objectId} ${baseMomentId ?? " absent-base"}${branchPart}`,
   ).slice(0, 32)}`;
+}
+
+// The local branch's FIRST divergent op after the shared fork point M0: the
+// only APPLIED (non-record-only) local moment for this object whose preimage
+// head is M0. Remote divergent ops are recorded as `sync_record_only`, so they
+// are excluded -- this returns THIS machine's own branch root, which the peer
+// sees as the incoming branch root of the mirror conflict (so both machines
+// fold the same order-independent pair of roots into the id).
+function localBranchRoot(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: string,
+  baseMomentId: string | null,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT moment_id FROM moments
+       WHERE workspace_id = ? AND version_id = ? AND object_id = ?
+         AND before_latest_moment_id IS ?
+         AND (sync_record_only IS NULL OR sync_record_only = 0)
+       ORDER BY moment_order
+       LIMIT 1`,
+    )
+    .get(workspaceId, versionId, objectId, baseMomentId);
+  return row ? rowString(row, "moment_id") : null;
 }
 
 // Coalesce a newer divergent remote head onto an already-open sync conflict
@@ -2886,16 +2932,42 @@ function coalesceConflictSides(
 }
 
 // Open a fresh sync conflict, OR coalesce onto the open one already tracking
-// this object lineage (items 1+2). Returns the number of conflicts newly
-// opened (0 when it coalesced or was already present). `primaryObjectId` is
-// the object whose lineage this conflict is about (the diverging object for a
-// same-object divergence; the displaced occupant for an occupancy conflict).
+// this branch lineage (items 1+2). Returns the number of conflicts newly
+// opened (0 when it coalesced or was already present).
+//
+// COALESCING IS BRANCH- AND KIND-SPECIFIC (item 2 gate fix). A newer divergent
+// op coalesces ONLY onto the open row it EXTENDS: the row's recorded incoming
+// head equals this op's own preimage head (`incomingBranchBase`) — per-origin
+// FIFO makes each op's base the previous op's head, tying a coalesce to one
+// specific incoming branch — PLUS a kind-specific anchor on the correct object
+// side:
+//   - "same-object": the DIVERGING object is the incoming side
+//     (incoming_object_id). When this machine holds its OWN copy of that
+//     object the current side is it too (current_object_id), and a
+//     co-created path-occupancy row shares the SAME incoming op; the
+//     `current_object_id IS diverging` preference then breaks the tie toward
+//     the primary row (the occupancy row's current is the displaced occupant).
+//     When this machine has NO local copy (the incoming object collides at a
+//     path an unrelated object holds) the current side is that occupant, no
+//     occupancy row is created, and the incoming-side anchor still finds the
+//     one row to extend.
+//   - "occupancy": the DISPLACED occupant is the current side
+//     (current_object_id), which the same incoming mover op never matches.
+// This replaces the old `current OR incoming = O` lookup, which matched a
+// same-object move conflict AND its occupancy row (data loss: a later coalesce
+// landed on the occupancy row, leaving the real conflict stale) and matched
+// every branch of an N-way fork onto whichever row sorted first (dropping the
+// rest).
+type SyncCoalesceAnchor =
+  | { kind: "same-object"; divergingObjectId: string; incomingBranchBase: string | null }
+  | { kind: "occupancy"; occupantObjectId: string; incomingBranchBase: string | null };
+
 function openOrCoalesceSyncConflict(
   db: SqliteDb,
   workspaceId: WorkspaceId,
   params: {
     versionId: VersionId;
-    primaryObjectId: string | null;
+    coalesce: SyncCoalesceAnchor;
     conflictId: string;
     path: string;
     base: VersionedTextFileState;
@@ -2904,28 +2976,52 @@ function openOrCoalesceSyncConflict(
     recordedAtMs: number;
   },
 ): number {
-  if (params.primaryObjectId !== null) {
-    const existingRow = db
-      .prepare(
-        conflictSelectSql(
-          `WHERE c.workspace_id = ? AND c.status = 'open' AND c.metadata_origin = 'sync'
-             AND c.target_version_id = ?
-             AND (c.current_object_id IS ? OR c.incoming_object_id IS ?)
-           ORDER BY c.created_at_ms, c.conflict_id
-           LIMIT 1`,
-        ),
-      )
-      .get(workspaceId, params.versionId, params.primaryObjectId, params.primaryObjectId);
-    if (existingRow) {
-      coalesceConflictSides(
-        db,
-        workspaceId,
-        rowString(existingRow, "conflict_id"),
-        params.incoming,
-        params.recordedAtMs,
-      );
-      return 0;
-    }
+  const existingRow =
+    params.coalesce.kind === "same-object"
+      ? db
+          .prepare(
+            conflictSelectSql(
+              `WHERE c.workspace_id = ? AND c.status = 'open' AND c.metadata_origin = 'sync'
+                 AND c.target_version_id = ?
+                 AND c.incoming_object_id IS ?
+                 AND c.incoming_latest_moment_id IS ?
+               ORDER BY (c.current_object_id IS ?) DESC, c.created_at_ms, c.conflict_id
+               LIMIT 1`,
+            ),
+          )
+          .get(
+            workspaceId,
+            params.versionId,
+            params.coalesce.divergingObjectId,
+            params.coalesce.incomingBranchBase,
+            params.coalesce.divergingObjectId,
+          )
+      : db
+          .prepare(
+            conflictSelectSql(
+              `WHERE c.workspace_id = ? AND c.status = 'open' AND c.metadata_origin = 'sync'
+                 AND c.target_version_id = ?
+                 AND c.current_object_id IS ?
+                 AND c.incoming_latest_moment_id IS ?
+               ORDER BY c.created_at_ms, c.conflict_id
+               LIMIT 1`,
+            ),
+          )
+          .get(
+            workspaceId,
+            params.versionId,
+            params.coalesce.occupantObjectId,
+            params.coalesce.incomingBranchBase,
+          );
+  if (existingRow) {
+    coalesceConflictSides(
+      db,
+      workspaceId,
+      rowString(existingRow, "conflict_id"),
+      params.incoming,
+      params.recordedAtMs,
+    );
+    return 0;
   }
   if (
     db
@@ -4190,19 +4286,38 @@ function createVersionedTextStoreWithHooks(
             latestMomentId: payload.momentId,
             metadata: pickWriteMetadata(payload.metadata),
           };
-    // Deterministic id keyed on the shared fork point (item 1) + coalescing
-    // onto the open conflict already tracking this object (item 2): both
-    // machines mint the SAME id for the same divergence, and repeated divergent
-    // ops in one episode update the existing row instead of stacking.
+    // Deterministic id keyed on the shared fork point AND the two branch roots
+    // (item 1) + branch-specific coalescing (item 2): both machines mint the
+    // SAME id for the same pairwise divergence, DIFFERENT pairwise divergences
+    // on one object get DIFFERENT ids, and repeated divergent ops in one
+    // episode update the existing row instead of stacking. The incoming branch
+    // root is THIS op's own moment id when the row first opens (the first
+    // divergent op each side sees, per-origin FIFO); the local branch root is
+    // this machine's own first divergent op after the shared fork point.
+    const baseMomentId = payload.beforeLatestMomentId ?? null;
     const conflictId = syncConflictId(
       workspaceId,
       payload.versionId,
       payload.objectId,
-      payload.beforeLatestMomentId ?? null,
+      baseMomentId,
+      {
+        local: localBranchRoot(
+          db,
+          workspaceId,
+          payload.versionId,
+          payload.objectId,
+          baseMomentId,
+        ),
+        incoming: payload.momentId,
+      },
     );
     let conflictsOpened = openOrCoalesceSyncConflict(db, workspaceId, {
       versionId: payload.versionId,
-      primaryObjectId: payload.objectId,
+      coalesce: {
+        kind: "same-object",
+        divergingObjectId: payload.objectId,
+        incomingBranchBase: baseMomentId,
+      },
       conflictId,
       path: current.path,
       base: fileStateFromAppendBefore(db, payload),
@@ -4222,16 +4337,32 @@ function createVersionedTextStoreWithHooks(
       // row instead of stacking (item 2). Occupancy is inherently asymmetric
       // (only one machine holds the displaced occupant), so cross-machine id
       // symmetry does not apply here; the resolve path falls back to the
-      // head-match for these (item 1's documented fallback).
+      // head-match for these (item 1's documented fallback). The incoming
+      // mover's branch root still folds into the id so two DIFFERENT movers
+      // displacing the SAME occupant get DISTINCT occupancy rows, not a
+      // colliding id.
       const occupancyConflictId = syncConflictId(
         workspaceId,
         payload.versionId,
         conflictingPathOccupant.objectId,
         conflictingPathOccupant.latestMomentId ?? null,
+        {
+          local: conflictingPathOccupant.latestMomentId ?? null,
+          incoming: payload.momentId,
+        },
       );
       conflictsOpened += openOrCoalesceSyncConflict(db, workspaceId, {
         versionId: payload.versionId,
-        primaryObjectId: conflictingPathOccupant.objectId,
+        coalesce: {
+          kind: "occupancy",
+          occupantObjectId: conflictingPathOccupant.objectId,
+          // Coalesce on the INCOMING (mover) branch chain, not the occupant's
+          // stable head: a repeated move by the same mover has
+          // beforeLatestMomentId == the mover head already recorded on this
+          // occupancy row's incoming side, so it extends this row instead of
+          // stacking; a DIFFERENT mover has a different base and opens its own.
+          incomingBranchBase: baseMomentId,
+        },
         conflictId: occupancyConflictId,
         path: conflictingPathOccupant.path,
         // No shared base: the occupant and the incoming object never had a

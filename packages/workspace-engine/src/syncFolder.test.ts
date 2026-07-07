@@ -2608,6 +2608,97 @@ describe("sync folder replication", () => {
     });
   });
 
+  // 0P sync-hardening item 1 GATE FIX (N-way data loss). Three machines A/B/C
+  // all fork the SAME object O from the SAME base moment M0 with different
+  // edits. Before the fix, every pairwise divergence hashed to ONE id keyed
+  // only on (workspace, version, object, baseMoment), so on A the C op
+  // coalesced onto the A-vs-B row (dropping the "from B" branch) or a
+  // resolve-by-id closed the wrong mirror. After the fix the id also folds in
+  // the two branch roots, so A-vs-B and A-vs-C are DISTINCT rows and resolving
+  // one leaves the other intact — no branch is silently dropped.
+  it("keeps A-vs-B and A-vs-C distinct when three machines fork one object (item 1 N-way)", async () => {
+    const a = await tempRoot("sync-nway-a");
+    const b = await tempRoot("sync-nway-b");
+    const c = await tempRoot("sync-nway-c");
+    const seedDir = await tempRoot("sync-nway-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-nway-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+    // Seed base on A, propagate the SAME object/base to B and C.
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await importSyncBundle({ rootDir: c, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    // Three independent forks of O from M0.
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(c, 4000, "c-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from C", metadata: { origin: "api" } }).then(() => {}),
+    );
+    // A imports B's fork, then C's fork: two SEPARATE pairwise conflicts.
+    const importB = await replicate(b, a);
+    const importC = await replicate(c, a);
+    expect(importB.conflictsOpened).toBe(1);
+    // The N-way data loss: before the fix this was 0 (C coalesced onto the
+    // A-vs-B row, dropping the "from B" branch). After the fix it is a fresh row.
+    expect(importC.conflictsOpened).toBe(1);
+
+    let idAB = "";
+    let idAC = "";
+    await withStore(a, 5000, "ac-", async (store) => {
+      const open = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open).toHaveLength(2);
+      const abRow = open.find((row) => row.incoming.text === "from B");
+      const acRow = open.find((row) => row.incoming.text === "from C");
+      expect(abRow).toBeDefined();
+      expect(acRow).toBeDefined();
+      expect(abRow!.current.text).toBe("from A");
+      expect(acRow!.current.text).toBe("from A");
+      // Two DIFFERENT pairwise conflicts on the SAME object get DIFFERENT ids.
+      expect(abRow!.id).not.toBe(acRow!.id);
+      idAB = abRow!.id;
+      idAC = acRow!.id;
+    });
+
+    // Resolving A-vs-B must NOT close or corrupt A-vs-C: the "from C" branch
+    // survives as its own actionable conflict.
+    await withStore(a, 6000, "ar-", async (store) => {
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: idAB,
+        resolution: { kind: "keep-current" },
+        metadata: { origin: "api" },
+      });
+      const open = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open).toHaveLength(1);
+      expect(open[0]!.id).toBe(idAC);
+      expect(open[0]!.incoming.text).toBe("from C");
+      expect(open[0]!.current.text).toBe("from A");
+    });
+  });
+
   // 0P sync-hardening item 1: when ids genuinely cannot align (a resolve whose
   // conflictId has no local row), the swapped-head fallback still closes the
   // mirror — the ambiguous case the deterministic id does not cover.
