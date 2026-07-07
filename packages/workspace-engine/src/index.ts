@@ -17,6 +17,10 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+// WS-G2-C1 / G2-C-2 handoff: the reserved transaction origin a remote
+// ydoc.update apply carries, so the future editor provider can filter it out of
+// its local-edit journaling (see liveYDocRegistry.ts for the contract).
+export { REMOTE_YDOC_APPLY_ORIGIN } from "./liveYDocRegistry";
 // Legacy `.dohc/history` change-set store. The engine (moments in
 // engine.db) is the production recorder post-flip; createChangeSetStore is
 // retained ONLY so read-only relic reads and drift-guard checks (the desktop

@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { yDocToMarkdown } from "@dohc/ydoc-projection";
+import { plainTextToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type {
   SyncReplicationEnvelope,
   VersionedTextStore,
@@ -30,6 +30,7 @@ import {
   createVersionedTextStore,
 } from "./versionedTextStore";
 import { createYDocEngineDriver, type YDocEngineDriver, type YDocSession } from "./ydocEngineDriver";
+import { REMOTE_YDOC_APPLY_ORIGIN } from "./liveYDocRegistry";
 import { collectBlobHashesFromOp } from "./syncApply";
 
 const WS = "ws-ydoc-repl";
@@ -64,17 +65,92 @@ interface Node {
 
 const nodes: Node[] = [];
 
-async function makeNode(label: string, clock: () => number): Promise<Node> {
+async function makeNode(
+  label: string,
+  clock: () => number,
+  driverOptions?: { onBeforeBaseClaimForTest?: () => void | Promise<void> },
+): Promise<Node> {
   const root = await mkdtemp(join(tmpdir(), `dohc-ydoc-repl-${label}-`));
   const store = createVersionedTextStore(root, { nowMs: clock });
   // replicated:true is the co-editing lifecycle — journal the ydoc.update ops,
   // always resume an existing lineage (base-once), and keep the CRDT bytes
   // durable across close (never prune) so the test can reconstruct + compare
   // Y.Doc state after a session ends AND a fresh peer can replay the full log.
-  const driver = createYDocEngineDriver({ store, rootDir: root, replicated: true });
+  const driver = createYDocEngineDriver({
+    store,
+    rootDir: root,
+    replicated: true,
+    ...driverOptions,
+  });
   const node: Node = { root, store, driver };
   nodes.push(node);
   return node;
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  const { createHash } = requireModule("node:crypto") as typeof import("node:crypto");
+  return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
+}
+
+// Commit a competing replicated BASE lineage into `root`'s engine.db on a
+// SEPARATE connection — stands in for another PROCESS winning the first-open
+// race. Writes the marker + seq-0 snapshot + a base ydoc.update op so the
+// driver's atomic claim re-check observes an existing lineage and resumes it.
+function writeCompetingBase(
+  root: string,
+  objectId: WorkspaceObjectId,
+  text: string,
+  now: number,
+): void {
+  const seed = plainTextToYDoc(text);
+  const base = Y.encodeStateAsUpdate(seed);
+  const sv = Y.encodeStateVector(seed);
+  const baseSha = sha256Hex(base);
+  const svSha = sha256Hex(sv);
+  const db = rawDb(root);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare(
+      "INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)",
+    ).run(baseSha, base.byteLength, Buffer.from(base));
+    db.prepare(
+      "INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, content) VALUES (?, ?, ?)",
+    ).run(svSha, sv.byteLength, Buffer.from(sv));
+    db.prepare(
+      `INSERT INTO ydoc_docs
+         (workspace_id, version_id, object_id, content_kind,
+          head_update_seq, head_snapshot_seq, updated_at_ms)
+       VALUES (?, ?, ?, 'plaintext', 0, 0, ?)`,
+    ).run(WS, "main", objectId, now);
+    db.prepare(
+      `INSERT INTO ydoc_snapshots
+         (workspace_id, version_id, object_id, up_to_seq,
+          snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms)
+       VALUES (?, ?, ?, 0, ?, ?, ?)`,
+    ).run(WS, "main", objectId, baseSha, svSha, now);
+    db.prepare(
+      `INSERT INTO replication_log
+         (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      WS,
+      "origin_racer",
+      0,
+      "ydoc.update",
+      JSON.stringify({
+        versionId: "main",
+        objectId,
+        path: PATH,
+        contentKind: "plaintext",
+        updateBlobSha256: baseSha,
+        isBaseState: true,
+      }),
+      now,
+    );
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
 }
 
 beforeEach(() => {
@@ -730,6 +806,198 @@ describe("ydoc.update replication", () => {
     expect(Number(afterUpdates?.n)).toBe(Number(baselineUpdates?.n));
     expect(Number(afterOps?.n)).toBe(Number(baselineOps?.n));
 
+    await session.close();
+  });
+
+  // FIX 1a (fail-closed on corrupt lineage) — a replicated marker whose CRDT
+  // rows are missing/unreadable must NOT reseed from the file (that would fork a
+  // second base and duplicate content on every peer). Open fails CLOSED instead.
+  it("fails closed when a replicated marker exists but its CRDT rows are missing", async () => {
+    let t = 7500;
+    const clock = () => (t += 5);
+    const a = await makeNode("a", clock);
+    const objectId = await seedRichDoc(a, "alpha\n");
+
+    // Establish the lineage (marker + base + a delta), then close.
+    const s1 = await a.driver.openSession({
+      workspaceId: WS,
+      versionId: "main",
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await edit(s1, (text) => text.insert(text.length, "beta\n"));
+    await s1.close();
+    expect(baseOpCount(a)).toBe(1);
+
+    // Simulate corruption: the marker survives but every snapshot + update row
+    // is gone (a partial write, a GC bug, an unreadable blob).
+    const raw = rawDb(a.root);
+    try {
+      raw.prepare("DELETE FROM ydoc_snapshots WHERE object_id = ?").run(objectId);
+      raw.prepare("DELETE FROM ydoc_updates WHERE object_id = ?").run(objectId);
+    } finally {
+      raw.close();
+    }
+
+    // Reopen must throw state-corrupt — NOT reseed and journal a second base.
+    await expect(
+      a.driver.openSession({ workspaceId: WS, versionId: "main", path: PATH }),
+    ).rejects.toThrow(/corrupt|reconstructable|reseed/i);
+
+    // No second base was minted; the object is not left "live".
+    expect(baseOpCount(a)).toBe(1);
+    expect(a.driver.canonicalSourceFor({ workspaceId: WS, objectId })).toBe("file");
+  });
+
+  // FIX 1b (atomic first-creation claim) — two separate PROCESSES that both see
+  // "no lineage" and race the first open must journal EXACTLY ONE base. The
+  // in-process registry cannot guard cross-process, so the claim re-checks
+  // inside the write-lane BEGIN IMMEDIATE and resumes the winner instead of
+  // forking a second base.
+  it("a cross-process first-open race journals exactly ONE base (atomic claim)", async () => {
+    let t = 8000;
+    const clock = () => (t += 5);
+
+    // Capture the object id the seeded file will carry so the competing writer
+    // can target the SAME (workspace, version, object) lineage.
+    let racedObjectId: WorkspaceObjectId | null = null;
+    const a = await makeNode("a", clock, {
+      // Runs after the driver decided "no lineage" but BEFORE its atomic claim
+      // transaction — a stand-in for a concurrent process committing the base.
+      onBeforeBaseClaimForTest: () => {
+        if (racedObjectId) writeCompetingBase(a.root, racedObjectId, "winner\n", clock());
+      },
+    });
+    const objectId = await seedRichDoc(a, "loser-seed\n");
+    racedObjectId = objectId;
+
+    // The driver seeds "loser-seed" from the file, but a concurrent writer
+    // commits the "winner" base first; the atomic claim detects it and RESUMES
+    // the winner rather than journaling a second base.
+    const session = await a.driver.openSession({
+      workspaceId: WS,
+      versionId: "main",
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    // The live doc converged to the winner's lineage, not the local seed fork.
+    expect(yDocToMarkdown(session.doc)).toContain("winner");
+    expect(yDocToMarkdown(session.doc)).not.toContain("loser-seed");
+    // EXACTLY ONE base op across the whole race (the competitor's; the driver
+    // journaled none).
+    expect(baseOpCount(a)).toBe(1);
+
+    // Editing + closing then replaying on a fresh peer shows no duplication.
+    await edit(session, (text) => text.insert(text.length, "after\n"));
+    await session.close();
+    expect(baseOpCount(a)).toBe(1);
+
+    const b = await makeNode("b", clock);
+    await replicate(a, b);
+    expect(persistedStateVector(b, objectId)).toBe(persistedStateVector(a, objectId));
+    expect(countOccurrences(persistedMarkdown(b, objectId), "winner")).toBe(1);
+    expect(countOccurrences(persistedMarkdown(b, objectId), "after")).toBe(1);
+  });
+
+  // FIX 2 (reserved remote-apply origin) — a remote ydoc.update routed into a
+  // LIVE doc is applied under REMOTE_YDOC_APPLY_ORIGIN so the future G2-C-2
+  // editor provider can filter it out of its local-edit journaling (no echo).
+  it("applies a remote ydoc.update into the live doc under the reserved origin", async () => {
+    let t = 8500;
+    const clock = () => (t += 5);
+    const a = await makeNode("a", clock);
+    const b = await makeNode("b", clock);
+    await seedRichDoc(a, "base\n");
+
+    // A establishes the lineage; B receives it and opens a LIVE session.
+    const s0 = await a.driver.openSession({
+      workspaceId: WS,
+      versionId: "main",
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await edit(s0, (text) => text.insert(text.length, "A0\n"));
+    await s0.close();
+    await replicate(a, b);
+    const sb = await b.driver.openSession({ workspaceId: WS, versionId: "main", path: PATH });
+
+    // Observe the origins of every update applied to B's live doc.
+    const origins: unknown[] = [];
+    const observer = (_update: Uint8Array, origin: unknown): void => {
+      origins.push(origin);
+    };
+    sb.doc.on("update", observer);
+
+    // A makes a remote edit and closes; it arrives at B while sb is open.
+    const sa = await a.driver.openSession({ workspaceId: WS, versionId: "main", path: PATH });
+    await edit(sa, (text) => text.insert(text.length, "REMOTE\n"));
+    await sa.close();
+    await replicate(a, b);
+    sb.doc.off("update", observer);
+
+    // The remote apply converged into the live doc AND carried the reserved
+    // origin (nothing else mutated sb.doc, so it is the only observed origin).
+    expect(yDocToMarkdown(sb.doc)).toContain("REMOTE");
+    expect(origins.length).toBeGreaterThan(0);
+    for (const origin of origins) expect(origin).toBe(REMOTE_YDOC_APPLY_ORIGIN);
+
+    await sb.close();
+  });
+
+  // FIX 3 (initial base is size-capped) — an oversized INITIAL replicated base
+  // is rejected locally BEFORE any blob put / journal, so it never lands a base
+  // op that every peer would reject on hydrate.
+  it("rejects an oversized initial replicated base before storing or journaling it", async () => {
+    let t = 9000;
+    const clock = () => (t += 5);
+    const a = await makeNode("a", clock);
+    // A ~6 MiB file → its Y.Doc base encoding exceeds the 5 MiB replication cap
+    // (still under the 10 MiB text-file cap so the projected seed write itself
+    // succeeds).
+    const big = `${"x".repeat(6 * 1024 * 1024)}\n`;
+    const objectId = await seedRichDoc(a, big);
+
+    await expect(
+      a.driver.openSession({
+        workspaceId: WS,
+        versionId: "main",
+        path: PATH,
+        contentKind: "plaintext",
+      }),
+    ).rejects.toThrow(/cap|over|exceed/i);
+
+    // Nothing was journaled and no lineage marker/rows were minted.
+    expect(baseOpCount(a)).toBe(0);
+    const marker = rawDb(a.root)
+      .prepare("SELECT 1 FROM ydoc_docs WHERE object_id = ?")
+      .get(objectId);
+    expect(marker).toBeUndefined();
+    // The object is not stranded "live" after the rejected open.
+    expect(a.driver.canonicalSourceFor({ workspaceId: WS, objectId })).toBe("file");
+  });
+
+  // FIX 4 (G2-C-2 landmine defused) — applyExternalMarkdownEdit REJECTS on a
+  // replicated doc (its merge branch would reseed and fork the lineage). A
+  // future caller fails loud instead of silently forking.
+  it("rejects applyExternalMarkdownEdit on a replicated doc", async () => {
+    let t = 9500;
+    const clock = () => (t += 5);
+    const a = await makeNode("a", clock);
+    await seedRichDoc(a, "alpha\n");
+    const session = await a.driver.openSession({
+      workspaceId: WS,
+      versionId: "main",
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      session.applyExternalMarkdownEdit({ markdown: "alpha\nexternal\n" }),
+    ).rejects.toThrow(/not supported|replicated|deltas/i);
+
+    // No second base was forked by the rejected external edit.
+    expect(baseOpCount(a)).toBe(1);
     await session.close();
   });
 });

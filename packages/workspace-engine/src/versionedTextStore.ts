@@ -53,7 +53,7 @@ import {
   type EngineIntegrityCheckMode,
 } from "./engineDbSchema";
 import { classifyEngineFilePath } from "./enginePathFloor";
-import { getLiveYDoc, liveYDocKey } from "./liveYDocRegistry";
+import { REMOTE_YDOC_APPLY_ORIGIN, getLiveYDoc, liveYDocKey } from "./liveYDocRegistry";
 import {
   deleteFileSearchIndex,
   ensureSearchIndexForVersion,
@@ -5363,7 +5363,11 @@ function createVersionedTextStoreWithHooks(
               const liveDoc = getLiveYDoc(
                 liveYDocKey(stateFilePath, workspaceId, input.payload.objectId),
               );
-              if (liveDoc) Y.applyUpdate(liveDoc, projection.update);
+              // Apply under the RESERVED remote-apply origin (G2-C-2 handoff): a
+              // future editor provider observing doc.on("update") MUST ignore
+              // updates carrying REMOTE_YDOC_APPLY_ORIGIN so it never re-journals
+              // a remote op back to every peer (echo storm). See liveYDocRegistry.
+              if (liveDoc) Y.applyUpdate(liveDoc, projection.update, REMOTE_YDOC_APPLY_ORIGIN);
             }
             break;
           }

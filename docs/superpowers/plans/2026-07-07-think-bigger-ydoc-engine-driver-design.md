@@ -505,6 +505,23 @@ Depends on G2-B + 0P-B (the relay).
   Test gate: presence appears and clears on disconnect; awareness is provably
   absent from `replication_log` and from bundles; a co-edit latency budget
   under push; awareness-channel-down still allows editing.
+  - **Editor provider — reserved remote-apply origin (contract from G2-C1).**
+    A remote `ydoc.update` applied into a LIVE in-memory doc is applied with the
+    reserved transaction origin `REMOTE_YDOC_APPLY_ORIGIN` (exported from
+    `@dohc/workspace-engine`; defined in `liveYDocRegistry.ts`). The G2-C2
+    editor provider observes `doc.on("update", (u, origin) => …)` to journal
+    LOCAL edits via `recordUpdate`, and it **MUST** skip any update whose
+    `origin === REMOTE_YDOC_APPLY_ORIGIN`. That update is a remote op the store
+    already persisted + journaled + acked in `applyReplicationOp`; re-journaling
+    it under the local origin would echo it back to every peer (an echo storm).
+    Editor/local edits carry a null/editor origin and ARE journaled.
+  - **External edits as CRDT deltas (contract from G2-C1).**
+    `YDocSession.applyExternalMarkdownEdit` currently REJECTS on a replicated
+    doc (its merge branch reseeds via a fresh `markdownToYDoc`, forking the
+    lineage). G2-C2 must implement restore/agent external edits for replicated
+    docs as CRDT DELTAS applied to the live doc (diff the incoming markdown into
+    the existing Y.Doc, emit an ordinary `recordUpdate`) so the single lineage is
+    preserved — never a reseed + second base.
 - **G2-C3 — Hocuspocus retirement.** Delete the service + provider + token
   route; ship the closed-boundary migration tool. Test gate: a cloud doc
   migrates at a closed boundary (file == re-projection verified, else
