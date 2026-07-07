@@ -169,7 +169,9 @@ export async function seedWorkspaceRegistry(
         version: 1,
         workspaces: entries.map((entry) => ({
           workspaceId: entry.workspaceId,
-          rootPath: entry.rootPath,
+          // Store the app-canonical forward-slash form, exactly as the app
+          // itself writes registry entries (matters on Windows).
+          rootPath: normalizeAbsolutePath(entry.rootPath),
           ...SEEDED_WORKSPACE_SHAPE,
           ...(entry.remote ? { remote: entry.remote } : {}),
         })),

@@ -220,7 +220,10 @@ function failingSiteFixtures(): WorkspaceFileWrite[] {
 
 function siteRuntimePaths(): { viteBin: string; sdkEntry: string } {
   const repoRoot = resolve(desktopRoot, "../..");
-  const viteBin = resolve(repoRoot, "node_modules/vite/bin/vite.js");
+  // Resolve vite from the desktop package, which declares it — the repo-root
+  // node_modules only contains vite under hoisting layouts pnpm does not
+  // guarantee (and does not produce on a fresh Windows install).
+  const viteBin = resolve(desktopRoot, "node_modules/vite/bin/vite.js");
   const sdkEntry = resolve(repoRoot, "packages/sdk/src/index.ts");
   if (!existsSync(viteBin)) throw new Error(`Vite binary not found: ${viteBin}`);
   if (!existsSync(sdkEntry)) throw new Error(`SDK entry not found: ${sdkEntry}`);
