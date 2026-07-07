@@ -1518,12 +1518,20 @@ export type SearchResultsEventSchema = z.infer<typeof SearchResultsEventSchema>;
 // Uint8Array (structured clone). These zod schemas are the main-side mirror of
 // the dependency-free preload parseEngineYDocRemoteUpdateEvent bounds.
 const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_CHARS);
-const ENGINE_YDOC_UPDATE = z
-  .instanceof(Uint8Array)
-  .refine(
-    (update) => update.byteLength > 0 && update.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
-    "Y.Doc update is empty or exceeds the IPC byte bound.",
-  );
+// z.custom (not z.instanceof) so the inferred type is a plain `Uint8Array`
+// (ArrayBufferLike) — matching yjs's update type and the transport — rather than
+// the ArrayBuffer-narrowed shape z.instanceof yields.
+const ENGINE_YDOC_UPDATE = z.custom<Uint8Array>(
+  (value) =>
+    value instanceof Uint8Array &&
+    value.byteLength > 0 &&
+    value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
+  "Y.Doc update is not a Uint8Array within the IPC byte bound.",
+);
+const ENGINE_YDOC_INITIAL_UPDATE = z.custom<Uint8Array>(
+  (value) => value instanceof Uint8Array && value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
+  "Y.Doc initial update is not a Uint8Array within the IPC byte bound.",
+);
 
 export const OpenEngineYDocSessionPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1534,7 +1542,7 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
-  initialUpdate: z.instanceof(Uint8Array).optional(),
+  initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
 

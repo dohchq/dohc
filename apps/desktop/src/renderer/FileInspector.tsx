@@ -22,7 +22,7 @@ import {
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
-import { useCollabDoc } from "./collab/useCollabDoc";
+import { useEngineDoc } from "./collab/useEngineDoc";
 import { parseFrontmatter } from "./markdown/frontmatter";
 import type {
   MarkdownEditorHandle,
@@ -550,19 +550,18 @@ function MarkdownView(props: {
     ? () => props.onSharePath?.(props.path)
     : undefined;
 
-  // Live co-editing only ever activates for SHARED cloud workspaces with a
-  // signed-in session (the collabToken IPC returns available:false otherwise).
-  // When it does, Tiptap is driven by the shared rich Y.Doc instead of the
-  // local autosave path — personal/local-only stays byte-identical to today.
-  const collab = useCollabDoc({
+  // WS-G2-C-2: a rich (markdown) file on an engine-flagged workspace binds
+  // Tiptap to the engine-native Y.Doc (recordUpdate + debounced settle),
+  // replacing the old HocuspocusProvider path — solo runs entirely on the
+  // engine with no relay, and a shared workspace co-edits through the same
+  // ydoc.update replication. available:false (unflagged workspace, secret path,
+  // missing file, already live) keeps the plain local autosave editor.
+  const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
-    // The on-disk text so the collab session can reconcile external changes
-    // (agent edits, sync pulls) into the live doc instead of clobbering them.
-    onDiskText: props.body,
     enabled: !props.truncated && !props.forceReadOnly,
   });
-  const readOnly = !!props.forceReadOnly || (props.truncated && !collab.enabled);
+  const readOnly = !!props.forceReadOnly || (props.truncated && !engine.available);
 
   useEffect(() => {
     if (!readOnly) return;
@@ -571,8 +570,8 @@ function MarkdownView(props: {
   }, [readOnly]);
 
   useEffect(() => {
-    if (props.truncated && !collab.enabled) setPropertiesOpen(false);
-  }, [props.truncated, collab.enabled]);
+    if (props.truncated && !engine.available) setPropertiesOpen(false);
+  }, [props.truncated, engine.available]);
 
   // Performance measure: MarkdownView only mounts once the document body is
   // loaded, so this post-commit effect brackets click → IPC read → markdown
@@ -653,7 +652,7 @@ function MarkdownView(props: {
         : serializeDraftRef.current();
     latestDraft.current = current;
     setDraft(current);
-    if (next !== "source" && propertiesOpen && !collab.enabled) {
+    if (next !== "source" && propertiesOpen && !engine.available) {
       setPropertiesOpen(false);
     }
     setMode(next);
@@ -674,8 +673,8 @@ function MarkdownView(props: {
 
   function togglePropertiesPanel() {
     const opening = !propertiesOpen;
-    if (opening && props.truncated && !collab.enabled) return;
-    if (opening && mode !== "source" && !collab.enabled) {
+    if (opening && props.truncated && !engine.available) return;
+    if (opening && mode !== "source" && !engine.available) {
       switchMode("source");
     }
     setPropertiesOpen(opening);
@@ -743,16 +742,13 @@ function MarkdownView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush, readOnly]);
 
-  // Materialization of the converged CRDT back to the file lives inside
-  // useCollabDoc, gated on sync and routed through the canonical-state model
-  // (collabSession.ts) so a stale/empty doc folds the on-disk text in rather
-  // than clobbering it — never a blind write of the live text over the file.
-
-  // Collab mode: the shared rich Y.Doc drives Tiptap. There is no local save
-  // state (the CRDT is canonical; main materializes to disk at settle points),
-  // so the toolbar shows live presence instead. Co-editing has no separate
-  // "Edit" gate once the provider has synced.
-  if (collab.enabled && collab.ydoc) {
+  // Engine mode: the engine-native rich Y.Doc drives Tiptap (recordUpdate +
+  // debounced settle in main; engine.db + the .md are the durable artifact).
+  // There is no read/source/Edit gate here — the CRDT is canonical the whole
+  // time the doc is open — but a settle indicator keeps the editing feel
+  // unchanged, and undo/redo stays intact through the Collaboration extension's
+  // Yjs UndoManager. This replaces the old HocuspocusProvider collab branch.
+  if (engine.available && engine.doc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <ViewHeader
@@ -762,6 +758,13 @@ function MarkdownView(props: {
           onShare={onShareCurrentPath}
           actions={
             <>
+              <span
+                data-testid="markdown-save-state"
+                data-state={engine.saveState}
+                className="text-[11px] text-subtle"
+              >
+                {engine.saveState === "saved" ? "Saved" : "Saving…"}
+              </span>
               <button
                 type="button"
                 data-testid="markdown-properties-toggle"
@@ -776,25 +779,12 @@ function MarkdownView(props: {
               >
                 <SlidersHorizontal size={13} aria-hidden />
               </button>
-              <span
-                data-testid="collab-presence"
-                data-peer-count={collab.peerCount}
-                className="flex items-center gap-1 text-[11px] text-accent"
-              >
-                <span
-                  aria-hidden
-                  className="inline-block h-1.5 w-1.5 rounded-full bg-success"
-                />
-                {collab.peerCount === 0
-                  ? "Live · just you"
-                  : `${collab.peerCount + 1} editing`}
-              </span>
             </>
           }
         />
         {propertiesOpen ? (
           <Suspense fallback={<PropertiesFallback />}>
-            <LazyPropertiesPanel ydoc={collab.ydoc} />
+            <LazyPropertiesPanel ydoc={engine.doc} />
           </Suspense>
         ) : null}
         {props.truncatedNotice}
@@ -820,10 +810,13 @@ function MarkdownView(props: {
               pendingUndo={editorPendingUndo}
               onPendingUndoConsumed={props.onPendingUndoConsumed}
               collab={{
-                ydoc: collab.ydoc,
-                status: collab.status,
-                peerCount: collab.peerCount,
-                synced: collab.synced,
+                ydoc: engine.doc,
+                // Solo engine editing shows the settle indicator, not presence
+                // chrome — "disabled" hides the in-editor presence bar while the
+                // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
+                status: "disabled",
+                peerCount: 0,
+                synced: true,
               }}
             />
           </Suspense>
