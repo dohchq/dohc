@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateStateEvent } from "../../ipc/bridgeContract";
+import type { AgentNotification } from "./agentNotifications";
 import { StatusBar } from "./StatusBar";
 
 // Captures the renderer-side update listener exactly as the preload would
@@ -69,11 +70,33 @@ function renderBar(
       {...(props.onDismissSyncReview
         ? { onDismissSyncReview: props.onDismissSyncReview }
         : {})}
+      {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
+      {...(props.onOpenAgentNotification
+        ? { onOpenAgentNotification: props.onOpenAgentNotification }
+        : {})}
+      {...(props.onDismissAgentNotification
+        ? { onDismissAgentNotification: props.onDismissAgentNotification }
+        : {})}
       onOpenSettings={() => {}}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
     />,
   );
+}
+
+function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
+  return {
+    id: "ws-a::run-1::finished",
+    kind: "finished",
+    workspaceId: "ws-a",
+    workspaceName: "Personal",
+    agentName: "You's agent",
+    runId: "run-1",
+    title: "Your agent finished",
+    body: "Reorganized /notes into three folders.",
+    createdAtMs: 1_700_000_000_000,
+    ...overrides,
+  };
 }
 
 describe("update toast", () => {
@@ -477,6 +500,54 @@ describe("notice center", () => {
         name: "Restart",
       }),
     ).toBeNull();
+  });
+
+  it("surfaces agent notifications with specific copy, newest first", async () => {
+    renderBar({
+      agentNotifications: [
+        agentNotice({ id: "ws-a::run-1::finished", createdAtMs: 1000 }),
+        agentNotice({
+          id: "ws-a::run-2::asked",
+          kind: "asked",
+          runId: "run-2",
+          title: "Your agent has a question",
+          body: "Which draft should I keep?",
+          createdAtMs: 2000,
+        }),
+      ],
+      onOpenAgentNotification: vi.fn(),
+      onDismissAgentNotification: vi.fn(),
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const center = screen.getByTestId("notice-center");
+    expect(within(center).getByTestId("notice-center-count").textContent).toBe("2");
+    // Newest (the ask) leads; specific copy is shown verbatim.
+    const items = within(center).getAllByRole("listitem");
+    expect(items[0]!.textContent).toContain("Which draft should I keep?");
+    expect(within(center).getByText("Reorganized /notes into three folders.")).toBeTruthy();
+  });
+
+  it("opens and dismisses an agent notification through its actions", async () => {
+    const onOpenAgentNotification = vi.fn();
+    const onDismissAgentNotification = vi.fn();
+    const notice = agentNotice();
+    renderBar({
+      agentNotifications: [notice],
+      onOpenAgentNotification,
+      onDismissAgentNotification,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const center = screen.getByTestId("notice-center");
+    await userEvent.click(within(center).getByRole("button", { name: "Open" }));
+    expect(onOpenAgentNotification).toHaveBeenCalledWith(notice);
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByTestId(
+        "notice-ws-a::run-1::finished-dismiss",
+      ),
+    );
+    expect(onDismissAgentNotification).toHaveBeenCalledWith("ws-a::run-1::finished");
   });
 
   it("closes the notice popover on outside click while preserving inside clicks", async () => {
