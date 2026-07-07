@@ -136,6 +136,12 @@ export function collectBlobHashesFromOp(op: SyncReplicationEnvelope): OpBlobRefs
         (snapshot.contentKind ?? "text") === "binary" ? "binary" : "text",
       );
     }
+  } else if (op.opKind === "ydoc.update") {
+    // The Yjs update bytes are content-addressed into binary_blobs and ride the
+    // binary blob-have/blob-put path (dedup for free). Declaring them here makes
+    // the push uploader ship the blob BEFORE the log op (honoring the relay's
+    // append-time blob-ref validation) and the apply hydrate it before the txn.
+    push(op.payload.updateBlobSha256, "binary");
   } else if (op.opKind === "secret.file.put") {
     push(op.payload.ciphertextSha256, "binary");
   } else if (op.opKind === "secret.version.fork") {

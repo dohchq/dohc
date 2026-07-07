@@ -75,6 +75,8 @@ import {
   trackEngineDbHandleForTest,
 } from "./engineDbSchema";
 import { canonicalEngineDbPath } from "./versionedTextStore";
+import { journalLocalReplicationOp } from "./syncReplication";
+import type { YDocUpdatePayload } from "@dohc/workspace-contracts/engine";
 
 export type YDocContentKind = "richdoc" | "plaintext";
 
@@ -255,6 +257,11 @@ export interface YDocEngineDriver {
     versionId: VersionId;
     path: string;
     contentKind?: YDocContentKind;
+    // WS-G2-C1: when true and this object already has a replicated ydoc.update
+    // lineage persisted locally, seed the live doc from that SHARED CRDT state
+    // (loadPersistedDoc) instead of re-seeding from the file — the join-before-
+    // edit path for co-editing (a fresh seed would fork a divergent lineage).
+    resume?: boolean;
   }): Promise<YDocSession>;
   // "file" when no live session (file is canonical); "ydoc" while a session is
   // live for this object (the Y.Doc is canonical, the file is its projection).
@@ -327,6 +334,19 @@ export function createYDocEngineDriver(
   // Rebind to a non-optional const so nested write helpers (closures) see the
   // narrowed, definitely-present type rather than the optional interface member.
   const runInWriteLane = boundWriteLane;
+  // WS-G2-C1 replication: rich-doc settles must NOT journal a moment.append op
+  // (the object replicates solely through the commutative ydoc.update stream;
+  // journaling the projection too would collide two peers' independent settles
+  // into a P0D conflict). The Y.Doc driver therefore REQUIRES the store's
+  // non-journaling projection write — fail loud if a store lacks it.
+  const boundProjectedWrite = store.writeProjectedTextFile?.bind(store);
+  if (!boundProjectedWrite) {
+    throw new YDocEngineDriverError(
+      "invalid-input",
+      "VersionedTextStore does not expose writeProjectedTextFile; the Y.Doc driver requires it so rich-doc settles never double-replicate as moment.append.",
+    );
+  }
+  const writeProjection = boundProjectedWrite;
   // Canonical (symlink/alias-resolved) engine.db identity: two drivers whose
   // rootDirs point at the SAME physical engine.db (via a symlink or case alias)
   // must share ONE reservation namespace, or each would be free to open the same
@@ -515,10 +535,14 @@ export function createYDocEngineDriver(
 
   // Reset the persisted log for a key to a single base snapshot of `doc`. Used
   // on open (trust the file: the prior log is dead) and after a merge reseed.
+  // ALSO journals a full-state BASE ydoc.update op (WS-G2-C1): it makes the
+  // replicated op stream self-contained so a from-scratch peer (no file, no
+  // prior state) can reconstruct the doc, and re-bases replay after each open.
   async function resetPersistedState(
     key: YDocDocKey,
     contentKind: YDocContentKind,
     doc: Y.Doc,
+    path: string,
   ): Promise<void> {
     const snapshotBytes = Y.encodeStateAsUpdate(doc);
     const stateVectorBytes = Y.encodeStateVector(doc);
@@ -562,6 +586,14 @@ export function createYDocEngineDriver(
            VALUES (?, ?, ?, 0, ?, ?, ?)`,
         )
         .run(key.workspaceId, key.versionId, key.objectId, snapshotSha, stateVectorSha, now);
+      // Journal the full-state BASE op in the SAME transaction (the snapshot
+      // blob is already in binary_blobs above, satisfying blob-before-log).
+      journalLocalReplicationOp(conn, {
+        workspaceId: key.workspaceId,
+        opKind: "ydoc.update",
+        payload: ydocUpdatePayload(key, contentKind, path, snapshotSha, true),
+        recordedAtMs: now,
+      });
     });
   }
 
@@ -597,6 +629,21 @@ export function createYDocEngineDriver(
     ...(summary !== undefined ? { summary } : {}),
   });
 
+  const ydocUpdatePayload = (
+    key: YDocDocKey,
+    contentKind: YDocContentKind,
+    path: string,
+    updateBlobSha256: string,
+    isBaseState: boolean,
+  ): YDocUpdatePayload => ({
+    versionId: key.versionId,
+    objectId: key.objectId,
+    path,
+    contentKind,
+    updateBlobSha256,
+    ...(isBaseState ? { isBaseState: true } : {}),
+  });
+
   return {
     canonicalSourceFor({ workspaceId, objectId }) {
       // Process-global: an object is canonical-ydoc if ANY driver instance holds
@@ -614,7 +661,7 @@ export function createYDocEngineDriver(
       return loadPersistedDoc(key);
     },
 
-    async openSession({ workspaceId, versionId, path, contentKind }) {
+    async openSession({ workspaceId, versionId, path, contentKind, resume }) {
       const snapshot = await store.readTextFile({ workspaceId, versionId, path });
       if (!snapshot) {
         throw new YDocEngineDriverError(
@@ -636,11 +683,24 @@ export function createYDocEngineDriver(
           `Object ${objectId} already has a live Y.Doc session; close it before opening another (single-canonical).`,
         );
       }
-      const kind: YDocContentKind = contentKind ?? "richdoc";
       const key: YDocDocKey = { workspaceId, versionId, objectId };
 
-      // Flip file -> Y.Doc: seed from the CURRENT file, never a stale cache.
-      const doc = seedDoc(snapshot.text, kind);
+      // RESUME (WS-G2-C1 co-edit join): when a peer has already applied this
+      // doc's replicated ydoc.update lineage, it MUST resume the SHARED CRDT
+      // state (loadPersistedDoc) rather than re-seed from the file — two
+      // independent markdownToYDoc seeds mint different Yjs item ids for the
+      // same text, and editing both then merging would DUPLICATE content
+      // (inherent CRDT property). Resuming keeps the shared lineage so
+      // concurrent edits converge. Falls back to file-seed when there is no
+      // persisted lineage yet (the origin, or a doc never replicated here).
+      const persistedMarker = readDocRow(key);
+      const persistedDoc = resume ? loadPersistedDoc(key) : null;
+      const resumed = persistedDoc !== null;
+      const kind: YDocContentKind =
+        contentKind ?? (resumed ? persistedMarker?.contentKind ?? "richdoc" : "richdoc");
+      // Flip file -> Y.Doc: seed from the CURRENT file (never a stale cache),
+      // UNLESS resuming a replicated lineage.
+      const doc = resumed && persistedDoc ? persistedDoc : seedDoc(snapshot.text, kind);
       // Reserve BEFORE the reset write so a concurrent open for the same object
       // (any instance) loses the race here, not after clobbering the log.
       globalLiveYDocReservations.add(reservationKey);
@@ -651,7 +711,9 @@ export function createYDocEngineDriver(
       // "live" forever, blocking every future openSession for it.
       let sessionInstalled = false;
       try {
-        await resetPersistedState(key, kind, doc);
+        // Resuming keeps the existing replicated log intact (a reset would fork
+        // a new lineage and diverge). A fresh open re-bases from the file.
+        if (!resumed) await resetPersistedState(key, kind, doc, path);
         // Test seam: simulate a mid-open failure AFTER the reservation is taken
         // but BEFORE the session installs, proving release-on-any-throw covers
         // the whole open path (not just the reset step).
@@ -674,7 +736,11 @@ export function createYDocEngineDriver(
 
       async function doSettle(summary?: string): Promise<YDocSettleResult> {
         const markdown = projectMarkdown(doc, kind);
-        const result = await store.writeTextFile({
+        // Non-journaling projection write (WS-G2-C1): the object replicates only
+        // through ydoc.update ops, so its settle must NEVER journal moment.append
+        // (two peers' independent settles would collide into a P0D conflict on
+        // markdown the CRDT already reconciled).
+        const result = await writeProjection({
           workspaceId,
           versionId,
           path,
@@ -745,6 +811,18 @@ export function createYDocEngineDriver(
                   WHERE workspace_id = ? AND version_id = ? AND object_id = ?`,
               )
               .run(seq, now, workspaceId, versionId, objectId);
+            // WS-G2-C1: journal the commutative ydoc.update DELTA op in the SAME
+            // transaction as the ydoc_updates append (the blob is already in
+            // binary_blobs above — blob-before-log holds). This is what makes a
+            // live edit replicate; the settle's markdown never journals a
+            // moment.append (writeProjection), so the ydoc.update stream is this
+            // object's sole replication channel.
+            journalLocalReplicationOp(conn, {
+              workspaceId,
+              opKind: "ydoc.update",
+              payload: ydocUpdatePayload(key, kind, path, sha, false),
+              recordedAtMs: now,
+            });
           });
           await compact(key);
           return { seq };
@@ -768,7 +846,7 @@ export function createYDocEngineDriver(
             // (markdown-is-the-artifact: the projection is the merge surface).
             const merged = seedDoc(merge.content, kind);
             replaceDocContent(doc, merged, kind);
-            await resetPersistedState(key, kind, doc);
+            await resetPersistedState(key, kind, doc, path);
             lastSettledMarkdown = projectMarkdown(doc, kind);
             return { kind: "merged", markdown: lastSettledMarkdown };
           }

@@ -1004,6 +1004,13 @@ export function referencedBlobShas(opKind: string, payloadJson: string): string[
       const snapshot = asObject(raw);
       if (snapshot) push(snapshot.blobSha256);
     }
+  } else if (opKind === "ydoc.update") {
+    // A ydoc.update's Yjs bytes are content-addressed like any binary blob. The
+    // relay stays content-agnostic (dumb log) but must count this reference so
+    // (a) append-time validation requires the blob uploaded first, and (b) the
+    // blob GC treats a blob a live ydoc.update op references as a ROOT — a live
+    // rich-doc update blob is never collected out from under the log.
+    push(record.updateBlobSha256);
   } else if (opKind === "secret.file.put") {
     push(record.ciphertextSha256);
   } else if (opKind === "secret.version.fork") {
