@@ -37,8 +37,6 @@ import {
   resolveConflict,
   searchWorkspaceFiles,
   share,
-  syncCloud,
-  syncNow,
   testSite,
   writeWorkspaceFile,
   workspaceStatus,
@@ -115,28 +113,10 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await workspaceStatus(ctx)),
   );
 
-  server.registerTool(
-    "dohc_sync_now",
-    {
-      description:
-        "LEGACY cloud path: report pre-flip legacy change sets pending since a cursor for the retired cloud sync. Engine moments never appear here (use dohc_list_changes); kept until the engine folder sync replaces it. No network push.",
-      inputSchema: { sinceMs: z.number().int().nonnegative().optional() },
-    },
-    async (args) => text(await syncNow(ctx, args)),
-  );
-
-  registerWrite(
-    "dohc_sync_cloud",
-    {
-      description:
-        "Run dohc Cloud merge sync for this workspace. Pull merges safely; push sends local file changes already recorded in history.",
-      inputSchema: {
-        direction: z.enum(["pull", "push", "push-pull"]).optional(),
-      },
-    },
-    async (args) => text(await syncCloud(ctx, args)),
-  );
-
+  // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
+  // retired workspace-api file/sync routes. Cloud sync is now automatic per
+  // workspace via the sync relay; use dohc_list_changes for workspace history
+  // and dohc_workspace_status to see whether a workspace is cloud-synced.
   server.registerTool(
     "dohc_list_changes",
     {

@@ -5,8 +5,10 @@ title: dohc Product Spec
 
 # dohc — product spec (overview)
 
-A working summary of what dohc does today. The desktop implementation
-lives in `apps/desktop`; the Cloud web client lives in `apps/web`.
+A working summary of what dohc does today. dohc is a desktop-first product;
+the implementation lives in `apps/desktop`. There is no web client — cloud is
+opt-in collaboration (Better Auth, Hocuspocus collab, and a sync-relay over
+Postgres) that the desktop app connects to.
 
 ## Core model
 
@@ -65,8 +67,8 @@ lives in `apps/desktop`; the Cloud web client lives in `apps/web`.
 ## Stack
 
 Electron, React 19, Vite, Tailwind CSS v4, SQLite (`node:sqlite`), Rust
-(workspace kernel), Tiptap, Yjs + Hocuspocus (opt-in cloud collab), WorkOS
-AuthKit (cloud auth), Vitest, Playwright.
+(workspace kernel), Tiptap, Yjs + Hocuspocus (opt-in cloud collab), Better
+Auth over Postgres (cloud auth) with a sync-relay, Vitest, Playwright.
 
 ## Invariants
 

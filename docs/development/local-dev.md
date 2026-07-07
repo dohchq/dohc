@@ -25,31 +25,33 @@ pnpm test:desktop:e2e              # Playwright E2E (builds first)
 pnpm typecheck                     # repo-wide tsc --noEmit
 ```
 
-## Cloud stack (opt-in, retiring per audit Phase D)
+## Cloud stack (opt-in, reduced surface)
 
-Only needed for cloud sync/shares/collab development:
+Only needed for live-collaboration and sync-relay development (both opt-in;
+the desktop default needs none of it):
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d postgres minio hocuspocus
-pnpm dev:workspace-api
-pnpm dev            # apps/web dev server
+pnpm dev:workspace-api               # collab + auth (Better Auth on /api/auth)
+pnpm --filter @dohc/sync-relay dev   # sync relay
 ```
 
 Environment variables for the stack live in `.env.self-host.example` and
-`docker-compose.dev.yml` (Postgres, MinIO, `HOCUSPOCUS_*`, WorkOS for cloud
-auth, `SQLITE_WORKER_TOKEN`, `APP_TESTER_TOKEN`). See
-[`docs/self-hosting.md`](../self-hosting.md).
+`docker-compose.dev.yml` (Postgres, MinIO, `HOCUSPOCUS_*`, `BETTER_AUTH_SECRET`
+for cloud auth shared by workspace-api and the relay, `SQLITE_WORKER_TOKEN`).
+See [`docs/self-hosting.md`](../self-hosting.md).
 
 ## Monorepo layout
 
 ```text
 apps/desktop          Electron desktop app (local-first product)
-apps/web              web client for the opt-in cloud stack
 packages              workspace engine, contracts, core/fs/history/sync,
+                      workspace-auth, workspace-postgres (collab membership),
                       MCP server, SDK, brand, performance
-services              Hocuspocus, workspace API, SQLite worker, agent sandbox
+services              Hocuspocus (collab), workspace API (collab + auth),
+                      sync relay, SQLite worker, agent sandbox
 crates                Rust workspace kernel
 ```
 
 Internal workspace packages ship raw TS source; consumers transpile them
-(electron-vite for the desktop, Vite `ssr.noExternal` for the web app).
+(electron-vite for the desktop).

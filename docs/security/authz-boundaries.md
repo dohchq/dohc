@@ -49,14 +49,24 @@ This page states where authorization is enforced today.
   writes); engine chat tools require the workspace's engine to be enabled and
   a workspace manifest identity.
 
-## Cloud (opt-in, retiring per audit Phase D)
+## Cloud (opt-in, reduced surface)
 
-- The legacy cloud stack (`services/workspace-api`, Hocuspocus, Postgres) is
-  reachable only through explicit opt-in cloud sync with bearer-token auth;
-  nothing on the local default path depends on it. Collab tokens are minted
-  only for shared cloud workspaces with a signed-in session and fail closed
-  to local editing. Arc 0P rebuilds sync engine-native; the rebuilt server
-  owns its own authorization design note when it lands.
+- The opt-in cloud stack is reduced to **live collaboration** and the **sync
+  relay**; nothing on the local default path depends on either. Identity comes
+  only from a validated Better Auth session (the auth surface lives in
+  `packages/workspace-auth`, mounted by `services/workspace-api` and reused by
+  `services/sync-relay` — a bearer token minted by the workspace-api device
+  flow validates at the relay against the same Postgres and secret). Client
+  callers never supply identity; the resolver derives the actor server-side.
+- The collab-token route (`POST /workspaces/:id/collab/token`) mints a
+  hocuspocus-verifiable token only after that session check AND a
+  `hasWorkspaceMembership` check (`packages/workspace-postgres`), membership
+  before atom existence so non-members cannot probe atom paths; it fails closed
+  (collab-disabled) when no collab secret is configured.
+- The former sharing/members/invites/files/sync web surface and the `apps/web`
+  client were retired. Postgres survives for Better Auth's `user` table and the
+  membership check. Engine-native sync (Arc 0P) is the ongoing replacement; the
+  history/sync salvage and full Postgres-for-auth retirement remain deferred.
 
 Security rule unchanged from the beginning: client callers never provide
 user identity or workspace authorization; the process that owns the data

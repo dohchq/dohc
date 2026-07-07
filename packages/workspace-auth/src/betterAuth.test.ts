@@ -1,9 +1,7 @@
-import type { WorkspaceBackend } from "@dohc/workspace-contracts";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createWorkspaceApiHandler } from "../server";
 import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
-import { createSessionActorResolver, UnauthorizedError } from "./session";
+import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
 // conformance tests): pnpm dev:postgres first. The 0002_better_auth migration
@@ -31,12 +29,30 @@ async function sessionCookieFor(email: string): Promise<string> {
   return signin.headers.get("set-cookie")?.split(";")[0] ?? "";
 }
 
+// A minimal request handler standing in for the API layer: resolve the actor
+// (401 on UnauthorizedError) and otherwise echo ok. This keeps the cookie
+// path's request-handler coverage without workspace-auth depending on the
+// application server it feeds.
+function miniHandler(resolve: ResolveActor, workspaceId: string) {
+  return async (request: Request): Promise<Response> => {
+    try {
+      const actor = await resolve(request, workspaceId);
+      return Response.json({ ok: true, userId: actor.userId });
+    } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        return Response.json({ ok: false }, { status: 401 });
+      }
+      throw error;
+    }
+  };
+}
+
 beforeAll(async () => {
   pool = new Pool({ connectionString: POSTGRES_URL });
   const { readFile } = await import("node:fs/promises");
   const migration = await readFile(
     new URL(
-      "../../../../packages/workspace-postgres/src/db/migrations/0002_better_auth.sql",
+      "../../workspace-postgres/src/db/migrations/0002_better_auth.sql",
       import.meta.url,
     ),
     "utf8",
@@ -227,16 +243,15 @@ describe("browser cookie sessions (web client)", () => {
     );
     expect(actor).toEqual({ userId: signup.user.id, workspaceId: "ws-cookie" });
 
-    // Route-level: the full API handler serves a cookie-authenticated request.
-    const handler = createWorkspaceApiHandler({
-      backend: { listFiles: async () => [] } as unknown as WorkspaceBackend,
-      resolveActor: resolve,
-    });
+    // Route-level: a request handler built on this resolver serves a
+    // cookie-authenticated request and 401s an anonymous one (the same
+    // resolver the API layer wires in).
+    const handler = miniHandler(resolve, "ws-cookie");
     const response = await handler(
       new Request("http://localhost:1786/workspaces/ws-cookie/files", { headers: { cookie } }),
     );
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, files: [] });
+    await expect(response.json()).resolves.toEqual({ ok: true, userId: signup.user.id });
 
     const anonymous = await handler(
       new Request("http://localhost:1786/workspaces/ws-cookie/files"),

@@ -18101,3 +18101,137 @@ Dogfooding. The engine is the default and every loop is tested and reviewed,
 but the product's promise is a *feel* — flip a real workspace, work in a named
 version for a day, hand a task to an agent with "Try in a version", and let
 the friction reshape the next phase more than any document does.
+
+## Legacy Cloud Safe Deletion
+
+Scope: the safe, tightly-bounded slice of the legacy-cloud retirement (audit
+Phase D). Live co-editing SURVIVES per User Decision — Hocuspocus, the
+workspace-api collab route + auth wiring, the workspace-postgres membership
+slice, and renderer collab all stay. `workspace-history` and `workspace-sync`
+were left untouched (they have live engine/MCP importers). Postgres stays for
+Better Auth's `user` table and the collab membership check.
+
+Sequence (each step left typecheck + suites green; one commit per step):
+
+1. **Auth extraction.** Moved the relay's production auth surface out of
+   `services/workspace-api` into a new `packages/workspace-auth`
+   (`@dohc/workspace-auth`, subpath exports `./betterAuth` + `./session`). Cut
+   the one bad edge — `betterAuth.ts` imported `claimWorkspaceInvitations` from
+   workspace-api routes — by replacing it with an injected optional
+   `onEmailVerified(user)` callback on `WorkspaceAuthOptions`, invoked in the
+   `afterEmailVerification` hook (errors swallowed + logged, as before).
+   workspace-auth imports nothing from workspace-api. Re-pointed both consumers:
+   `services/sync-relay` (the relay's PRODUCTION login) and workspace-api's
+   `main.ts`, which passes `onEmailVerified: claimWorkspaceInvitations` to
+   preserve today's claim-on-verification behavior.
+2. **Deleted `apps/web`** (46 files, ~6.6k LOC; nothing imported `@dohc/web`).
+   Re-pointed root `dev` to the desktop, dropped web-only scripts, deleted the
+   web-only root `playwright.config.ts`, removed the compose `web` service.
+3. **Reduced `services/workspace-api` to collab + auth.** Deleted the
+   shares/shared/members/invites/dataFragments/sync/files/workspaces/email
+   routes + `realtime/`; kept only `POST /workspaces/:id/collab/token` and the
+   Better Auth wiring. `workspace-fs`'s `localMode.test.ts` (which drove
+   `createLocalSyncClient` through the old file/sync routes) was re-based onto
+   an in-test stub of that HTTP contract, faithful to the retired
+   `applyWorkspaceSync` (per-op, non-fail-fast, approval codes in `results[]`);
+   the `@dohc/workspace-api` devDep was dropped. Coverage preserved.
+4. **Reduced `packages/workspace-postgres` to the membership slice.** Kept
+   `repositories/workspaces` (`hasWorkspaceMembership` + `listUserWorkspaces`),
+   `defaultPostgresUrl`/`createPgPool` (trimmed to raw pg — dropped drizzle +
+   schema.ts), and migrations `0001`/`0002`/`0003`. Deleted blobStore,
+   policy/authorize, repositories/{atoms,assets,events}, all of services/*, the
+   drizzle schema, and the deleted-feature migrations `0004`..`0010`. Dropped
+   now-unused deps `drizzle-orm` + `@dohc/workspace-contracts`.
+5. **Config + docs.** self-host compose: workspace-api reduced to the collab +
+   auth service (added shared `HOCUSPOCUS_JWT_SECRET`, dropped the unused
+   object-storage dep + `DOHC_BACKEND`); `.env.self-host.example` dropped
+   `DOHC_BACKEND`/`WEB_PORT`/stale `APP_TESTER_*`; `check-self-host.mjs`
+   REQUIRED_SERVICES now matches the real compose (dropped web + app-tester,
+   added sync-relay) and its package refs were de-staled. Updated README + the
+   living docs (backend-modes, authz-boundaries, self-hosting, local-dev,
+   AGENTS.md) to the reduced-surface / relay-auth reality; historical
+   point-in-time records were left untouched.
+
+Result: 89 files deleted, ~15.6k lines removed (387 added), lockfile aside.
+Final suites all green on live Postgres: workspace-engine 389, desktop 960,
+sync-relay 53, workspace-auth 8, workspace-api 10, workspace-postgres 2,
+workspace-fs 44, hocuspocus 96, mcp 80, workspace-core 108, workspace-history
+47, workspace-sync 38, workspace-contracts 10, sdk 20, performance 18,
+sqlite-worker 11, agent-sandbox 3, workspace-kernel-client 8; repo-wide
+typecheck clean; desktop build + the load-bearing e2e (workspace-collab-
+decoupling, workspace-sync-rejoin, workspace-shares) 6/6; `check-self-host` and
+the think-bigger doc-links checker green.
+
+### Completion round: orphaned client surfaces + gate fixes
+
+The route deletion above left the desktop and MCP CLIENTS pointing at deleted
+workspace-api routes (they would 404 at runtime; unit tests missed it). This
+round removed the dead client surfaces and cleared the review gate.
+
+- **Desktop dead surfaces removed.** Deleted the legacy IPC handlers in
+  `apps/desktop/src/main.ts` for the retired routes: the `cloudDataFragments`
+  path (`createDataFragment`/`listDataFragments`/`readDataFragment`/
+  `revokeDataFragment` → deleted `/data-fragments`) and the workspace
+  shares/members/invites handlers (`listWorkspaceShares`/`createWorkspaceShare`/
+  `revokeWorkspaceShare`/`listWorkspaceMembers`/`listWorkspaceInvites`/
+  `createWorkspaceInvite`/`revokeWorkspaceInvite` → deleted
+  `/workspaces/:id/{shares,members,invites}`), plus the now-unused `cloudJson`
+  main-process helper. Removed the matching channel consts
+  (`apps/desktop/src/ipc/channels.ts`), the zod schemas + `DesktopBridge`
+  method signatures (`bridgeContract.ts`), the preload bridge methods
+  (`preload.ts`), and the "import-export" (Data Fragments) menu command from the
+  three closed menu tuples + `main.ts`/`applicationMenu.ts`/`Explorer.tsx`
+  builders. Deleted the entirely-legacy renderer dialogs `ShareDialog.tsx`
+  (never even wired), `WorkspaceManagementDialog.tsx` (members/invites), and
+  `ImportExportDialog.tsx` (cloud data fragments), plus their tests and
+  `workspaces/cloudDataFragments.ts`. Excised their wiring from
+  `DesktopWorkspaceShell.tsx` (lazy imports, state, palette/menu/toolbar/
+  empty-state entry points) and the now-unused `onManageWorkspace` seam on
+  `CloudLogin.tsx`. Grep-verified zero surviving references to the removed
+  channels/functions/dialogs.
+- **PR-18 relay shares + collab preserved (evidence).** The relay-share system
+  (`createRelayShare`/`listRelayShares`/`revokeRelayShare` → live sync-relay
+  `/sync/:ws/shares`), `RelayShareDialog.tsx`, the `relayShareJson` helper, and
+  the collab-token path (`/workspaces/:id/collab/token`, hocuspocus, renderer
+  collab) were all left untouched. Desktop suite 935 green including the
+  relay-share tests; the workspace-shares e2e (PR-18) still passes, proving the
+  correct share system was kept.
+- **MCP legacy cloud sync resolved.** Removed the `dohc_sync_now` and
+  `dohc_sync_cloud` tool registrations (`packages/mcp/src/server.ts`) and the
+  `syncCloud`/`createMergeSync` implementation + helpers
+  (`packages/mcp/src/tools.ts`) that targeted the deleted `/workspaces/:id/files`
+  + `/sync/apply` routes; dropped the now-unused `@dohc/workspace-sync` import
+  and package dependency from `@dohc/mcp`. Honest replacement: no dead tool
+  remains — a comment points agents at `dohc_list_changes` (engine history) and
+  `dohc_workspace_status`; cloud sync is now automatic per workspace via the
+  sync relay. `workspace-sync/cloudSync.ts` itself stays as deferred dead code
+  (no live caller once MCP stopped calling it). MCP suite 74 green.
+- **Reduced-surface membership limitation (known).** Invitation-claim-on-verify
+  was intentionally retired with the members/invites routes; the optional
+  `onEmailVerified` seam in `@dohc/workspace-auth` is deliberately left unset by
+  workspace-api (documented at the `createWorkspaceAuth` call site). The seam
+  stays optional because the sync-relay still supplies it. Cloud collab
+  membership is now seeded out-of-band in the reduced surface — there is no
+  in-product invitation flow.
+- **Gate fixes.** Restored/confirmed the `@dohc/workspace-postgres` root `"."`
+  export → `./src/index.ts` (already present; verified it resolves). Removed the
+  consumer-less MinIO/object-storage service + volume from
+  `docker-compose.self-host.yml`, its env from `.env.self-host.example`, its
+  `REQUIRED_SERVICES` entry from `check-self-host.mjs`, and its mention in
+  `docs/self-hosting.md` (grep confirmed no kept service reads `MINIO_`/
+  `OBJECT_STORAGE_`). Made `HOCUSPOCUS_JWT_SECRET` fail-fast
+  (`${HOCUSPOCUS_JWT_SECRET:?…}`) on both services. De-staled `docs/product/
+  spec.md` (dropped the `apps/web` cloud-client + WorkOS AuthKit lines →
+  desktop-first, Better Auth + collab + sync-relay over Postgres).
+
+Verification: repo-wide `pnpm -r typecheck` clean; suites green — desktop 935,
+mcp 74, workspace-api 10, sync-relay 53, workspace-auth 8, workspace-fs 44,
+workspace-engine 389, workspace-postgres 2 (live pg); desktop build + the
+load-bearing e2e (workspace-collab-decoupling, workspace-sync-rejoin,
+workspace-shares) green; `git diff --check` clean; `check-self-host` passes with
+the reduced matrix; doc-links checker green.
+
+Deferred (recorded follow-up for the full retirement): the `workspace-history`
+and `workspace-sync` salvage (live engine/MCP importers keep them for now), and
+the eventual full Postgres-for-auth retirement once Arc 0P's engine-native sync
+subsumes the relay + collab auth path.

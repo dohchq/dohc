@@ -7,10 +7,11 @@ clear, traceable, and ready. Spoken "dock"; always written lowercase.
 
 ```text
 apps/desktop          Electron desktop app (the product; local-first)
-apps/web              web client for the opt-in cloud stack
 packages              workspace engine, contracts, core/fs/history/sync,
+                      workspace-auth, workspace-postgres (collab membership),
                       MCP server, SDK, brand, performance
-services              Hocuspocus, workspace API, SQLite worker, agent sandbox
+services              Hocuspocus (collab), workspace API (collab + auth),
+                      sync relay, SQLite worker, agent sandbox
 crates                Rust workspace kernel (supervised sidecar)
 docs                  product, brand, development, qa, security
 ```
@@ -28,14 +29,19 @@ history, versions, chats, and search with no backend.
 
 ## Cloud stack (opt-in)
 
-The Postgres-backed cloud stack serves opt-in sync/shares and is retiring in
-favor of engine-native sync (see
-[`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
-and [`docs/self-hosting.md`](docs/self-hosting.md)):
+The engine is the default: the desktop app needs no backend. The opt-in cloud
+stack is now a reduced surface — **live collaboration** (Hocuspocus + the
+workspace-api collab-token route) and the **sync relay**, both authenticated by
+Better Auth over Postgres (Postgres survives for the auth user table and the
+collab membership check). The former sharing/members/invites/files/sync web
+surface has been retired. See
+[`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md) and
+[`docs/self-hosting.md`](docs/self-hosting.md).
 
 ```bash
 pnpm dev:postgres        # local Postgres + MinIO
-pnpm dev:workspace-api   # workspace API
+pnpm dev:hocuspocus      # collab server
+pnpm dev:workspace-api   # workspace API (collab + auth)
 pnpm check:self-host     # validate the self-host compose/service matrix
 pnpm reset:postgres      # reset local Postgres dev data
 ```
@@ -65,5 +71,5 @@ pnpm test:desktop:e2e   # desktop Playwright suite (builds first)
 ## Stack
 
 Electron, React 19, Vite, Tailwind CSS v4, Tiptap, SQLite (`node:sqlite`),
-Rust (workspace kernel), Yjs + Hocuspocus (cloud collab), WorkOS AuthKit
-(cloud auth), Vitest, Playwright.
+Rust (workspace kernel), Yjs + Hocuspocus (cloud collab), Better Auth on
+Postgres (cloud auth), Vitest, Playwright.

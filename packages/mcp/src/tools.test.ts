@@ -19,7 +19,6 @@ import {
   createChangeSetStore,
   isDurableChangeSetRecordingSupported,
 } from "@dohc/workspace-history";
-import type { FetchLike } from "@dohc/workspace-sync";
 import {
   createWorkspaceDirectory,
   addSiteSdk,
@@ -42,8 +41,6 @@ import {
   safeResolve,
   searchWorkspaceFiles,
   share,
-  syncCloud,
-  syncNow,
   testSite,
   writeWorkspaceFile,
   workspaceStatus,
@@ -156,162 +153,6 @@ async function bindCloudWorkspace(
       token: options.token ?? "plain:device-token",
     }),
   );
-}
-
-function fakeCloudServer() {
-  const files = new Map<
-    string,
-    {
-      id: string;
-      kind: "atom" | "asset";
-      contentType: string;
-      revision: number;
-      body?: string;
-      bytesBase64?: string;
-    }
-  >();
-  const seen = { authHeaders: [] as string[], appliedOps: [] as unknown[][] };
-
-  function set(path: string, body: string, contentType = "text/markdown") {
-    const prior = files.get(path);
-    files.set(path, {
-      id: `id-${path}`,
-      kind: "atom",
-      contentType,
-      revision: (prior?.revision ?? 0) + 1,
-      body,
-    });
-  }
-
-  function summary(path: string) {
-    const file = files.get(path)!;
-    return {
-      id: file.id,
-      path,
-      kind: file.kind,
-      contentType: file.contentType,
-      revision: String(file.revision),
-    };
-  }
-
-  function apply(op: Record<string, unknown>): { ok: boolean; error?: string; file?: unknown } {
-    const path = String(op.path ?? "");
-    const existing = files.get(path);
-    if (op.op === "create") {
-      if (existing) return { ok: false, error: "File path already exists" };
-      files.set(path, {
-        id: `id-${path}`,
-        kind: String(op.kind ?? "atom") === "asset" ? "asset" : "atom",
-        contentType: String(op.mediaType ?? "text/markdown"),
-        revision: 1,
-        ...(typeof op.body === "string"
-          ? { body: op.body }
-          : { bytesBase64: String(op.bytesBase64 ?? "") }),
-      });
-      return { ok: true, file: summary(path) };
-    }
-    if (op.op === "update") {
-      if (!existing) return { ok: false, error: "Asset not found" };
-      if (String(existing.revision) !== String(op.expectedRevision)) {
-        return { ok: false, error: "Expected revision is stale" };
-      }
-      files.set(path, {
-        ...existing,
-        contentType: String(op.mediaType ?? existing.contentType),
-        revision: existing.revision + 1,
-        ...(typeof op.body === "string"
-          ? { body: op.body, bytesBase64: undefined }
-          : { bytesBase64: String(op.bytesBase64 ?? ""), body: undefined }),
-      });
-      return { ok: true, file: summary(path) };
-    }
-    if (op.op === "delete") {
-      files.delete(path);
-      return { ok: true };
-    }
-    if (op.op === "rename") {
-      const fromPath = String(op.fromPath ?? "");
-      const toPath = String(op.toPath ?? "");
-      const source = files.get(fromPath);
-      if (!source) return { ok: false, error: "Asset not found" };
-      files.delete(fromPath);
-      files.set(toPath, { ...source, revision: source.revision + 1 });
-      return { ok: true, file: summary(toPath) };
-    }
-    return { ok: false, error: `unsupported op ${String(op.op)}` };
-  }
-
-  const fetchImpl: FetchLike = async (input, init) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    seen.authHeaders.push(headers.get("authorization") ?? "");
-    const json = (body: unknown, status = 200) =>
-      new Response(JSON.stringify(body), {
-        status,
-        headers: { "content-type": "application/json" },
-      });
-
-    if (url.endsWith("/sync/apply") && init?.method === "POST") {
-      const { operations } = JSON.parse(String(init.body)) as {
-        operations: Array<Record<string, unknown>>;
-      };
-      seen.appliedOps.push(operations);
-      const results = operations.map((op) => ({
-        path: op.op === "rename" ? String(op.toPath) : String(op.path),
-        ...apply(op),
-      }));
-      return json({
-        ok: true,
-        applied: results.filter((result) => result.ok).length,
-        results,
-      });
-    }
-
-    if (/\/files$/.test(url)) {
-      return json({ ok: true, files: [...files.keys()].map(summary) });
-    }
-
-    const fileMatch = /\/files\/(.+)$/.exec(url);
-    if (fileMatch) {
-      const path = decodeURIComponent(fileMatch[1]!);
-      const file = files.get(path);
-      if (!file) return json({ ok: false, error: "not found" }, 404);
-      return json({
-        ok: true,
-        file: {
-          revision: String(file.revision),
-          ...(file.body !== undefined ? { body: file.body } : { bytesBase64: file.bytesBase64 }),
-        },
-      });
-    }
-
-    return json({ ok: false, error: `unexpected ${url}` }, 500);
-  };
-
-  return { fetchImpl, files, seen, set };
-}
-
-async function withCloudEnv<T>(
-  env: Record<string, string | undefined>,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const prior = {
-    DOHC_MCP_CLOUD_SERVER_URL: process.env.DOHC_MCP_CLOUD_SERVER_URL,
-    DOHC_MCP_CLOUD_EMAIL: process.env.DOHC_MCP_CLOUD_EMAIL,
-    DOHC_MCP_CLOUD_TOKEN: process.env.DOHC_MCP_CLOUD_TOKEN,
-  };
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await fn();
-  } finally {
-    for (const [key, value] of Object.entries(prior)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
 }
 
 describe("mcp tool path containment", () => {
@@ -477,105 +318,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("sync_now reports a clean local state with no history", async () => {
-    await withWorkspace(async (ctx) => {
-      expect(await syncNow(ctx, {})).toMatchObject({ clean: true, pendingChangeCount: 0 });
-    });
-  });
-
-  it("sync_cloud pushes local workspace files through the bound dohc Cloud workspace", async () => {
-    await withWorkspace(async (ctx) => {
-      await bindCloudWorkspace(ctx);
-      await writeFile(join(ctx.root, "notes.md"), "from local\n");
-      const server = fakeCloudServer();
-
-      const result = await syncCloud(ctx, { direction: "push" }, { fetch: server.fetchImpl });
-      expect(result).toMatchObject({
-        ok: true,
-        direction: "push",
-        pushed: 1,
-        pushedPaths: ["notes.md"],
-        remoteWorkspaceId: "ws-1",
-      });
-      expect(server.files.get("notes.md")?.body).toBe("from local\n");
-      expect(server.seen.authHeaders.every((header) => header === "Bearer device-token")).toBe(true);
-    });
-  });
-
-  it("sync_cloud pulls remote files and reports the engine as recorder (Phase C: no change sets)", async () => {
-    await withWorkspace(async (ctx) => {
-      await bindCloudWorkspace(ctx);
-      const server = fakeCloudServer();
-      server.set("notes/remote.md", "from cloud\n");
-
-      const result = await syncCloud(ctx, { direction: "pull" }, { fetch: server.fetchImpl });
-      expect(result).toMatchObject({
-        ok: true,
-        direction: "pull",
-        pulled: 1,
-        pulledPaths: ["notes/remote.md"],
-      });
-      await expect(readFile(join(ctx.root, "notes", "remote.md"), "utf8")).resolves.toBe(
-        "from cloud\n",
-      );
-
-      // Retirement Phase C: MCP writes no change sets — the pull reports the
-      // engine as the recorder (the desktop watcher captures the new file).
-      expect(result).toMatchObject({ recordedBy: "workspace-engine" });
-      await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
-        count: 0,
-        totalAvailable: 0,
-      });
-    });
-  });
-
-  it("sync_cloud can use desktop-injected cloud env instead of reading the credential file", async () => {
-    await withWorkspace(async (ctx) => {
-      await bindCloudWorkspace(ctx, { credentials: false });
-      await writeFile(join(ctx.root, "notes.md"), "from managed desktop\n");
-      const server = fakeCloudServer();
-
-      await withCloudEnv(
-        {
-          DOHC_MCP_CLOUD_SERVER_URL: "http://cloud.test",
-          DOHC_MCP_CLOUD_EMAIL: "ice@example.test",
-          DOHC_MCP_CLOUD_TOKEN: "env-token",
-        },
-        async () => {
-          const result = await syncCloud(ctx, { direction: "push" }, { fetch: server.fetchImpl });
-          expect(result).toMatchObject({
-            ok: true,
-            pushed: 1,
-            pushedPaths: ["notes.md"],
-          });
-        },
-      );
-
-      expect(server.files.get("notes.md")?.body).toBe("from managed desktop\n");
-      expect(server.seen.authHeaders.every((header) => header === "Bearer env-token")).toBe(true);
-    });
-  });
-
-  it("sync_cloud refuses encrypted desktop credentials in a standalone MCP process", async () => {
-    await withWorkspace(async (ctx) => {
-      await bindCloudWorkspace(ctx, { token: "enc:sealed-token" });
-      await expect(syncCloud(ctx, { direction: "pull" }, { fetch: fakeCloudServer().fetchImpl })).resolves.toMatchObject({
-        ok: false,
-        credentialStatus: "encrypted",
-        reason: expect.stringContaining("safeStorage"),
-      });
-    });
-  });
-
-  it("sync_cloud keeps local-only workspaces offline instead of inventing a remote", async () => {
-    await withWorkspace(async (ctx) => {
-      await expect(syncCloud(ctx, { direction: "push" }, { fetch: fakeCloudServer().fetchImpl })).resolves.toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("local-only"),
-      });
-    });
-  });
-
   it("writes, reads, and lists arbitrary visible files (no legacy change sets after Phase C)", async () => {
     await withWorkspace(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {
@@ -615,13 +357,9 @@ describe("mcp tools operate on allowed paths", () => {
         ]);
       }
 
-      // Retirement Phase C: the write carried no change set (the engine is
-      // the recorder), so the legacy pending view stays clean.
+      // Retirement Phase C: the write carried no legacy change set (the engine
+      // is the recorder).
       expect(written).toMatchObject({ recordedBy: "workspace-engine" });
-      await expect(syncNow(ctx, { sinceMs: 0 })).resolves.toMatchObject({
-        clean: true,
-        pendingChangeCount: 0,
-      });
     });
   });
 
@@ -661,11 +399,6 @@ describe("mcp tools operate on allowed paths", () => {
         );
         await store.record(set, { id: "watcher-record-1", recordedAtMs: 1234 });
 
-        await expect(syncNow(ctx, { sinceMs: 0 })).resolves.toMatchObject({
-          clean: false,
-          pendingChangeCount: 1,
-          pending: [expect.objectContaining({ id: "watcher-record-1" })],
-        });
         await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
           count: 1,
           changes: [
@@ -975,10 +708,6 @@ describe("mcp tools operate on allowed paths", () => {
       // Phase C: none of the mutations wrote a legacy change set.
       expect(moved).toMatchObject({ recordedBy: "workspace-engine" });
       expect(deleted).toMatchObject({ recordedBy: "workspace-engine" });
-      await expect(syncNow(ctx, { sinceMs: 0 })).resolves.toMatchObject({
-        clean: true,
-        pendingChangeCount: 0,
-      });
     });
   });
 

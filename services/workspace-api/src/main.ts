@@ -1,19 +1,16 @@
-import { createLocalBlobStore } from "@dohc/workspace-postgres/blobStore";
-import { createPostgresWorkspaceBackend } from "@dohc/workspace-postgres/services/backend";
-import { createPostgresWorkspaceProvisioner } from "@dohc/workspace-postgres/services/provisioning";
+import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { createSessionActorResolver } from "@dohc/workspace-auth/session";
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
-import { createWorkspaceAuth } from "./auth/betterAuth";
-import { createSessionActorResolver } from "./auth/session";
 import { withCors } from "./cors";
 import { createWorkspaceApiHandler } from "./server";
-import type { HocuspocusAdminClient } from "./routes/shared";
 
-// The dohc Cloud / self-host server process: ONE Postgres, Better Auth mounted
-// on /api/auth/*, and the workspace API behind session-resolved actors.
-// server.ts stays a pure, injectable fetch-handler factory; THIS file is the
-// production wiring (and the only place that reads env).
+// The dohc Cloud / self-host server process, reduced to its surviving surface:
+// ONE Postgres, Better Auth mounted on /api/auth/*, and the collab-token route
+// behind session-resolved actors (live co-editing). server.ts stays a pure,
+// injectable fetch-handler factory; THIS file is the production wiring (and the
+// only place that reads env).
 
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
@@ -44,153 +41,37 @@ if (!testAuthSeam && secret.length < 32) {
   process.exit(1);
 }
 
-// Browser web client (dohc Cloud): setting DOHC_WEB_ORIGIN enables CORS with
-// credentials for that ONE origin plus Better Auth origin trust. Unset (the
-// default) leaves the API same-origin/Bearer only.
+// Browser web client: setting DOHC_WEB_ORIGIN enables CORS with credentials for
+// that ONE origin plus Better Auth origin trust. Unset (the default) leaves the
+// API same-origin/Bearer only.
 const webOrigin = process.env.DOHC_WEB_ORIGIN;
 
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
 });
+// No `onEmailVerified` callback is passed here on purpose. The
+// invitation-claim-on-verify seam was intentionally retired alongside the
+// deleted members/invites routes, so there is no application hook to run when
+// an email is verified. The callback stays OPTIONAL in @dohc/workspace-auth
+// (the sync-relay still supplies it) and is deliberately left unset here.
+// Cloud collab membership is now seeded out-of-band in this reduced surface.
 const auth = createWorkspaceAuth({
   pool,
   baseURL,
   secret: secret || "dev-test-only-secret-0123456789abcdef",
   ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
 });
-const backend = createPostgresWorkspaceBackend(pool, {
-  blobStore: createLocalBlobStore(),
-});
 
-const HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS = 2_000;
-const HOCUSPOCUS_ADMIN_TIMEOUT_MAX_MS = 5_000;
+// The HS256 secret shared with the hocuspocus service. Unset means this
+// deployment runs without a collab server, so the collab-token route fails
+// closed instead of minting tokens nothing can verify.
 const hocuspocusJwtSecret = process.env.HOCUSPOCUS_JWT_SECRET?.trim();
 
-function createHocuspocusAdminClient(): HocuspocusAdminClient {
-  if (!hocuspocusJwtSecret) {
-    const client: HocuspocusAdminClient & { disconnectTimeoutMs: number } = {
-      disconnectTimeoutMs: HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS,
-      async disconnectWorkspaceUser() {
-        // Collaboration token minting is disabled, so no Hocuspocus sessions
-        // can be authenticated for this API process.
-      },
-    };
-    return client;
-  }
-  const baseUrl = process.env.HOCUSPOCUS_ADMIN_URL?.trim();
-  const adminToken = process.env.HOCUSPOCUS_ADMIN_TOKEN?.trim();
-  if (!baseUrl || !adminToken) {
-    console.error(
-      "HOCUSPOCUS_ADMIN_URL and HOCUSPOCUS_ADMIN_TOKEN are required when HOCUSPOCUS_JWT_SECRET enables collaboration.",
-    );
-    process.exit(1);
-  }
-  let adminBase: URL;
-  try {
-    adminBase = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
-  } catch {
-    console.error("HOCUSPOCUS_ADMIN_URL must be a valid absolute URL.");
-    process.exit(1);
-  }
-  if (
-    adminBase.protocol !== "https:" &&
-    !(adminBase.protocol === "http:" && isLocalHocuspocusAdminHost(adminBase.hostname))
-  ) {
-    console.error(
-      "HOCUSPOCUS_ADMIN_URL must use https, or http only for localhost/loopback development endpoints.",
-    );
-    process.exit(1);
-  }
-  const configuredTimeoutMs = Number(
-    process.env.HOCUSPOCUS_ADMIN_TIMEOUT_MS ??
-      HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS,
-  );
-  const timeoutMs =
-    Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
-      ? Math.min(configuredTimeoutMs, HOCUSPOCUS_ADMIN_TIMEOUT_MAX_MS)
-      : HOCUSPOCUS_ADMIN_TIMEOUT_DEFAULT_MS;
-  const client: HocuspocusAdminClient & { disconnectTimeoutMs: number } = {
-    disconnectTimeoutMs: timeoutMs,
-    async disconnectWorkspaceUser({ workspaceId, userId, signal }) {
-      const url = new URL("admin/disconnect-by-workspace-user", adminBase);
-      if (signal?.aborted) {
-        throw signal.reason ?? new Error("hocuspocus disconnect aborted");
-      }
-      const controller = new AbortController();
-      let callerAbortReason: unknown;
-      let timeoutAborted = false;
-      const abortFromCaller = () => {
-        callerAbortReason = signal?.reason ?? new Error("hocuspocus disconnect aborted");
-        controller.abort(callerAbortReason);
-      };
-      signal?.addEventListener("abort", abortFromCaller, { once: true });
-      const timeout = setTimeout(() => {
-        timeoutAborted = true;
-        controller.abort();
-      }, timeoutMs);
-      let response: Response;
-      try {
-        response = await fetch(url, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${adminToken}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ workspaceId, userId }),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          if (callerAbortReason !== undefined || signal?.aborted) {
-            throw callerAbortReason ?? signal?.reason ?? error;
-          }
-          if (!timeoutAborted) throw error;
-          throw new Error(`hocuspocus disconnect timed out after ${timeoutMs}ms`);
-        }
-        throw error;
-      } finally {
-        clearTimeout(timeout);
-        signal?.removeEventListener("abort", abortFromCaller);
-      }
-      try {
-        if (!response.ok) {
-          throw new Error(`hocuspocus disconnect failed with ${response.status}`);
-        }
-      } finally {
-        await response.body?.cancel().catch(() => undefined);
-      }
-    },
-  };
-  return client;
-}
-
-function isLocalHocuspocusAdminHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  const ipv4Parts = normalized.split(".");
-  const isIpv4Loopback =
-    ipv4Parts.length === 4 &&
-    ipv4Parts[0] === "127" &&
-    ipv4Parts.every((part) => {
-      if (!/^\d{1,3}$/u.test(part)) return false;
-      return Number(part) <= 255;
-    });
-  return (
-    normalized === "localhost" ||
-    normalized.endsWith(".localhost") ||
-    isIpv4Loopback ||
-    normalized === "::1" ||
-    normalized === "[::1]"
-  );
-}
-
 const workspaceHandler = createWorkspaceApiHandler({
-  backend,
   resolveActor: createSessionActorResolver(auth),
-  createWorkspace: createPostgresWorkspaceProvisioner(pool),
   // Same secret hocuspocus verifies with; self-hosts without a collab server
   // leave it unset and POST /workspaces/:id/collab/token errors collab-disabled.
   collab: hocuspocusJwtSecret ? { pool, jwtSecret: hocuspocusJwtSecret } : undefined,
-  shared: { pool, hocuspocusAdmin: createHocuspocusAdminClient() },
 });
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded

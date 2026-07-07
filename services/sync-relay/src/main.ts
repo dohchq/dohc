@@ -1,5 +1,5 @@
-import { createWorkspaceAuth } from "@dohc/workspace-api/auth/betterAuth";
-import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-api/auth/session";
+import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

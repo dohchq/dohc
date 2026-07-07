@@ -56,20 +56,12 @@ import {
   DismissSyncReviewNoticePayload,
   CollabTokenPayload,
   CollabTokenResult,
-  CreateDataFragmentPayload,
-  CreateDataFragmentResult,
-  CreateWorkspaceInvitePayload,
-  CreateWorkspaceInviteResult,
-  CreateWorkspaceSharePayload,
-  CreateWorkspaceShareResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   ImportToDatabasePayload,
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
-  ListDataFragmentsPayload,
-  ListDataFragmentsResult,
   DesktopMarksResult,
   LaunchMarksResult,
   ListSitesPayload,
@@ -79,10 +71,6 @@ import {
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
-  ListWorkspaceSharesPayload,
-  ListWorkspaceSharesResult,
-  ListWorkspaceMembersResult,
-  ListWorkspaceInvitesResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   ListWorkspaceVersionsResult,
@@ -140,13 +128,8 @@ import {
   PickWorkspaceRootResult,
   ReadWorkspaceGraphPayload,
   ReadWorkspaceDatabasePayload,
-  ReadDataFragmentPayload,
-  ReadDataFragmentResult,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
-  RevokeDataFragmentPayload,
-  RevokeWorkspaceSharePayload,
-  RevokeWorkspaceInvitePayload,
   WriteWorkspaceTextPayload,
   SetTitlebarThemePayload,
   SetUserSettingsPayload,
@@ -201,12 +184,6 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
-import {
-  createCloudDataFragment,
-  listCloudDataFragments,
-  readCloudDataFragment,
-  revokeCloudDataFragment,
-} from "./workspaces/cloudDataFragments";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import {
@@ -859,28 +836,6 @@ async function remoteForWorkspace(workspaceId: string) {
     throw new Error("Sign in to the cloud server this workspace uses.");
   }
   return { workspace, remote, credentials: cachedCredentials };
-}
-
-async function cloudJson<T>(
-  workspaceId: string,
-  path: string,
-  init?: RequestInit,
-): Promise<T> {
-  const { remote, credentials } = await remoteForWorkspace(workspaceId);
-  const headers = new Headers(init?.headers);
-  if (init?.body) headers.set("content-type", "application/json");
-  headers.set("authorization", `Bearer ${credentials.token}`);
-  const response = await fetch(`${remote.serverUrl}${path}`, {
-    ...init,
-    headers,
-  });
-  const data = (await response.json().catch(() => null)) as
-    | { ok?: boolean; error?: string }
-    | null;
-  if (!response.ok || data?.ok === false) {
-    throw new Error(data?.error ?? `Cloud request failed (${response.status})`);
-  }
-  return data as T;
 }
 
 // Relay-share HTTP (PR 18): grant-side calls go to the SYNC RELAY (not the
@@ -1659,7 +1614,6 @@ function registerIpcHandlers(): void {
           ? [
               item("New File", "new-file"),
               item("New Folder", "new-folder"),
-              item("Data Fragments…", "import-export"),
               separator,
               item("Import Files…", "import-files"),
               item("Export Workspace as Zip…", "export-zip"),
@@ -1677,9 +1631,6 @@ function registerIpcHandlers(): void {
               item("Delete", "delete"),
               input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
               separator,
-              ...(input.kind === "file"
-                ? [item("Data Fragments…", "import-export")]
-                : []),
               item("Export as Zip…", "export-zip"),
               item("Reveal in File Manager", "open-externally"),
             ];
@@ -1747,8 +1698,6 @@ function registerIpcHandlers(): void {
               item("Close Tab", "close-tab"),
               item("Close Other Tabs", "close-other-tabs"),
               separator,
-              item("Data Fragments…", "import-export"),
-              separator,
               item("Copy Path", "copy-path"),
               item("Show in Explorer", "show-in-explorer"),
             ]
@@ -1767,7 +1716,7 @@ function registerIpcHandlers(): void {
                 separator,
                 item("Toggle Theme", "toggle-theme"),
               ]
-            : [item("Data Fragments…", "import-export"), separator, ...editRoles];
+            : [...editRoles];
       const menu = Menu.buildFromTemplate(template);
       const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       menu.popup({
@@ -1807,49 +1756,6 @@ function registerIpcHandlers(): void {
       ? []
       : await copyIntoWorkspace(workspace.rootPath, result.filePaths);
     return ImportWorkspaceFilesResult.parse({ imported });
-  });
-
-  ipcMain.handle(CHANNELS.createDataFragment, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateDataFragmentPayload.parse(payload);
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    return CreateDataFragmentResult.parse(
-      await createCloudDataFragment(
-        (path, init) => cloudJson(input.workspaceId, path, init),
-        remote.remoteWorkspaceId,
-        input,
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.listDataFragments, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListDataFragmentsPayload.parse(payload);
-    return ListDataFragmentsResult.parse(
-      await listCloudDataFragments((path, init) =>
-        cloudJson(input.workspaceId, path, init),
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.readDataFragment, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadDataFragmentPayload.parse(payload);
-    return ReadDataFragmentResult.parse(
-      await readCloudDataFragment(
-        (path, init) => cloudJson(input.workspaceId, path, init),
-        input.fragmentId,
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.revokeDataFragment, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RevokeDataFragmentPayload.parse(payload);
-    await revokeCloudDataFragment(
-      (path, init) => cloudJson(input.workspaceId, path, init),
-      input.fragmentId,
-    );
   });
 
   // Site preview SDK reads use the combined helper to make the main-process
@@ -2385,94 +2291,6 @@ function registerIpcHandlers(): void {
     const input = DismissSyncReviewNoticePayload.parse(payload);
     activity.dismissUnmatchedRemoteResolves(input.workspaceId);
     notifyRenderer();
-  });
-
-  ipcMain.handle(CHANNELS.listWorkspaceShares, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceSharesPayload.parse(payload);
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    return ListWorkspaceSharesResult.parse(
-      await cloudJson(
-        input.workspaceId,
-        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.createWorkspaceShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateWorkspaceSharePayload.parse(payload);
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    return CreateWorkspaceShareResult.parse(
-      await cloudJson(
-        input.workspaceId,
-        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            atomPath: input.atomPath,
-            recipientEmail: input.recipientEmail,
-            capability: input.capability,
-          }),
-        },
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.revokeWorkspaceShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RevokeWorkspaceSharePayload.parse(payload);
-    await cloudJson(input.workspaceId, `/shares/${encodeURIComponent(input.shareId)}`, {
-      method: "DELETE",
-    });
-  });
-
-  ipcMain.handle(CHANNELS.listWorkspaceMembers, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceSharesPayload.parse(payload);
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    return ListWorkspaceMembersResult.parse(
-      await cloudJson(
-        input.workspaceId,
-        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/members`,
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.listWorkspaceInvites, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceSharesPayload.parse(payload);
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    return ListWorkspaceInvitesResult.parse(
-      await cloudJson(
-        input.workspaceId,
-        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/invites`,
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.createWorkspaceInvite, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateWorkspaceInvitePayload.parse(payload);
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    return CreateWorkspaceInviteResult.parse(
-      await cloudJson(
-        input.workspaceId,
-        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/invites`,
-        {
-          method: "POST",
-          body: JSON.stringify({ email: input.email }),
-        },
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.revokeWorkspaceInvite, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RevokeWorkspaceInvitePayload.parse(payload);
-    await cloudJson(input.workspaceId, `/invites/${encodeURIComponent(input.inviteId)}`, {
-      method: "DELETE",
-    });
   });
 
   // Mints a short-lived live-co-editing token for one atom. Only available for

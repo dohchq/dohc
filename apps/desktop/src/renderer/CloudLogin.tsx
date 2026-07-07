@@ -19,7 +19,6 @@ type Phase =
 // render status + email. Local-only use never opens this panel.
 export function CloudLogin(props: {
   workspaceId?: string;
-  onManageWorkspace?: () => void;
   // Fired when a device-flow login completes inside this panel (the join
   // surface re-checks its own gate on it).
   onConnected?: () => void;
@@ -386,16 +385,6 @@ export function CloudLogin(props: {
                     {syncBusy && passphrasePurpose === "unlock"
                       ? "Unlocking…"
                       : "Unlock protected files"}
-                  </button>
-                ) : null}
-                {props.onManageWorkspace ? (
-                  <button
-                    type="button"
-                    data-testid="cloud-manage-workspace"
-                    onClick={props.onManageWorkspace}
-                    className="mt-3 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
-                  >
-                    Manage workspace
                   </button>
                 ) : null}
               </>

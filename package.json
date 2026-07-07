@@ -7,8 +7,7 @@
     "pnpm": "10.24.0"
   },
   "scripts": {
-    "dev": "pnpm --filter @dohc/web --if-present run dev",
-    "dev:app": "pnpm --filter @dohc/web --if-present run dev",
+    "dev": "pnpm --filter @dohc/desktop dev",
     "dev:desktop": "pnpm --filter @dohc/desktop dev",
     "build:desktop": "pnpm --filter @dohc/desktop build",
     "test:desktop": "pnpm --filter @dohc/desktop test",
@@ -22,12 +21,9 @@
     "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
     "dev:postgres": "docker compose -f docker-compose.dev.yml up -d postgres minio",
     "build": "pnpm -r --if-present build",
-    "start": "pnpm --filter @dohc/web --if-present run start",
-    "preview": "pnpm --filter @dohc/web --if-present run preview",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
-    "test:e2e": "playwright test",
     "test:phase0-agent-cli": "node scripts/phase0-agent-cli-smoke.mjs",
     "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",
     "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",

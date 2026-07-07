@@ -74,7 +74,6 @@ export function buildMenuTemplate(options: {
                 }))
               : [{ label: "No Recent Workspaces", enabled: false }],
         },
-        command("Data Fragments…", "import-export"),
         command("Import Files…", "import-files"),
         command("Export Workspace as Zip…", "export-workspace"),
         { type: "separator" },

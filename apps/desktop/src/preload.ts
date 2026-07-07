@@ -86,14 +86,6 @@ const bridge: DohcDesktopBridge = {
   },
   importWorkspaceFiles: (payload) =>
     ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
-  createDataFragment: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createDataFragment, payload),
-  listDataFragments: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listDataFragments, payload),
-  readDataFragment: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readDataFragment, payload),
-  revokeDataFragment: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeDataFragment, payload),
   readWorkspaceText: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceText, payload),
   writeWorkspaceText: (payload) =>
@@ -129,20 +121,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   dismissSyncReviewNotice: (payload) =>
     ipcRenderer.invoke(CHANNELS.dismissSyncReviewNotice, payload),
-  listWorkspaceShares: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceShares, payload),
-  createWorkspaceShare: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceShare, payload),
-  revokeWorkspaceShare: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeWorkspaceShare, payload),
-  listWorkspaceMembers: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceMembers, payload),
-  listWorkspaceInvites: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceInvites, payload),
-  createWorkspaceInvite: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceInvite, payload),
-  revokeWorkspaceInvite: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeWorkspaceInvite, payload),
   collabToken: (payload) => ipcRenderer.invoke(CHANNELS.collabToken, payload),
   createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
   listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),

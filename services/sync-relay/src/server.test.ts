@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-api/auth/session";
+import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BLOB_BYTES,

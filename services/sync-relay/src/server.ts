@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ResolveActor } from "@dohc/workspace-api/auth/session";
+import type { ResolveActor } from "@dohc/workspace-auth/session";
 import {
   filterOpForShare,
   parseShareSelectorJson,
