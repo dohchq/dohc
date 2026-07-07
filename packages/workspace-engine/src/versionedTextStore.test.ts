@@ -2420,4 +2420,25 @@ describe("engine schema bootstrap (shared with linkedChatStore)", () => {
       }),
     ).resolves.toMatchObject({ text: "Persisted\n" });
   });
+
+  it("reopens lazily after the test-teardown sweep closes its handle externally", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Survives the sweep\n",
+      metadata: { origin: "api" },
+    });
+
+    // The sweep closes the raw handle out from under the live store — the
+    // store must reopen (and re-validate) instead of returning a dead handle.
+    closeTrackedEngineDbHandlesForTest();
+
+    await expect(
+      store.readTextFile({ workspaceId: "workspace-a", versionId: main.id, path: "notes/today.md" }),
+    ).resolves.toMatchObject({ text: "Survives the sweep\n" });
+    await store.close();
+  });
 });
