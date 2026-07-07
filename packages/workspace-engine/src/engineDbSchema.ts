@@ -208,6 +208,65 @@ export const SYNC_REPLICATION_DDL = `
   )
 `;
 
+// Y.Doc engine content-driver tables are the same lazy additive upgrade
+// (WS-G2-B): existing engine.db files gain them on open without a schema-
+// version bump, and a file with NO ydoc_docs row stays an ordinary text file
+// with zero behavior change. Not in REQUIRED_ENGINE_TABLES for that reason.
+//
+// Filed under (workspace_id, version_id, object_id) because versions are
+// independent content lines. Update and snapshot BYTES are content-addressed
+// into the existing binary_blobs table (the load-bearing reuse: Y.Doc state
+// then replicates through the identical blob-have/blob-put path the 0P relay
+// ships, deduped for free) — these tables hold only the sha references + head
+// pointers.
+//
+// MARKDOWN-IS-THE-ARTIFACT (G2-B decision): the settled .md file is the
+// durable/canonical artifact; the update log is a fast-resume cache that a
+// closed session may prune to a single snapshot. The schema is deliberately
+// ADDITIVE-COMPATIBLE with a future persistent-threads layer: keeping
+// ydoc_snapshots (and un-pruned ydoc_updates) durable past a closed session —
+// so live suggestion threads / marks survive a close — needs NO schema change,
+// only a policy flip in the driver's compaction/close path.
+export const ENGINE_YDOC_DDL = `
+  CREATE TABLE IF NOT EXISTS ydoc_docs (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    content_kind TEXT NOT NULL DEFAULT 'richdoc',
+    head_update_seq INTEGER NOT NULL DEFAULT 0,
+    head_snapshot_seq INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id)
+  );
+  CREATE TABLE IF NOT EXISTS ydoc_updates (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    update_blob_sha256 TEXT NOT NULL,
+    actor_origin_id TEXT,
+    recorded_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, seq),
+    FOREIGN KEY (update_blob_sha256) REFERENCES binary_blobs(sha256)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ydoc_updates_doc_seq
+    ON ydoc_updates(workspace_id, version_id, object_id, seq);
+  CREATE TABLE IF NOT EXISTS ydoc_snapshots (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    up_to_seq INTEGER NOT NULL,
+    snapshot_blob_sha256 TEXT NOT NULL,
+    state_vector_blob_sha256 TEXT NOT NULL,
+    recorded_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, up_to_seq),
+    FOREIGN KEY (snapshot_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (state_vector_blob_sha256) REFERENCES binary_blobs(sha256)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ydoc_snapshots_doc_uptoseq
+    ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC)
+`;
+
 // Search index tables are lazy additive (WS-D): existing engine.db files gain
 // them on open without a schema-version bump. The FTS tables store only
 // currently searchable text; write-time policy hooks delete rows for secret,
@@ -409,6 +468,7 @@ export function initializeOrValidateEngineSchema(
   db.exec(BINARY_BLOBS_DDL);
   db.exec(SECRET_TABLES_DDL);
   db.exec(SYNC_REPLICATION_DDL);
+  db.exec(ENGINE_YDOC_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
@@ -652,6 +712,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       ${SECRET_TABLES_DDL};
       ${CHAT_CHANNEL_TABLES_DDL};
       ${SYNC_REPLICATION_DDL};
+      ${ENGINE_YDOC_DDL};
       CREATE INDEX IF NOT EXISTS idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX IF NOT EXISTS idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
       CREATE INDEX IF NOT EXISTS idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);
