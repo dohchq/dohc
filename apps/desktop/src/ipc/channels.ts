@@ -334,6 +334,41 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
   return { searchId, entries: safeEntries, done, limitHit };
 }
 
+// WS-G2-C-2 engine Y.Doc binding: main owns the node-only live Y.Doc session;
+// the renderer's editor binds to a mirror doc kept convergent over IPC. A
+// remote CRDT delta (a co-editor's edit routed through the engine) is forwarded
+// main→renderer over the engine-ydoc-remote-update event channel as a raw Yjs
+// update (structured-clone Uint8Array). Like every event that crosses into the
+// sandboxed preload, its shape is re-validated there with this dependency-free
+// closed check. sessionId is the renderer-minted per-open correlation id (like
+// searchId): the renderer applies a forwarded delta only when it matches the
+// session currently bound, so a slow/stale session can never repaint another.
+export const ENGINE_YDOC_SESSION_ID_MAX_CHARS = 64;
+// A single Yjs update crossing IPC is bounded well above a normal keystroke
+// delta yet below anything abusive; the driver's recordUpdate independently
+// rejects an oversized update, so this is a preload sanity bound, not the
+// authority.
+export const ENGINE_YDOC_UPDATE_MAX_BYTES = 16 * 1024 * 1024;
+
+export interface EngineYDocRemoteUpdateEvent {
+  sessionId: string;
+  update: Uint8Array;
+}
+
+export function parseEngineYDocRemoteUpdateEvent(
+  value: unknown,
+): EngineYDocRemoteUpdateEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  if (!Object.hasOwn(value, "sessionId") || !Object.hasOwn(value, "update")) return null;
+  const { sessionId, update } = value as { sessionId?: unknown; update?: unknown };
+  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
+  // Structured clone preserves a Uint8Array as a real Uint8Array; anything else
+  // (a plain object, an ArrayBuffer, a tampered value) is rejected.
+  if (!(update instanceof Uint8Array)) return null;
+  if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
+  return { sessionId, update };
+}
+
 export interface WorkspaceActivatedEvent {
   workspaceId: string;
   rootPath: string;
@@ -473,6 +508,10 @@ export const CHANNELS = {
   searchWorkspace: "desktop:search-workspace",
   cancelWorkspaceSearch: "desktop:cancel-workspace-search",
   searchResults: "desktop:search-results",
+  engineYDocOpen: "desktop:engine-ydoc-open",
+  engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
+  engineYDocClose: "desktop:engine-ydoc-close",
+  engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   updateState: "desktop:update-state",

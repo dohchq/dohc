@@ -17,12 +17,15 @@ import {
 import {
   EXPLORER_MENU_COMMANDS,
   MENU_COMMANDS,
+  ENGINE_YDOC_SESSION_ID_MAX_CHARS,
+  ENGINE_YDOC_UPDATE_MAX_BYTES,
   SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   UPDATE_CHANNELS,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
+  type EngineYDocRemoteUpdateEvent,
   type SearchResultsEvent,
 } from "./channels";
 import { isLoopbackHostname } from "../security/loopback";
@@ -1508,6 +1511,52 @@ export const SearchResultsEventSchema = z.object({
 });
 export type SearchResultsEventSchema = z.infer<typeof SearchResultsEventSchema>;
 
+// WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
+// per open; main constructs the node-only live session (through the workspace's
+// engine capture, reusing its store) and STREAMS remote CRDT deltas back over
+// the desktop:engine-ydoc-remote-update event channel. Updates cross IPC as raw
+// Uint8Array (structured clone). These zod schemas are the main-side mirror of
+// the dependency-free preload parseEngineYDocRemoteUpdateEvent bounds.
+const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_CHARS);
+const ENGINE_YDOC_UPDATE = z
+  .instanceof(Uint8Array)
+  .refine(
+    (update) => update.byteLength > 0 && update.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
+    "Y.Doc update is empty or exceeds the IPC byte bound.",
+  );
+
+export const OpenEngineYDocSessionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  path: PATH_STRING,
+});
+export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionPayload>;
+
+export const OpenEngineYDocSessionResult = z.object({
+  available: z.boolean(),
+  initialUpdate: z.instanceof(Uint8Array).optional(),
+});
+export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
+
+export const ApplyEngineYDocUpdatePayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  update: ENGINE_YDOC_UPDATE,
+});
+export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
+
+export const CloseEngineYDocSessionPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+});
+export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessionPayload>;
+
+export const EngineYDocRemoteUpdateEventSchema = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  update: ENGINE_YDOC_UPDATE,
+});
+export type EngineYDocRemoteUpdateEventSchema = z.infer<
+  typeof EngineYDocRemoteUpdateEventSchema
+>;
+
 // Test-only snapshot of the main-process mark/measure recorder (Phase 16):
 // named marks as wall-clock epochs, measures as durations between marks.
 export const DesktopMarksResult = z.object({
@@ -1737,4 +1786,27 @@ export interface DohcDesktopBridge {
   // unsubscribe function. The searchId round-trips so the renderer drops
   // batches that belong to a superseded search.
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
+  // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
+  // opens a live engine Y.Doc session for a rich file; main constructs the
+  // node-only session through the workspace's engine capture (reusing its
+  // store), replacing HocuspocusProvider. available:false => not engine-backed
+  // (unflagged workspace, secret path, missing file, or already live) — the
+  // caller falls back to the plain local autosave editor. On success
+  // initialUpdate seeds the renderer's mirror doc.
+  openEngineYDocSession(
+    payload: OpenEngineYDocSessionPayload,
+  ): Promise<OpenEngineYDocSessionResult>;
+  // Ship a local editor CRDT update to main (journaled via recordUpdate +
+  // debounced settle). A no-op if the session is unknown/closed.
+  applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
+  // Settle + close the session in main (releases the single-canonical
+  // reservation so the same object can reopen on a version/file switch).
+  closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;
+  // Remote CRDT deltas main forwards (a co-editor's edit routed through the
+  // engine), validated in the preload via parseEngineYDocRemoteUpdateEvent.
+  // The sessionId round-trips so the renderer applies only deltas for the
+  // session currently bound. Returns an unsubscribe function.
+  onEngineYDocRemoteUpdate(
+    listener: (event: EngineYDocRemoteUpdateEvent) => void,
+  ): () => void;
 }

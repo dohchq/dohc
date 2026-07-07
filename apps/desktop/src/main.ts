@@ -146,11 +146,17 @@ import {
   WorkspaceSearchPayload,
   CancelWorkspaceSearchPayload,
   SearchResultsEventSchema,
+  OpenEngineYDocSessionPayload,
+  OpenEngineYDocSessionResult,
+  ApplyEngineYDocUpdatePayload,
+  CloseEngineYDocSessionPayload,
+  EngineYDocRemoteUpdateEventSchema,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
 import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "./ipc/channels";
+import type { EngineYDocProviderSession } from "./collab/ydocEngineProviderSession";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
 import {
@@ -326,6 +332,17 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
+}
+
+// WS-G2-C-2: only RICH (markdown) files bind to an engine Y.Doc — that is the
+// editor surface the Collaboration extension drives. Plain source/CSV/JSON/text
+// files keep the local autosave editor, and secret paths never open as a Y.Doc
+// (the driver refuses one anyway). The renderer already gates on the same
+// classifier; this is the main-side authority.
+function isRichEnginePath(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  const ext = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
+  return ext === "md" || ext === "markdown";
 }
 
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
@@ -1168,6 +1185,37 @@ const searchRegistry = createSearchRegistry({ rgPath });
 // Senders whose 'destroyed' cleanup hook is already attached.
 const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
+// WS-G2-C-2 engine Y.Doc editor binding: the live node-only sessions main owns
+// on the renderer's behalf, keyed by the renderer-minted sessionId. Each holds
+// the single-canonical reservation for its object; closing it (renderer close,
+// window gone, app quit) releases the reservation so the object can reopen.
+interface EngineYDocSessionEntry {
+  session: EngineYDocProviderSession;
+  senderId: number;
+  workspaceId: string;
+}
+const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
+// Senders whose engine-ydoc 'destroyed' cleanup hook is already attached.
+const engineYDocCleanupHooked = new WeakSet<Electron.WebContents>();
+
+// Close and drop every engine Y.Doc session owned by one renderer (window gone
+// / crashed). Settles the converged state and releases each reservation.
+function closeEngineYDocSessionsForSender(senderId: number): void {
+  for (const [sessionId, entry] of [...engineYDocSessions]) {
+    if (entry.senderId !== senderId) continue;
+    engineYDocSessions.delete(sessionId);
+    void entry.session.close().catch(() => undefined);
+  }
+}
+
+// Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
+// stopped, so no session settles onto a closed store.
+async function closeAllEngineYDocSessions(): Promise<void> {
+  const entries = [...engineYDocSessions.values()];
+  engineYDocSessions.clear();
+  await Promise.all(entries.map((entry) => entry.session.close().catch(() => undefined)));
+}
+
 function fallbackUpdateState(): PublicUpdateState {
   const currentVersion = app.getVersion();
   const state = publicUpdateState(initialUpdateState, {
@@ -1219,10 +1267,13 @@ app.on("will-quit", (event) => {
   const searchStoreStop = Promise.all(
     [...engineSearchStores.values()].map((store) => store.close().catch(() => undefined)),
   );
+  // Close live engine Y.Doc sessions (settle + release reservations) before the
+  // engine stores stop — a session must never settle onto a closed store.
+  const engineYDocStop = closeAllEngineYDocSessions();
   void Promise.race([
     Promise.all([
       agentSessionStop,
-      activity.stopAll(),
+      engineYDocStop.then(() => activity.stopAll()),
       chatStoreStop,
       searchStoreStop,
     ]).then(() => undefined),
@@ -3234,6 +3285,87 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = CancelWorkspaceSearchPayload.parse(payload);
     searchRegistry.cancel(event.sender.id, input.searchId);
+  });
+
+  // WS-G2-C-2 engine Y.Doc editor binding. Main owns the node-only live session
+  // (constructed through the workspace's engine capture, which reuses its store)
+  // and forwards remote CRDT deltas back to the sender that opened it. This is
+  // the drop-in for the old collab-token/Hocuspocus path: no websocket, no
+  // token. Gated on an engine-flagged workspace + a rich (markdown) path; a
+  // secret/not-found/already-live throw surfaces as available:false so the
+  // renderer falls back to the plain local autosave editor.
+  ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = OpenEngineYDocSessionPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const sender = event.sender;
+    const capture = activity.engineCaptureFor(workspace.workspaceId);
+    // Only engine-flagged workspaces have a capture; only rich (markdown) files
+    // bind to a Y.Doc. Everything else stays on the plain editor.
+    if (!capture || !isRichEnginePath(input.path)) {
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
+    // A stale session under this id (e.g. a renderer that reused an id after a
+    // crash) is closed before opening a new one.
+    const existing = engineYDocSessions.get(input.sessionId);
+    if (existing) {
+      engineYDocSessions.delete(input.sessionId);
+      await existing.session.close().catch(() => undefined);
+    }
+    let session: EngineYDocProviderSession;
+    try {
+      session = await capture.openYDocSession({
+        path: input.path,
+        onRemoteUpdate: (update) => {
+          // Forward a co-editor's delta to the renderer that owns this session.
+          if (sender.isDestroyed()) return;
+          try {
+            sender.send(
+              CHANNELS.engineYDocRemoteUpdate,
+              EngineYDocRemoteUpdateEventSchema.parse({ sessionId: input.sessionId, update }),
+            );
+          } catch {
+            // A malformed delta is DROPPED, never thrown through the session's
+            // update observer (an uncaught throw there would wedge main).
+          }
+        },
+      });
+    } catch {
+      // Secret path, missing file, or already-live: fall back gracefully.
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
+    if (!engineYDocCleanupHooked.has(sender)) {
+      engineYDocCleanupHooked.add(sender);
+      sender.once("destroyed", () => closeEngineYDocSessionsForSender(sender.id));
+    }
+    engineYDocSessions.set(input.sessionId, {
+      session,
+      senderId: sender.id,
+      workspaceId: workspace.workspaceId,
+    });
+    return OpenEngineYDocSessionResult.parse({
+      available: true,
+      initialUpdate: session.initialUpdate,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
+    assertTrustedSender(event);
+    const input = ApplyEngineYDocUpdatePayload.parse(payload);
+    const entry = engineYDocSessions.get(input.sessionId);
+    // Owner-scoped: only the renderer that opened the session can drive it; a
+    // no-op for an unknown/closed/foreign session (never throws to the caller).
+    if (!entry || entry.senderId !== event.sender.id) return;
+    entry.session.applyLocalUpdate(input.update);
+  });
+
+  ipcMain.handle(CHANNELS.engineYDocClose, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CloseEngineYDocSessionPayload.parse(payload);
+    const entry = engineYDocSessions.get(input.sessionId);
+    if (!entry || entry.senderId !== event.sender.id) return;
+    engineYDocSessions.delete(input.sessionId);
+    await entry.session.close().catch(() => undefined);
   });
 
   ipcMain.handle(CHANNELS.getUpdateState, (event) => {
