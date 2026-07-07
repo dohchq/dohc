@@ -18162,6 +18162,75 @@ typecheck clean; desktop build + the load-bearing e2e (workspace-collab-
 decoupling, workspace-sync-rejoin, workspace-shares) 6/6; `check-self-host` and
 the think-bigger doc-links checker green.
 
+### Completion round: orphaned client surfaces + gate fixes
+
+The route deletion above left the desktop and MCP CLIENTS pointing at deleted
+workspace-api routes (they would 404 at runtime; unit tests missed it). This
+round removed the dead client surfaces and cleared the review gate.
+
+- **Desktop dead surfaces removed.** Deleted the legacy IPC handlers in
+  `apps/desktop/src/main.ts` for the retired routes: the `cloudDataFragments`
+  path (`createDataFragment`/`listDataFragments`/`readDataFragment`/
+  `revokeDataFragment` → deleted `/data-fragments`) and the workspace
+  shares/members/invites handlers (`listWorkspaceShares`/`createWorkspaceShare`/
+  `revokeWorkspaceShare`/`listWorkspaceMembers`/`listWorkspaceInvites`/
+  `createWorkspaceInvite`/`revokeWorkspaceInvite` → deleted
+  `/workspaces/:id/{shares,members,invites}`), plus the now-unused `cloudJson`
+  main-process helper. Removed the matching channel consts
+  (`apps/desktop/src/ipc/channels.ts`), the zod schemas + `DesktopBridge`
+  method signatures (`bridgeContract.ts`), the preload bridge methods
+  (`preload.ts`), and the "import-export" (Data Fragments) menu command from the
+  three closed menu tuples + `main.ts`/`applicationMenu.ts`/`Explorer.tsx`
+  builders. Deleted the entirely-legacy renderer dialogs `ShareDialog.tsx`
+  (never even wired), `WorkspaceManagementDialog.tsx` (members/invites), and
+  `ImportExportDialog.tsx` (cloud data fragments), plus their tests and
+  `workspaces/cloudDataFragments.ts`. Excised their wiring from
+  `DesktopWorkspaceShell.tsx` (lazy imports, state, palette/menu/toolbar/
+  empty-state entry points) and the now-unused `onManageWorkspace` seam on
+  `CloudLogin.tsx`. Grep-verified zero surviving references to the removed
+  channels/functions/dialogs.
+- **PR-18 relay shares + collab preserved (evidence).** The relay-share system
+  (`createRelayShare`/`listRelayShares`/`revokeRelayShare` → live sync-relay
+  `/sync/:ws/shares`), `RelayShareDialog.tsx`, the `relayShareJson` helper, and
+  the collab-token path (`/workspaces/:id/collab/token`, hocuspocus, renderer
+  collab) were all left untouched. Desktop suite 935 green including the
+  relay-share tests; the workspace-shares e2e (PR-18) still passes, proving the
+  correct share system was kept.
+- **MCP legacy cloud sync resolved.** Removed the `dohc_sync_now` and
+  `dohc_sync_cloud` tool registrations (`packages/mcp/src/server.ts`) and the
+  `syncCloud`/`createMergeSync` implementation + helpers
+  (`packages/mcp/src/tools.ts`) that targeted the deleted `/workspaces/:id/files`
+  + `/sync/apply` routes; dropped the now-unused `@dohc/workspace-sync` import
+  and package dependency from `@dohc/mcp`. Honest replacement: no dead tool
+  remains — a comment points agents at `dohc_list_changes` (engine history) and
+  `dohc_workspace_status`; cloud sync is now automatic per workspace via the
+  sync relay. `workspace-sync/cloudSync.ts` itself stays as deferred dead code
+  (no live caller once MCP stopped calling it). MCP suite 74 green.
+- **Reduced-surface membership limitation (known).** Invitation-claim-on-verify
+  was intentionally retired with the members/invites routes; the optional
+  `onEmailVerified` seam in `@dohc/workspace-auth` is deliberately left unset by
+  workspace-api (documented at the `createWorkspaceAuth` call site). The seam
+  stays optional because the sync-relay still supplies it. Cloud collab
+  membership is now seeded out-of-band in the reduced surface — there is no
+  in-product invitation flow.
+- **Gate fixes.** Restored/confirmed the `@dohc/workspace-postgres` root `"."`
+  export → `./src/index.ts` (already present; verified it resolves). Removed the
+  consumer-less MinIO/object-storage service + volume from
+  `docker-compose.self-host.yml`, its env from `.env.self-host.example`, its
+  `REQUIRED_SERVICES` entry from `check-self-host.mjs`, and its mention in
+  `docs/self-hosting.md` (grep confirmed no kept service reads `MINIO_`/
+  `OBJECT_STORAGE_`). Made `HOCUSPOCUS_JWT_SECRET` fail-fast
+  (`${HOCUSPOCUS_JWT_SECRET:?…}`) on both services. De-staled `docs/product/
+  spec.md` (dropped the `apps/web` cloud-client + WorkOS AuthKit lines →
+  desktop-first, Better Auth + collab + sync-relay over Postgres).
+
+Verification: repo-wide `pnpm -r typecheck` clean; suites green — desktop 935,
+mcp 74, workspace-api 10, sync-relay 53, workspace-auth 8, workspace-fs 44,
+workspace-engine 389, workspace-postgres 2 (live pg); desktop build + the
+load-bearing e2e (workspace-collab-decoupling, workspace-sync-rejoin,
+workspace-shares) green; `git diff --check` clean; `check-self-host` passes with
+the reduced matrix; doc-links checker green.
+
 Deferred (recorded follow-up for the full retirement): the `workspace-history`
 and `workspace-sync` salvage (live engine/MCP importers keep them for now), and
 the eventual full Postgres-for-auth retirement once Arc 0P's engine-native sync
