@@ -92,6 +92,16 @@ export function useEngineDoc(input: {
   // The caller gates: only a rich (markdown) file that is not truncated / read-
   // only opens an engine session. Everything else keeps the local editor.
   enabled: boolean;
+  // G2-C-3 version-switch re-bind: a monotonic token that changes whenever the
+  // ACTIVE VERSION of this workspace changes while the SAME file stays open
+  // (the shell's versionEpoch). The session keys on it so switching version
+  // flushes+closes the current engine session and reopens it against the
+  // now-active version's Y.Doc lineage — resume-never-reseed for a replicated
+  // doc (the durable lineage), reseed-from-the-new-file for a local-only doc
+  // (switchVersion already materialized the new version onto disk before this
+  // reopens). Undefined/stable => no reopen; ordinary history growth in the
+  // SAME version must NOT bump this (that would churn the live session).
+  reopenKey?: number;
 }): UseEngineDoc {
   const [doc, setDoc] = useState<Y.Doc | null>(null);
   const [available, setAvailable] = useState(false);
@@ -167,10 +177,15 @@ export function useEngineDoc(input: {
       // drop the mirror doc.
       void binding?.destroy();
     };
-    // input is destructured; re-open only when the workspace, path, or gate
-    // changes — never on unrelated re-renders.
+    // input is destructured; re-open only when the workspace, path, gate, or the
+    // active-version token changes — never on unrelated re-renders. reopenKey
+    // re-binds the editor to the new version's lineage on a version switch
+    // (server-side switchVersion already settled+closed the old session and
+    // materialized the new version to disk; this effect's cleanup settles+closes
+    // the renderer's mirror session and the re-run opens a fresh one, guarded by
+    // the per-open token so a stale response never repaints).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.workspaceId, input.path, input.enabled]);
+  }, [input.workspaceId, input.path, input.enabled, input.reopenKey]);
 
   return { available, doc, saveState };
 }

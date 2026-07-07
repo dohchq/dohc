@@ -2325,6 +2325,10 @@ export function DesktopWorkspaceShell(props: {
                 // History growth AND version switches both re-read the open
                 // file (both counters only ever increase).
                 refreshKey={historyRefreshCounter + versionEpoch}
+                // G2-C-3: the engine editor re-binds to the new version's Y.Doc
+                // lineage ONLY on an active-version change — versionEpoch alone,
+                // NOT history growth (which must not churn the live session).
+                engineVersionKey={versionEpoch}
                 onOpenPath={openFile}
                 scrollTarget={searchScrollTarget ?? undefined}
                 onScrollConsumed={consumeScrollTarget}
