@@ -1,7 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
-import { win32 } from "node:path";
 import { createInterface } from "node:readline";
+import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 
 export class JsonRpcError extends Error {
   readonly code: number;
@@ -72,63 +71,7 @@ function normalizeError(error: unknown): JsonRpcError {
   return new JsonRpcError(-32603, "JSON-RPC handler failed.");
 }
 
-// Quote a token for a cmd.exe /s /c command line. Tokens with embedded
-// double quotes are not representable safely; whitespace-bearing paths (the
-// realistic case, e.g. "C:\Program Files\nodejs\npm.cmd") are.
-function quoteForCmd(token: string): string {
-  return /\s/.test(token) ? `"${token}"` : token;
-}
-
-export function resolveSpawnCommand(
-  command: string,
-  args: string[],
-  options: {
-    env?: NodeJS.ProcessEnv;
-    platform?: NodeJS.Platform;
-    exists?: (path: string) => boolean;
-  } = {},
-): { command: string; args: string[]; windowsVerbatimArguments?: boolean } {
-  const platform = options.platform ?? process.platform;
-  if (platform !== "win32") return { command, args };
-
-  const env = options.env ?? process.env;
-  const exists = options.exists ?? existsSync;
-  const pathValue = env.Path ?? env.PATH ?? "";
-  const pathext = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
-    .split(";")
-    .map((ext) => ext.trim())
-    .filter(Boolean);
-  const hasPathSegment = /[\\/]/.test(command);
-  const hasExtension = win32.extname(command).length > 0;
-  const bases = hasPathSegment
-    ? [command]
-    : pathValue
-        .split(win32.delimiter)
-        .filter(Boolean)
-        .map((dir) => win32.join(dir, command));
-  const candidates = bases.flatMap((base) =>
-    hasExtension ? [base] : pathext.map((ext) => `${base}${ext}`),
-  );
-  const resolved = candidates.find((candidate) => exists(candidate));
-  if (!resolved) return { command, args };
-
-  const extension = win32.extname(resolved).toLowerCase();
-  if (extension === ".cmd" || extension === ".bat") {
-    // cmd.exe /s strips the first and last quote of the string after /c, so
-    // the whole command line rides in ONE outer-quoted argument with spaced
-    // tokens quoted individually. windowsVerbatimArguments stops Node from
-    // re-quoting that argument, which would corrupt cmd.exe's parsing (and,
-    // for a spaced shim path like "C:\Program Files\nodejs\npm.cmd", swallow
-    // the child's real exit code behind a cmd.exe launch failure).
-    const line = [resolved, ...args].map(quoteForCmd).join(" ");
-    return {
-      command: env.ComSpec ?? env.COMSPEC ?? "cmd.exe",
-      args: ["/d", "/s", "/c", `"${line}"`],
-      windowsVerbatimArguments: true,
-    };
-  }
-  return { command: resolved, args };
-}
+export { resolveSpawnCommand } from "../process/windowsSpawn";
 
 export class JsonRpcTransport {
   private readonly child: ChildProcessWithoutNullStreams;
@@ -159,15 +102,14 @@ export class JsonRpcTransport {
     const env = { ...process.env, ...options.env };
     const resolved = resolveSpawnCommand(options.command, options.args, {
       env,
+      cwd: options.cwd,
     });
     const child = spawn(resolved.command, resolved.args, {
       cwd: options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      ...(resolved.windowsVerbatimArguments
-        ? { windowsVerbatimArguments: true }
-        : {}),
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
     });
     return new JsonRpcTransport(child, options);
   }
@@ -195,7 +137,16 @@ export class JsonRpcTransport {
   async dispose(): Promise<void> {
     this.close(new Error("JSON-RPC transport disposed."));
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    // Shim-launched agents (.cmd via cmd.exe) must die as a tree: killing
+    // only the wrapper leaves the real agent alive with the workspace root
+    // as its cwd, keeping that directory locked on Windows.
+    await killChildTreeWin32(this.child);
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
     this.child.kill("SIGTERM");
+    // The escalation timer self-guards on exit state and is unref'd, so it
+    // never needs cancelling — clearing it could skip the SIGKILL in the
+    // exotic case where "error" resolves the exit promise while the child
+    // still lives.
     const forceKill = setTimeout(() => {
       if (this.child.exitCode === null && this.child.signalCode === null) {
         this.child.kill("SIGKILL");
@@ -214,7 +165,6 @@ export class JsonRpcTransport {
     try {
       await Promise.race([this.exited, capped]);
     } finally {
-      clearTimeout(forceKill);
       if (waitCap) clearTimeout(waitCap);
     }
   }

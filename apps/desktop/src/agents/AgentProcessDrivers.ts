@@ -11,7 +11,8 @@ import type {
   PermissionOption,
 } from "./AgentDriver";
 import { selectPermissionOption } from "./AgentDriver";
-import { JsonRpcError, JsonRpcTransport, resolveSpawnCommand } from "./JsonRpcTransport";
+import { JsonRpcError, JsonRpcTransport } from "./JsonRpcTransport";
+import { resolveSpawnCommand } from "../process/windowsSpawn";
 
 interface ProcessSpec {
   command: string;
@@ -61,9 +62,7 @@ async function probeCommand(spec: ProcessSpec): Promise<{ installed: boolean; ve
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-      ...(resolved.windowsVerbatimArguments
-        ? { windowsVerbatimArguments: true }
-        : {}),
+      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
     });
     let stdout = "";
     let stderr = "";

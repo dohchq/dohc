@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentEvent } from "./AgentDriver";
 import { createDesktopAgentDrivers } from "./AgentProcessDrivers";
-import { resolveSpawnCommand } from "./JsonRpcTransport";
+import { resolveSpawnCommand } from "../process/windowsSpawn";
 
 const fakeAgent = fileURLToPath(new URL("../../e2e/fixtures/fakeAgentProcess.mjs", import.meta.url));
 const tempRoots: string[] = [];
@@ -50,12 +50,14 @@ describe("process-backed agent drivers", () => {
       command: "C:\\Windows\\System32\\cmd.exe",
       // One outer-quoted /s /c command line, passed verbatim so Node cannot
       // re-quote it — cmd.exe strips the outer quotes and runs the shim with
-      // its argv intact even when the shim path contains spaces.
+      // its argv intact even when the shim path contains spaces. EVERY token
+      // is quoted so cmd metacharacters (& | < > ^) inside arguments are
+      // inert instead of being parsed as command separators.
       args: [
         "/d",
         "/s",
         "/c",
-        '"C:\\Users\\ice\\AppData\\Roaming\\npm\\codex.CMD app-server"',
+        '""C:\\Users\\ice\\AppData\\Roaming\\npm\\codex.CMD" "app-server""',
       ],
       windowsVerbatimArguments: true,
     });
