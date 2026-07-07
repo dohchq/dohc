@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import {
   LOCAL_FILE_AUTHOR,
   VersionedFileWorkspaceError,
@@ -42,6 +43,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await rm(rootParent, { recursive: true, force: true });
 });
 

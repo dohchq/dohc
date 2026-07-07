@@ -28,6 +28,41 @@ export interface EngineSqliteDb {
 
 export type EngineIntegrityCheckMode = "quick" | "full";
 
+// Test-only handle bookkeeping. Windows cannot delete files with open handles,
+// so test teardowns must close every engine DB handle before removing a temp
+// workspace root. Production closes handles through each store's close()
+// seam; this registry only tracks handles while running under a test harness
+// (guard below), so production behavior on every platform is unchanged.
+const trackedEngineDbHandlesForTest = new Set<{ close(): void }>();
+
+function isTestHarness(): boolean {
+  return process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+}
+
+export function trackEngineDbHandleForTest<T extends { close(): void }>(db: T): T {
+  if (!isTestHarness()) return db;
+  trackedEngineDbHandlesForTest.add(db);
+  const originalClose = db.close.bind(db);
+  db.close = () => {
+    trackedEngineDbHandlesForTest.delete(db);
+    originalClose();
+  };
+  return db;
+}
+
+// Closes every still-open engine DB handle. Safe between tests: stores reopen
+// lazily on their next use.
+export function closeTrackedEngineDbHandlesForTest(): void {
+  for (const db of [...trackedEngineDbHandlesForTest]) {
+    try {
+      db.close();
+    } catch {
+      // Already closed or mid-close; the goal is releasing OS handles.
+    }
+  }
+  trackedEngineDbHandlesForTest.clear();
+}
+
 const REQUIRED_ENGINE_TABLES = [
   "schema_version",
   "blobs",

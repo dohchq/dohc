@@ -122,7 +122,8 @@ describe("WorkspaceKernelClient", () => {
   });
 
   it("restarts after a kernel crash and enforces the restart limit", async () => {
-    const crashOnSecondRequest = await writeFakeKernel(`
+    const crashOnSecondRequest = await writeFakeKernel(
+      `
 requests=0
 while IFS= read -r line; do
   requests=$((requests + 1))
@@ -132,7 +133,21 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\\([0-9][0-9]*\\).*/\\1/p')
   printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["kernel.handshake"]},"timingMs":{"total":0.1}}\\n' "$id"
 done
-`);
+`,
+      `
+import { createInterface } from "node:readline";
+let requests = 0;
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  requests += 1;
+  if (requests === 2) process.exit(1);
+  const id = /"id":([0-9]+)/.exec(line)?.[1] ?? "0";
+  process.stdout.write(
+    \`{"jsonrpc":"2.0","id":\${id},"result":{"protocolVersion":1,"capabilities":["kernel.handshake"]},"timingMs":{"total":0.1}}\\n\`,
+  );
+});
+`,
+    );
     let exitCount = 0;
     const waiters: Array<() => void> = [];
     const waitForExitCount = (count: number) =>
@@ -152,7 +167,7 @@ done
         });
     });
     const client = new WorkspaceKernelClient({
-      binaryPath: crashOnSecondRequest,
+      ...crashOnSecondRequest,
       timeoutMs: 500,
       initialBackoffMs: 1,
       maxBackoffMs: 5,
@@ -171,12 +186,17 @@ done
       await client.dispose();
     }
 
-    const exitsOnRequest = await writeFakeKernel(`
+    const exitsOnRequest = await writeFakeKernel(
+      `
 IFS= read -r _line
 exit 1
-`);
+`,
+      `
+process.stdin.once("data", () => process.exit(1));
+`,
+    );
     const limited = new WorkspaceKernelClient({
-      binaryPath: exitsOnRequest,
+      ...exitsOnRequest,
       timeoutMs: 500,
       maxRestarts: 0,
     });
@@ -188,12 +208,18 @@ exit 1
   });
 
   it("times out a call when the kernel never replies", async () => {
-    const neverReplies = await writeFakeKernel(`
+    const neverReplies = await writeFakeKernel(
+      `
 while true; do
   sleep 1
 done
-`);
-    const client = new WorkspaceKernelClient({ binaryPath: neverReplies, timeoutMs: 200 });
+`,
+      `
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`,
+    );
+    const client = new WorkspaceKernelClient({ ...neverReplies, timeoutMs: 200 });
     try {
       await expect(client.handshake()).rejects.toBeInstanceOf(KernelTimeoutError);
     } finally {
@@ -247,16 +273,26 @@ async function write(root: string, path: string, text: string): Promise<void> {
 }
 
 // Deterministic misbehaving kernels for supervision tests (crash, silence).
-// POSIX shell only: the repo's dev/CI environments for this suite are
-// Linux/macOS, and faking a stdio JSON-RPC peer in cmd.exe is not worth the
-// complexity. Windows packaging is out of scope for this lane.
-async function writeFakeKernel(source: string): Promise<string> {
+// POSIX platforms run the original bash fakes unchanged; Windows cannot spawn
+// shebang scripts, so it runs behavior-identical Node ports through the Node
+// executable (via the client's binaryArgs option).
+interface FakeKernel {
+  binaryPath: string;
+  binaryArgs?: string[];
+}
+
+async function writeFakeKernel(bashSource: string, nodeSource: string): Promise<FakeKernel> {
   const root = await mkdtemp(join(nativeTmpdir(), "dohc-fake-kernel-"));
   roots.push(root);
+  if (process.platform === "win32") {
+    const path = join(root, "fake-kernel.mjs");
+    await writeFile(path, `${nodeSource.trim()}\n`);
+    return { binaryPath: process.execPath, binaryArgs: [path] };
+  }
   const path = join(root, "fake-kernel");
-  await writeFile(path, `#!/usr/bin/env bash\n${source.trim()}\n`);
+  await writeFile(path, `#!/usr/bin/env bash\n${bashSource.trim()}\n`);
   await chmod(path, 0o755);
-  return path;
+  return { binaryPath: path };
 }
 
 function nativeTmpdir(): string {

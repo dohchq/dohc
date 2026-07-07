@@ -59,6 +59,10 @@ export interface KernelCallOptions {
 
 export interface WorkspaceKernelClientOptions {
   binaryPath: string;
+  // Extra argv passed to the kernel binary. Tests use this on Windows to run
+  // script-based fake kernels through the Node executable; the real kernel
+  // takes no arguments on any platform.
+  binaryArgs?: string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
@@ -304,7 +308,7 @@ export class WorkspaceKernelClient {
     if (this.restartFailures > (this.options.maxRestarts ?? 3)) {
       throw new KernelUnavailableError("Workspace kernel restart limit exceeded.");
     }
-    const child = spawn(this.options.binaryPath, [], {
+    const child = spawn(this.options.binaryPath, this.options.binaryArgs ?? [], {
       cwd: this.options.cwd ?? dirname(this.options.binaryPath),
       env: {
         ...process.env,

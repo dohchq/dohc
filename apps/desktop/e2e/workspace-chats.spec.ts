@@ -81,7 +81,13 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
-    await page.getByTestId("activity-chats").click();
+    // The active-view choice is persisted asynchronously, so a slow close can
+    // restore Chats as the active view; blind-clicking would then TOGGLE the
+    // panel closed. Reveal it only when it is not already showing — what this
+    // test pins is chat-data durability, not active-view persistence.
+    if (!(await page.getByTestId("chats-view").isVisible())) {
+      await page.getByTestId("activity-chats").click();
+    }
     await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
     await page.getByTestId("chats-channel").click();
     await page.getByTestId("chats-thread").click();

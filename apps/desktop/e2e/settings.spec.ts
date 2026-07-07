@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -84,13 +85,15 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
       .toBe("dark");
 
     await desktop.page.getByTestId("settings-nav-agents").click();
+    // The snippet renders the app-canonical forward-slash workspace path.
+    const canonicalRootPath = normalizeAbsolutePath(temp.rootPath);
     await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
-      temp.rootPath,
+      canonicalRootPath,
     );
     await desktop.page.getByRole("button", { name: "Copy" }).click();
     await expect
       .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()))
-      .toContain(temp.rootPath);
+      .toContain(canonicalRootPath);
 
     await desktop.close();
     desktop = await openWorkspace(temp);
@@ -131,15 +134,20 @@ test("settings remains usable at desktop minimum size", async () => {
         },
         { width, height },
       );
+      // Windows DPI scaling can round the applied size by a pixel; the
+      // responsive breakpoint under test is unaffected by that rounding.
       await expect
-        .poll(() =>
-          desktop!.app.evaluate(({ BrowserWindow }) => {
+        .poll(async () => {
+          const size = await desktop!.app.evaluate(({ BrowserWindow }) => {
             const [currentWidth, currentHeight] =
               BrowserWindow.getAllWindows()[0]?.getSize() ?? [0, 0];
             return { height: currentHeight, width: currentWidth };
-          }),
-        )
-        .toEqual({ height, width });
+          });
+          return (
+            Math.abs(size.width - width) <= 1 && Math.abs(size.height - height) <= 1
+          );
+        })
+        .toBe(true);
       await openSettings(desktop.page);
       await expect(desktop.page.getByTestId("settings-search")).toBeVisible();
       await expect(desktop.page.getByRole("button", { name: "Close settings" })).toBeVisible();

@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createLinkedChatStore } from "./linkedChatStore";
 import {
   MAX_SECRET_FILE_BYTES,
@@ -43,6 +44,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 

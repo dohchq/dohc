@@ -6,6 +6,7 @@ import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createVersionedTextStore, type VersionedTextStore } from "@dohc/workspace-engine";
+import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import { nativeTmpdir } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
@@ -38,6 +39,9 @@ async function tempRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
+  // so release every tracked engine handle before removing the temp roots.
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 

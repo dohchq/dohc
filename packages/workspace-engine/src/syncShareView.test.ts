@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createVersionedTextStore } from "./versionedTextStore";
 import {
   ShareUnavailableError,
@@ -23,6 +24,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 

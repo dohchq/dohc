@@ -72,6 +72,13 @@ function normalizeError(error: unknown): JsonRpcError {
   return new JsonRpcError(-32603, "JSON-RPC handler failed.");
 }
 
+// Quote a token for a cmd.exe /s /c command line. Tokens with embedded
+// double quotes are not representable safely; whitespace-bearing paths (the
+// realistic case, e.g. "C:\Program Files\nodejs\npm.cmd") are.
+function quoteForCmd(token: string): string {
+  return /\s/.test(token) ? `"${token}"` : token;
+}
+
 export function resolveSpawnCommand(
   command: string,
   args: string[],
@@ -80,7 +87,7 @@ export function resolveSpawnCommand(
     platform?: NodeJS.Platform;
     exists?: (path: string) => boolean;
   } = {},
-): { command: string; args: string[] } {
+): { command: string; args: string[]; windowsVerbatimArguments?: boolean } {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32") return { command, args };
 
@@ -107,9 +114,17 @@ export function resolveSpawnCommand(
 
   const extension = win32.extname(resolved).toLowerCase();
   if (extension === ".cmd" || extension === ".bat") {
+    // cmd.exe /s strips the first and last quote of the string after /c, so
+    // the whole command line rides in ONE outer-quoted argument with spaced
+    // tokens quoted individually. windowsVerbatimArguments stops Node from
+    // re-quoting that argument, which would corrupt cmd.exe's parsing (and,
+    // for a spaced shim path like "C:\Program Files\nodejs\npm.cmd", swallow
+    // the child's real exit code behind a cmd.exe launch failure).
+    const line = [resolved, ...args].map(quoteForCmd).join(" ");
     return {
       command: env.ComSpec ?? env.COMSPEC ?? "cmd.exe",
-      args: ["/d", "/s", "/c", resolved, ...args],
+      args: ["/d", "/s", "/c", `"${line}"`],
+      windowsVerbatimArguments: true,
     };
   }
   return { command: resolved, args };
@@ -118,6 +133,7 @@ export function resolveSpawnCommand(
 export class JsonRpcTransport {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string | number, PendingRequest>();
+  private readonly exited: Promise<void>;
   private nextId = 1;
   private closed = false;
 
@@ -127,6 +143,11 @@ export class JsonRpcTransport {
     stdout.on("line", (line) => this.handleLine(line));
     const stderr = createInterface({ input: child.stderr });
     stderr.on("line", (line) => options.onStderr?.(line));
+    this.exited = new Promise((resolve) => {
+      child.once("exit", () => resolve());
+      // A spawn failure may never emit "exit"; treat it as terminal too.
+      child.once("error", () => resolve());
+    });
     child.once("error", (error) => this.close(error));
     child.once("exit", (code, signal) => {
       options.onExit?.(code, signal);
@@ -144,6 +165,9 @@ export class JsonRpcTransport {
       env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      ...(resolved.windowsVerbatimArguments
+        ? { windowsVerbatimArguments: true }
+        : {}),
     });
     return new JsonRpcTransport(child, options);
   }
@@ -168,15 +192,30 @@ export class JsonRpcTransport {
     this.send({ jsonrpc: "2.0", method, params });
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.close(new Error("JSON-RPC transport disposed."));
-    if (this.child.exitCode === null && this.child.signalCode === null) {
-      this.child.kill("SIGTERM");
-      setTimeout(() => {
-        if (this.child.exitCode === null && this.child.signalCode === null) {
-          this.child.kill("SIGKILL");
-        }
-      }, 2000).unref();
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    this.child.kill("SIGTERM");
+    const forceKill = setTimeout(() => {
+      if (this.child.exitCode === null && this.child.signalCode === null) {
+        this.child.kill("SIGKILL");
+      }
+    }, 2000);
+    forceKill.unref();
+    // Wait for the child to actually exit: a live child whose cwd is the
+    // workspace root keeps that directory locked on Windows, so a dispose
+    // that returns before exit leaves the workspace undeletable. Bounded so
+    // an unkillable child cannot hang dispose forever.
+    let waitCap: NodeJS.Timeout | undefined;
+    const capped = new Promise<void>((resolve) => {
+      waitCap = setTimeout(resolve, 5000);
+      waitCap.unref?.();
+    });
+    try {
+      await Promise.race([this.exited, capped]);
+    } finally {
+      clearTimeout(forceKill);
+      if (waitCap) clearTimeout(waitCap);
     }
   }
 

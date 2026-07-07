@@ -2,6 +2,7 @@ import { expect, type Page } from "@playwright/test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../src/workspaces/workspaceSettings";
 
 export interface TempWorkspace {
@@ -168,7 +169,9 @@ export async function seedWorkspaceRegistry(
         version: 1,
         workspaces: entries.map((entry) => ({
           workspaceId: entry.workspaceId,
-          rootPath: entry.rootPath,
+          // Store the app-canonical forward-slash form, exactly as the app
+          // itself writes registry entries (matters on Windows).
+          rootPath: normalizeAbsolutePath(entry.rootPath),
           ...SEEDED_WORKSPACE_SHAPE,
           ...(entry.remote ? { remote: entry.remote } : {}),
         })),
@@ -271,6 +274,10 @@ export async function activeWorkspace(
   page: Page,
   rootPath: string,
 ): Promise<WorkspaceSummary> {
+  // The registry stores rootPath in the app's canonical forward-slash form
+  // (normalizeAbsolutePath); canonicalize the expected native path the same
+  // way so the comparison holds on Windows.
+  const expected = normalizeAbsolutePath(rootPath);
   const workspace = await page.waitForFunction(
     async (expectedRootPath) => {
       const api = (window as unknown as {
@@ -286,7 +293,7 @@ export async function activeWorkspace(
         ) ?? null
       );
     },
-    rootPath,
+    expected,
   );
   const value = await workspace.jsonValue();
   if (!value) throw new Error(`Workspace was not registered: ${rootPath}`);

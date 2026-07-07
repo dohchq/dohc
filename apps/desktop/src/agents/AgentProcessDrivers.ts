@@ -61,6 +61,9 @@ async function probeCommand(spec: ProcessSpec): Promise<{ installed: boolean; ve
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      ...(resolved.windowsVerbatimArguments
+        ? { windowsVerbatimArguments: true }
+        : {}),
     });
     let stdout = "";
     let stderr = "";
@@ -287,13 +290,13 @@ class AcpSession implements AgentSession {
   async stop(): Promise<void> {
     await this.cancel();
     this.transport.notify("session/close", { sessionId: this.sessionId });
-    this.dispose();
+    await this.dispose();
   }
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    this.transport.dispose();
+    await this.transport.dispose();
   }
 
   requestPermission(params: unknown): Promise<unknown> {
@@ -387,7 +390,7 @@ class AcpAgentDriver implements AgentDriver {
       input.onEvent({ kind: "session-state", state: "ready" });
       return session;
     } catch (error) {
-      transport.dispose();
+      await transport.dispose();
       throw error;
     }
   }
@@ -495,13 +498,13 @@ class CodexSession implements AgentSession {
 
   async stop(): Promise<void> {
     await this.cancel();
-    this.dispose();
+    await this.dispose();
   }
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    this.transport.dispose();
+    await this.transport.dispose();
   }
 
   requestApproval(method: string, params: unknown): Promise<unknown> {
@@ -619,7 +622,7 @@ class CodexAppServerDriver implements AgentDriver {
       input.onEvent({ kind: "session-state", state: "ready" });
       return session;
     } catch (error) {
-      transport.dispose();
+      await transport.dispose();
       throw error;
     }
   }

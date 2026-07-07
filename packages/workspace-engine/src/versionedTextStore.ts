@@ -46,6 +46,7 @@ import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
   assertEngineSqliteIntegrity,
   initializeOrValidateEngineSchema,
+  trackEngineDbHandleForTest,
   type EngineIntegrityCheckMode,
 } from "./engineDbSchema";
 import { classifyEngineFilePath } from "./enginePathFloor";
@@ -488,7 +489,7 @@ function openDatabase(
   const { DatabaseSync } = nodeSqlite();
   let db: SqliteDb;
   try {
-    db = new DatabaseSync(path);
+    db = trackEngineDbHandleForTest(new DatabaseSync(path));
   } catch (error) {
     throw corruptStore(error);
   }

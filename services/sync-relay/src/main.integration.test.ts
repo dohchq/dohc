@@ -53,7 +53,26 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  for (const child of children) child.kill("SIGTERM");
+  // Wait for each relay child to actually exit before removing temp dirs:
+  // kill() only requests termination, and Windows cannot unlink the child's
+  // still-open relay.sqlite handles (EBUSY) until the process is gone.
+  await Promise.all(
+    children.map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          const forceKill = setTimeout(() => child.kill("SIGKILL"), 5_000);
+          child.once("close", () => {
+            clearTimeout(forceKill);
+            resolve();
+          });
+          child.kill("SIGTERM");
+        }),
+    ),
+  );
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 

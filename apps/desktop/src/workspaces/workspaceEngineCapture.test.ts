@@ -1,11 +1,13 @@
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import type { VersionedTextStore } from "@dohc/workspace-engine";
 import { createVersionedTextStore } from "@dohc/workspace-engine";
+import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { cpus } from "node:os";
+import { cpus, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -44,6 +46,9 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  // Windows cannot unlink engine.db* files with open sqlite handles (EBUSY),
+  // so release every tracked engine handle before removing the temp roots.
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -824,12 +829,38 @@ describe("workspaceEngineCapture startup reconciliation", () => {
   // ignores file modes), so these degrade-tolerance tests skip under uid 0.
   const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
+  // Access denial is chmod 0o000 on POSIX and an explicit NTFS deny-read ACE
+  // on Windows (POSIX modes do not exist there); the capture behavior under
+  // test — degrade, keep the rest, never fabricate deletes — is identical.
+  async function denyRead(absolute: string): Promise<void> {
+    if (process.platform === "win32") {
+      const user = userInfo().username;
+      execFileSync(
+        "icacls",
+        [absolute, "/inheritance:r", "/deny", `${user}:(OI)(CI)(R)`],
+        { stdio: "pipe" },
+      );
+      return;
+    }
+    await chmod(absolute, 0o000);
+  }
+
+  async function restoreRead(absolute: string, mode: number): Promise<void> {
+    if (process.platform === "win32") {
+      const user = userInfo().username;
+      execFileSync("icacls", [absolute, "/remove:d", user], { stdio: "pipe" });
+      execFileSync("icacls", [absolute, "/inheritance:e"], { stdio: "pipe" });
+      return;
+    }
+    await chmod(absolute, mode);
+  }
+
   itNonRoot("cold adoption survives an unreadable subdirectory: the rest of the tree seeds and the pass reports degraded", async () => {
     const root = await tempRoot();
     await write(root, "notes/adopted.md", "# Adopted\n");
     await write(root, "docs/deep/nested.md", "# Nested\n");
     await write(root, "locked/secret.md", "# Never readable this pass\n");
-    await chmod(join(root, "locked"), 0o000);
+    await denyRead(join(root, "locked"));
 
     const outcomes: boolean[] = [];
     const errors: Array<{ context: string; error: unknown }> = [];
@@ -841,7 +872,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       engine.start();
       await engine.stop();
     } finally {
-      await chmod(join(root, "locked"), 0o755);
+      await restoreRead(join(root, "locked"), 0o755);
     }
 
     // Every readable file seeded — one bad directory no longer starves the
@@ -873,7 +904,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
 
     // Second session: the directory is unreadable. Absent-from-a-degraded-
     // listing is NOT deletion evidence — no delete moment may be recorded.
-    await chmod(join(root, "locked"), 0o000);
+    await denyRead(join(root, "locked"));
     const outcomes: boolean[] = [];
     try {
       const second = capture(root, {
@@ -883,7 +914,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       second.start();
       await second.stop();
     } finally {
-      await chmod(join(root, "locked"), 0o755);
+      await restoreRead(join(root, "locked"), 0o755);
     }
 
     expect(outcomes).toEqual([false]);

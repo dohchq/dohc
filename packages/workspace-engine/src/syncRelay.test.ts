@@ -21,6 +21,7 @@ import {
   type SyncReplicationEnvelope,
 } from ".";
 import { openEngineDb } from "./syncApply";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // node:sqlite via createRequire: vitest's vite pipeline cannot statically
@@ -43,6 +44,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
