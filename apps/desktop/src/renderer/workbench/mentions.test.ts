@@ -55,6 +55,18 @@ describe("findMentions", () => {
     expect(found).toHaveLength(1);
     expect(found[0]!.candidate.id).toBe("agent:default");
   });
+
+  it("matches when the @ immediately follows an opening bracket", () => {
+    // MENTION_RE's lead class also admits ( [ {, the shared seam every surface
+    // depends on — lock the bracket boundary so it can't silently regress.
+    expect(findMentions("(@you)", candidates)).toMatchObject([
+      { candidate: { id: "user:you" }, start: 1 },
+    ]);
+    expect(findMentions("[@agent]", candidates).map((m) => m.candidate.id)).toEqual([
+      "agent:default",
+    ]);
+    expect(findMentions("{@you}", candidates).map((m) => m.candidate.id)).toEqual(["user:you"]);
+  });
 });
 
 describe("findMentions code-awareness (ignoreCode)", () => {

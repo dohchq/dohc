@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import {
-  clearAgentNotificationsForThread,
   clearAgentNotificationsForWorkspace,
   deriveAgentActivity,
   dismissAgentNotification,
@@ -26,8 +25,6 @@ export interface UseAgentNotifications {
   dismiss: (id: string) => void;
   // The user is now looking at the run — clear this workspace's notices.
   clearForCurrentWorkspace: () => void;
-  // The user opened a chat thread — clear notices tied to it.
-  clearForThread: (threadId: string) => void;
 }
 
 export function useAgentNotifications(params: {
@@ -118,18 +115,6 @@ export function useAgentNotifications(params: {
     });
   }, [dismissedFor, workspaceId]);
 
-  const clearForThread = useCallback(
-    (threadId: string) => {
-      setNotifications((prev) => {
-        for (const notice of prev) {
-          if (notice.threadId === threadId) dismissedFor(notice.workspaceId).add(notice.id);
-        }
-        return clearAgentNotificationsForThread(prev, threadId);
-      });
-    },
-    [dismissedFor],
-  );
-
   // Render only the CURRENT workspace's notices, computed synchronously. A
   // switch to workspace B therefore never repaints workspace A's notices, even
   // for the tick before the next poll runs (product invariant: a slow/stale
@@ -143,6 +128,5 @@ export function useAgentNotifications(params: {
     notifications: currentWorkspaceNotifications,
     dismiss,
     clearForCurrentWorkspace,
-    clearForThread,
   };
 }

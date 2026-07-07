@@ -29,9 +29,6 @@ export interface AgentNotification {
   title: string;
   body: string;
   createdAtMs: number;
-  // Present when the notice points at a specific chat thread (an agent ask
-  // authored into a thread). Opening it auto-clears the notice.
-  threadId?: string;
 }
 
 // One poll's worth of truth about a workspace's agent session. Derived in the
@@ -57,8 +54,6 @@ export interface AgentActivityInput {
   // The agent's latest message reads as directed at the user (an @mention or a
   // trailing question). Promotes a completion from "finished" to "asked".
   addressedToUser?: boolean;
-  // A chat thread the ask is tied to, if any.
-  threadId?: string;
 }
 
 // The minimal slice of an agent-session snapshot the notification model needs.
@@ -210,7 +205,6 @@ function build(
     title,
     body,
     createdAtMs: nowMs,
-    ...(input.threadId ? { threadId: input.threadId } : {}),
   };
 }
 
@@ -234,15 +228,29 @@ export function reduceAgentNotifications(
   opts: ReduceOptions,
 ): AgentNotification[] {
   const runId = input.runId;
-  if (!runId) return [...prev];
+  // Reference-stable no-op: a poll that changes nothing MUST return the same
+  // array so useAgentNotifications' setState bails out and React skips the
+  // re-render. The hook polls every ~1.5s for the app's life; allocating a
+  // fresh array each idle tick would re-render the whole notifications subtree
+  // forever. So every return below reuses `prev` when the content is unchanged.
+  if (!runId) return prev as AgentNotification[];
   const kind = desiredKind(input);
   const desiredId = kind !== null ? notificationIdFor(input, kind, runId) : null;
-  const kept = prev.filter((notice) => {
-    if (notice.workspaceId !== input.workspaceId || notice.runId !== runId) return true;
-    // For THIS run, keep only the exact desired notice; any other kind — or an
-    // earlier needs-input for a DIFFERENT permission — is superseded.
-    return desiredId !== null && notice.id === desiredId;
+  // Would the filter actually drop anything for THIS run? (a superseded kind,
+  // an earlier needs-input for a different permission, or a resume clearing a
+  // notice). If not, keep `prev` itself rather than a fresh, equal copy.
+  const needsFilter = prev.some((notice) => {
+    if (notice.workspaceId !== input.workspaceId || notice.runId !== runId) return false;
+    return desiredId === null || notice.id !== desiredId;
   });
+  const kept: AgentNotification[] = needsFilter
+    ? prev.filter((notice) => {
+        if (notice.workspaceId !== input.workspaceId || notice.runId !== runId) return true;
+        // For THIS run, keep only the exact desired notice; any other kind — or
+        // an earlier needs-input for a DIFFERENT permission — is superseded.
+        return desiredId !== null && notice.id === desiredId;
+      })
+    : (prev as AgentNotification[]);
   if (desiredId === null) return kept;
   if (opts.dismissed?.has(desiredId)) return kept;
   if (kept.some((notice) => notice.id === desiredId)) return kept;
@@ -257,19 +265,16 @@ export function dismissAgentNotification(
 }
 
 // Auto-clear seam: remove every notice for a workspace (used when the user
-// opens the Agent panel — they are now looking at the run).
+// opens the Agent panel — they are now looking at the run). This is the ONLY
+// auto-clear: a run's notices point at the workspace's agent session, not at a
+// specific chat thread. The agent session model does not (yet) carry the chat
+// thread a mention-driven ask belongs to, so there is no reliable per-thread
+// clear to offer — opening the notice lands on the run and clears the whole
+// workspace. When the session snapshot starts carrying the originating chat
+// thread, a thread-scoped clear can be reintroduced honestly.
 export function clearAgentNotificationsForWorkspace(
   list: readonly AgentNotification[],
   workspaceId: string,
 ): AgentNotification[] {
   return list.filter((notice) => notice.workspaceId !== workspaceId);
-}
-
-// Auto-clear seam: remove every notice tied to a chat thread (used when the
-// user opens that thread — an ask is answered by reading it).
-export function clearAgentNotificationsForThread(
-  list: readonly AgentNotification[],
-  threadId: string,
-): AgentNotification[] {
-  return list.filter((notice) => notice.threadId !== threadId);
 }

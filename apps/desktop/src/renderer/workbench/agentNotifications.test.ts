@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   agentNotificationId,
-  clearAgentNotificationsForThread,
   clearAgentNotificationsForWorkspace,
   deriveAgentActivity,
   dismissAgentNotification,
@@ -117,6 +116,48 @@ describe("reduceAgentNotifications coalescing", () => {
     const runOne = reduce([], input({ runId: "run-1", status: "completed", latestSummary: "one" }));
     const runTwo = reduce(runOne, input({ runId: "run-2", status: "failed", lastError: "boom" }));
     expect(runTwo.map((n) => n.runId).sort()).toEqual(["run-1", "run-2"]);
+  });
+});
+
+describe("reduceAgentNotifications reference stability", () => {
+  // The hook polls every ~1.5s for the app's life and feeds the result into
+  // setState; a no-op tick MUST return the SAME array so React bails out.
+  it("returns the identical array on an idle (no-run) tick", () => {
+    const prev: AgentNotification[] = [];
+    expect(reduce(prev, input({ runId: null, status: "running" }))).toBe(prev);
+  });
+
+  it("returns the identical array while a run merely keeps running", () => {
+    const prev: AgentNotification[] = [];
+    expect(reduce(prev, input({ status: "running" }))).toBe(prev);
+  });
+
+  it("returns the identical array on a steady completed re-poll (no change)", () => {
+    const done = reduce([], input({ status: "completed", latestSummary: "done" }));
+    const second = reduce(done, input({ status: "completed", latestSummary: "done" }));
+    expect(second).toBe(done);
+  });
+
+  it("returns the identical array when the desired notice is already dismissed", () => {
+    const done = reduce([], input({ status: "completed", latestSummary: "done" }));
+    const dismissed = new Set([done[0]!.id]);
+    const cleared = dismissAgentNotification(done, done[0]!.id);
+    const next = reduce(cleared, input({ status: "completed", latestSummary: "done" }), dismissed);
+    expect(next).toBe(cleared);
+  });
+
+  it("allocates a NEW array when a real change occurs", () => {
+    const prev: AgentNotification[] = [];
+    const next = reduce(prev, input({ status: "completed", latestSummary: "done" }));
+    expect(next).not.toBe(prev);
+    expect(next).toHaveLength(1);
+  });
+
+  it("allocates a NEW array when a run resumes and clears its notice", () => {
+    const blocked = reduce([], input({ status: "waiting-permission" }));
+    const resumed = reduce(blocked, input({ status: "running" }));
+    expect(resumed).not.toBe(blocked);
+    expect(resumed).toEqual([]);
   });
 });
 
@@ -284,19 +325,15 @@ describe("clear helpers", () => {
       title: "Your agent has a question",
       body: "which one?",
       createdAtMs: NOW,
-      threadId: "thread-7",
     },
   ];
 
+  // Opening a notice lands the user on the run, which clears the WHOLE
+  // workspace's notices — the single, honest auto-clear. There is no per-thread
+  // clear because the agent session isn't tied to a specific chat thread.
   it("clears every notice for a workspace", () => {
     expect(clearAgentNotificationsForWorkspace(sample, "ws-a").map((n) => n.workspaceId)).toEqual([
       "ws-b",
-    ]);
-  });
-
-  it("clears notices tied to a thread", () => {
-    expect(clearAgentNotificationsForThread(sample, "thread-7").map((n) => n.runId)).toEqual([
-      "run-1",
     ]);
   });
 });
