@@ -486,6 +486,7 @@ function reactionFromRow(row: Record<string, unknown>): ChatReaction {
       kind: actorKindValue(row.author_kind),
       displayName: stringValue(row.author_display_name),
     },
+    state: reactionStateValue(row.state),
     atMs: numberValue(row.at_ms),
   };
 }

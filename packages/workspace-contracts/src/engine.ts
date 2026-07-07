@@ -1105,15 +1105,18 @@ export interface ChatReactionAuthor {
   displayName: string;
 }
 
-// One ACTIVE ("added") reaction as the store returns it for display. Removed
-// cells (tombstones) are never surfaced. The UI groups these by
-// (messageId, emoji) into pills with a count and the reactors' names.
+// One reaction CELL as the store returns it. `listReactions` returns only
+// active ("added") cells for display; `setReaction` returns the resolved cell
+// after the LWW upsert (whose `state` reflects the winning op). The UI groups
+// active reactions by (messageId, emoji) into pills with a count and the
+// reactors' names.
 export interface ChatReaction {
   reactionId: string;
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   emoji: string;
   author: ChatReactionAuthor;
+  state: ChatReactionState;
   atMs: number;
 }
 

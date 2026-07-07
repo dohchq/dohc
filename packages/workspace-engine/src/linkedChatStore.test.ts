@@ -10,6 +10,7 @@ import {
   createLinkedChatStore,
   linkedChatProjectionPath,
 } from "./linkedChatStore";
+import type { SyncReplicationEnvelope } from "./linkedChatStore";
 import { createVersionedTextStore } from "./versionedTextStore";
 
 interface RawSqliteStatement {
@@ -1211,5 +1212,380 @@ describe("chat search index rebuild", () => {
       versions.ensureSearchIndex({ workspaceId: "workspace-a", versionId: main.id }),
     ).rejects.toMatchObject({ code: "state-corrupt" });
     await versions.close();
+  });
+});
+
+describe("chat reactions (WS-MU-C2)", () => {
+  const WS = "workspace-a";
+
+  // A fully independent engine (own root + clock + id prefix) so two-store
+  // tests model real peers, not two handles on one database. Each engine mints
+  // globally distinct ids (like the uuid the store uses in production), so a
+  // replicated thread/message is never confused with a peer's local one.
+  interface Engine {
+    root: string;
+    store: ReturnType<typeof createLinkedChatStore>;
+    setClock: (ms: number) => void;
+  }
+  const engines: Engine[] = [];
+
+  async function makeEngine(prefix: string, startMs = 1000): Promise<Engine> {
+    const engineRoot = await mkdtemp(join(tmpdir(), `dohc-reactions-${prefix}-`));
+    let clock = startMs;
+    const counters = { channel: 0, message: 0, thread: 0 };
+    const store = createLinkedChatStore(engineRoot, {
+      nowMs: () => (clock += 10),
+      createId: (kind) => `${prefix}-${kind}-${(counters[kind] += 1)}`,
+    });
+    const engine: Engine = {
+      root: engineRoot,
+      store,
+      setClock: (ms) => {
+        clock = ms;
+      },
+    };
+    engines.push(engine);
+    return engine;
+  }
+
+  afterEach(async () => {
+    for (const engine of engines.splice(0)) {
+      await engine.store.close();
+      await rm(engine.root, { recursive: true, force: true });
+    }
+  });
+
+  function rawDbFor<T>(engineRoot: string, fn: (db: RawSqliteDb) => T): T {
+    const db = new DatabaseSync(join(engineRoot, LINKED_CHAT_STORE_RELATIVE_PATH));
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  // Every chat op an engine has journaled, in origin-seq order — the exact
+  // stream the relay would ship. Used to replicate a producer engine into a
+  // consumer engine through the real applyReplicationOp path.
+  function chatOpsFor(engineRoot: string): SyncReplicationEnvelope[] {
+    return rawDbFor(engineRoot, (db) =>
+      db
+        .prepare(
+          `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+           FROM replication_log
+           ORDER BY origin_seq`,
+        )
+        .all()
+        .map(
+          (row) =>
+            ({
+              workspaceId: String(row.workspace_id),
+              originId: String(row.origin_id),
+              originSeq: Number(row.origin_seq),
+              opKind: String(row.op_kind),
+              payload: JSON.parse(String(row.payload_json)),
+              recordedAtMs: Number(row.recorded_at_ms),
+            }) as SyncReplicationEnvelope,
+        ),
+    );
+  }
+
+  // The observed active set, read straight from chat_reactions (bypasses the
+  // thread requirement of listReactions so the CRDT convergence tests can
+  // apply reaction ops without replicating the message chain). Encoded as
+  // sorted "message|emoji|author" keys so two engines compare equal exactly
+  // when they converged.
+  function activeCells(engineRoot: string): string[] {
+    return rawDbFor(engineRoot, (db) =>
+      db
+        .prepare(
+          `SELECT message_id, emoji, author_id FROM chat_reactions
+           WHERE state = 'added'
+           ORDER BY message_id, emoji, author_id`,
+        )
+        .all()
+        .map((row) => `${String(row.message_id)}|${String(row.emoji)}|${String(row.author_id)}`),
+    );
+  }
+
+  interface ReactionOpSpec {
+    origin: string;
+    seq: number;
+    messageId: string;
+    threadId: string;
+    emoji: string;
+    authorId: string;
+    state: "added" | "removed";
+    atMs: number;
+  }
+
+  function reactionEnvelope(spec: ReactionOpSpec): SyncReplicationEnvelope {
+    return {
+      workspaceId: WS,
+      originId: spec.origin,
+      originSeq: spec.seq,
+      opKind: "chat.reaction.set",
+      payload: {
+        // reactionId is a stored column; the CELL key is the natural
+        // (message, emoji, author) tuple, so a per-cell-stable id suffices.
+        reactionId: `r:${spec.messageId}:${spec.emoji}:${spec.authorId}`,
+        messageId: spec.messageId,
+        threadId: spec.threadId,
+        emoji: spec.emoji,
+        authorId: spec.authorId,
+        authorKind: "human",
+        authorDisplayName: spec.authorId,
+        state: spec.state,
+        atMs: spec.atMs,
+      },
+      recordedAtMs: spec.atMs,
+    } as SyncReplicationEnvelope;
+  }
+
+  async function seedMessage(engine: Engine): Promise<{ threadId: string; messageId: string }> {
+    const channel = await engine.store.createChannel({ workspaceId: WS, name: "general" });
+    const started = await engine.store.startChannelThread({
+      workspaceId: WS,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "ship it?",
+    });
+    return { threadId: started.thread.id, messageId: started.message.id };
+  }
+
+  it("adds and lists a reaction solo, with no relay", async () => {
+    const a = await makeEngine("a");
+    const { threadId, messageId } = await seedMessage(a);
+    const reaction = await a.store.setReaction({
+      workspaceId: WS,
+      threadId,
+      messageId,
+      emoji: "👍",
+      author: { authorId: "alice@x", kind: "human", displayName: "Alice" },
+      state: "added",
+    });
+    expect(reaction).toMatchObject({ emoji: "👍", messageId, state: "added" });
+    expect(reaction.author).toMatchObject({ authorId: "alice@x", displayName: "Alice" });
+    const list = await a.store.listReactions({ workspaceId: WS, threadId });
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ emoji: "👍", author: { authorId: "alice@x" } });
+  });
+
+  it("reacts to an AGENT message as a first-class case (individual-first)", async () => {
+    const a = await makeEngine("a");
+    const channel = await a.store.createChannel({ workspaceId: WS, name: "general" });
+    const started = await a.store.startChannelThread({
+      workspaceId: WS,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "status?",
+    });
+    const agentMessage = await a.store.sendMessage({
+      workspaceId: WS,
+      threadId: started.thread.id,
+      author: { kind: "agent", displayName: "Alice" },
+      body: "Deploy is green.",
+    });
+    await a.store.setReaction({
+      workspaceId: WS,
+      threadId: started.thread.id,
+      messageId: agentMessage.id,
+      emoji: "🎉",
+      author: { authorId: "alice@x", kind: "human", displayName: "Alice" },
+      state: "added",
+    });
+    const list = await a.store.listReactions({ workspaceId: WS, threadId: started.thread.id });
+    expect(list).toEqual([expect.objectContaining({ messageId: agentMessage.id, emoji: "🎉" })]);
+  });
+
+  it("toggles a reaction off and keeps the tombstone for convergence", async () => {
+    const a = await makeEngine("a");
+    const { threadId, messageId } = await seedMessage(a);
+    const author = { authorId: "alice@x", kind: "human" as const, displayName: "Alice" };
+    await a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: "👍", author, state: "added" });
+    await a.store.setReaction({ workspaceId: WS, threadId, messageId, emoji: "👍", author, state: "removed" });
+    expect(await a.store.listReactions({ workspaceId: WS, threadId })).toHaveLength(0);
+    // The removed cell persists as a tombstone (one row, state 'removed').
+    const rows = rawDbFor(a.root, (db) =>
+      db.prepare("SELECT state FROM chat_reactions WHERE message_id = ?").all(messageId),
+    );
+    expect(rows).toEqual([{ state: "removed" }]);
+  });
+
+  it("requires the message to exist and to live in the given thread", async () => {
+    const a = await makeEngine("a");
+    const { threadId } = await seedMessage(a);
+    await expect(
+      a.store.setReaction({
+        workspaceId: WS,
+        threadId,
+        messageId: "ghost-message",
+        emoji: "👍",
+        author: { authorId: "alice@x", kind: "human", displayName: "Alice" },
+        state: "added",
+      }),
+    ).rejects.toMatchObject({ code: "message-not-found" });
+  });
+
+  it("distinguishes reactors: same emoji by two authors is two pills, each removable independently", async () => {
+    const a = await makeEngine("a");
+    const { threadId, messageId } = await seedMessage(a);
+    for (const authorId of ["alice@x", "bob@x"]) {
+      await a.store.setReaction({
+        workspaceId: WS,
+        threadId,
+        messageId,
+        emoji: "👍",
+        author: { authorId, kind: "human", displayName: authorId },
+        state: "added",
+      });
+    }
+    expect(await a.store.listReactions({ workspaceId: WS, threadId })).toHaveLength(2);
+    // Alice removing hers leaves Bob's untouched (distinct cells).
+    await a.store.setReaction({
+      workspaceId: WS,
+      threadId,
+      messageId,
+      emoji: "👍",
+      author: { authorId: "alice@x", kind: "human", displayName: "alice@x" },
+      state: "removed",
+    });
+    const list = await a.store.listReactions({ workspaceId: WS, threadId });
+    expect(list.map((reaction) => reaction.author.authorId)).toEqual(["bob@x"]);
+  });
+
+  it("replicates a solo reaction to a second engine over the chat pipeline", async () => {
+    const a = await makeEngine("a");
+    const b = await makeEngine("b");
+    const { threadId, messageId } = await seedMessage(a);
+    await a.store.setReaction({
+      workspaceId: WS,
+      threadId,
+      messageId,
+      emoji: "👍",
+      author: { authorId: "alice@x", kind: "human", displayName: "Alice" },
+      state: "added",
+    });
+    // Ship every chat op A journaled (channel, thread, message, reaction) into
+    // B through the real apply path, in origin-seq order.
+    for (const op of chatOpsFor(a.root)) {
+      await b.store.applyReplicationOp(op);
+    }
+    const listB = await b.store.listReactions({ workspaceId: WS, threadId });
+    expect(listB).toEqual([
+      expect.objectContaining({ emoji: "👍", messageId, author: expect.objectContaining({ authorId: "alice@x" }) }),
+    ]);
+    // Re-applying the whole stream is an idempotent no-op (log-level dedup).
+    for (const op of chatOpsFor(a.root)) {
+      expect((await b.store.applyReplicationOp(op)).status).toBe("skipped");
+    }
+    expect(await b.store.listReactions({ workspaceId: WS, threadId })).toHaveLength(1);
+  });
+
+  it("converges add/remove regardless of apply order (commutative, remove-wins tie)", async () => {
+    const cell = { messageId: "m1", threadId: "t1", emoji: "👍", authorId: "alice@x" };
+    // Same author, two devices (two origins): add earlier, remove later.
+    const add = reactionEnvelope({ ...cell, origin: "dev1", seq: 0, state: "added", atMs: 100 });
+    const remove = reactionEnvelope({ ...cell, origin: "dev2", seq: 0, state: "removed", atMs: 200 });
+    const forward = await makeEngine("fwd");
+    await forward.store.applyReplicationOp(add);
+    await forward.store.applyReplicationOp(remove);
+    const reverse = await makeEngine("rev");
+    await reverse.store.applyReplicationOp(remove);
+    await reverse.store.applyReplicationOp(add);
+    // The newer remove wins in both orders.
+    expect(activeCells(forward.root)).toEqual([]);
+    expect(activeCells(reverse.root)).toEqual(activeCells(forward.root));
+
+    // Equal timestamps: remove wins the tie deterministically, both orders.
+    const tieAdd = reactionEnvelope({ ...cell, origin: "dev1", seq: 0, state: "added", atMs: 500 });
+    const tieRemove = reactionEnvelope({ ...cell, origin: "dev2", seq: 0, state: "removed", atMs: 500 });
+    const tieA = await makeEngine("tieA");
+    await tieA.store.applyReplicationOp(tieAdd);
+    await tieA.store.applyReplicationOp(tieRemove);
+    const tieB = await makeEngine("tieB");
+    await tieB.store.applyReplicationOp(tieRemove);
+    await tieB.store.applyReplicationOp(tieAdd);
+    expect(activeCells(tieA.root)).toEqual([]);
+    expect(activeCells(tieB.root)).toEqual([]);
+  });
+
+  it("is idempotent at the CRDT level: a stale re-add never revives a newer remove", async () => {
+    const cell = { messageId: "m1", threadId: "t1", emoji: "👍", authorId: "alice@x" };
+    const engine = await makeEngine("idem");
+    await engine.store.applyReplicationOp(
+      reactionEnvelope({ ...cell, origin: "dev2", seq: 0, state: "removed", atMs: 200 }),
+    );
+    // A distinct origin replays an OLDER add — different origin so it clears the
+    // log dedup, but the LWW WHERE clause rejects it.
+    await engine.store.applyReplicationOp(
+      reactionEnvelope({ ...cell, origin: "dev1", seq: 0, state: "added", atMs: 100 }),
+    );
+    expect(activeCells(engine.root)).toEqual([]);
+    // Replaying the exact winning op again is a plain no-op.
+    await engine.store.applyReplicationOp(
+      reactionEnvelope({ ...cell, origin: "dev3", seq: 0, state: "removed", atMs: 200 }),
+    );
+    expect(activeCells(engine.root)).toEqual([]);
+  });
+
+  it("fuzz: two engines applying random interleavings of the same ops converge", async () => {
+    // A small pool of cells; each op flips a random cell to a random state at a
+    // strictly increasing atMs (unique winner per cell = the last op applied to
+    // it). Ops are spread across two origins so a cell can receive writes from
+    // both — the cross-origin interleaving genuinely differs between engines.
+    const authors = ["alice@x", "bob@x"];
+    const emojis = ["👍", "🎉"];
+    const origins = ["oX", "oY"];
+    const seqByOrigin: Record<string, number> = { oX: 0, oY: 0 };
+    const perCellWinner = new Map<string, { state: "added" | "removed"; atMs: number }>();
+    const streams: Record<string, SyncReplicationEnvelope[]> = { oX: [], oY: [] };
+    let atMs = 1000;
+    for (let i = 0; i < 60; i += 1) {
+      atMs += 10;
+      const authorId = authors[Math.floor(Math.random() * authors.length)]!;
+      const emoji = emojis[Math.floor(Math.random() * emojis.length)]!;
+      const state = Math.random() < 0.5 ? "added" : "removed";
+      const origin = origins[Math.floor(Math.random() * origins.length)]!;
+      const spec: ReactionOpSpec = {
+        origin,
+        seq: seqByOrigin[origin]!++,
+        messageId: "m1",
+        threadId: "t1",
+        emoji,
+        authorId,
+        state,
+        atMs,
+      };
+      streams[origin]!.push(reactionEnvelope(spec));
+      // atMs strictly increases, so the last write to each cell is its winner.
+      perCellWinner.set(`m1|${emoji}|${authorId}`, { state, atMs });
+    }
+    const expected = [...perCellWinner.entries()]
+      .filter(([, value]) => value.state === "added")
+      .map(([key]) => key)
+      .sort();
+
+    // A merge that preserves each origin's seq order (any such interleaving is
+    // a valid delivery order) — two independent shuffles for two engines.
+    function mergedOrder(): SyncReplicationEnvelope[] {
+      const cursors: Record<string, number> = { oX: 0, oY: 0 };
+      const out: SyncReplicationEnvelope[] = [];
+      for (;;) {
+        const ready = origins.filter((origin) => cursors[origin]! < streams[origin]!.length);
+        if (ready.length === 0) break;
+        const origin = ready[Math.floor(Math.random() * ready.length)]!;
+        out.push(streams[origin]![cursors[origin]!++]!);
+      }
+      return out;
+    }
+
+    const engine1 = await makeEngine("fuzz1");
+    for (const op of mergedOrder()) await engine1.store.applyReplicationOp(op);
+    const engine2 = await makeEngine("fuzz2");
+    for (const op of mergedOrder()) await engine2.store.applyReplicationOp(op);
+
+    expect(activeCells(engine1.root)).toEqual(expected);
+    expect(activeCells(engine2.root)).toEqual(expected);
   });
 });
