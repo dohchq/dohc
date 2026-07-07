@@ -612,6 +612,27 @@ export async function recoverRelayOrigin(
            ON CONFLICT(workspace_id, origin_id) DO UPDATE SET pushed_seq = excluded.pushed_seq`,
         )
         .run(input.workspaceId, oldOriginId, sharedPrefixLength - 1);
+      // Clamp the old origin's INBOUND ack down to the shared prefix (0P
+      // sync-hardening item 5 gate fix). This machine has already ACKED its own
+      // old-origin ops back from the relay, so replication_peers.acked_seq for
+      // the old origin can sit at/above the relay's authoritative tail. The
+      // pull's fast path (`originSeq <= ackedSeq` -> skip) runs BEFORE the
+      // imported-log-exists check, so without this clamp the divergent
+      // old-origin relay tail (seqs >= sharedPrefixLength, whose local journal
+      // rows we just deleted) would be silently skipped and NEVER materialize
+      // as a conflict -- the relay's version of that work would be lost. Only
+      // lowers (never raises) an existing ack.
+      writeDb
+        .prepare(
+          `UPDATE replication_peers SET acked_seq = ?
+           WHERE workspace_id = ? AND origin_id = ? AND acked_seq > ?`,
+        )
+        .run(
+          sharedPrefixLength - 1,
+          input.workspaceId,
+          oldOriginId,
+          sharedPrefixLength - 1,
+        );
       // The fresh origin has pushed nothing yet.
       writeDb
         .prepare(

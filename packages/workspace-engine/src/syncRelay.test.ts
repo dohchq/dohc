@@ -767,6 +767,26 @@ describe("sync relay client", () => {
       pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
     ).rejects.toBeInstanceOf(RelayOriginDivergedError);
 
+    // 0P sync-hardening item 5 precondition: this machine has already ACKED the
+    // old origin's authoritative tail back from the relay (a pull after the
+    // failed push, or an ack from before the divergence). replication_peers
+    // records that ack. The pull fast path (`originSeq <= ackedSeq` -> skip)
+    // runs BEFORE importedReplicationLogExists, so if recovery leaves this ack
+    // at/above the tail the divergent old-origin ops are silently skipped and
+    // NEVER materialize as a conflict. Seed that hostile ack directly.
+    const ackDb = openEngineDb(a);
+    try {
+      ackDb
+        .prepare(
+          `INSERT INTO replication_peers (workspace_id, origin_id, acked_seq)
+           VALUES (?, ?, ?)
+           ON CONFLICT(workspace_id, origin_id) DO UPDATE SET acked_seq = excluded.acked_seq`,
+        )
+        .run(WORKSPACE_ID, relayOriginId, 2);
+    } finally {
+      ackDb.close();
+    }
+
     // Recover: re-baseline onto a fresh origin, preserving the divergent op.
     const recovery = await recoverRelayOrigin({
       rootDir: a,
@@ -778,6 +798,22 @@ describe("sync relay client", () => {
     expect(recovery.sharedPrefixLength).toBe(2); // init + "hello" write
     expect(recovery.preservedOps).toBe(1); // the divergent "post-restore" write
 
+    // The old origin's inbound ack was clamped down to the shared prefix
+    // (sharedPrefixLength - 1 = 1), so the next pull re-applies the divergent
+    // tail instead of skipping it. Without the clamp this reads 2 and the
+    // conflict below never opens.
+    const ackCheckDb = openEngineDb(a);
+    try {
+      const ackRow = ackCheckDb
+        .prepare(
+          "SELECT acked_seq FROM replication_peers WHERE workspace_id = ? AND origin_id = ?",
+        )
+        .get(WORKSPACE_ID, relayOriginId);
+      expect(Number(ackRow?.acked_seq)).toBe(recovery.sharedPrefixLength - 1);
+    } finally {
+      ackCheckDb.close();
+    }
+
     // Now the machine syncs again: push the preserved work under the fresh
     // origin (no divergence), then pull the relay's authoritative tail.
     const pushed = await pushWorkspaceToRelay({
@@ -785,7 +821,9 @@ describe("sync relay client", () => {
       workspaceId: WORKSPACE_ID,
       relay: relay.connection(),
     });
-    expect(pushed.pushed).toBeGreaterThanOrEqual(1);
+    // Exactly the 1 re-journaled orphan op is pushed under the fresh origin;
+    // the frozen shared prefix must NOT be re-pushed.
+    expect(pushed.pushed).toBe(1);
     // The preserved work reached the relay under the NEW origin (a peer would
     // see it) — never silently lost.
     expect(relay.log.some((op) => op.originId === recovery.newOriginId)).toBe(true);

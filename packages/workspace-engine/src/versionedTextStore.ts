@@ -4949,6 +4949,12 @@ function createVersionedTextStoreWithHooks(
                   : payload.resolution === "kept-current"
                     ? "applied-incoming"
                     : payload.resolution;
+              // A merged resolution (apply-merged) does NOT replicate its
+              // merged bytes in the resolve payload, so this mirror has nothing
+              // to apply. Marking it resolved anyway would leave the two
+              // machines holding DIFFERENT text with no open conflict anywhere
+              // (silent divergence). Surface it for local review instead.
+              if (mirroredResolution === "applied-merged") return false;
               const applied =
                 mirroredResolution === "applied-incoming"
                   ? applyMirroredIncomingState(txDb, workspaceId, mirror)
