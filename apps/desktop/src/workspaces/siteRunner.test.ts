@@ -159,6 +159,50 @@ describe("startSiteDevServer", () => {
     }
   });
 
+  it("does not reject the ready-timeout until the child is fully stopped", async () => {
+    // Regression: the ready-timeout used to `void stopChild(child)` and reject
+    // immediately, so a caller could observe the failure and delete/switch the
+    // workspace while the dev server was still alive holding the site dir. The
+    // reject must now wait for stopChild to complete. A child that delays its
+    // exit on SIGTERM makes the ordering observable: with the await in place
+    // the rejection cannot arrive before that delay has elapsed.
+    await mkdir(join(root, "site"), { recursive: true });
+    const pidFile = join(root, "site", "dev.pid");
+    const readyTimeoutMs = 150;
+    const sigtermExitDelayMs = 400;
+    const script = [
+      `process.on("SIGTERM", () => { setTimeout(() => process.exit(0), ${sigtermExitDelayMs}); });`,
+      `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+
+    const startedAt = Date.now();
+    await expect(
+      startSiteDevServer({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: process.execPath,
+        args: ["-e", script],
+        readyTimeoutMs,
+      }),
+    ).rejects.toThrow(/did not report a local URL/);
+    const elapsed = Date.now() - startedAt;
+
+    // Reject waited for the delayed exit; without the fix it fires at ~150ms.
+    expect(elapsed).toBeGreaterThanOrEqual(readyTimeoutMs + sigtermExitDelayMs - 100);
+
+    // And the child is confirmed down by the time the rejection surfaces.
+    const pid = Number((await readFile(pidFile, "utf8")).trim());
+    expect(pid).toBeGreaterThan(0);
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
+  });
+
   it("fails when the child exits before reporting a URL", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     await expect(

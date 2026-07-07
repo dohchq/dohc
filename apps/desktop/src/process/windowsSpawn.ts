@@ -12,14 +12,23 @@ import { win32 } from "node:path";
 // cmd.exe does not interpret its metacharacters (& | < > ^ and parentheses)
 // inside double quotes, so quoting only whitespace-bearing tokens would let a
 // metacharacter-bearing argument be parsed as a second command that no
-// validation ever saw. Tokens with embedded double quotes are not
-// representable safely (cmd has no escape for them), so they are refused.
-// Residual caveat: %VAR% expansion still occurs inside quotes and has no
-// reliable escape in a cmd /c context.
+// validation ever saw. Two token shapes have no safe representation and are
+// refused outright rather than quoted:
+//   - embedded double quotes: cmd has no escape for them.
+//   - a percent sign: cmd.exe still expands %VAR% inside double quotes with no
+//     reliable escape, so a crafted env value (e.g. DOHC_PWN='" & calc & "')
+//     would break out of the quotes and inject a second command that the
+//     pre-expansion argv allowlist in siteRunner never saw. Quoting cannot
+//     contain it, so any token carrying % is rejected.
 function quoteForCmd(token: string): string {
   if (token.includes('"')) {
     throw new Error(
       "Command argument contains a double quote, which cannot be represented safely on a cmd.exe command line.",
+    );
+  }
+  if (token.includes("%")) {
+    throw new Error(
+      "Command argument contains a percent sign, which cmd.exe expands as an environment-variable reference (%VAR%) even inside double quotes, with no reliable escape. Refusing to build a cmd.exe command line that could inject an attacker-controlled environment value.",
     );
   }
   // A trailing backslash run would combine with the closing quote into

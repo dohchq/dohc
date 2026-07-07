@@ -332,11 +332,20 @@ export async function startSiteDevServer(input: {
     const failTimer = setTimeout(() => {
       if (resolved) return;
       stopped = true;
-      // stopChild sequences the Windows tree kill BEFORE the wrapper signal;
-      // signalling first would let the taskkill race a dead wrapper pid and
-      // orphan the real dev server.
-      void stopChild(child);
-      reject(new Error(`Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`));
+      // Bring the child fully DOWN before rejecting. stopChild awaits before it
+      // delivers SIGTERM (non-win32) / completes the tree kill (win32), so
+      // rejecting first would let a caller observe the failure and delete or
+      // switch the workspace while the dev server is still alive, holding the
+      // site dir. stopChild also sequences the Windows tree kill BEFORE the
+      // wrapper signal; signalling first would let the taskkill race a dead
+      // wrapper pid and orphan the real dev server.
+      void stopChild(child).finally(() => {
+        reject(
+          new Error(
+            `Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
+          ),
+        );
+      });
     }, input.readyTimeoutMs ?? 15000);
 
     function maybeResolve(chunk: string) {
