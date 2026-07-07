@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
@@ -456,6 +456,40 @@ function cloneFileObject(object: FileObjectRecord): FileObjectRecord {
 
 function storePath(rootDir: string): string {
   return join(rootDir, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+}
+
+// Canonical FILESYSTEM identity of a rootDir's engine.db. Used to KEY the
+// process-global write-chain map (storeWriteChains) and the Y.Doc driver's
+// live-reservation set, so two rootDirs that resolve to the SAME physical
+// engine.db — via a symlink, a case-insensitive alias, or a bind mount — share
+// ONE write lane / reservation instead of racing two writers or two live Y.Docs
+// on one file.
+//
+// resolve() alone is only a LEXICAL normalization: root /a and a symlinked
+// /b -> /a produce different strings, so keying by it hands each a private lane
+// and defeats the single-write-lane + single-canonical guarantees. realpath
+// resolves the actual on-disk path. It requires the target to EXIST, and the
+// key is computed before the DB is created, so we canonicalize the deepest
+// existing ancestor and rejoin the not-yet-created trailing components. The
+// engine.db lives at a FIXED relative path created only as plain dirs/file (the
+// trailing components are never themselves symlinks), so the value is stable
+// across the DB's later creation: once the DB file exists the walk stops at it
+// and realpaths the whole path; while it does not, the walk stops at rootDir
+// (always present) and resolves the same root symlink — both yield the same key.
+export function canonicalEngineDbPath(rootDir: string): string {
+  const dbPath = storePath(resolve(normalizeRootDir(rootDir)));
+  let existing = dbPath;
+  const trailing: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    // Reached the filesystem root with nothing existing (should never happen —
+    // rootDir exists) — fall back to the lexical path rather than loop forever.
+    if (parent === existing) return dbPath;
+    trailing.unshift(basename(existing));
+    existing = parent;
+  }
+  const canonical = realpathSync.native(existing);
+  return trailing.length === 0 ? canonical : join(canonical, ...trailing);
 }
 
 interface SqliteStatement {
@@ -3065,8 +3099,15 @@ function createVersionedTextStoreWithHooks(
   const createId = options.createId ?? defaultCreateId;
   const createGeneratedId = (kind: "conflict" | "moment" | "object" | "version") =>
     normalizeGeneratedId(kind, createId(kind));
-  const stateFilePath = storePath(resolve(normalizeRootDir(rootDir)));
+  // Canonical (symlink/alias-resolved) engine.db identity keys the shared write
+  // chain so a store, a second store, and the Y.Doc driver on the SAME physical
+  // engine.db all serialize through ONE lane (not per-lexical-path lanes).
+  const stateFilePath = canonicalEngineDbPath(rootDir);
   let activeWriteDb: SqliteDb | null = null;
+  // Set only while a runInEngineWriteLane task is executing. A store WRITE
+  // (serialize) invoked from inside that task would queue behind the still-open
+  // lane transaction and deadlock, so we refuse it loudly (see serialize()).
+  let inEngineWriteLane = false;
   let dbHandle: SqliteDb | null = null;
   let validated = false;
 
@@ -3119,6 +3160,18 @@ function createVersionedTextStoreWithHooks(
   }
 
   function serialize<T>(task: () => Promise<T>): Promise<T> {
+    // Reentry guard: a runInEngineWriteLane task holds the single lane
+    // transaction open. If that task calls back into a serialized store write
+    // (writeTextFile, writeBinaryFile, applyReplicationOp, another lane, …) the
+    // new write would queue behind the still-running lane promise and never run
+    // — a self-inflicted deadlock. The lane contract is SQL-only on the passed
+    // connection; misuse must fail loud, not hang.
+    if (inEngineWriteLane) {
+      throw new VersionedTextStoreError(
+        "write-lane-reentry",
+        "A store write was called from inside a runInEngineWriteLane task. The lane task must operate ONLY on its passed connection (SQL-only) and must not re-enter serialized store methods, which would deadlock behind the open lane transaction.",
+      );
+    }
     const queuedBehindExistingWrite = storeWriteChains.has(stateFilePath);
     if (queuedBehindExistingWrite) {
       testHooks.onWriteQueued?.();
@@ -4788,6 +4841,35 @@ function createVersionedTextStoreWithHooks(
         ackReplicationPeer(txDb, workspaceId, input.originId, input.originSeq);
         await persistBarrier();
         return appliedApplyResult(conflictsOpened, pendingResolves);
+      });
+    },
+
+    // WS-G2-B engine write lane: the Y.Doc driver's writes share THIS store's
+    // connection + serialized queue + single BEGIN IMMEDIATE, so a settle and a
+    // Y.Doc update-append can never open two concurrent in-process write
+    // transactions (node:sqlite busy-waits block the JS thread). The task runs
+    // inside runTransaction — it must not BEGIN/COMMIT itself; a throw rolls the
+    // lane transaction back.
+    runInEngineWriteLane(task) {
+      return serialize(async () => {
+        // Guard ONLY the SYNCHRONOUS execution of the task, not an await gap.
+        // A reentrant store write deadlocks by calling serialize synchronously
+        // from within the task body (the lane contract is SQL-only + synchronous
+        // on the passed connection), and JS can't interleave another async
+        // continuation into a synchronous span — so a flag set/cleared around
+        // the synchronous `task(db())` call catches real reentry with zero false
+        // positives. Holding the flag across `await` instead would leak it into
+        // unrelated continuations that run during the suspension (a concurrent
+        // lane task's own await), flagging innocent serialize calls.
+        const conn = db();
+        let result: ReturnType<typeof task>;
+        inEngineWriteLane = true;
+        try {
+          result = task(conn);
+        } finally {
+          inEngineWriteLane = false;
+        }
+        return await result;
       });
     },
 

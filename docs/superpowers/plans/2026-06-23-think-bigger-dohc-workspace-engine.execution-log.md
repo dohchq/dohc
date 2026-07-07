@@ -18247,8 +18247,13 @@ Y.Doc as an engine content driver, so live collab can retire off Hocuspocus.
   tables (`ydoc_docs` head pointers, `ydoc_updates` append-only log,
   `ydoc_snapshots`) file Y.Doc state under `(workspace_id, version_id,
   object_id)`. Update/snapshot bytes are content-addressed into the existing
-  `binary_blobs` (engineDbSchema.ts:62-68), so Y.Doc state replicates through
-  the 0P blob path for free. The markdown `snapshots.text` + `moments` stay
+  `binary_blobs` (engineDbSchema.ts), which POSITIONS Y.Doc state to ride the
+  0P blob path — but at G2-B those blobs are LOCAL-ONLY: no replication op
+  references them, so they do NOT replicate yet (that arrives with the
+  `ydoc.update` op in G2-C). Until then a Y.Doc's cross-device story is its
+  settled `.md` (markdown-is-the-artifact). The local blob GC must treat a blob
+  referenced by a live `ydoc_updates`/`ydoc_snapshots` head as a ROOT (never an
+  orphan). The markdown `snapshots.text` + `moments` stay
   as the PROJECTION beside the Y.Doc — searchable/exportable/restorable and
   the durable artifact. `content_kind` stays `text`; the driver dimension is
   the `ydoc_docs` marker.
@@ -18626,3 +18631,121 @@ already fixed in that lane.
   + fs-lock changeSetStore 39/2-skip, desktop 958 (was 953). Untouched
   baselines unaffected.
 - `git diff --check` clean; doc-links checker green.
+
+## Y.Doc Engine Driver G2-B
+
+Implemented milestones B1 (engine Y.Doc storage + compaction) and B2 (markdown
+projection + capture integration + fidelity harness) from
+`2026-07-07-think-bigger-ydoc-engine-driver-design.md`. Substrate only — NO
+editor/renderer binding (the provider swap is deferred to G2-C per open
+question 2). Binding decision applied: MARKDOWN-IS-THE-ARTIFACT — full Y.Doc
+CRDT state is NOT persisted past a closed session, but the storage is
+additive-compatible with a future persistent-threads layer.
+
+- **Salvage.** Re-homed the proven `markdownToYDoc`/`yDocToMarkdown` roundtrip
+  + `dohc-markdown-extensions` out of the hocuspocus SERVICE into a new
+  framework-only package `@dohc/ydoc-projection` (tiptap + yjs only, no engine
+  coupling), the shared home both the engine driver and the G2-C editor
+  import. hocuspocus keeps its own copy running for live collab until the G2-C
+  cutover. The copied roundtrip test passes standalone (12 tests).
+- **Storage (B1).** Three lazy-additive tables in `engineDbSchema.ts`
+  (`ydoc_docs` marker + head pointers, `ydoc_updates` append-only log,
+  `ydoc_snapshots` compacted full state), keyed by
+  `(workspace_id, version_id, object_id)`; update/snapshot bytes
+  content-addressed into the existing `binary_blobs` table. A file with NO
+  `ydoc_docs` row stays an ordinary text file (asserted: zero ydoc_* rows,
+  unchanged read/moment behavior). Compaction (the fold the legacy stack
+  skipped): fold the log into a full-state snapshot past a threshold, prune
+  folded updates + superseded snapshots, byte-identical reload across the fold.
+- **Projection + handoff (B2).** `createYDocEngineDriver` (new
+  `ydocEngineDriver.ts`) opens a doc into a Y.Doc seeded from the current file,
+  records content-addressed updates, and settles-on-quiesce via
+  `store.writeTextFile` so capture records ONE ordinary moment. Single-canonical
+  enforced structurally: one live session per objectId (not per version), so a
+  version switch of the same object must settle+close first (never two live
+  Y.Docs for one object). Close flips Y.Doc->file and prunes CRDT bytes
+  (`persistClosedSessionState` flips to the additive persistent-threads path).
+  Restore/external edits fold via three-way `mergeMarkdown` on the projection,
+  preserving both (`.conflict`) on overlap.
+- **Fidelity harness.** A corpus round-trips file->Y.Doc->file through both the
+  pure projection and the driver. SURVIVES: headings, inline marks, lists,
+  nesting, blockquotes, GFM tables, task lists, strikethrough, code fences, the
+  custom dohc query fence, frontmatter, and Obsidian power-user syntax
+  (wikilinks, embeds, tags, highlights). LOSSY (expected + pinned): Y.Doc state
+  with no markdown surface — suggestion-thread / non-serialized-mark sidecars —
+  is dropped on every close (a future persistent-threads layer, not the .md
+  file, is what would preserve it).
+
+### Gate fix round (G2-B adversarial review)
+
+Adversarial review + CodeRabbit found substrate-correctness gaps; all fixed
+tests-first:
+
+- **[HIGH] Single-canonical was per-instance.** The live-session registry was a
+  per-`createYDocEngineDriver()` map, so two drivers on the same engine.db could
+  both open one object (even different versions). Moved the reservation to a
+  PROCESS-GLOBAL set keyed by normalized engine-db path + workspace + object,
+  re-checked/reserved before any open/reset. Test: two separate driver instances
+  (separate stores) on one rootDir — the second open (same and different version)
+  throws `already-live`.
+- **[HIGH] Second-connection two-writer deadlock.** `recordUpdate` used a second
+  in-process SQLite connection + `BEGIN IMMEDIATE` while settle wrote through the
+  store connection — node:sqlite busy-waits block the JS thread, so concurrent
+  settle + append could deadlock. Added `VersionedTextStore.runInEngineWriteLane`
+  (serialized queue + store connection + one `BEGIN IMMEDIATE`) and routed ALL
+  driver writes (blob puts, update/snapshot rows, head pointers, reset, prune,
+  compact) through it. The driver keeps its own connection for READS only. Test:
+  40 appends racing settles complete without hanging, head monotonic to 40.
+- **[MED] `loadPersistedDoc` returned a blank doc after prune.** A default close
+  prunes snapshots/updates but keeps the marker; `loadPersistedDoc` handed back
+  an empty Y.Doc. Now returns `null` (seed-from-file) when a marker has no
+  persisted state. Test: after close, `isYDocDriven` true but `loadPersistedDoc`
+  is `null`.
+- **[MED] "replicates for free" was false + GC-root gap.** ydoc_* blobs are
+  LOCAL-ONLY (no replication op references them) until G2-C. Corrected the
+  claims (driver header, schema comment, this log) and documented the GC-root
+  invariant: a blob referenced by a live `ydoc_updates`/`ydoc_snapshots` head is
+  NOT collectable (coordinate with the parallel sync-hardening blob GC).
+- **[LOW] Unverified blob read.** `readYDocBlob` now verifies
+  `sha256(content) === sha` and byte_length, matching the relay/blob posture.
+  Test: a tampered blob row (matching length, wrong bytes) is rejected on read.
+- **[CR major] ON DELETE CASCADE.** `ydoc_docs` now FK-cascades from
+  `file_objects`, and `ydoc_updates`/`ydoc_snapshots` cascade through
+  `ydoc_docs`, so deleting a rich-doc file leaves no orphaned ydoc_* rows.
+  (`resetPersistedState` reordered to upsert the marker before the base snapshot
+  so the new child FK is satisfied.)
+- **[CR major] Code-fence fidelity.** The `DohcQueryBlock` `parseMarkdown` DEFERS
+  a non-query fence (returns the empty `MarkdownParseResult` — the type-valid
+  defer signal in @tiptap/markdown; `null` is not permitted) so ordinary code
+  blocks fall through to the default handler instead of being dropped. Test:
+  plain ` ```js ` / no-language fences round-trip; a `query` fence still becomes
+  a query block.
+
+### Verification
+
+- `pnpm -r typecheck` clean repo-wide (incl. apps/desktop and the new
+  `@dohc/ydoc-projection`).
+- workspace-engine suite 420 (416 + 4 gate-fix driver tests) + fs-lock
+  changeSetStore 39/5-skip; `@dohc/ydoc-projection` 14 (12 + 2 code-fence).
+  Desktop suite 966 green (engine-capture suite included — no capture
+  regression).
+- `git diff --check` clean.
+
+### G2-C handoff
+
+- **Editor binding.** Replace the renderer `HocuspocusProvider`
+  (`useCollabDoc.ts`) with an engine provider that drives
+  `driver.openSession`/`session.recordUpdate`/`settle`/`close`; `MarkdownEditor`
+  already binds Collaboration to the `body` XmlFragment, so the provider is the
+  only change. Import projection from `@dohc/ydoc-projection`.
+- **`ydoc.update` replication.** Add the op kind to `SyncReplicationOpKind`, a
+  commutative apply branch (`Y.applyUpdate` + re-project, NO head check / NO P0D
+  conflict row), journaling, and relay push/fetch carrying update blobs. The
+  content-addressed `ydoc_updates` bytes are POSITIONED to ship over the blob
+  path (same layout as every other blob) but are LOCAL-ONLY until this op
+  references them — G2-C is where they actually replicate; wire the additive
+  persistent-threads flip if suggestion threads must survive a close.
+- **Hocuspocus retirement.** Delete `services/hocuspocus`, the collab-token
+  route + IPC, and the hocuspocus provider (its projection copy retires with
+  it — `@dohc/ydoc-projection` is now the shared home); cut over at a
+  closed-session boundary.

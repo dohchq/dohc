@@ -208,6 +208,92 @@ export const SYNC_REPLICATION_DDL = `
   )
 `;
 
+// Y.Doc engine content-driver tables are the same lazy additive upgrade
+// (WS-G2-B): existing engine.db files gain them on open without a schema-
+// version bump, and a file with NO ydoc_docs row stays an ordinary text file
+// with zero behavior change. Not in REQUIRED_ENGINE_TABLES for that reason.
+//
+// Filed under (workspace_id, version_id, object_id) because versions are
+// independent content lines. Update and snapshot BYTES are content-addressed
+// into the existing binary_blobs table (these tables hold only the sha
+// references + head pointers).
+//
+// REPLICATION SCOPE (G2-B correction — do NOT claim "free replication" yet):
+// ydoc_* blobs are LOCAL-ONLY at this stage. No replication op references them,
+// so sync export / the 0P relay never sees them; they ride the identical
+// content-addressed blob path ONLY once G2-C adds an explicit `ydoc.update`
+// replication op. Until then a Y.Doc's cross-device story is: settle -> the .md
+// replicates as an ordinary text moment (markdown-is-the-artifact); the CRDT
+// bytes are a local resume cache.
+//
+// GC-ROOT ACCOUNTING (coordinate with the sync-hardening blob GC built in
+// parallel): a binary_blob referenced by a LIVE ydoc_updates or ydoc_snapshots
+// row (i.e. reachable from a ydoc_docs head) is a GC ROOT and MUST NOT be
+// collected, exactly like a snapshot/moment blob. Closed-session pruning
+// deletes those ydoc_updates/ydoc_snapshots rows first, which is what makes the
+// blobs collectable — so the GC's "live ydoc blob" root set is precisely the
+// blobs still referenced by ydoc_updates/ydoc_snapshots. Deleting a rich-doc
+// file cascades those rows away (see the ON DELETE CASCADE below), after which
+// their blobs become collectable too. The GC must treat ydoc_* references as
+// roots while they exist and never assume ydoc blobs are orphans just because
+// no replication op points at them.
+//
+// MARKDOWN-IS-THE-ARTIFACT (G2-B decision): the settled .md file is the
+// durable/canonical artifact; the update log is a fast-resume cache that a
+// closed session may prune to a single snapshot. The schema is deliberately
+// ADDITIVE-COMPATIBLE with a future persistent-threads layer: keeping
+// ydoc_snapshots (and un-pruned ydoc_updates) durable past a closed session —
+// so live suggestion threads / marks survive a close — needs NO schema change,
+// only a policy flip in the driver's compaction/close path.
+export const ENGINE_YDOC_DDL = `
+  CREATE TABLE IF NOT EXISTS ydoc_docs (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    content_kind TEXT NOT NULL DEFAULT 'richdoc',
+    head_update_seq INTEGER NOT NULL DEFAULT 0,
+    head_snapshot_seq INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    -- Deleting the underlying rich-doc file object drops its Y.Doc marker; the
+    -- update/snapshot rows below cascade through this marker in turn, so no
+    -- ydoc_* rows outlive the file they describe.
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS ydoc_updates (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    update_blob_sha256 TEXT NOT NULL,
+    actor_origin_id TEXT,
+    recorded_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, seq),
+    FOREIGN KEY (update_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_ydoc_updates_doc_seq
+    ON ydoc_updates(workspace_id, version_id, object_id, seq);
+  CREATE TABLE IF NOT EXISTS ydoc_snapshots (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    up_to_seq INTEGER NOT NULL,
+    snapshot_blob_sha256 TEXT NOT NULL,
+    state_vector_blob_sha256 TEXT NOT NULL,
+    recorded_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, up_to_seq),
+    FOREIGN KEY (snapshot_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (state_vector_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_ydoc_snapshots_doc_uptoseq
+    ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC)
+`;
+
 // Search index tables are lazy additive (WS-D): existing engine.db files gain
 // them on open without a schema-version bump. The FTS tables store only
 // currently searchable text; write-time policy hooks delete rows for secret,
@@ -409,6 +495,7 @@ export function initializeOrValidateEngineSchema(
   db.exec(BINARY_BLOBS_DDL);
   db.exec(SECRET_TABLES_DDL);
   db.exec(SYNC_REPLICATION_DDL);
+  db.exec(ENGINE_YDOC_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
   ensureMomentsAuthorColumn(db, corrupt);
@@ -652,6 +739,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       ${SECRET_TABLES_DDL};
       ${CHAT_CHANNEL_TABLES_DDL};
       ${SYNC_REPLICATION_DDL};
+      ${ENGINE_YDOC_DDL};
       CREATE INDEX IF NOT EXISTS idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX IF NOT EXISTS idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);
       CREATE INDEX IF NOT EXISTS idx_path_aliases_object ON path_aliases(workspace_id, version_id, object_id);
