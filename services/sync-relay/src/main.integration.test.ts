@@ -1007,7 +1007,7 @@ async function spawnRelayExpectExit(
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       clearTimeout(timeout);
       resolve({ code, stderr });
     });
@@ -1026,6 +1026,20 @@ describe("sync relay startup guards", () => {
     });
     expect(code).toBe(1);
     expect(stderr).toContain("SYNC_RELAY_PORT must be an integer");
+  });
+
+  it("refuses to start when SYNC_RELAY_WORKSPACE_QUOTA_BYTES is not positive", async () => {
+    const dbPath = join(await tempRoot("bad-quota"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0",
+      SYNC_RELAY_WORKSPACE_QUOTA_BYTES: "0",
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("SYNC_RELAY_WORKSPACE_QUOTA_BYTES must be a positive integer");
   });
 
   it("refuses to start in production when POSTGRES_URL is unset", async () => {

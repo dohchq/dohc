@@ -2535,30 +2535,6 @@ function selectSnapshotByObject(
   return row ? snapshotFromRow(row) : null;
 }
 
-function selectLatestMomentForObject(input: {
-  db: SqliteDb;
-  workspaceId: WorkspaceId;
-  versionId: VersionId;
-  objectId: WorkspaceObjectId;
-}): { momentId: VersionedTextMomentId; momentOrder: number } | null {
-  const row = input.db
-    .prepare(
-      `SELECT moment_id, moment_order
-       FROM moments
-       WHERE workspace_id = ? AND version_id = ? AND object_id = ?
-         AND (sync_record_only IS NULL OR sync_record_only = 0)
-       ORDER BY moment_order DESC
-       LIMIT 1`,
-    )
-    .get(input.workspaceId, input.versionId, input.objectId);
-  return row
-    ? {
-        momentId: rowString(row, "moment_id"),
-        momentOrder: rowNumber(row, "moment_order"),
-      }
-    : null;
-}
-
 function selectSnapshotByPath(
   db: SqliteDb,
   workspaceId: WorkspaceId,
@@ -2856,6 +2832,222 @@ function insertConflictRow(db: SqliteDb, conflict: VersionedTextConflictRecord):
     ...insertConflictFileState(db, conflict.current),
     ...insertConflictFileState(db, conflict.incoming),
   );
+}
+
+// Deterministic, machine-independent identity for a SYNC divergence conflict
+// (0P sync-hardening item 1). Sync conflicts are minted independently on each
+// machine that applies a divergent remote moment.append (they never replicate
+// as conflict.open ops), so their ids must be a pure function of the shared
+// facts: the workspace, the version, the diverging object, and the fork-point
+// moment both lineages descend from. Both machines therefore compute the SAME
+// id for the same divergence, which lets a resolve on one close the mirror on
+// the other by id (instead of the fragile swapped-head lookup), and lets
+// repeated divergent ops in one episode coalesce onto one row.
+//
+// The base moment id is the shared fork point: `beforeLatestMomentId` of the
+// FIRST divergent op each side sees (per-origin FIFO makes that the same M0 on
+// both machines). Later ops in the episode coalesce, so the id never
+// re-derives from their differing bases.
+//
+// N-WAY BRANCH IDENTITY (0P sync-hardening item 1 gate fix): the fork point
+// alone is NOT enough. If machines A/B/C all fork the SAME object O from the
+// SAME base moment M0, every pairwise divergence (A-vs-B, A-vs-C, B-vs-C)
+// hashes to the SAME id -- so C's op coalesces onto A-vs-B's row, or a
+// resolve-by-id closes the wrong mirror, and a branch is silently dropped from
+// the actionable conflict set. The id therefore also folds in the identity of
+// the TWO diverging branches: each branch's FIRST divergent op after M0 (its
+// "branch root"). The pair is order-independent (min,max) so the SAME pairwise
+// conflict still mints the SAME id on both machines (they see the same two
+// root op ids, just with current/incoming swapped), while two DIFFERENT
+// pairwise conflicts on one object get DIFFERENT ids.
+function syncConflictId(
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  baseMomentId: string | null,
+  branchRoots?: { local: string | null; incoming: string | null },
+): string {
+  let branchPart = "";
+  if (branchRoots) {
+    const local = branchRoots.local ?? " absent-local-root";
+    const incoming = branchRoots.incoming ?? " absent-incoming-root";
+    const [low, high] = local <= incoming ? [local, incoming] : [incoming, local];
+    branchPart = ` ${low} ${high}`;
+  }
+  return `conflict_sync_${sha256Text(
+    `${workspaceId} ${versionId} ${objectId} ${baseMomentId ?? " absent-base"}${branchPart}`,
+  ).slice(0, 32)}`;
+}
+
+// The local branch's FIRST divergent op after the shared fork point M0: the
+// only APPLIED (non-record-only) local moment for this object whose preimage
+// head is M0. Remote divergent ops are recorded as `sync_record_only`, so they
+// are excluded -- this returns THIS machine's own branch root, which the peer
+// sees as the incoming branch root of the mirror conflict (so both machines
+// fold the same order-independent pair of roots into the id).
+function localBranchRoot(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  versionId: VersionId,
+  objectId: string,
+  baseMomentId: string | null,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT moment_id FROM moments
+       WHERE workspace_id = ? AND version_id = ? AND object_id = ?
+         AND before_latest_moment_id IS ?
+         AND (sync_record_only IS NULL OR sync_record_only = 0)
+       ORDER BY moment_order
+       LIMIT 1`,
+    )
+    .get(workspaceId, versionId, objectId, baseMomentId);
+  return row ? rowString(row, "moment_id") : null;
+}
+
+// Coalesce a newer divergent remote head onto an already-open sync conflict
+// (0P sync-hardening item 2): update the incoming side to the newer remote
+// head and bump updatedAtMs, preserving the row's identity, base, and current
+// side. The current side is deliberately left as first recorded — it is THIS
+// machine's own divergent head, which local writes advance independently of
+// the conflict row; the resolve path always re-reads the live head before
+// acting (liveStateMatchesConflictCurrent), so a lagging current is never
+// acted on stale.
+function coalesceConflictSides(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  conflictId: string,
+  incoming: VersionedTextFileState,
+  updatedAtMs: number,
+): void {
+  db.prepare(
+    `UPDATE conflicts SET
+       updated_at_ms = ?,
+       incoming_exists = ?, incoming_path = ?, incoming_object_id = ?,
+       incoming_content_kind = ?, incoming_blob_sha256 = ?, incoming_updated_at_ms = ?,
+       incoming_latest_moment_id = ?, incoming_metadata_origin = ?, incoming_metadata_summary = ?,
+       incoming_metadata_correlation_id = ?
+     WHERE workspace_id = ? AND conflict_id = ?`,
+  ).run(updatedAtMs, ...insertConflictFileState(db, incoming), workspaceId, conflictId);
+}
+
+// Open a fresh sync conflict, OR coalesce onto the open one already tracking
+// this branch lineage (items 1+2). Returns the number of conflicts newly
+// opened (0 when it coalesced or was already present).
+//
+// COALESCING IS BRANCH- AND KIND-SPECIFIC (item 2 gate fix). A newer divergent
+// op coalesces ONLY onto the open row it EXTENDS: the row's recorded incoming
+// head equals this op's own preimage head (`incomingBranchBase`) — per-origin
+// FIFO makes each op's base the previous op's head, tying a coalesce to one
+// specific incoming branch — PLUS a kind-specific anchor on the correct object
+// side:
+//   - "same-object": the DIVERGING object is the incoming side
+//     (incoming_object_id). When this machine holds its OWN copy of that
+//     object the current side is it too (current_object_id), and a
+//     co-created path-occupancy row shares the SAME incoming op; the
+//     `current_object_id IS diverging` preference then breaks the tie toward
+//     the primary row (the occupancy row's current is the displaced occupant).
+//     When this machine has NO local copy (the incoming object collides at a
+//     path an unrelated object holds) the current side is that occupant, no
+//     occupancy row is created, and the incoming-side anchor still finds the
+//     one row to extend.
+//   - "occupancy": the DISPLACED occupant is the current side
+//     (current_object_id), which the same incoming mover op never matches.
+// This replaces the old `current OR incoming = O` lookup, which matched a
+// same-object move conflict AND its occupancy row (data loss: a later coalesce
+// landed on the occupancy row, leaving the real conflict stale) and matched
+// every branch of an N-way fork onto whichever row sorted first (dropping the
+// rest).
+type SyncCoalesceAnchor =
+  | { kind: "same-object"; divergingObjectId: string; incomingBranchBase: string | null }
+  | { kind: "occupancy"; occupantObjectId: string; incomingBranchBase: string | null };
+
+function openOrCoalesceSyncConflict(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  params: {
+    versionId: VersionId;
+    coalesce: SyncCoalesceAnchor;
+    conflictId: string;
+    path: string;
+    base: VersionedTextFileState;
+    current: VersionedTextFileState;
+    incoming: VersionedTextFileState;
+    recordedAtMs: number;
+  },
+): number {
+  const existingRow =
+    params.coalesce.kind === "same-object"
+      ? db
+          .prepare(
+            conflictSelectSql(
+              `WHERE c.workspace_id = ? AND c.status = 'open' AND c.metadata_origin = 'sync'
+                 AND c.target_version_id = ?
+                 AND c.incoming_object_id IS ?
+                 AND c.incoming_latest_moment_id IS ?
+               ORDER BY (c.current_object_id IS ?) DESC, c.created_at_ms, c.conflict_id
+               LIMIT 1`,
+            ),
+          )
+          .get(
+            workspaceId,
+            params.versionId,
+            params.coalesce.divergingObjectId,
+            params.coalesce.incomingBranchBase,
+            params.coalesce.divergingObjectId,
+          )
+      : db
+          .prepare(
+            conflictSelectSql(
+              `WHERE c.workspace_id = ? AND c.status = 'open' AND c.metadata_origin = 'sync'
+                 AND c.target_version_id = ?
+                 AND c.current_object_id IS ?
+                 AND c.incoming_latest_moment_id IS ?
+               ORDER BY c.created_at_ms, c.conflict_id
+               LIMIT 1`,
+            ),
+          )
+          .get(
+            workspaceId,
+            params.versionId,
+            params.coalesce.occupantObjectId,
+            params.coalesce.incomingBranchBase,
+          );
+  if (existingRow) {
+    coalesceConflictSides(
+      db,
+      workspaceId,
+      rowString(existingRow, "conflict_id"),
+      params.incoming,
+      params.recordedAtMs,
+    );
+    return 0;
+  }
+  if (
+    db
+      .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
+      .get(workspaceId, params.conflictId)
+  ) {
+    // A row with this deterministic id already exists (idempotent re-import,
+    // or a resolved prior episode with the same base). Leave it untouched.
+    return 0;
+  }
+  insertConflictRow(db, {
+    id: params.conflictId,
+    workspaceId,
+    path: params.path,
+    targetVersionId: params.versionId,
+    sourceVersionId: params.versionId,
+    createdAtMs: params.recordedAtMs,
+    updatedAtMs: params.recordedAtMs,
+    base: params.base,
+    current: params.current,
+    incoming: params.incoming,
+    status: "open",
+    chosenFrom: "current",
+    metadata: { origin: "sync" },
+  });
+  return 1;
 }
 
 function conflictFromRow(row: Record<string, unknown>): VersionedTextConflictRecord {
@@ -3947,12 +4139,6 @@ function createVersionedTextStoreWithHooks(
     if (db.prepare("SELECT 1 FROM moments WHERE workspace_id = ? AND moment_id = ?").get(workspaceId, payload.momentId)) {
       return 0;
     }
-    const latest = selectLatestMomentForObject({
-      db,
-      workspaceId,
-      versionId: payload.versionId,
-      objectId: payload.objectId,
-    });
     const localSnapshot = selectSnapshotByObject(
       db,
       workspaceId,
@@ -3965,7 +4151,6 @@ function createVersionedTextStoreWithHooks(
         : selectSnapshotByPath(db, workspaceId, payload.versionId, payload.payloadAfterPath);
     const conflictingPathOccupant =
       pathOccupant && pathOccupant.objectId !== payload.objectId ? pathOccupant : null;
-    const localHeadMomentId = localSnapshot?.latestMomentId ?? latest?.momentId ?? null;
     const originSawAbsent =
       payload.beforePresent === "absent" || payload.beforePresent === "null";
     const headFastForward = originSawAbsent
@@ -4101,69 +4286,92 @@ function createVersionedTextStoreWithHooks(
             latestMomentId: payload.momentId,
             metadata: pickWriteMetadata(payload.metadata),
           };
-    const conflictId = `conflict_sync_${sha256Text(
-      `${workspaceId}\0${payload.versionId}\0${payload.objectId}\0${localHeadMomentId}\0${payload.momentId}`,
-    ).slice(0, 32)}`;
-    let conflictsOpened = 0;
-    if (
-      !db
-        .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
-        .get(workspaceId, conflictId)
-    ) {
-      insertConflictRow(db, {
-        id: conflictId,
-        workspaceId,
-        path: current.path,
-        // Sync divergences do not have separate merge source/target versions;
-        // both fields name the replicated version whose object head diverged.
-        targetVersionId: payload.versionId,
-        sourceVersionId: payload.versionId,
-        createdAtMs: payload.recordedAtMs,
-        updatedAtMs: payload.recordedAtMs,
-        base: fileStateFromAppendBefore(db, payload),
-        current,
-        incoming,
-        status: "open",
-        chosenFrom: "current",
-        metadata: { origin: "sync" },
-      });
-      // 0P-A records one conflict per divergent remote op; coalescing is a
-      // 0P-B follow-up once the folder sync contract is proven.
-      conflictsOpened += 1;
-    }
+    // Deterministic id keyed on the shared fork point AND the two branch roots
+    // (item 1) + branch-specific coalescing (item 2): both machines mint the
+    // SAME id for the same pairwise divergence, DIFFERENT pairwise divergences
+    // on one object get DIFFERENT ids, and repeated divergent ops in one
+    // episode update the existing row instead of stacking. The incoming branch
+    // root is THIS op's own moment id when the row first opens (the first
+    // divergent op each side sees, per-origin FIFO); the local branch root is
+    // this machine's own first divergent op after the shared fork point.
+    const baseMomentId = payload.beforeLatestMomentId ?? null;
+    const conflictId = syncConflictId(
+      workspaceId,
+      payload.versionId,
+      payload.objectId,
+      baseMomentId,
+      {
+        local: localBranchRoot(
+          db,
+          workspaceId,
+          payload.versionId,
+          payload.objectId,
+          baseMomentId,
+        ),
+        incoming: payload.momentId,
+      },
+    );
+    let conflictsOpened = openOrCoalesceSyncConflict(db, workspaceId, {
+      versionId: payload.versionId,
+      coalesce: {
+        kind: "same-object",
+        divergingObjectId: payload.objectId,
+        incomingBranchBase: baseMomentId,
+      },
+      conflictId,
+      path: current.path,
+      base: fileStateFromAppendBefore(db, payload),
+      current,
+      incoming,
+      recordedAtMs: payload.recordedAtMs,
+    });
     // Destination occupancy is modeled EXPLICITLY: when the diverged object's
     // incoming path is occupied by a DIFFERENT local object, that occupant
     // gets its own path-occupancy conflict. Applying the incoming move later
     // requires the occupant to be handled first — nothing is silently written
     // elsewhere and the occupant is never silently clobbered.
     if (localSnapshot && conflictingPathOccupant) {
-      const occupancyConflictId = `conflict_sync_${sha256Text(
-        `${workspaceId}\0${payload.versionId}\0${conflictingPathOccupant.objectId}\0${conflictingPathOccupant.latestMomentId}\0${payload.momentId}`,
-      ).slice(0, 32)}`;
-      if (
-        !db
-          .prepare("SELECT 1 FROM conflicts WHERE workspace_id = ? AND conflict_id = ?")
-          .get(workspaceId, occupancyConflictId)
-      ) {
-        insertConflictRow(db, {
-          id: occupancyConflictId,
-          workspaceId,
-          path: conflictingPathOccupant.path,
-          targetVersionId: payload.versionId,
-          sourceVersionId: payload.versionId,
-          createdAtMs: payload.recordedAtMs,
-          updatedAtMs: payload.recordedAtMs,
-          // No shared base: the occupant and the incoming object never had a
-          // common state at this path.
-          base: { exists: false, path: conflictingPathOccupant.path },
-          current: fileStateFromSnapshot(conflictingPathOccupant.path, conflictingPathOccupant),
-          incoming,
-          status: "open",
-          chosenFrom: "current",
-          metadata: { origin: "sync" },
-        });
-        conflictsOpened += 1;
-      }
+      // The occupant lineage never shared a moment with the incoming object,
+      // so the fork point is the occupant's own head — a stable, deterministic
+      // base that keeps repeated incoming ops coalescing onto one occupancy
+      // row instead of stacking (item 2). Occupancy is inherently asymmetric
+      // (only one machine holds the displaced occupant), so cross-machine id
+      // symmetry does not apply here; the resolve path falls back to the
+      // head-match for these (item 1's documented fallback). The incoming
+      // mover's branch root still folds into the id so two DIFFERENT movers
+      // displacing the SAME occupant get DISTINCT occupancy rows, not a
+      // colliding id.
+      const occupancyConflictId = syncConflictId(
+        workspaceId,
+        payload.versionId,
+        conflictingPathOccupant.objectId,
+        conflictingPathOccupant.latestMomentId ?? null,
+        {
+          local: conflictingPathOccupant.latestMomentId ?? null,
+          incoming: payload.momentId,
+        },
+      );
+      conflictsOpened += openOrCoalesceSyncConflict(db, workspaceId, {
+        versionId: payload.versionId,
+        coalesce: {
+          kind: "occupancy",
+          occupantObjectId: conflictingPathOccupant.objectId,
+          // Coalesce on the INCOMING (mover) branch chain, not the occupant's
+          // stable head: a repeated move by the same mover has
+          // beforeLatestMomentId == the mover head already recorded on this
+          // occupancy row's incoming side, so it extends this row instead of
+          // stacking; a DIFFERENT mover has a different base and opens its own.
+          incomingBranchBase: baseMomentId,
+        },
+        conflictId: occupancyConflictId,
+        path: conflictingPathOccupant.path,
+        // No shared base: the occupant and the incoming object never had a
+        // common state at this path.
+        base: { exists: false, path: conflictingPathOccupant.path },
+        current: fileStateFromSnapshot(conflictingPathOccupant.path, conflictingPathOccupant),
+        incoming,
+        recordedAtMs: payload.recordedAtMs,
+      });
     }
     return conflictsOpened;
   }
@@ -4719,27 +4927,101 @@ function createVersionedTextStoreWithHooks(
           }
           case "conflict.resolve": {
             const payload = input.payload;
-            const direct = txDb
+            // Apply a peer's resolution to the LOCAL mirror of a sync conflict:
+            // flip the choice/resolution (current/incoming are swapped between
+            // the two machines) and, when the peer kept its own copy (which is
+            // our "incoming"), adopt that state so the machines never disagree
+            // forever with no open conflict anywhere. Guarded by
+            // applyMirroredIncomingState — a lineage that moved on locally is
+            // NEVER clobbered; it returns false and the op is surfaced.
+            const applyMirroredResolve = (
+              mirror: VersionedTextConflictRecord,
+            ): boolean => {
+              const mirroredChosenFrom =
+                payload.chosenFrom === "current"
+                  ? "incoming"
+                  : payload.chosenFrom === "incoming"
+                    ? "current"
+                    : "merged";
+              const mirroredResolution =
+                payload.resolution === "applied-incoming"
+                  ? "kept-current"
+                  : payload.resolution === "kept-current"
+                    ? "applied-incoming"
+                    : payload.resolution;
+              // A merged resolution (apply-merged) does NOT replicate its
+              // merged bytes in the resolve payload, so this mirror has nothing
+              // to apply. Marking it resolved anyway would leave the two
+              // machines holding DIFFERENT text with no open conflict anywhere
+              // (silent divergence). Surface it for local review instead.
+              if (mirroredResolution === "applied-merged") return false;
+              const applied =
+                mirroredResolution === "applied-incoming"
+                  ? applyMirroredIncomingState(txDb, workspaceId, mirror)
+                  : true;
+              if (!applied) return false;
+              txDb
+                .prepare(
+                  `UPDATE conflicts
+                   SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
+                   WHERE workspace_id = ? AND conflict_id = ?`,
+                )
+                .run(
+                  payload.status,
+                  mirroredChosenFrom,
+                  mirroredResolution,
+                  payload.updatedAtMs,
+                  workspaceId,
+                  mirror.id,
+                );
+              return true;
+            };
+
+            // Item 1: sync divergence conflicts now carry a DETERMINISTIC,
+            // machine-independent id, so both machines share it and a resolve
+            // closes the mirror BY ID — robust across coalesced incoming heads
+            // and divergent moves that the swapped-head lookup would miss. The
+            // row's shape decides how to apply it.
+            const localRow = txDb
               .prepare(
-                `UPDATE conflicts
-                 SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
-                 WHERE workspace_id = ? AND conflict_id = ?`,
+                conflictSelectSql("WHERE c.workspace_id = ? AND c.conflict_id = ?"),
               )
-              .run(
-                payload.status,
-                payload.chosenFrom,
-                payload.resolution,
-                payload.updatedAtMs,
-                workspaceId,
-                payload.conflictId,
-              );
-            if (direct.changes === 0) {
-              // Sync divergence conflicts are minted with independent local
-              // ids per side, so the peer's id may not exist here. Fall back
-              // to the MIRROR of the peer's conflict: same target version,
-              // current/incoming heads swapped. The peer resolving its
-              // "incoming" (our content) mirrors to keeping our "current" —
-              // choice and resolution flip sides accordingly.
+              .get(workspaceId, payload.conflictId);
+            const local = localRow ? conflictFromRow(localRow) : undefined;
+            if (local && local.status !== "open") {
+              // Already resolved locally or by an earlier pass — idempotent.
+            } else if (local && local.metadata.origin === "sync") {
+              // Sync conflicts are minted independently per side with
+              // current/incoming SWAPPED, so a same-id match IS the mirror.
+              if (!applyMirroredResolve(local)) {
+                pendingResolves.push({
+                  remoteConflictId: payload.conflictId,
+                  localConflictId: local.id,
+                  path: local.path,
+                });
+              }
+            } else if (local) {
+              // Merge conflicts replicate verbatim via conflict.open (same id,
+              // same sides on both machines): apply the resolution as-is.
+              txDb
+                .prepare(
+                  `UPDATE conflicts
+                   SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
+                   WHERE workspace_id = ? AND conflict_id = ?`,
+                )
+                .run(
+                  payload.status,
+                  payload.chosenFrom,
+                  payload.resolution,
+                  payload.updatedAtMs,
+                  workspaceId,
+                  payload.conflictId,
+                );
+            } else {
+              // No id match: fall back to the swapped-head mirror lookup for
+              // conflicts whose ids genuinely cannot align — occupancy
+              // conflicts (inherently asymmetric) and pre-deterministic legacy
+              // rows.
               const mirrorRow =
                 payload.targetVersionId !== undefined
                   ? txDb
@@ -4762,50 +5044,7 @@ function createVersionedTextStoreWithHooks(
                   : undefined;
               const mirror = mirrorRow ? conflictFromRow(mirrorRow) : undefined;
               if (mirror) {
-                const mirroredChosenFrom =
-                  payload.chosenFrom === "current"
-                    ? "incoming"
-                    : payload.chosenFrom === "incoming"
-                      ? "current"
-                      : "merged";
-                const mirroredResolution =
-                  payload.resolution === "applied-incoming"
-                    ? "kept-current"
-                    : payload.resolution === "kept-current"
-                      ? "applied-incoming"
-                      : payload.resolution;
-                // The peer KEPT ITS OWN copy ("kept-current" there reads as
-                // "applied-incoming" here): this store must adopt that state,
-                // or the two machines would silently disagree forever with no
-                // open conflict anywhere. Applies through the same in-db
-                // write path a local resolution uses, guarded like
-                // resolveTextConflict's stale-target check — a file that
-                // moved on locally is NEVER clobbered; the conflict stays
-                // open for local review and the op is surfaced instead.
-                const applied =
-                  mirroredResolution === "applied-incoming"
-                    ? applyMirroredIncomingState(txDb, workspaceId, mirror)
-                    : true;
-                if (applied) {
-                  txDb
-                    .prepare(
-                      `UPDATE conflicts
-                       SET status = ?, chosen_from = ?, resolution = ?, updated_at_ms = ?
-                       WHERE workspace_id = ? AND conflict_id = ?`,
-                    )
-                    .run(
-                      payload.status,
-                      mirroredChosenFrom,
-                      mirroredResolution,
-                      payload.updatedAtMs,
-                      workspaceId,
-                      mirror.id,
-                    );
-                } else {
-                  // Carry the LOCAL conflict identity out with the pending
-                  // count so the surfacing layer can clear its notice when
-                  // this conflict is later resolved (locally or by a
-                  // subsequent sync pass) instead of accumulating forever.
+                if (!applyMirroredResolve(mirror)) {
                   pendingResolves.push({
                     remoteConflictId: payload.conflictId,
                     localConflictId: mirror.id,
@@ -4813,9 +5052,9 @@ function createVersionedTextStoreWithHooks(
                   });
                 }
               } else {
-                // No local match at all: journal + ack the op (idempotency
-                // and ordering must hold) but surface it — a peer's
-                // resolution is never silently swallowed.
+                // No local match at all: journal + ack the op (idempotency and
+                // ordering must hold) but surface it — a peer's resolution is
+                // never silently swallowed.
                 pendingResolves.push({
                   remoteConflictId: payload.conflictId,
                   localConflictId: null,
@@ -5137,7 +5376,14 @@ function createVersionedTextStoreWithHooks(
           conflict.path,
           selectSnapshotByPath(txDb, workspaceId, conflict.targetVersionId, conflict.path),
         );
-        if (!fileStatesEqual(current, conflict.current)) {
+        // Exact head check (0P sync-hardening item 3 gate fix): byte-equality
+        // alone (fileStatesEqual) ignores object identity, path, and latest
+        // moment id, so a file that moved on and reverted to the SAME bytes, or
+        // a DIFFERENT object now sitting at this path with identical bytes,
+        // would pass and let this resolve of the OLD conflict delete/overwrite
+        // the newer local work. Require the live head to be the precise state
+        // the conflict row recorded before acting on it.
+        if (!liveStateMatchesConflictCurrent(current, conflict.current)) {
           throw new VersionedTextStoreError(
             "conflict-stale-target",
             `Conflict ${conflict.id} no longer matches ${conflict.path}.`,

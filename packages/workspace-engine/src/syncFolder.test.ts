@@ -602,8 +602,12 @@ describe("sync folder replication", () => {
       await expect(check.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "docs/x.md" })).resolves.toMatchObject({ text: "from B" });
       expect(snapshotLatestMomentId(b, "docs/x.md")).toBe(bHeadBefore);
       const conflicts = await check.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
-      expect(conflicts).toHaveLength(2);
-      expect(conflicts.some((conflict) => conflict.incoming.text === "from A again")).toBe(true);
+      // Coalescing (0P sync-hardening item 2): the second divergent op from A
+      // ("from A again") does NOT stack a second conflict on the same object —
+      // it updates the one open conflict's incoming head. Exactly one open
+      // conflict remains, now pointing at A's latest divergent content.
+      expect(conflicts).toHaveLength(1);
+      expect(conflicts[0]?.incoming.text).toBe("from A again");
     } finally {
       await check.close();
     }
@@ -2460,6 +2464,315 @@ describe("sync folder replication", () => {
     });
   });
 
+  // 0P sync-hardening item 1: the same logical divergence must mint the SAME
+  // conflict id on both machines, so a resolve on one closes the mirror on the
+  // other BY ID (not the fragile swapped-head lookup).
+  it("mints a deterministic, identical conflict id on both machines for one divergence (item 1)", async () => {
+    const a = await tempRoot("sync-detid-a");
+    const b = await tempRoot("sync-detid-b");
+    const seedDir = await tempRoot("sync-detid-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-detid-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    // Both machines fork from the same base and edit the same path/object.
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await replicate(a, b);
+    await replicate(b, a);
+
+    let idOnA = "";
+    let idOnB = "";
+    await withStore(a, 4000, "ac-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      idOnA = conflict!.id;
+    });
+    await withStore(b, 4100, "bc-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      idOnB = conflict!.id;
+    });
+    // Machine-independent identity: same workspace + version + object + fork
+    // point ⇒ byte-identical id, even though the two rows were minted
+    // independently with current/incoming swapped.
+    expect(idOnA).toBe(idOnB);
+    expect(idOnA).toMatch(/^conflict_sync_/u);
+
+    // A resolve on A closes B's mirror BY ID (the payload's conflictId matches
+    // B's local row directly), and B adopts A's kept copy.
+    await withStore(a, 5000, "ar-", async (store) => {
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: idOnA,
+        resolution: { kind: "keep-current" },
+        metadata: { origin: "api" },
+      });
+    });
+    const resolveImport = await replicate(a, b);
+    expect(resolveImport.pendingConflictResolves).toBe(0);
+    await withStore(b, 5500, "bf-", async (store) => {
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const [resolved] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "resolved" });
+      expect(resolved?.id).toBe(idOnA);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from A");
+    });
+  });
+
+  // 0P sync-hardening item 2: many rapid divergent syncs on one path must NOT
+  // stack duplicate conflicts — they coalesce onto one open row whose incoming
+  // tracks the latest divergent head, resolvable exactly once.
+  it("coalesces N rapid divergent syncs on one path into one resolvable conflict (item 2)", async () => {
+    const a = await tempRoot("sync-coal-a");
+    const b = await tempRoot("sync-coal-b");
+    const seedDir = await tempRoot("sync-coal-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-coal-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    // B holds one divergent head; A extends its own side FIVE times, syncing
+    // each new head to B as a separate rapid pass.
+    await withStore(b, 1500, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    let openedTotal = 0;
+    for (let index = 0; index < 5; index += 1) {
+      await withStore(a, 2000 + index * 100, `a${index}-`, (store) =>
+        store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: `from A v${index}`, metadata: { origin: "api" } }).then(() => {}),
+      );
+      const result = await replicate(a, b);
+      openedTotal += result.conflictsOpened;
+    }
+    // Exactly one conflict is EVER opened across the five divergent syncs; the
+    // rest coalesce onto it.
+    expect(openedTotal).toBe(1);
+    await withStore(b, 4000, "bc-", async (store) => {
+      const open = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open).toHaveLength(1);
+      // Incoming tracks A's LATEST divergent head, not the first.
+      expect(open[0]?.incoming.text).toBe("from A v4");
+      expect(open[0]?.current.text).toBe("from B");
+      // Resolvable exactly once — after resolving, no open conflict remains.
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: open[0]!.id,
+        resolution: { kind: "apply-incoming" },
+        metadata: { origin: "api" },
+      });
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from A v4");
+    });
+  });
+
+  // 0P sync-hardening item 1 GATE FIX (N-way data loss). Three machines A/B/C
+  // all fork the SAME object O from the SAME base moment M0 with different
+  // edits. Before the fix, every pairwise divergence hashed to ONE id keyed
+  // only on (workspace, version, object, baseMoment), so on A the C op
+  // coalesced onto the A-vs-B row (dropping the "from B" branch) or a
+  // resolve-by-id closed the wrong mirror. After the fix the id also folds in
+  // the two branch roots, so A-vs-B and A-vs-C are DISTINCT rows and resolving
+  // one leaves the other intact — no branch is silently dropped.
+  it("keeps A-vs-B and A-vs-C distinct when three machines fork one object (item 1 N-way)", async () => {
+    const a = await tempRoot("sync-nway-a");
+    const b = await tempRoot("sync-nway-b");
+    const c = await tempRoot("sync-nway-c");
+    const seedDir = await tempRoot("sync-nway-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-nway-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+    // Seed base on A, propagate the SAME object/base to B and C.
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await importSyncBundle({ rootDir: c, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    // Three independent forks of O from M0.
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(c, 4000, "c-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from C", metadata: { origin: "api" } }).then(() => {}),
+    );
+    // A imports B's fork, then C's fork: two SEPARATE pairwise conflicts.
+    const importB = await replicate(b, a);
+    const importC = await replicate(c, a);
+    expect(importB.conflictsOpened).toBe(1);
+    // The N-way data loss: before the fix this was 0 (C coalesced onto the
+    // A-vs-B row, dropping the "from B" branch). After the fix it is a fresh row.
+    expect(importC.conflictsOpened).toBe(1);
+
+    let idAB = "";
+    let idAC = "";
+    await withStore(a, 5000, "ac-", async (store) => {
+      const open = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open).toHaveLength(2);
+      const abRow = open.find((row) => row.incoming.text === "from B");
+      const acRow = open.find((row) => row.incoming.text === "from C");
+      expect(abRow).toBeDefined();
+      expect(acRow).toBeDefined();
+      expect(abRow!.current.text).toBe("from A");
+      expect(acRow!.current.text).toBe("from A");
+      // Two DIFFERENT pairwise conflicts on the SAME object get DIFFERENT ids.
+      expect(abRow!.id).not.toBe(acRow!.id);
+      idAB = abRow!.id;
+      idAC = acRow!.id;
+    });
+
+    // Resolving A-vs-B must NOT close or corrupt A-vs-C: the "from C" branch
+    // survives as its own actionable conflict.
+    await withStore(a, 6000, "ar-", async (store) => {
+      await store.resolveTextConflict({
+        workspaceId: WORKSPACE_ID,
+        conflictId: idAB,
+        resolution: { kind: "keep-current" },
+        metadata: { origin: "api" },
+      });
+      const open = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open).toHaveLength(1);
+      expect(open[0]!.id).toBe(idAC);
+      expect(open[0]!.incoming.text).toBe("from C");
+      expect(open[0]!.current.text).toBe("from A");
+    });
+  });
+
+  // 0P sync-hardening item 1: when ids genuinely cannot align (a resolve whose
+  // conflictId has no local row), the swapped-head fallback still closes the
+  // mirror — the ambiguous case the deterministic id does not cover.
+  it("falls back to the swapped-head match when the resolve's id has no local row (item 1 fallback)", async () => {
+    const a = await tempRoot("sync-fb-a");
+    const b = await tempRoot("sync-fb-b");
+    const seedDir = await tempRoot("sync-fb-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-fb-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await replicate(a, b);
+    // B has an open conflict (current="from B", incoming="from A"). Hand it a
+    // conflict.resolve whose conflictId is UNKNOWN locally but whose swapped
+    // heads (current↔incoming) name B's open row — the fallback must find and
+    // close it, adopting the peer's kept copy ("from A").
+    await withStore(b, 4000, "bx-", async (store) => {
+      const [open] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(open?.current.text).toBe("from B");
+      const result = await store.applyReplicationOp({
+        workspaceId: WORKSPACE_ID,
+        originId: "origin_test_fallback",
+        originSeq: 0,
+        opKind: "conflict.resolve",
+        payload: {
+          // An id that exists on NO local row — forces the head-match fallback.
+          conflictId: "conflict_sync_nonexistent_mirror_id",
+          status: "resolved",
+          chosenFrom: "current",
+          resolution: "kept-current",
+          updatedAtMs: 4000,
+          targetVersionId: "main",
+          path: "x.md",
+          // The PEER's heads: its current is our incoming, its incoming is our
+          // current — the swapped-head key the fallback matches on.
+          currentLatestMomentId: open!.incoming.latestMomentId,
+          incomingLatestMomentId: open!.current.latestMomentId,
+        },
+        recordedAtMs: 4000,
+      });
+      // Applied via the fallback, not surfaced as an unmatched pending resolve.
+      expect(result).toEqual({ status: "applied", conflictsOpened: 0 });
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toEqual([]);
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from A");
+    });
+  });
+
   it("a peer's resolution never clobbers a file that moved on locally — it surfaces for review", async () => {
     const a = await tempRoot("sync-mv-a");
     const b = await tempRoot("sync-mv-b");
@@ -2522,6 +2835,76 @@ describe("sync folder replication", () => {
       expect(open).toHaveLength(1);
       const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
       expect(text?.text).toBe("from B, newer");
+    });
+  });
+
+  // 0P sync-hardening item 3 GATE FIX (local resolve overwrites newer work).
+  // resolveTextConflict re-reads live state, but the staleness guard used
+  // byte-equality (fileStatesEqual), which ignores the latest moment id. A file
+  // that moved on AFTER the conflict opened and reverted to the SAME bytes has
+  // a NEW head; resolving the OLD conflict against it would act on stale state
+  // and discard the newer local work. The exact-head guard
+  // (liveStateMatchesConflictCurrent) must reject it as stale instead.
+  it("a local resolve of a stale conflict never overwrites a moved-on-then-reverted file (item 3)", async () => {
+    const a = await tempRoot("sync-lr-a");
+    const b = await tempRoot("sync-lr-b");
+    const seedDir = await tempRoot("sync-lr-seed");
+    const withStore = async (
+      root: string,
+      now: number,
+      prefix: string,
+      fn: (store: ReturnType<typeof createVersionedTextStore>) => Promise<void>,
+    ) => {
+      const store = createVersionedTextStore(root, { nowMs: () => now, createId: createIdFactory(prefix) });
+      try {
+        await fn(store);
+      } finally {
+        await store.close();
+      }
+    };
+    const replicate = async (from: string, to: string) => {
+      const bundle = await tempRoot("sync-lr-bundle");
+      await exportSyncBundle({ rootDir: from, workspaceId: WORKSPACE_ID, toDir: bundle });
+      return importSyncBundle({ rootDir: to, workspaceId: WORKSPACE_ID, fromDir: bundle });
+    };
+
+    await withStore(a, 1000, "a-", async (store) => {
+      await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "base", metadata: { origin: "api" } });
+    });
+    await exportSyncBundle({ rootDir: a, workspaceId: WORKSPACE_ID, toDir: seedDir });
+    await importSyncBundle({ rootDir: b, workspaceId: WORKSPACE_ID, fromDir: seedDir });
+    await withStore(a, 2000, "a2-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from A", metadata: { origin: "api" } }).then(() => {}),
+    );
+    await withStore(b, 3000, "b-", (store) =>
+      store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } }).then(() => {}),
+    );
+    // B imports A's divergent edit and opens a LOCAL conflict (current="from B").
+    await replicate(a, b);
+
+    await withStore(b, 4000, "b2-", async (store) => {
+      const [conflict] = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+      expect(conflict!.current.text).toBe("from B");
+      // The file moves on AFTER the conflict opened, then reverts to the exact
+      // same bytes — a NEW head over identical content.
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B, in progress", metadata: { origin: "api" } });
+      await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md", text: "from B", metadata: { origin: "api" } });
+      // Resolving the OLD conflict (apply-incoming would write "from A" over the
+      // live head) must fail closed as stale — byte-equality alone would have
+      // let it through and clobbered the newer local lineage.
+      await expect(
+        store.resolveTextConflict({
+          workspaceId: WORKSPACE_ID,
+          conflictId: conflict!.id,
+          resolution: { kind: "apply-incoming" },
+          metadata: { origin: "api" },
+        }),
+      ).rejects.toMatchObject({ code: "conflict-stale-target" });
+      // The newer local work is untouched and the conflict is still open.
+      const text = await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "x.md" });
+      expect(text?.text).toBe("from B");
+      expect(await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" })).toHaveLength(1);
     });
   });
 
@@ -3091,15 +3474,41 @@ describe("sync folder replication", () => {
             ]);
             expect([...forkB.entries()].sort()).toEqual([...forkA.entries()].sort());
           }
-          for (const [key, count] of conflictCounts(conflictsA)) {
-            if (count !== 1) continue;
-            const left = conflictsA.find((conflict) => conflictKey(conflict) === key);
-            const right = conflictsB.find((conflict) => conflictKey(conflict) === key);
-            if (!left || !right) continue;
-            const stateKey = (state: { contentKind?: string; sha256?: string; text?: string }) =>
-              (state.contentKind ?? "text") === "binary" ? `bin:${state.sha256}` : `txt:${state.text}`;
-            expect(stateKey(left.current)).toBe(stateKey(right.incoming));
-            expect(stateKey(left.incoming)).toBe(stateKey(right.current));
+          // Coalescing (0P sync-hardening item 2) collapses a per-op divergence
+          // to ONE row per (version, object): the incoming side tracks the
+          // peer's LATEST divergent head while the current side stays this
+          // machine's own head as first recorded (local writes advance the file
+          // independently of the row). The strict per-op current/incoming
+          // content mirror the non-coalesced model asserted here is therefore no
+          // longer an invariant — a machine that keeps editing its own side
+          // after the conflict opened legitimately holds a `current` that lags
+          // its live head while the peer's `incoming` tracks that live head. The
+          // surviving cross-machine guarantees are checked above (same conflict
+          // KEY multiset, full non-conflicted-path convergence) and below (no
+          // stacking), plus the resolve-by-id round trips in the dedicated
+          // conflict tests.
+          //
+          // Item 2 guarantee, asserted directly: no machine ever stacks more
+          // than one OPEN sync conflict for the same (version, object) lineage.
+          // Each conflict is keyed by its PRIMARY (current-side) object — the
+          // diverging object for a same-object conflict, the displaced occupant
+          // for an occupancy conflict — which is what coalescing dedupes on.
+          for (const conflicts of [conflictsA, conflictsB]) {
+            const perLineage = new Map<string, number>();
+            for (const conflict of conflicts) {
+              if (conflict.metadata?.origin !== "sync") continue;
+              const currentObjectId = conflict.current.objectId;
+              if (typeof currentObjectId !== "string") continue;
+              // Key by the (current, incoming) object PAIR so a same-object
+              // divergence (O,O) and an occupancy conflict that merely displaces
+              // O (O,Q) count as distinct lineages — both legitimate — while a
+              // TRUE stack (two rows for the same divergence) is still caught.
+              const lineageKey = `${conflict.targetVersionId}\0${currentObjectId}\0${conflict.incoming.objectId ?? "none"}`;
+              perLineage.set(lineageKey, (perLineage.get(lineageKey) ?? 0) + 1);
+            }
+            for (const [, openCount] of perLineage) {
+              expect(openCount).toBeLessThanOrEqual(1);
+            }
           }
           await expect(chatDigest(bChats)).resolves.toEqual(await chatDigest(aChats));
           expect(seqDigest(b)).toEqual(seqDigest(a));

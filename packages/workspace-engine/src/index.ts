@@ -57,12 +57,14 @@ export {
   probeRelayWorkspace,
   pullWorkspaceFromRelay,
   pushWorkspaceToRelay,
+  recoverRelayOrigin,
   uploadKeyEnvelope,
 } from "./syncRelay";
 export type {
   ProbeRelayWorkspaceResult,
   PullWorkspaceFromRelayResult,
   PushWorkspaceToRelayResult,
+  RecoverRelayOriginResult,
   RelayMaterializedPath,
   SyncRelayConnection,
   SyncRelayInput,

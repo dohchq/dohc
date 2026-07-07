@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   PendingConflictResolve,
   SyncReplicationEnvelope,
@@ -6,6 +7,7 @@ import type {
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
 import { VersionedTextStoreError, createVersionedTextStore } from "./versionedTextStore";
+import { journalReplicationOp } from "./syncReplication";
 import {
   applySyncQueues,
   collectBlobHashesFromOp,
@@ -434,6 +436,233 @@ export async function pushWorkspaceToRelay(
     return { pushed, originsPushed };
   } finally {
     db.close();
+  }
+}
+
+export interface RecoverRelayOriginResult {
+  // The diverged origin id the relay is authoritative for; it is retired
+  // locally (never pushed again) but its ops stay as shared history.
+  oldOriginId: string;
+  // The fresh origin id this machine adopts for all future local writes.
+  newOriginId: string;
+  // How many leading local ops the relay also holds byte-identically — the
+  // shared history prefix, kept as-is.
+  sharedPrefixLength: number;
+  // Genuinely-unpushed / divergent local ops re-journaled under the fresh
+  // origin so they push cleanly and surface as conflicts where they clash —
+  // never silently dropped.
+  preservedOps: number;
+}
+
+// Canonical (sorted-key) JSON so a local payload and the relay's stored copy
+// compare equal regardless of key order (the real relay canonicalizes on
+// append; a raw JSON.stringify would not match).
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// Recovery for RelayOriginDivergedError (0P sync-hardening item 3). When a
+// machine's engine.db is restored-from-older or cloned, its local origin's
+// sequence space collides with the relay's authoritative record for that
+// origin and push fails closed with RelayOriginDivergedError — with no way
+// forward. This re-baselines the machine onto a FRESH origin id so it can
+// resync WITHOUT losing local-only unpushed work:
+//   - the shared history prefix (leading ops the relay also holds
+//     byte-identically) stays under the old origin and is marked fully pushed,
+//     so the old origin is never pushed again;
+//   - genuinely-unpushed / divergent local ops ("orphans") are re-journaled
+//     under the fresh origin so they push cleanly and, where they clash with
+//     the relay's authoritative lineage, surface as ordinary sync conflicts on
+//     the next pull — never silently dropped;
+//   - the orphan rows are removed from the OLD origin's journal so the relay's
+//     authoritative versions at those sequence numbers apply as REMOTE ops on
+//     the next pull (opening the preservation conflict) instead of being
+//     idempotently skipped;
+//   - the relay fetch cursor resets so the next pull re-ingests the relay's
+//     authoritative tail (idempotent for everything already applied).
+// Idempotent-safe: if there is no divergence (relay holds every local op), it
+// still mints a fresh origin with zero preserved ops and leaves state syncing.
+export async function recoverRelayOrigin(
+  input: SyncRelayInput,
+): Promise<RecoverRelayOriginResult> {
+  interface LocalOp {
+    originSeq: number;
+    opKind: SyncReplicationOpKind;
+    payloadJson: string;
+    recordedAtMs: number;
+  }
+  const readDb = openEngineDb(input.rootDir);
+  let oldOriginId: string;
+  let localOps: LocalOp[];
+  try {
+    const originRow = readDb
+      .prepare("SELECT origin_id FROM sync_identity WHERE workspace_id = ?")
+      .get(input.workspaceId);
+    if (typeof originRow?.origin_id !== "string") {
+      throw new VersionedTextStoreError(
+        "invalid-workspace",
+        `Cannot recover relay origin: workspace ${input.workspaceId} has no local sync identity.`,
+      );
+    }
+    oldOriginId = originRow.origin_id;
+    localOps = readDb
+      .prepare(
+        `SELECT origin_seq, op_kind, payload_json, recorded_at_ms
+         FROM replication_log
+         WHERE workspace_id = ? AND origin_id = ?
+         ORDER BY origin_seq`,
+      )
+      .all(input.workspaceId, oldOriginId)
+      .map((row) => ({
+        originSeq: Number(row.origin_seq),
+        opKind: String(row.op_kind) as SyncReplicationOpKind,
+        payloadJson: String(row.payload_json),
+        recordedAtMs: Number(row.recorded_at_ms),
+      }));
+  } finally {
+    readDb.close();
+  }
+
+  // Fetch the relay's authoritative ops for the old origin (canonicalized).
+  const relayOpsBySeq = new Map<
+    number,
+    { opKind: string; payloadJson: string; recordedAtMs: number }
+  >();
+  let cursor = 0;
+  for (;;) {
+    const page = await jsonRelay<RelayLogPage>(
+      input.relay,
+      `/sync/${encodeURIComponent(input.workspaceId)}/log?since=${cursor}&limit=500`,
+    );
+    for (const row of page.ops) {
+      if (row.originId === oldOriginId) {
+        relayOpsBySeq.set(row.originSeq, {
+          opKind: row.opKind,
+          payloadJson: stableStringify(row.payload),
+          recordedAtMs: row.recordedAtMs,
+        });
+      }
+    }
+    if (page.hasMore && page.nextCursor <= cursor) {
+      throw new Error("Relay log pagination did not advance; aborting origin recovery.");
+    }
+    cursor = page.nextCursor;
+    if (!page.hasMore) break;
+  }
+
+  // Longest leading run of local ops the relay holds byte-identically.
+  let sharedPrefixLength = 0;
+  for (const op of localOps) {
+    if (op.originSeq !== sharedPrefixLength) break; // a gap ends the prefix
+    const relayOp = relayOpsBySeq.get(op.originSeq);
+    if (
+      !relayOp ||
+      relayOp.opKind !== op.opKind ||
+      relayOp.recordedAtMs !== op.recordedAtMs ||
+      relayOp.payloadJson !== stableStringify(JSON.parse(op.payloadJson))
+    ) {
+      break;
+    }
+    sharedPrefixLength += 1;
+  }
+  const orphanOps = localOps.filter((op) => op.originSeq >= sharedPrefixLength);
+
+  const writeDb = openEngineDb(input.rootDir);
+  try {
+    writeDb.exec("BEGIN IMMEDIATE");
+    try {
+      const newOriginId = `origin_${randomUUID()}`;
+      // Re-journal orphan ops under the fresh origin with contiguous seqs.
+      orphanOps.forEach((op, index) => {
+        journalReplicationOp(writeDb, {
+          workspaceId: input.workspaceId,
+          originId: newOriginId,
+          originSeq: index,
+          opKind: op.opKind,
+          payload: JSON.parse(op.payloadJson),
+          recordedAtMs: op.recordedAtMs,
+        });
+      });
+      // Drop orphan rows from the OLD origin so the relay's authoritative
+      // versions at those seqs apply as REMOTE ops (opening the preservation
+      // conflict) instead of being idempotently skipped on the next pull.
+      writeDb
+        .prepare(
+          `DELETE FROM replication_log
+           WHERE workspace_id = ? AND origin_id = ? AND origin_seq >= ?`,
+        )
+        .run(input.workspaceId, oldOriginId, sharedPrefixLength);
+      // Adopt the fresh origin for all future local writes.
+      writeDb
+        .prepare("UPDATE sync_identity SET origin_id = ? WHERE workspace_id = ?")
+        .run(newOriginId, input.workspaceId);
+      // The old origin is authoritative on the relay; never push it again.
+      writeDb
+        .prepare(
+          `INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq)
+           VALUES (?, ?, ?)
+           ON CONFLICT(workspace_id, origin_id) DO UPDATE SET pushed_seq = excluded.pushed_seq`,
+        )
+        .run(input.workspaceId, oldOriginId, sharedPrefixLength - 1);
+      // Clamp the old origin's INBOUND ack down to the shared prefix (0P
+      // sync-hardening item 5 gate fix). This machine has already ACKED its own
+      // old-origin ops back from the relay, so replication_peers.acked_seq for
+      // the old origin can sit at/above the relay's authoritative tail. The
+      // pull's fast path (`originSeq <= ackedSeq` -> skip) runs BEFORE the
+      // imported-log-exists check, so without this clamp the divergent
+      // old-origin relay tail (seqs >= sharedPrefixLength, whose local journal
+      // rows we just deleted) would be silently skipped and NEVER materialize
+      // as a conflict -- the relay's version of that work would be lost. Only
+      // lowers (never raises) an existing ack.
+      writeDb
+        .prepare(
+          `UPDATE replication_peers SET acked_seq = ?
+           WHERE workspace_id = ? AND origin_id = ? AND acked_seq > ?`,
+        )
+        .run(
+          sharedPrefixLength - 1,
+          input.workspaceId,
+          oldOriginId,
+          sharedPrefixLength - 1,
+        );
+      // The fresh origin has pushed nothing yet.
+      writeDb
+        .prepare(
+          "DELETE FROM sync_relay_push_state WHERE workspace_id = ? AND origin_id = ?",
+        )
+        .run(input.workspaceId, newOriginId);
+      // Re-pull the relay's authoritative tail from scratch (idempotent for
+      // everything already applied; surfaces the divergent tail as conflicts).
+      writeDb
+        .prepare(
+          `INSERT INTO sync_relay_cursors (workspace_id, relay_fetch_cursor)
+           VALUES (?, 0)
+           ON CONFLICT(workspace_id) DO UPDATE SET relay_fetch_cursor = 0`,
+        )
+        .run(input.workspaceId);
+      writeDb.exec("COMMIT");
+      return {
+        oldOriginId,
+        newOriginId,
+        sharedPrefixLength,
+        preservedOps: orphanOps.length,
+      };
+    } catch (error) {
+      try {
+        writeDb.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  } finally {
+    writeDb.close();
   }
 }
 
