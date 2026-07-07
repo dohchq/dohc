@@ -85,13 +85,6 @@ reviews:
         ctx.auth.getUserIdentity(), omits workspace scoping, weakens folder/atom
         access, bypasses share boundaries, or weakens lock/skill-turn gates.
         Prefer fail-closed behavior and focused convex-test coverage.
-    - path: "services/hocuspocus/**"
-      instructions: |
-        Treat this service as the collaboration and Convex ACL bridge. Check
-        signed actor/user tokens, document-name parsing, workspace ownership,
-        HOCUSPOCUS_CONVEX_SERVER_TOKEN handling, snapshot/update sequencing,
-        and final Convex ACL decisions. Flag any path that lets a browser caller
-        choose identity or workspace without server verification.
     - path: "apps/app/src/editor-v2/**"
       instructions: |
         The canonical document state is the Y.Doc. Flag new behavior that treats
@@ -329,8 +322,6 @@ code_generation:
     path_instructions:
       - path: "apps/app/convex/**"
         instructions: "Generate docstrings only for exported functions or non-obvious server-side authorization boundaries. Do not restate simple Convex boilerplate."
-      - path: "services/hocuspocus/**"
-        instructions: "Document token, ACL, persistence, and sequence invariants where future agents could accidentally weaken them."
       - path: "apps/app/src/**"
         instructions: "Prefer clear names over comments. Add comments only for non-obvious editor, auth, routing, or sanitizer behavior."
   unit_tests:
@@ -339,8 +330,6 @@ code_generation:
         instructions: "Use convex-test and mocked identities to cover workspace scoping, access denial, sharing, locks, and skill-turn gates."
       - path: "apps/app/src/**"
         instructions: "Use Vitest for pure logic and component behavior. Add Playwright only for full user workflows that unit tests cannot cover."
-      - path: "services/hocuspocus/**"
-        instructions: "Use Vitest for token parsing, ACL bridge behavior, document-name parsing, persistence sequencing, and reconnect/recovery cases."
 
 issue_enrichment:
   auto_enrich:
