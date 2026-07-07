@@ -55,19 +55,7 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
   });
 
-  it("surfaces data fragments in the File menu", () => {
-    const { template, sendCommand } = build();
-    const item = items(template, "File").find(
-      (entry) => entry.label === "Data Fragments…",
-    );
-    const fakeWindow = { id: 3 };
-
-    (item?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
-
-    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "import-export");
-  });
-
-  it("keeps file import and zip export separate from data fragments", () => {
+  it("keeps file import and zip export as separate File-menu commands", () => {
     const { template, sendCommand } = build();
     const fileItems = items(template, "File");
     const importFiles = fileItems.find((entry) => entry.label === "Import Files…");

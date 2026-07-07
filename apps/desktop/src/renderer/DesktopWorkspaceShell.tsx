@@ -1,7 +1,6 @@
 import {
   Bot,
   CircleHelp,
-  Cloud,
   ExternalLink,
   Eye,
   FileArchive,
@@ -129,17 +128,6 @@ export type Workspace = WorkspaceSummary;
 const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
 );
-const LazyImportExportDialog = lazy(() =>
-  import("./ImportExportDialog").then((mod) => ({
-    default: mod.ImportExportDialog,
-  })),
-);
-const LazyWorkspaceManagementDialog = lazy(() =>
-  import("./WorkspaceManagementDialog").then((mod) => ({
-    default: mod.WorkspaceManagementDialog,
-  })),
-);
-
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 
 function scheduleMarkdownEditorPreload(): () => void {
@@ -759,19 +747,6 @@ function InvalidSitePathFallback({
   return null;
 }
 
-function readSelectedText(): string {
-  const active = document.activeElement;
-  if (
-    active instanceof HTMLTextAreaElement ||
-    (active instanceof HTMLInputElement && active.type === "text")
-  ) {
-    const start = active.selectionStart ?? 0;
-    const end = active.selectionEnd ?? 0;
-    return start === end ? "" : active.value.slice(start, end);
-  }
-  return window.getSelection()?.toString() ?? "";
-}
-
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -794,10 +769,6 @@ export function DesktopWorkspaceShell(props: {
     versionId?: string;
     versionName?: string;
   } | null>(null);
-  const [importExportOpen, setImportExportOpen] = useState(false);
-  const [importExportPath, setImportExportPath] = useState<string | null>(null);
-  const [importExportSelectionText, setImportExportSelectionText] = useState("");
-  const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
   const [openShareOpen, setOpenShareOpen] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
@@ -1452,16 +1423,6 @@ export function DesktopWorkspaceShell(props: {
   const openAgentView = useCallback(() => {
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
   }, [mutateWb]);
-  const openImportExportDialog = useCallback((path?: string | null) => {
-    const targetPath = path === undefined ? activeDocumentPath : path;
-    const canUseSelection =
-      targetPath !== null &&
-      activeDocumentPath !== null &&
-      targetPath === activeDocumentPath;
-    setImportExportPath(targetPath && !isVirtualTabPath(targetPath) ? targetPath : null);
-    setImportExportSelectionText(canUseSelection ? readSelectedText() : "");
-    setImportExportOpen(true);
-  }, [activeDocumentPath]);
   const checkForDesktopUpdates = useCallback(async () => {
     try {
       const result = await bridge().checkForUpdates();
@@ -1500,10 +1461,6 @@ export function DesktopWorkspaceShell(props: {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path && !isVirtualTabPath(path)) {
         showPathInExplorer(path);
-      } else if (command === "import-export") {
-        openImportExportDialog(
-          path && !isVirtualTabPath(path) ? path : activeDocumentPath,
-        );
       } else if (command === "open-agent") {
         openAgentView();
       } else if (command === "open-history") {
@@ -1528,7 +1485,6 @@ export function DesktopWorkspaceShell(props: {
       installDesktopUpdate,
       openAgentView,
       openHistoryView,
-      openImportExportDialog,
       openSettings,
       showPathInExplorer,
     ],
@@ -1680,11 +1636,6 @@ export function DesktopWorkspaceShell(props: {
         run: () => void openWorkspaceFolder(),
       },
       {
-        id: "import-export",
-        label: "Data fragments",
-        run: openImportExportDialog,
-      },
-      {
         id: "import-files",
         label: "Import files",
         run: () => void importFiles(),
@@ -1725,11 +1676,6 @@ export function DesktopWorkspaceShell(props: {
         run: () => setCloudOpen(true),
       },
       {
-        id: "manage-workspace",
-        label: "Manage workspace members",
-        run: () => setWorkspaceManagementOpen(true),
-      },
-      {
         id: "settings",
         label: "Settings",
         run: () => openSettings(),
@@ -1766,7 +1712,6 @@ export function DesktopWorkspaceShell(props: {
       importFiles,
       mutateWb,
       requestExplorerCreate,
-      openImportExportDialog,
       checkForDesktopUpdates,
       installDesktopUpdate,
       openSettings,
@@ -1876,7 +1821,6 @@ export function DesktopWorkspaceShell(props: {
         onBeforeChanges={flushActiveDraft}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={(droppedPaths) => void importFiles(droppedPaths)}
-        onImportExport={openImportExportDialog}
         onShare={(path) => setShareTarget({ path })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
@@ -1885,22 +1829,6 @@ export function DesktopWorkspaceShell(props: {
         }
         onNewFileDialog={() => setNewFileOpen(true)}
       />
-
-      <footer className="flex flex-col border-t border-line px-1 py-1">
-        <button
-          type="button"
-          data-testid="import-export-open"
-          onMouseDown={(event) => {
-            event.preventDefault();
-            openImportExportDialog();
-          }}
-          onClick={() => openImportExportDialog()}
-          className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
-        >
-          <Cloud size={13} aria-hidden />
-          Data fragments
-        </button>
-      </footer>
     </>
   );
 
@@ -2283,18 +2211,6 @@ export function DesktopWorkspaceShell(props: {
                   </button>
                   <button
                     type="button"
-                    data-testid="empty-import-export"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      openImportExportDialog();
-                    }}
-                    onClick={() => openImportExportDialog()}
-                    className="font-mono text-xs text-subtle hover:text-ink"
-                  >
-                    data fragments
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => setQuickOpenOpen(true)}
                     className="font-mono text-xs text-subtle hover:text-ink"
                   >
@@ -2449,13 +2365,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {cloudOpen ? (
         <Overlay onClose={() => setCloudOpen(false)}>
-          <CloudLogin
-            workspaceId={workspaceId}
-            onManageWorkspace={() => {
-              setCloudOpen(false);
-              setWorkspaceManagementOpen(true);
-            }}
-          />
+          <CloudLogin workspaceId={workspaceId} />
         </Overlay>
       ) : null}
       {conflictReviewOpen ? (
@@ -2497,29 +2407,6 @@ export function DesktopWorkspaceShell(props: {
           </Suspense>
         </Overlay>
       ) : null}
-      {importExportOpen ? (
-        <Overlay onClose={() => setImportExportOpen(false)}>
-          <Suspense
-            fallback={
-              <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
-                Loading import/export panel...
-              </div>
-            }
-          >
-            <LazyImportExportDialog
-              workspaceId={workspaceId}
-              activePath={importExportPath}
-              selectedText={importExportSelectionText}
-              onImported={() =>
-                void refreshFiles().catch((error) =>
-                  reportShellError("Could not refresh workspace files.", error),
-                )
-              }
-              onClose={() => setImportExportOpen(false)}
-            />
-          </Suspense>
-        </Overlay>
-      ) : null}
       {openShareOpen ? (
         <Overlay onClose={() => setOpenShareOpen(false)}>
           <OpenSharedView
@@ -2529,22 +2416,6 @@ export function DesktopWorkspaceShell(props: {
             }}
             onBack={() => setOpenShareOpen(false)}
           />
-        </Overlay>
-      ) : null}
-      {workspaceManagementOpen ? (
-        <Overlay onClose={() => setWorkspaceManagementOpen(false)}>
-          <Suspense
-            fallback={
-              <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
-                Loading workspace members...
-              </div>
-            }
-          >
-            <LazyWorkspaceManagementDialog
-              workspaceId={workspaceId}
-              onClose={() => setWorkspaceManagementOpen(false)}
-            />
-          </Suspense>
         </Overlay>
       ) : null}
     </div>

@@ -85,7 +85,6 @@ export interface ExplorerProps {
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   onImportFiles: (droppedPaths?: string[]) => void;
-  onImportExport: (path: string | null) => void;
   // "Share…" (PR 18): offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
@@ -699,9 +698,6 @@ export function Explorer(props: ExplorerProps) {
         case "import-files":
           props.onImportFiles();
           break;
-        case "import-export":
-          props.onImportExport(kind === "file" ? (path ?? null) : null);
-          break;
         case "share":
           if (path) props.onShare(path);
           break;
@@ -718,7 +714,6 @@ export function Explorer(props: ExplorerProps) {
       onTogglePin,
       exportZip,
       props.onImportFiles,
-      props.onImportExport,
       props.onShare,
     ],
   );

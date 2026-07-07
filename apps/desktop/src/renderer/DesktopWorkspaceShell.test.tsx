@@ -205,65 +205,6 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       serverUrl: "https://cloud.dohc.test",
       workspaceSynced: true,
     })),
-    createDataFragment: vi.fn(async () => ({
-      fragment: {
-        fragmentId: "fragment-created",
-        sourceWorkspaceId: "ws-shell-test",
-        sourcePath: "a.md",
-        title: "Shared data",
-        preview: "10 apples",
-        contentType: "text/plain",
-        createdBy: "owner-1",
-        createdAt: "2026-06-18T00:00:00.000Z",
-        recipientEmail: "peer@dohc.test",
-      },
-    })),
-    listDataFragments: vi.fn(async () => ({
-      fragments: [
-        {
-          fragmentId: "fragment-1",
-          sourceWorkspaceId: "source-ws",
-          sourcePath: "source.md",
-          title: "Apple count",
-          preview: "10 apples",
-          contentType: "text/plain",
-          createdBy: "owner-1",
-          createdAt: "2026-06-18T00:00:00.000Z",
-          recipientEmail: "me@dohc.test",
-        },
-      ],
-    })),
-    readDataFragment: vi.fn(async () => ({
-      fragment: {
-        fragmentId: "fragment-1",
-        sourceWorkspaceId: "source-ws",
-        sourcePath: "source.md",
-        title: "Apple count",
-        preview: "10 apples",
-        contentType: "text/plain",
-        createdBy: "owner-1",
-        createdAt: "2026-06-18T00:00:00.000Z",
-        recipientEmail: "me@dohc.test",
-        body: "10 apples",
-      },
-    })),
-    revokeDataFragment: vi.fn(async () => undefined),
-    listWorkspaceShares: vi.fn(async () => ({ shares: [] })),
-    listWorkspaceMembers: vi.fn(async () => ({
-      members: [{ userId: "owner-1", email: "owner@dohc.test", role: "owner" }],
-    })),
-    listWorkspaceInvites: vi.fn(async () => ({ invites: [] })),
-    createWorkspaceInvite: vi.fn(async () => ({
-      invite: {
-        inviteId: "invite-1",
-        workspaceId: "ws-shell-test",
-        email: "new@dohc.test",
-        role: "member",
-        invitedBy: "owner-1",
-        status: "pending" as const,
-      },
-    })),
-    revokeWorkspaceInvite: vi.fn(async () => undefined),
     collabToken: vi.fn(async () => ({ available: false as const })),
     createRelayShare: vi.fn(async () => ({
       shareId: "relay-share-1",
@@ -844,19 +785,7 @@ describe("history rail", () => {
   });
 });
 
-describe("data fragments and file transfers", () => {
-  it("opens the data-fragment panel from the explorer footer", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("import-export-open"));
-
-    const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getByText("Data fragments")).toBeTruthy();
-    expect(within(dialog).queryByText("Files and archives")).toBeNull();
-  });
-
+describe("file transfers", () => {
   it("keeps file import and workspace zip export as separate commands", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -894,28 +823,6 @@ describe("data fragments and file transfers", () => {
 });
 
 describe("native workbench context menus", () => {
-  it("opens import/export data from a file tree context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showExplorerMenu.mockResolvedValue("import-export");
-    renderShell(bridge);
-
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (item) => item.getAttribute("data-path") === "a.md",
-    )!;
-    fireEvent.contextMenu(row);
-
-    await waitFor(() => {
-      expect(bridge.showExplorerMenu).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        kind: "file",
-        path: "a.md",
-        pinned: false,
-      });
-    });
-    const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getAllByText("a.md").length).toBeGreaterThan(0);
-  });
-
   it("routes tab context menu commands through existing tab actions", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
@@ -953,34 +860,6 @@ describe("native workbench context menus", () => {
         context: "editor",
       });
     });
-  });
-
-  it("opens import/export data from the editor context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("import-export");
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByText("a.md"));
-    fireEvent.contextMenu(await screen.findByTestId("view-markdown"));
-
-    const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getByText("Cloud data fragment")).toBeTruthy();
-    expect(within(dialog).queryByText("Files and archives")).toBeNull();
-  });
-
-  it("opens import/export data for the tab path from the tab context menu", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("import-export");
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByText("a.md"));
-    await user.click(screen.getByText("b.md"));
-    fireEvent.contextMenu(await screen.findByTestId("tab-a.md"));
-
-    const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getAllByText("a.md").length).toBeGreaterThan(0);
   });
 
   it("routes status bar context menu commands to panel actions", async () => {
@@ -1079,26 +958,5 @@ describe("settings entry points", () => {
 
     await user.keyboard("{Control>},{/Control}");
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-  });
-});
-
-describe("workspace management", () => {
-  it("opens the workspace management dialog from the command palette", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.type(await screen.findByRole("textbox", { name: "Command" }), "manage");
-    await user.keyboard("{Enter}");
-
-    const dialog = await screen.findByTestId("workspace-management-dialog");
-    expect(await within(dialog).findByText("owner@dohc.test")).toBeTruthy();
-    expect(bridge.listWorkspaceMembers).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-    });
-    expect(bridge.listWorkspaceInvites).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-    });
   });
 });
