@@ -1208,6 +1208,17 @@ function localUserId(): string {
   return cachedCredentials?.userId ?? localReactorFallbackId();
 }
 
+// The VERIFIED relay identity a signed-in send stamps on a chat message
+// (WS-MU-C0). Present ONLY when signed in to the relay: the OPAQUE Better Auth
+// user id the relay verifies as `actor.userId` before admitting the op. Solo /
+// signed-out returns undefined, so message.append omits `authorUserId` and stays
+// byte-identical to the pre-MU-C0 shape (unlike reactions, which anchor on a
+// stable local fallback id even offline). NEVER the email — identity is opaque;
+// the email is display-only via localUserDisplayName().
+function relayAuthorUserId(): string | undefined {
+  return cachedCredentials?.userId;
+}
+
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
 // tracked by handle. A new search, an explicit cancel, the renderer's
 // webContents going away, and app quit each kill the SPECIFIC tracked child.
@@ -2860,6 +2871,10 @@ function registerIpcHandlers(): void {
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
       author: { kind: "human", displayName: localUserDisplayName() },
+      // WS-MU-C0: stamp the verified relay identity when signed in (the relay
+      // checks it === actor.userId); omit it solo. Identity is main-derived,
+      // never renderer-supplied.
+      authorUserId: relayAuthorUserId(),
       body: input.body,
     });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
@@ -2987,6 +3002,8 @@ function registerIpcHandlers(): void {
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
       author: { kind: "human", displayName: localUserDisplayName() },
+      // WS-MU-C0: stamp the verified relay identity when signed in; omit solo.
+      authorUserId: relayAuthorUserId(),
       body: input.body,
     });
     return StartChannelThreadResult.parse({
