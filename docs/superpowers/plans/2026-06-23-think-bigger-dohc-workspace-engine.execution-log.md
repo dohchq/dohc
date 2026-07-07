@@ -18749,3 +18749,75 @@ tests-first:
   route + IPC, and the hocuspocus provider (its projection copy retires with
   it — `@dohc/ydoc-projection` is now the shared home); cut over at a
   closed-session boundary.
+## Sync Hardening (0P follow-ups)
+
+Closes the four "carried unsolved" robustness items from the Arc 0P sync work.
+All four are correctness-critical for multi-machine data integrity. Landed
+tests-first, platform-neutral (Linux-verified). Commits: items 1+2 (engine),
+item 4 (relay), item 3 (engine + desktop).
+
+### Item 1 — deterministic conflict-id symmetry
+
+Sync divergence conflicts are minted independently on each machine (they never
+replicate as `conflict.open` ops), so the old id embedded the local head +
+incoming moment id and differed per side, forcing the resolve path onto a
+fragile swapped-head lookup. Now a sync conflict's id is a pure function of
+`(workspaceId, versionId, objectId, fork-point moment)` — the fork point being
+`beforeLatestMomentId` of the first divergent op, which per-origin FIFO makes
+identical on both machines. Both sides therefore compute the SAME id, and
+`conflict.resolve` closes the peer's mirror BY ID: the resolve path looks up the
+local row by the payload's conflictId first, routing sync conflicts (origin
+`sync`, current/incoming swapped) through the mirror-flip + state adoption and
+merge conflicts (replicated verbatim via `conflict.open`) through a plain
+update. The existing swapped-head lookup remains as the fallback ONLY when ids
+genuinely cannot align — occupancy conflicts (inherently asymmetric) and
+pre-deterministic rows.
+
+### Item 2 — conflict coalescing
+
+`openOrCoalesceSyncConflict` keeps one OPEN sync conflict per (version, object)
+lineage: a newer divergent remote op updates the existing open row's incoming
+head + updatedAtMs instead of stacking a second row. The current side is left
+as first recorded (this machine's own head; local writes advance the file
+independently, and resolve always re-reads the live head before acting, so a
+lagging current is never acted on stale). Interacts with item 1: the deterministic
+id is minted once at first divergence and never re-derived, so coalescing keeps
+one stable identity across an episode.
+
+### Item 3 — origin-reset recovery preserving unpushed work
+
+`recoverRelayOrigin` turns the previously dead-end `RelayOriginDivergedError`
+(restored-from-older / cloned engine.db) into a recovery: it computes the
+byte-identical shared history prefix against the relay's authoritative record
+for the origin, re-journals the divergent tail ("orphans") under a FRESH origin
+id (so they push cleanly), drops the orphan rows from the old origin (so the
+relay's authoritative versions apply as REMOTE ops — opening ordinary conflicts
+where they clash instead of being idempotently skipped), marks the old origin
+fully pushed, and resets the fetch cursor. Genuinely-unpushed local work is
+never dropped — it is preserved as pushed-under-a-new-origin content and, where
+it clashes, as an open conflict on both machines. The desktop relay sync loop
+catches the diverged error, recovers, and re-pushes so the pass completes.
+
+### Item 4 — relay GC / quotas
+
+(a) A per-workspace storage quota (`SYNC_RELAY_WORKSPACE_QUOTA_BYTES`, default
+2 GiB) enforced inside the same transaction as blob-put and log-append; a new
+blob or a log batch that would exceed the workspace's total (blobs + log
+payloads) is rejected with `SyncRelayQuotaExceededError` (413, `quota_exceeded`).
+Idempotent re-PUTs add no bytes; over-quota log appends roll back atomically.
+(b) `collectUnreferencedBlobs`, behind an owner-only `POST /sync/:ws/maintenance/gc`,
+removes only blobs no live log row references (orphaned uploads from a push that
+failed before its log append). GC only ever DELETEs from `sync_relay_blobs` —
+the append-only log and the key-envelope history are never pruned.
+
+### Verification
+
+- `pnpm -r typecheck` clean repo-wide.
+- workspace-engine 395 (was 391: +3 conflict-id/coalescing/fallback, +1 origin
+  recovery; fuzz's per-op content-mirror assertion — invalid under coalescing —
+  replaced by a direct no-stacking invariant) + fs-lock 39/5-skip green.
+- sync-relay 60 (was 55: +4 quota/GC server, +1 quota-env integration guard).
+- desktop 967 (was 966: +1 origin-recovery loop test).
+- Relay child-process integration tests, `pnpm --filter @dohc/desktop build`,
+  and the workspace-sync-rejoin e2e (conflict round trip) all green.
+- `git diff --check` clean.
