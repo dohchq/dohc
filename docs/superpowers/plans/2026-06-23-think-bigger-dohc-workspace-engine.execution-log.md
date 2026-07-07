@@ -18235,3 +18235,46 @@ Deferred (recorded follow-up for the full retirement): the `workspace-history`
 and `workspace-sync` salvage (live engine/MCP importers keep them for now), and
 the eventual full Postgres-for-auth retirement once Arc 0P's engine-native sync
 subsumes the relay + collab auth path.
+
+## Y.Doc Engine Driver Design (G2-B/C)
+
+Design-only lane (no product code). Added
+`docs/superpowers/plans/2026-07-07-think-bigger-ydoc-engine-driver-design.md`
+(manifest + doc-links checker green), designing WS-G2 candidate (b): the
+Y.Doc as an engine content driver, so live collab can retire off Hocuspocus.
+
+- **Storage.** A rich doc stays a `file_objects` row; three lazy-additive
+  tables (`ydoc_docs` head pointers, `ydoc_updates` append-only log,
+  `ydoc_snapshots`) file Y.Doc state under `(workspace_id, version_id,
+  object_id)`. Update/snapshot bytes are content-addressed into the existing
+  `binary_blobs` (engineDbSchema.ts:62-68), so Y.Doc state replicates through
+  the 0P blob path for free. The markdown `snapshots.text` + `moments` stay
+  as the PROJECTION beside the Y.Doc — searchable/exportable/restorable and
+  the durable artifact. `content_kind` stays `text`; the driver dimension is
+  the `ydoc_docs` marker.
+- **Projection + handoff.** Settle on quiesce writes markdown via
+  `writeTextFile` (a normal capture moment) using the salvaged
+  `yDocToMarkdown`; open seeds via `markdownToYDoc`. Canonical flips
+  file->Y.Doc on session open and Y.Doc->file on session close, never both
+  (WS-G2 rule extended). Version switch = closed-session boundary; restore
+  into a live doc = external edit reconciled by the shipped
+  `reconcileExternalEdit`; cross-version merge = projection three-way with
+  P0D preserve-both (the CRDT has no cross-version ancestry).
+- **`ydoc.update` replication (G2-C).** New op kind in the multi-origin log,
+  standard `(originId, originSeq)` envelope, update bytes shipped as a
+  content-addressed blob over the existing relay push/fetch. Commutative CRDT
+  deltas: apply is `Y.applyUpdate` + re-project, with NO head check and NO
+  P0D conflict machinery (convergence is Yjs, not the log). Awareness is
+  ephemeral, never journaled, over a separate relay channel. Low-latency is
+  the same ops pushed instead of polled.
+- **Retirement.** Delete `services/hocuspocus`, the `POST /workspaces/:id/
+  collab/token` route, and the renderer Hocuspocus provider; keep
+  `collabSession.ts` (reused by the engine provider). Salvage
+  `import-export.ts`/`dohc-markdown-extensions.ts`. Cutover at a closed-
+  session boundary (WS-G2 rule 5); no update-history migration.
+- **Milestones.** G2-B: storage+compaction -> projection+capture ->
+  editor-binding-for-solo -> driver behavior matrix. G2-C: `ydoc.update`
+  replication -> awareness+relay-push -> Hocuspocus retirement. Each with a
+  test gate. Three user questions: markdown-fidelity-vs-full-Y.Doc-state;
+  solo-on-Y.Doc-now vs plain-autosave-until-G2-C; re-home vs retire the
+  suggestions/semantic-api surfaces.
