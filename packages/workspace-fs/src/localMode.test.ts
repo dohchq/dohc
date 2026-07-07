@@ -1,12 +1,145 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Actor, WorkspaceBackend, WorkspaceFile } from "@dohc/workspace-contracts";
-import { createWorkspaceApiHandler } from "@dohc/workspace-api";
+import type {
+  Actor,
+  AssetKind,
+  AtomKind,
+  WorkspaceBackend,
+  WorkspaceFile,
+} from "@dohc/workspace-contracts";
+import { isApprovalErrorReason } from "@dohc/workspace-contracts";
 import { createLocalSyncClient } from "./syncClient";
 
 const actor: Actor = { userId: "user_1", workspaceId: "ws_local" };
+
+// The reduced workspace-api service no longer ships the file/sync HTTP routes
+// (they were retired with apps/web). This stub reimplements just the slice of
+// that contract createLocalSyncClient drives — GET files, GET/POST files/:path,
+// POST assets, POST sync/apply — over a WorkspaceBackend, so the local-sync
+// integration coverage (materialize, push, pull, conflict + approval surfacing)
+// survives without a dependency on @dohc/workspace-api.
+type StubResolveActor = (request: Request, workspaceId: string) => Actor | Promise<Actor>;
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function readFileResponse(backend: WorkspaceBackend, resolvedActor: Actor, path: string) {
+  const files = await backend.listFiles(resolvedActor);
+  const metadata = files.find((candidate) => candidate.path === path);
+  if (!metadata) throw new Error(`file not found: ${path}`);
+  if (metadata.kind === "atom") {
+    const read = await backend.readText(resolvedActor, path);
+    return { ...metadata, body: read.body, revision: read.revision };
+  }
+  const read = await backend.readAsset(resolvedActor, path);
+  return {
+    ...metadata,
+    contentType: read.mediaType,
+    revision: read.revision,
+    bytesBase64: Buffer.from(read.bytes).toString("base64"),
+  };
+}
+
+// Per-op, non-fail-fast: mirrors the retired applyWorkspaceSync so approval
+// failures surface as per-op results[] (ok:false with the approval code) rather
+// than a thrown batch error.
+async function applyStubSync(
+  backend: WorkspaceBackend,
+  resolvedActor: Actor,
+  operations: Array<Record<string, any>>,
+) {
+  for (const operation of operations) {
+    if (operation.op === "rename" && dirname(operation.fromPath) !== dirname(operation.toPath)) {
+      const error = new Error("cross-folder renames are not supported by workspace sync") as Error & { path?: string };
+      error.path = operation.fromPath;
+      throw error;
+    }
+  }
+  const files: WorkspaceFile[] = [];
+  const results: Array<{ path: string; ok: boolean; error?: string; file?: WorkspaceFile | null }> = [];
+  let applied = 0;
+  for (const operation of operations) {
+    const path = operation.op === "rename" ? operation.toPath : operation.path;
+    try {
+      let file: WorkspaceFile | null = null;
+      if (operation.op === "create") {
+        file = operation.body !== undefined
+          ? await backend.createAtom(resolvedActor, { path: operation.path, kind: (operation.kind as AtomKind) ?? "markdown", body: operation.body })
+          : await backend.saveAsset(resolvedActor, { path: operation.path, kind: (operation.kind as AssetKind) ?? "file", mediaType: operation.mediaType ?? "application/octet-stream", bytes: Buffer.from(operation.bytesBase64 ?? "", "base64") });
+      } else if (operation.op === "update") {
+        file = operation.body !== undefined
+          ? await backend.writeAtom(resolvedActor, { path: operation.path, expectedRevision: operation.expectedRevision, body: operation.body })
+          : await backend.updateAsset(resolvedActor, { path: operation.path, expectedRevision: operation.expectedRevision, kind: (operation.kind as AssetKind) ?? "file", mediaType: operation.mediaType ?? "application/octet-stream", bytes: Buffer.from(operation.bytesBase64 ?? "", "base64") });
+      } else if (operation.op === "delete") {
+        await backend.deleteFile(resolvedActor, operation.path, operation.expectedRevision);
+      } else {
+        const toName = operation.toPath.includes("/") ? operation.toPath.slice(operation.toPath.lastIndexOf("/") + 1) : operation.toPath;
+        file = await backend.renameFile(resolvedActor, { fromPath: operation.fromPath, toName, expectedRevision: operation.expectedRevision });
+      }
+      if (file) files.push(file);
+      applied += 1;
+      results.push({ path, ok: true, file });
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : undefined;
+      const message = isApprovalErrorReason(code) ? code : error instanceof Error ? error.message : String(error);
+      results.push({ path, ok: false, error: message });
+    }
+  }
+  return { ok: true, applied, files, results };
+}
+
+function createStubWorkspaceApiHandler({
+  backend,
+  resolveActor,
+}: {
+  backend: WorkspaceBackend;
+  resolveActor: StubResolveActor;
+}) {
+  return async (request: Request): Promise<Response> => {
+    try {
+      const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (parts[0] !== "workspaces" || !parts[1]) return jsonResponse({ ok: false, error: "not found" }, 404);
+      const resolvedActor = { ...(await resolveActor(request, parts[1])), workspaceId: parts[1] };
+      const section = parts[2];
+
+      if (section === "files" && request.method === "GET" && parts.length === 3) {
+        return jsonResponse({ ok: true, files: await backend.listFiles(resolvedActor) });
+      }
+      if (section === "files" && request.method === "GET" && parts.length > 3) {
+        return jsonResponse({ ok: true, file: await readFileResponse(backend, resolvedActor, parts.slice(3).join("/")) });
+      }
+      if (section === "files" && request.method === "POST" && parts.length > 3) {
+        const path = parts.slice(3).join("/");
+        const input = (await request.json()) as { expectedRevision?: string; body: string; kind?: AtomKind };
+        const file = input.expectedRevision
+          ? await backend.writeAtom(resolvedActor, { path, expectedRevision: input.expectedRevision, body: input.body })
+          : await backend.createAtom(resolvedActor, { path, kind: input.kind ?? "markdown", body: input.body });
+        return jsonResponse({ ok: true, file });
+      }
+      if (section === "assets" && request.method === "POST") {
+        const input = (await request.json()) as { path: string; kind: AssetKind; mediaType: string; bytesBase64: string };
+        const file = await backend.saveAsset(resolvedActor, { path: input.path, kind: input.kind, mediaType: input.mediaType, bytes: Buffer.from(input.bytesBase64, "base64") });
+        return jsonResponse({ ok: true, file });
+      }
+      if (section === "sync" && parts[3] === "apply" && request.method === "POST") {
+        const { operations } = (await request.json()) as { operations: Array<Record<string, any>> };
+        return jsonResponse(await applyStubSync(backend, resolvedActor, operations));
+      }
+      return jsonResponse({ ok: false, error: "not found" }, 404);
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : undefined;
+      const path = typeof error === "object" && error && "path" in error ? String((error as { path?: unknown }).path) : undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse({ ok: false, error: message, ...(code ? { code } : {}), ...(path ? { path } : {}) }, 400);
+    }
+  };
+}
 
 function workspaceFile(path: string, revision: string): WorkspaceFile {
   return {
@@ -88,7 +221,7 @@ describe("local filesystem sync mode", () => {
   it("materializes, syncs local edits, pulls remote updates, creates conflicts, and surfaces delete approvals", async () => {
     await withTempDir(async (dir) => {
       const fixture = memoryBackend();
-      const handler = createWorkspaceApiHandler({
+      const handler = createStubWorkspaceApiHandler({
         backend: fixture.backend,
         resolveActor: async (_request, workspaceId) => ({ ...actor, workspaceId }),
       });
@@ -146,7 +279,7 @@ describe("local filesystem sync mode", () => {
   it("syncs local site source edits without publish approval", async () => {
     await withTempDir(async (dir) => {
       const fixture = memoryBackend();
-      const handler = createWorkspaceApiHandler({
+      const handler = createStubWorkspaceApiHandler({
         backend: fixture.backend,
         resolveActor: async (_request, workspaceId) => ({ ...actor, workspaceId }),
       });
