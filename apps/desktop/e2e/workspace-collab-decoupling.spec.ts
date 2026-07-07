@@ -13,14 +13,13 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// G2-A pinning E2E (collab design, milestone G2-A): the engine flag and the
-// collab stack are DECOUPLED. An engine-flagged personal/local workspace edits
-// a rich doc with no Hocuspocus reachable and no cloud config — the editor
-// loads, autosave works, and engine moments capture — with ZERO collab
-// involvement: no WebSocket is ever opened and the collabToken IPC refuses a
-// non-shared workspace. This is the "explicitly decoupled" half of the 0N-3
-// audit's collab gate ("live collab (Y.Doc) re-homed on the engine or
-// explicitly decoupled so the flip does not regress co-editing").
+// WS-G2-C-2 pinning E2E: the desktop editor is DECOUPLED from Hocuspocus. An
+// engine-flagged personal/local workspace edits a rich doc THROUGH the engine
+// Y.Doc provider (recordUpdate + debounced settle) with no relay — the editor
+// loads, editing lands on the .md and in engine.db as ydoc.update ops, with ZERO
+// collab-server involvement: no WebSocket is ever opened and the collabToken IPC
+// refuses a non-shared workspace. The former HocuspocusProvider path is no
+// longer instantiated by the editor (G2-C-3 removes its remaining code).
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
   DatabaseSync: new (
@@ -60,9 +59,28 @@ function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
   }
 }
 
-test("engine-flagged local workspace edits a rich doc with zero Hocuspocus — editor works, autosave lands, moments capture", async () => {
+function ydocUpdateCount(rootPath: string): number {
+  try {
+    const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), {
+      readOnly: true,
+    });
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS n FROM ydoc_updates").get() as
+        | { n: number }
+        | undefined;
+      return Number(row?.n ?? 0);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return 0;
+  }
+}
+
+test("engine-flagged local workspace edits a rich doc through the engine provider — no Hocuspocus, editing lands", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const sentinel = "Typed with no collab server anywhere.";
 
   try {
     await seedWorkspaceSettings(temp, {
@@ -85,34 +103,43 @@ test("engine-flagged local workspace edits a rich doc with zero Hocuspocus — e
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/solo.md");
 
-    // Open the rich doc and enter the rich (Tiptap WYSIWYG) editor. Opening a
-    // markdown file mounts useCollabDoc, which asks main for a collab token;
-    // for a personal/local workspace main answers available:false and the
-    // hook never imports yjs/@hocuspocus/provider.
+    // Open the rich doc: useEngineDoc opens an engine Y.Doc session over IPC and
+    // binds the Tiptap Collaboration extension to the mirror doc. There is no
+    // read/source Edit gate in engine mode — the WYSIWYG editor is the whole
+    // surface, so the local-editor Edit toggle is absent once the engine session
+    // is live.
     await explorerRow(page, "notes").click();
     await explorerRow(page, "notes/solo.md").click();
-    await page.getByTestId("markdown-edit-toggle").click();
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible();
 
-    // Type into the live rich editor and let the 800ms autosave settle.
+    // Type into the live rich editor and let the debounced settle land.
     await editor.click();
     await page.keyboard.press("ControlOrMeta+End");
-    await page.keyboard.type("Typed with no collab server anywhere.");
+    await page.keyboard.type(sentinel);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",
       "saved",
       { timeout: 15_000 },
     );
 
-    // Autosave landed on disk through the normal bridge.
-    const onDisk = await readFile(
-      join(temp.rootPath, "notes/solo.md"),
-      "utf8",
-    );
-    expect(onDisk).toContain("Typed with no collab server anywhere.");
+    // The settle projected the edit onto disk through the engine (not a bridge
+    // text write).
+    await expect
+      .poll(async () => await readFile(join(temp.rootPath, "notes/solo.md"), "utf8").catch(() => ""), {
+        timeout: 30_000,
+      })
+      .toContain(sentinel);
 
-    // The watcher captured the settled autosave into an engine moment.
+    // The edit went through the engine Y.Doc provider: it journaled ydoc.update
+    // CRDT ops (the old path would have produced only ordinary moment.append
+    // captures with no ydoc_updates rows at all).
+    await expect
+      .poll(() => ydocUpdateCount(temp.rootPath), { timeout: 30_000 })
+      .toBeGreaterThan(0);
+    // The settle projected a history moment carrying the text (settle points are
+    // engine history).
     await expect
       .poll(
         () =>
@@ -120,7 +147,7 @@ test("engine-flagged local workspace edits a rich doc with zero Hocuspocus — e
             (moment) =>
               moment.path === "notes/solo.md" &&
               moment.operation === "write" &&
-              moment.text.includes("Typed with no collab server anywhere."),
+              moment.text.includes(sentinel),
           ).length,
         { timeout: 30_000 },
       )
