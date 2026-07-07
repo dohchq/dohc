@@ -118,6 +118,7 @@ export function resolveSpawnCommand(
 export class JsonRpcTransport {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string | number, PendingRequest>();
+  private readonly exited: Promise<void>;
   private nextId = 1;
   private closed = false;
 
@@ -127,6 +128,11 @@ export class JsonRpcTransport {
     stdout.on("line", (line) => this.handleLine(line));
     const stderr = createInterface({ input: child.stderr });
     stderr.on("line", (line) => options.onStderr?.(line));
+    this.exited = new Promise((resolve) => {
+      child.once("exit", () => resolve());
+      // A spawn failure may never emit "exit"; treat it as terminal too.
+      child.once("error", () => resolve());
+    });
     child.once("error", (error) => this.close(error));
     child.once("exit", (code, signal) => {
       options.onExit?.(code, signal);
@@ -168,15 +174,30 @@ export class JsonRpcTransport {
     this.send({ jsonrpc: "2.0", method, params });
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.close(new Error("JSON-RPC transport disposed."));
-    if (this.child.exitCode === null && this.child.signalCode === null) {
-      this.child.kill("SIGTERM");
-      setTimeout(() => {
-        if (this.child.exitCode === null && this.child.signalCode === null) {
-          this.child.kill("SIGKILL");
-        }
-      }, 2000).unref();
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    this.child.kill("SIGTERM");
+    const forceKill = setTimeout(() => {
+      if (this.child.exitCode === null && this.child.signalCode === null) {
+        this.child.kill("SIGKILL");
+      }
+    }, 2000);
+    forceKill.unref();
+    // Wait for the child to actually exit: a live child whose cwd is the
+    // workspace root keeps that directory locked on Windows, so a dispose
+    // that returns before exit leaves the workspace undeletable. Bounded so
+    // an unkillable child cannot hang dispose forever.
+    let waitCap: NodeJS.Timeout | undefined;
+    const capped = new Promise<void>((resolve) => {
+      waitCap = setTimeout(resolve, 5000);
+      waitCap.unref?.();
+    });
+    try {
+      await Promise.race([this.exited, capped]);
+    } finally {
+      clearTimeout(forceKill);
+      if (waitCap) clearTimeout(waitCap);
     }
   }
 
