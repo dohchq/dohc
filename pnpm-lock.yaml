@@ -59,15 +59,9 @@ importers:
       '@dohc/workspace-fs':
         specifier: workspace:*
         version: link:../../packages/workspace-fs
-      '@dohc/workspace-history':
-        specifier: workspace:*
-        version: link:../../packages/workspace-history
       '@dohc/workspace-kernel-client':
         specifier: workspace:*
         version: link:../../packages/workspace-kernel-client
-      '@dohc/workspace-sync':
-        specifier: workspace:*
-        version: link:../../packages/workspace-sync
       '@fontsource-variable/inter':
         specifier: ^5.2.8
         version: 5.2.8
@@ -222,9 +216,6 @@ importers:
       '@dohc/workspace-engine':
         specifier: workspace:*
         version: link:../workspace-engine
-      '@dohc/workspace-history':
-        specifier: workspace:*
-        version: link:../workspace-history
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
@@ -334,9 +325,6 @@ importers:
       '@dohc/workspace-fs':
         specifier: workspace:*
         version: link:../workspace-fs
-      '@dohc/workspace-history':
-        specifier: workspace:*
-        version: link:../workspace-history
       smol-toml:
         specifier: ^1.7.0
         version: 1.7.0
@@ -376,22 +364,6 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
 
-  packages/workspace-history:
-    dependencies:
-      '@dohc/workspace-core':
-        specifier: workspace:*
-        version: link:../workspace-core
-    devDependencies:
-      '@types/node':
-        specifier: ^22.19.19
-        version: 22.19.19
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.9
-        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
-
   packages/workspace-kernel-client:
     devDependencies:
       '@types/node':
@@ -422,25 +394,6 @@ importers:
       vitest:
         specifier: ^2.1.9
         version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@24.13.2)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
-
-  packages/workspace-sync:
-    dependencies:
-      '@dohc/workspace-core':
-        specifier: workspace:*
-        version: link:../workspace-core
-      '@dohc/workspace-fs':
-        specifier: workspace:*
-        version: link:../workspace-fs
-    devDependencies:
-      '@types/node':
-        specifier: ^22.19.19
-        version: 22.19.19
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.9
-        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
 
   services/agent-sandbox:
     dependencies:

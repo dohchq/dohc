@@ -20,7 +20,7 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import { createChangeSetStore } from "@dohc/workspace-history";
+import { createChangeSetStore } from "@dohc/workspace-engine";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite

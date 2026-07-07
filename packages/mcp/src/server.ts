@@ -121,7 +121,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_changes",
     {
       description:
-        "List workspace history: workspace-engine moments (the recorder since the engine became the default) merged with pre-flip legacy change sets (read-only relic). Each entry names its source; engine entries carry path/operation/versionId instead of the legacy kind/boundaryCrossings.",
+        "List workspace history: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId.",
       inputSchema: {
         sinceMs: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().max(500).optional(),
@@ -135,7 +135,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_change",
     {
       description:
-        "Read one history entry by id: a workspace-engine moment (with its full before/after payload) or a pre-flip legacy change set (files, author, provenance, boundary crossings).",
+        "Read one history entry by id: a workspace-engine moment with its full before/after payload.",
       inputSchema: {
         id: z.string().min(1).max(500),
       },

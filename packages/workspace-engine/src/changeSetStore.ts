@@ -299,7 +299,7 @@ function normalizeReadableIndexEntries(entries: IndexEntry[]): IndexEntry[] {
       normalized.push(normalizeIndexEntry(entry));
     } catch (error) {
       console.error(
-        `[workspace-history] skipping unreadable index entry ${indexEntryIdForLog(entry)}:`,
+        `[workspace-engine] skipping unreadable index entry ${indexEntryIdForLog(entry)}:`,
         error,
       );
     }
@@ -1318,7 +1318,7 @@ export function createChangeSetStore(
         if (primaryError) {
           if (releaseError) {
             console.error(
-              "[workspace-history] failed to release history lock after failed commit:",
+              "[workspace-engine] failed to release history lock after failed commit:",
               releaseError,
             );
           }
@@ -1326,7 +1326,7 @@ export function createChangeSetStore(
         }
         if (releaseError) {
           if (!committed) throw releaseError;
-          console.error("[workspace-history] failed to release history lock after commit:", releaseError);
+          console.error("[workspace-engine] failed to release history lock after commit:", releaseError);
         }
 
         return record;
@@ -1359,7 +1359,7 @@ export function createChangeSetStore(
           }
         } catch (error) {
           console.error(
-            `[workspace-history] skipping unreadable record ${item.entry.id}:`,
+            `[workspace-engine] skipping unreadable record ${item.entry.id}:`,
             error,
           );
         }
@@ -1388,7 +1388,7 @@ export function createChangeSetStore(
           if (record) records.push(normalizeHistoryRecord(record));
         } catch (error) {
           console.error(
-            `[workspace-history] skipping unreadable record ${entry.id}:`,
+            `[workspace-engine] skipping unreadable record ${entry.id}:`,
             error,
           );
         }
@@ -1413,7 +1413,7 @@ export function createChangeSetStore(
         return normalizeHistoryRecord(record);
       } catch (error) {
         console.error(
-          `[workspace-history] skipping unreadable record ${entry.id}:`,
+          `[workspace-engine] skipping unreadable record ${entry.id}:`,
           error,
         );
         return null;

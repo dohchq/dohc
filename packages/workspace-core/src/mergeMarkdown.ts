@@ -4,10 +4,10 @@
 // proposal can sit alongside the conflict, but only a human applies it.
 //
 // This module is BROWSER-SAFE on purpose (no node: imports): the desktop
-// renderer's live-collab reconcile imports it via the package's
-// "./mergeMarkdown" subpath. Importing the package barrel from a renderer
-// would drag changeSetStore's node:fs into the dev module graph (no
-// tree-shaking in dev) and blank the window at load.
+// renderer's live-collab reconcile imports it via the "@dohc/workspace-core/
+// mergeMarkdown" subpath. It is deliberately NOT re-exported from the
+// workspace-core barrel, which pulls in node:fs modules (databases.ts) that
+// would blank the renderer's module graph at load if dragged in un-tree-shaken.
 
 export type MergeResult =
   | { kind: "merged"; content: string }
@@ -54,7 +54,19 @@ export function mergeMarkdown(input: {
         l.baseStart === l.baseEnd &&
         r.baseStart === r.baseEnd &&
         l.baseStart === r.baseStart;
-      if (bothInsertAtSameOffset || (l.baseStart < r.baseEnd && r.baseStart < l.baseEnd)) {
+      // A replacement and an insertion anchored at the same base offset also
+      // contest: the stable sort can apply the replacement then let the
+      // zero-length insertion reset the cursor backwards, reintroducing the
+      // stale base line the replacement was meant to overwrite (silent data
+      // loss). Flag when exactly one of the two hunks is a pure insertion.
+      const sameStartWithInsertion =
+        l.baseStart === r.baseStart &&
+        ((l.baseStart === l.baseEnd) !== (r.baseStart === r.baseEnd));
+      if (
+        bothInsertAtSameOffset ||
+        sameStartWithInsertion ||
+        (l.baseStart < r.baseEnd && r.baseStart < l.baseEnd)
+      ) {
         return { kind: "conflict" };
       }
     }

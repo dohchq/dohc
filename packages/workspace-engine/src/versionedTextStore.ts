@@ -41,7 +41,7 @@ import type {
   WorkspaceObjectId,
 } from "@dohc/workspace-contracts/engine";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { mergeMarkdown } from "@dohc/workspace-history/mergeMarkdown";
+import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import {
   ENGINE_SQLITE_BUSY_TIMEOUT_MS,
   assertEngineSqliteIntegrity,

@@ -11,14 +11,13 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config vitest.fs-lock.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
-    "@dohc/workspace-history": "workspace:*",
     "smol-toml": "^1.7.0"
   },
   "devDependencies": {

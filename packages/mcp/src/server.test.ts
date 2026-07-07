@@ -28,6 +28,15 @@ async function connectedToolNames(ctx: ToolContext): Promise<{ names: string[]; 
   return { names: listed.tools.map((tool) => tool.name), client };
 }
 
+async function connectedTools(ctx: ToolContext): Promise<Array<{ name: string; description?: string }>> {
+  const server = createDohcMcpServer(ctx);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "0.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const listed = await client.listTools();
+  return listed.tools.map((tool) => ({ name: tool.name, description: tool.description }));
+}
+
 describe("read-only shared-view profile", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
 
@@ -68,6 +77,37 @@ describe("read-only shared-view profile", () => {
     // (never reaching any filesystem write path).
     expect(result.isError).toBe(true);
     expect(result.content?.[0]?.text ?? "").toContain("not found");
+  });
+});
+
+describe("change-history tool descriptions (engine-only drift guard)", () => {
+  const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
+
+  // The .dohc/history legacy change-set relic was retired with
+  // @dohc/workspace-history; these tools now surface engine moments ONLY. Guard
+  // against the descriptions drifting back to promising legacy/merged content.
+  const STALE_PHRASES = [
+    "legacy",
+    "relic",
+    "merged with",
+    "pre-flip",
+    "boundaryCrossings",
+    "change set",
+    "change sets",
+    "provenance",
+  ];
+
+  it("dohc_list_changes and dohc_read_change describe engine moments only", async () => {
+    const tools = await connectedTools(base);
+    for (const name of ["dohc_list_changes", "dohc_read_change"]) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool, name).toBeDefined();
+      const description = (tool?.description ?? "").toLowerCase();
+      expect(description, name).toContain("engine");
+      for (const phrase of STALE_PHRASES) {
+        expect(description, `${name} must not mention "${phrase}"`).not.toContain(phrase.toLowerCase());
+      }
+    }
   });
 });
 

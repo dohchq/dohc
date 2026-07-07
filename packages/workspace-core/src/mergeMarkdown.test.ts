@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  describeConflict,
-  mergeMarkdown,
-  resolveConflict,
-  storeProposal,
-  type FileConflict,
-} from "./conflictResolution";
+import { mergeMarkdown } from "./mergeMarkdown";
 
 const BASE = "# Plan\n\nIntro paragraph.\n\n## Costs\n\nOld numbers.\n";
 
@@ -51,42 +45,25 @@ describe("mergeMarkdown (safe auto-merge)", () => {
     const remote = BASE.replace("## Costs", "REMOTE insert\n## Costs");
     expect(mergeMarkdown({ base: BASE, local, remote })).toEqual({ kind: "conflict" });
   });
-});
 
-describe("conflict records (both versions preserved, humans first)", () => {
-  const conflict: FileConflict = {
-    path: "notes/plan.md",
-    localContent: "LOCAL",
-    remoteContent: "REMOTE",
-    localAuthor: "you",
-    remoteAuthor: "Maya",
-  };
-
-  it("describes the conflict in plain language", () => {
-    const summary = describeConflict(conflict);
-    expect(summary).toMatch(/notes\/plan\.md/);
-    expect(summary).toMatch(/you/i);
-    expect(summary).toMatch(/Maya/);
-    expect(summary).not.toMatch(/<<<<<<</);
-  });
-
-  it("stores an AI resolution proposal alongside the conflict", () => {
-    const withProposal = storeProposal(conflict, {
-      content: "MERGED BY AI",
-      rationale: "Combined both edits; numbers from Maya, intro from you.",
+  it("conflicts when a local replacement shares a base offset with a remote insertion", () => {
+    // Local REPLACES B at base offset 1; remote INSERTS a new line at the same
+    // offset 1. Applying both blindly lets the stable sort reset the cursor
+    // backwards and reintroduce the stale base line B — data loss. Must conflict.
+    const result = mergeMarkdown({
+      base: "A\nB\nC",
+      local: "A\nLOCAL B\nC",
+      remote: "A\nREMOTE INSERT\nB\nC",
     });
-    expect(withProposal.proposal?.content).toBe("MERGED BY AI");
-    expect(withProposal.proposal?.source).toBe("ai");
-    // The original sides are still intact — a proposal never replaces them.
-    expect(withProposal.localContent).toBe("LOCAL");
-    expect(withProposal.remoteContent).toBe("REMOTE");
+    expect(result).toEqual({ kind: "conflict" });
   });
 
-  it("supports apply / keep-both / dismiss outcomes", () => {
-    const withProposal = storeProposal(conflict, { content: "AI", rationale: "" });
-    expect(resolveConflict(withProposal, "apply").resolution).toBe("applied");
-    const kept = resolveConflict(conflict, "keep-both");
-    expect(kept.resolution).toBe("kept-both");
-    expect(resolveConflict(conflict, "dismiss").resolution).toBe("dismissed");
+  it("conflicts symmetrically when the insertion is local and the replacement remote", () => {
+    const result = mergeMarkdown({
+      base: "A\nB\nC",
+      local: "A\nLOCAL INSERT\nB\nC",
+      remote: "A\nREMOTE B\nC",
+    });
+    expect(result).toEqual({ kind: "conflict" });
   });
 });
