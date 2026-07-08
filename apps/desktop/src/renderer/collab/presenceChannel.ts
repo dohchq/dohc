@@ -35,6 +35,16 @@ export interface PresenceTransport {
   poll(input: { topic: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
 }
 
+// The ONE guard between a peer's untrusted display payload and every UI
+// surface: only a real, non-empty string may become a display name. Keep any
+// future sanitization/length caps here so all callers stay in sync.
+export function resolvePeerDisplayName(peer: PresencePeer): string {
+  const state = (peer.state ?? {}) as { displayName?: unknown };
+  return typeof state.displayName === "string" && state.displayName.trim()
+    ? state.displayName
+    : "Someone";
+}
+
 export type PresenceScope =
   | { kind: "workspace"; workspaceId: string }
   | { kind: "share"; shareId: string };

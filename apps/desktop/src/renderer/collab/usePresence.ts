@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createPresenceChannel,
+  resolvePeerDisplayName,
   type PresenceChannel,
   type PresencePeer,
   type PresenceTransport,
@@ -107,12 +108,9 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     () =>
       others
         .filter((peer) => peerState(peer).typing === true)
-        .map((peer) => {
-          // Peer state is network payload; only a real string may reach the
-          // `string[]` contract (same guard as PresenceIndicators).
-          const name = peerState(peer).displayName;
-          return typeof name === "string" && name.trim() ? name : "Someone";
-        }),
+        // Peer state is network payload; the shared guard admits only a real
+        // string into the `string[]` contract (same as PresenceIndicators).
+        .map(resolvePeerDisplayName),
     [others],
   );
 
@@ -124,9 +122,12 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
         clearTimeout(typingTimerRef.current);
         typingTimerRef.current = null;
       }
-      if (typing === typingRef.current && typing === false) return;
+      // Publish only on the false<->true EDGE: a keystroke while already
+      // typing refreshes the idle timer below but must not republish the same
+      // state on every character (the heartbeat re-sends it anyway).
+      const changed = typing !== typingRef.current;
       typingRef.current = typing;
-      channel.setState({ displayName, typing } satisfies PresenceLocalState);
+      if (changed) channel.setState({ displayName, typing } satisfies PresenceLocalState);
       if (typing) {
         // Self-clearing: a forgotten typing state clears on idle.
         typingTimerRef.current = setTimeout(() => {

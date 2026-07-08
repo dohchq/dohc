@@ -107,16 +107,17 @@ async function openThread(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("ChatsView presence (MU-C1)", () => {
-  it("is dormant for solo: no transport => never publishes presence", async () => {
-    const t = pushableTransport();
+  it("is dormant for solo: no transport => no presence UI", async () => {
+    // With collaboration null, ChatsView receives no transport at all, so the
+    // real dormancy signal is the ABSENCE of presence UI (usePresence's own
+    // tests lock that a null transport never constructs a channel/publishes).
     const user = userEvent.setup();
     renderView(null); // collaboration off
     await openThread(user);
-    // Give any async effects a chance; nothing should have published.
+    // Give any async effects a chance; nothing presence-shaped may render.
     await act(async () => {
       for (let i = 0; i < 10; i += 1) await Promise.resolve();
     });
-    expect(t.publishes).toHaveLength(0);
     expect(screen.queryByLabelText(/is here|people here/)).toBeNull();
   });
 

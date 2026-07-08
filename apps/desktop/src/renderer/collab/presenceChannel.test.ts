@@ -245,4 +245,38 @@ describe("createRelayPresenceTransport", () => {
     await transport.poll({ topic: "notes/a.md", since: 3, signal: new AbortController().signal });
     expect(calls[0]).toContain("/sync/shares/share-1/presence?topic=notes%2Fa.md&since=3");
   });
+
+  it("surfaces non-2xx publish/poll responses as rejections — which the channel swallows", async () => {
+    const fakeFetch = (async () => new Response("relay says no", { status: 503 })) as unknown as typeof fetch;
+    const transport = createRelayPresenceTransport({
+      baseUrl: "http://relay.test",
+      token: "tok",
+      scope: { kind: "workspace", workspaceId: "w" },
+      fetch: fakeFetch,
+    });
+    // The transport boundary: an HTTP error is a rejected promise, never a
+    // silently-parsed snapshot.
+    await expect(
+      transport.publish({ topic: "t", clientId: "c", state: {} }),
+    ).rejects.toThrow("presence publish failed: 503");
+    await expect(
+      transport.poll({ topic: "t", since: 0, signal: new AbortController().signal }),
+    ).rejects.toThrow("presence poll failed: 503");
+
+    // The channel contract: those rejections degrade to dark presence and
+    // never throw into the UI (no repaint, no unhandled rejection — vitest
+    // would fail this test on one).
+    const peers = vi.fn();
+    const channel = createPresenceChannel({
+      transport,
+      topic: "t",
+      clientId: "c",
+      initialState: {},
+      onPeers: peers,
+      retryMs: 1,
+    });
+    await flush();
+    expect(peers).not.toHaveBeenCalled();
+    await expect(channel.stop()).resolves.toBeUndefined();
+  });
 });

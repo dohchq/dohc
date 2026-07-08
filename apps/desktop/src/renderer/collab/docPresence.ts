@@ -69,6 +69,46 @@ function fromBase64(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64"));
 }
 
+// y-protocols' applyAwarenessUpdate trusts whatever clientIDs are embedded in
+// the update — it does NOT validate ownership, so a hostile co-editor could
+// craft an update that overwrites ANOTHER peer's awareness entry (or ours).
+// Walk the update's wire format (varUint count, then per entry: varUint
+// clientID, varUint clock, varString state) and return the embedded clientIDs
+// so the caller can reject updates that touch any slot but the claimed one.
+// Returns null for anything malformed or suspiciously large.
+function awarenessUpdateClientIds(update: Uint8Array): number[] | null {
+  let pos = 0;
+  const readVarUint = (): number => {
+    let value = 0;
+    let multiplier = 1;
+    for (;;) {
+      if (pos >= update.length) throw new Error("truncated awareness update");
+      const byte = update[pos]!;
+      pos += 1;
+      value += (byte & 0x7f) * multiplier;
+      if (byte < 0x80) return value;
+      multiplier *= 0x80;
+    }
+  };
+  try {
+    const count = readVarUint();
+    // A presence publish carries exactly one client's state; anything bulk is
+    // not ours to apply.
+    if (count > 8) return null;
+    const ids: number[] = [];
+    for (let i = 0; i < count; i += 1) {
+      ids.push(readVarUint());
+      readVarUint(); // clock
+      const stateLength = readVarUint();
+      pos += stateLength;
+      if (pos > update.length) throw new Error("truncated awareness update");
+    }
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
 // Bind doc co-presence. Returns the Awareness (for carets) and a destroy hook.
 export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding {
   const awareness = new Awareness(options.doc);
@@ -83,6 +123,11 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
   // Yjs clientIDs of remote peers we've applied, so we can prune the ones that
   // leave (their presence entry disappears from the snapshot).
   const remoteClients = new Set<number>();
+  // Bind each Yjs clientID to the server-authenticated presence entry
+  // (userId + clientId) that first claimed it. Awareness itself never
+  // validates clientID ownership, so without this one authenticated peer
+  // could publish updates that spoof/overwrite another peer's slot.
+  const ycOwners = new Map<number, string>();
 
   const onPeers = (peers: PresencePeer[]): void => {
     const present = new Set<number>();
@@ -90,19 +135,37 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
       if (peer.clientId === options.clientId) continue;
       const state = peer.state as DocPresenceState | null;
       if (!state || typeof state.yc !== "number" || typeof state.update !== "string") continue;
-      present.add(state.yc);
+      // No remote peer may ever claim OUR Yjs clientID: applying such an
+      // update would overwrite (or clock-poison) the local awareness entry.
+      if (state.yc === awareness.clientID) continue;
+      // First authenticated claimant wins the slot; a different peer relaying
+      // updates for someone else's clientID is dropped.
+      const ownerKey = `${peer.userId}\u0000${peer.clientId}`;
+      const owner = ycOwners.get(state.yc);
+      if (owner !== undefined && owner !== ownerKey) continue;
       try {
-        applyAwarenessUpdate(awareness, fromBase64(state.update), "presence-remote");
+        const update = fromBase64(state.update);
+        // The update must touch exactly the claimed slot — an update smuggling
+        // extra clientIDs (another peer's, or ours) is rejected wholesale.
+        const embedded = awarenessUpdateClientIds(update);
+        if (!embedded || embedded.some((id) => id !== state.yc)) continue;
+        applyAwarenessUpdate(awareness, update, "presence-remote");
       } catch {
         // A malformed peer update never breaks local editing.
+        continue;
       }
+      ycOwners.set(state.yc, ownerKey);
+      present.add(state.yc);
       remoteClients.add(state.yc);
     }
-    // Prune peers that vanished from the snapshot.
+    // Prune peers that vanished from the snapshot (and free their slot claim).
     const departed = [...remoteClients].filter((id) => !present.has(id));
     if (departed.length > 0) {
       removeAwarenessStates(awareness, departed, "presence-remote");
-      for (const id of departed) remoteClients.delete(id);
+      for (const id of departed) {
+        remoteClients.delete(id);
+        ycOwners.delete(id);
+      }
     }
     // Report other editors' names (unique).
     const names = new Set<string>();

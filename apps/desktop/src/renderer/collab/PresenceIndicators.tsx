@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { PresencePeer } from "./presenceChannel";
+import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 // MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
 // line. Deliberately quiet: no layout thrash, no noisy badges, and it renders
@@ -22,13 +22,6 @@ function hueFor(key: string): number {
   return hash;
 }
 
-function displayNameOf(peer: PresencePeer): string {
-  const state = (peer.state ?? {}) as { displayName?: unknown };
-  return typeof state.displayName === "string" && state.displayName.trim()
-    ? state.displayName
-    : "Someone";
-}
-
 const MAX_FACES = 3;
 
 export function PresenceFaces(props: {
@@ -48,7 +41,7 @@ export function PresenceFaces(props: {
 
   const shown = unique.slice(0, MAX_FACES);
   const overflow = unique.length - shown.length;
-  const names = unique.map(displayNameOf);
+  const names = unique.map(resolvePeerDisplayName);
   const label =
     unique.length === 1 ? `${names[0]} is here` : `${unique.length} people here`;
 
@@ -61,7 +54,7 @@ export function PresenceFaces(props: {
       title={names.join(", ")}
     >
       {shown.map((peer) => {
-        const name = displayNameOf(peer);
+        const name = resolvePeerDisplayName(peer);
         const hue = hueFor(peer.userId);
         return (
           <span

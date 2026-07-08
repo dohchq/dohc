@@ -1,4 +1,4 @@
-import { Awareness, encodeAwarenessUpdate } from "y-protocols/awareness";
+import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { bindDocPresence } from "./docPresence";
@@ -87,6 +87,7 @@ describe("bindDocPresence", () => {
     const docA = new Y.Doc();
     const docB = new Y.Doc();
     const namesA = vi.fn();
+    const namesB = vi.fn();
 
     const a = bindDocPresence({
       doc: docA,
@@ -102,7 +103,7 @@ describe("bindDocPresence", () => {
       topic: "notes/a.md",
       clientId: "b",
       user: { name: "Bob", color: "#00f" },
-      onPeers: namesA,
+      onPeers: namesB,
     });
     await flush();
     expect(namesA.mock.calls.at(-1)?.[0]).toContain("Bob");
@@ -114,6 +115,147 @@ describe("bindDocPresence", () => {
     expect(names).not.toContain("Bob");
 
     a.destroy();
+  });
+
+  it("rejects forged awareness updates: a peer cannot claim another slot or ours", async () => {
+    // y-protocols applies whatever clientIDs an update embeds — it never
+    // validates ownership. These are the client-side guards: (1) a yc slot is
+    // bound to the first server-authenticated presence entry that claimed it,
+    // (2) no remote peer may claim OUR clientID, (3) an update embedding any
+    // id other than the claimed yc is rejected wholesale.
+    const forgedUpdate = (targetYc: number, name: string): string => {
+      const doc = new Y.Doc();
+      doc.clientID = targetYc;
+      const aw = new Awareness(doc);
+      // Bump the clock well past the honest peer's so, unguarded, this forgery
+      // WOULD win the awareness merge.
+      for (let i = 0; i < 5; i += 1) aw.setLocalState({ user: { name, color: "#000" } });
+      const update = Buffer.from(encodeAwarenessUpdate(aw, [targetYc])).toString("base64");
+      aw.destroy();
+      doc.destroy();
+      return update;
+    };
+
+    // Honest peer Alice, publishing her real awareness state.
+    const aliceDoc = new Y.Doc();
+    const aliceAw = new Awareness(aliceDoc);
+    aliceAw.setLocalState({ user: { name: "Alice", color: "#f00" } });
+    const aliceYc = aliceAw.clientID;
+    const alicePeer: PresencePeer = {
+      userId: "alice",
+      clientId: "pa",
+      state: {
+        yc: aliceYc,
+        update: Buffer.from(encodeAwarenessUpdate(aliceAw, [aliceYc])).toString("base64"),
+      },
+      updatedAtMs: 0,
+    };
+
+    // A controllable transport so each snapshot arrives AFTER we know yc ids.
+    let notify: ((s: PresenceSnapshot) => void) | null = null;
+    let version = 0;
+    const push = async (peers: PresencePeer[]): Promise<void> => {
+      for (let i = 0; i < 5 && !notify; i += 1) await Promise.resolve();
+      version += 1;
+      const fire = notify;
+      notify = null;
+      fire?.({ version, peers });
+      await flush();
+    };
+    const onPeers = vi.fn();
+    const doc = new Y.Doc();
+    const binding = bindDocPresence({
+      doc,
+      transport: {
+        async publish() {
+          return { version, peers: [] };
+        },
+        async leave() {},
+        poll: ({ signal }) =>
+          new Promise((resolve) => {
+            notify = resolve;
+            signal.addEventListener("abort", () => resolve({ version, peers: [] }), {
+              once: true,
+            });
+          }),
+      },
+      topic: "notes/a.md",
+      clientId: "me",
+      user: { name: "Me", color: "#fff" },
+      onPeers,
+    });
+    await flush();
+    const localYc = binding.awareness.clientID;
+
+    // Alice joins honestly; her slot is now owned by (alice, pa).
+    await push([alicePeer]);
+    expect(onPeers.mock.calls.at(-1)?.[0]).toContain("Alice");
+
+    // (1) Mallory claims ALICE's yc with a higher clock: dropped, Alice intact.
+    await push([
+      alicePeer,
+      {
+        userId: "mallory",
+        clientId: "pm",
+        state: { yc: aliceYc, update: forgedUpdate(aliceYc, "Impostor") },
+        updatedAtMs: 0,
+      },
+    ]);
+    const aliceState = binding.awareness.getStates().get(aliceYc) as {
+      user?: { name?: string };
+    };
+    expect(aliceState?.user?.name).toBe("Alice");
+    expect(onPeers.mock.calls.at(-1)?.[0]).not.toContain("Impostor");
+
+    // (2) Mallory claims OUR clientID: dropped, local state untouched.
+    await push([
+      alicePeer,
+      {
+        userId: "mallory",
+        clientId: "pm",
+        state: { yc: localYc, update: forgedUpdate(localYc, "Impostor") },
+        updatedAtMs: 0,
+      },
+    ]);
+    const localState = binding.awareness.getLocalState() as { user?: { name?: string } };
+    expect(localState?.user?.name).toBe("Me");
+
+    // (3) Mallory claims her own (unowned) yc but smuggles Alice's id into the
+    // update: rejected wholesale — Alice intact AND Mallory never applied.
+    const smuggleDoc = new Y.Doc();
+    smuggleDoc.clientID = 424242;
+    const smuggleAw = new Awareness(smuggleDoc);
+    smuggleAw.setLocalState({ user: { name: "Mallory", color: "#000" } });
+    applyAwarenessUpdate(
+      smuggleAw,
+      Buffer.from(forgedUpdate(aliceYc, "Clone"), "base64"),
+      "test",
+    );
+    const smuggled = Buffer.from(
+      encodeAwarenessUpdate(smuggleAw, [424242, aliceYc]),
+    ).toString("base64");
+    await push([
+      alicePeer,
+      {
+        userId: "mallory",
+        clientId: "pm",
+        state: { yc: 424242, update: smuggled },
+        updatedAtMs: 0,
+      },
+    ]);
+    const aliceAfter = binding.awareness.getStates().get(aliceYc) as {
+      user?: { name?: string };
+    };
+    expect(aliceAfter?.user?.name).toBe("Alice");
+    expect(binding.awareness.getStates().has(424242)).toBe(false);
+    expect(onPeers.mock.calls.at(-1)?.[0]).not.toContain("Mallory");
+
+    binding.destroy();
+    smuggleAw.destroy();
+    smuggleDoc.destroy();
+    aliceAw.destroy();
+    aliceDoc.destroy();
+    doc.destroy();
   });
 
   it("tolerates malformed peer state: bad yc/update are skipped, non-string names never reach onPeers", async () => {

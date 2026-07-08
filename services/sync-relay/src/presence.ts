@@ -224,8 +224,12 @@ export class PresenceHub {
   leave(scopeKey: string, userId: string, clientId: string, nowMs: number): PresenceSnapshot {
     const scope = this.scopes.get(scopeKey);
     if (!scope) return { version: 0, peers: [] };
-    this.prune(scope, nowMs);
-    if (this.deleteEntry(scope, entryKey(userId, clientId))) this.bump(scope);
+    // Bump on EITHER removal (same pattern as snapshot()/wait()): a retried
+    // leave whose own entry is already gone can still prune a DIFFERENT stale
+    // peer here, and that departure must wake parked waiters too.
+    const pruned = this.prune(scope, nowMs);
+    const deleted = this.deleteEntry(scope, entryKey(userId, clientId));
+    if (pruned || deleted) this.bump(scope);
     const snapshot = this.snapshotOf(scope);
     this.gc(scopeKey, scope);
     return snapshot;

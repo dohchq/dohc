@@ -138,6 +138,50 @@ describe("usePresence gating + guard", () => {
     }
   });
 
+  it("publishes typing only on the false->true edge, but each keystroke refreshes the idle timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = pushableTransport();
+      render(<Harness enabled transport={t.transport} topic="general" />);
+      await flush();
+      const before = t.publishes.length;
+      // A burst of keystrokes: ChatsView calls setTyping(true) on every input
+      // change — only the FIRST may republish.
+      act(() => {
+        screen.getByTestId("start-typing").click();
+      });
+      await flush();
+      expect(t.publishes.length).toBe(before + 1);
+      // (3 keystrokes x 1s keeps the whole timeline inside the 10s heartbeat,
+      // so every publish observed here is typing-driven.)
+      for (let i = 0; i < 3; i += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_000);
+        });
+        act(() => {
+          screen.getByTestId("start-typing").click();
+        });
+        await flush();
+      }
+      expect(t.publishes.length).toBe(before + 1); // still just the one edge
+      // …and the repeated keystrokes kept the idle window alive: at t=7s the
+      // window measured from the FIRST keystroke (t=5s) has lapsed, but the
+      // one from the LAST keystroke (t=3s+5s=8s) has not — no clear yet…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(t.publishes.length).toBe(before + 1);
+      // …then at t=8s typing finally clears, exactly once.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(t.publishes.length).toBe(before + 2);
+      expect(t.publishes.at(-1)).toMatchObject({ typing: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves on unmount (disconnect clears presence)", async () => {
     const t = pushableTransport();
     const view = render(<Harness enabled transport={t.transport} topic="general" />);
