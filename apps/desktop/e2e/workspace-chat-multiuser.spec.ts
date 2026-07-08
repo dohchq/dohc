@@ -107,7 +107,11 @@ async function grantedShare(
     const shares = await api.listChatChannelShares({ workspaceId: id }).catch(() => null);
     const live = shares?.granted.find((row) => row.revokedAtMs === null) ?? null;
     return live ? { shareId: live.shareId, channelWireId: live.channelWireId } : null;
-  }, workspaceId).then((handle) => handle.jsonValue());
+  }, workspaceId).then(
+    // waitForFunction only resolves on a truthy result, so the polled `null`
+    // branch is excluded at runtime — narrow the jsonValue union accordingly.
+    (handle) => handle.jsonValue() as Promise<{ shareId: string; channelWireId: string }>,
+  );
 }
 
 test("owner + participant chat and co-presence converge in the real app", async () => {
