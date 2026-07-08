@@ -613,6 +613,9 @@ export const ChatChannelRecord = z.object({
   updatedAtMs: z.number(),
   threadCount: z.number().int().min(0),
   unreadCount: z.number().int().min(0),
+  // MU-C4: the channel's cross-machine wire identity — what shared-channel
+  // grants key on. Absent/null for channels with no recorded wire mapping.
+  wireId: z.string().min(1).max(256).nullable().optional(),
 });
 export type ChatChannelRecord = z.infer<typeof ChatChannelRecord>;
 
@@ -1220,6 +1223,86 @@ export const RevokeRelaySharePayload = z.object({
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
+// ---- Shared channels (MU-C4) ----
+// A chat-channel grant: a whole channel (threads + messages + reactions)
+// shared to another relay account, read-write by default, read-only as the
+// broadcast opt-in. Granted rows manage who a channel is shared WITH;
+// received rows are invitations addressed to this account; joined rows are
+// the ones pulled into a local workspace's chat store.
+
+export const ChatShareAccess = z.enum(["read-write", "read-only"]);
+export type ChatShareAccess = z.infer<typeof ChatShareAccess>;
+
+const CHANNEL_WIRE_ID = z.string().min(1).max(256);
+
+export const ShareChatChannelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  channelId: CHAT_CHANNEL_ID,
+  recipientEmail: EMAIL_STRING,
+  access: ChatShareAccess.optional(),
+});
+export type ShareChatChannelPayload = z.infer<typeof ShareChatChannelPayload>;
+
+export const ShareChatChannelResult = z.object({
+  shareId: SHARE_ID,
+});
+export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
+
+export const ChatChannelShareGrantRow = z.object({
+  shareId: SHARE_ID,
+  channelWireId: CHANNEL_WIRE_ID,
+  access: ChatShareAccess,
+  recipientEmail: EMAIL_STRING.nullable(),
+  revokedAtMs: z.number().int().nonnegative().nullable(),
+});
+export type ChatChannelShareGrantRow = z.infer<typeof ChatChannelShareGrantRow>;
+
+export const ChatChannelShareReceivedRow = z.object({
+  shareId: SHARE_ID,
+  channelWireId: CHANNEL_WIRE_ID,
+  access: ChatShareAccess,
+  granterEmail: EMAIL_STRING.nullable(),
+});
+export type ChatChannelShareReceivedRow = z.infer<typeof ChatChannelShareReceivedRow>;
+
+export const JoinedSharedChannelRow = z.object({
+  shareId: SHARE_ID,
+  channelWireId: CHANNEL_WIRE_ID,
+  access: ChatShareAccess,
+  granterEmail: EMAIL_STRING.nullable(),
+  ended: z.boolean(),
+});
+export type JoinedSharedChannelRow = z.infer<typeof JoinedSharedChannelRow>;
+
+export const ListChatChannelSharesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesPayload>;
+
+export const ListChatChannelSharesResult = z.object({
+  granted: z.array(ChatChannelShareGrantRow).max(1000),
+  received: z.array(ChatChannelShareReceivedRow).max(1000),
+  joined: z.array(JoinedSharedChannelRow).max(1000),
+});
+export type ListChatChannelSharesResult = z.infer<typeof ListChatChannelSharesResult>;
+
+export const JoinSharedChannelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: SHARE_ID,
+});
+export type JoinSharedChannelPayload = z.infer<typeof JoinSharedChannelPayload>;
+
+export const JoinSharedChannelResult = z.object({
+  joined: JoinedSharedChannelRow,
+});
+export type JoinSharedChannelResult = z.infer<typeof JoinSharedChannelResult>;
+
+export const LeaveSharedChannelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: SHARE_ID,
+});
+export type LeaveSharedChannelPayload = z.infer<typeof LeaveSharedChannelPayload>;
+
 export const OpenSharedViewPayload = z.object({
   shareCode: z.string().min(1).max(4096),
   rootPath: PATH_STRING,
@@ -1710,6 +1793,12 @@ export interface DohcDesktopBridge {
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;
   revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  shareChatChannel(payload: ShareChatChannelPayload): Promise<ShareChatChannelResult>;
+  listChatChannelShares(
+    payload: ListChatChannelSharesPayload,
+  ): Promise<ListChatChannelSharesResult>;
+  joinSharedChannel(payload: JoinSharedChannelPayload): Promise<JoinSharedChannelResult>;
+  leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
   // Relay shares (PR 18): receive side — read-only shared views.
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;

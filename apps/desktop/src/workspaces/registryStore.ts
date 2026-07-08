@@ -25,10 +25,27 @@ export interface ShareViewIdentity {
   relayUrl?: string;
 }
 
+// A shared CHANNEL this workspace joined through a chat-channel grant
+// (MU-C4): bidirectional — pulled into the local chat store and (when
+// read-write) pushed back through the member append route. `ended` marks a
+// revoked grant: the locally replayed copy stays readable but stops syncing.
+export interface JoinedSharedChannel {
+  shareId: string;
+  channelWireId: string;
+  access: "read-write" | "read-only";
+  granterEmail: string | null;
+  // Same origin-relay pin as ShareViewIdentity.relayUrl: refreshes only ever
+  // run against the relay the share was joined from.
+  relayUrl: string;
+  ended?: boolean;
+}
+
 export interface RegistryEntry extends CreatedWorkspace {
   // Present only after the user explicitly enables cloud sync (Phase 9).
   remote?: RemoteIdentity;
   shareView?: ShareViewIdentity;
+  // MU-C4: shared channels joined INTO this workspace's chat store.
+  sharedChannels?: JoinedSharedChannel[];
 }
 
 interface RegistryFile {
@@ -140,6 +157,18 @@ export function createRegistryStore(registryFile: string) {
       const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       entry.shareView = shareView;
+      write(registry);
+    },
+
+    // MU-C4: replace the workspace's joined shared-channel set. Upserts and
+    // removals both go through this one write (callers compute the next set),
+    // keeping the file format append-simple.
+    setSharedChannels(workspaceId: string, sharedChannels: JoinedSharedChannel[]): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (sharedChannels.length === 0) delete entry.sharedChannels;
+      else entry.sharedChannels = sharedChannels;
       write(registry);
     },
 

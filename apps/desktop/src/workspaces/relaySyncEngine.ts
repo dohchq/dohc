@@ -38,6 +38,12 @@ export interface CloudSyncEngineOptions {
   // successful pull+materialize+cursor-commit a follow-up pass resumes the
   // normal push-then-pull contract.
   joinBootstrap?: boolean;
+  // MU-C4 shared channels: refresh the workspace's joined shared channels on
+  // every sync pass (push member ops, pull peers'). Best-effort — the
+  // callback owns its own error handling (revocation marking, logging); a
+  // throw here is logged and never fails the workspace's own pass, so a
+  // revoked share can't wedge file sync into permanent backoff.
+  syncSharedChannels?: () => Promise<void>;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -183,6 +189,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.
     bootstrapPullPending = false;
+    // Shared channels ride the same cadence but never gate the pass: chat
+    // replay touches no workspace files, so it runs OUTSIDE runRelaySync's
+    // capture gate, and its failures are contained here.
+    if (options.syncSharedChannels) {
+      try {
+        await options.syncSharedChannels();
+      } catch (error) {
+        console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
+      }
+    }
     for (const pending of pullResult.pendingResolves ?? []) {
       pendingRemoteResolves.set(pending.remoteConflictId, pending);
     }

@@ -1257,6 +1257,17 @@ export function createLinkedChatStore(
       });
     },
 
+    // MU-C4: the cross-machine wire identity a shared-channel grant keys on.
+    getChannelWireId(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        return withDb((db) => {
+          const channel = requireWorkspaceChannel(db, workspaceId, input.channelId);
+          return wireIdForChannelId(db, workspaceId, channel.id) ?? null;
+        });
+      });
+    },
+
     // Thread + first message in ONE transaction (the fast composer path): a
     // failed send can never strand an empty thread.
     startChannelThread(input) {
