@@ -14,6 +14,50 @@ Service matrix (see `docker-compose.self-host.yml`): `postgres`,
 `workspace-api` (auth only), `sync-relay`, `sqlite-worker`, `agent-sandbox`.
 There is no `web` and no `hocuspocus` service.
 
+## Multi-user chat is a hosted relay, not a cloud product
+
+dohc's "cloud" is a hosted instance of the very relay this document runs — there
+is no separate multi-user backend. The **entire** multi-user chat surface runs
+on `sync-relay` + Better Auth over Postgres, the same services `pnpm
+check:self-host` validates, with **zero new services and nothing cloud-locked**:
+
+- **Presence / typing** — the relay's in-memory awareness transport
+  (`/sync/:ws/presence`, `/sync/shares/:id/presence`). Ephemeral; see the
+  presence-never-journaled guarantee below.
+- **Reactions** — `chat.reaction.set` ops on the ordinary replicated log.
+- **Shares** — path/version grants create/list/read/revoke over
+  `/sync/shares` + `share-log` + `share-blob`.
+- **Shared channels** — chat-channel grants with a bidirectional
+  `share-log` member-append route.
+- **DMs** — a `kind:"dm"` channel plus one chat-channel grant per participant;
+  a strict subset of the shared-channel route, no DM-specific service.
+
+`check:self-host` proves this statically (needs no Docker): a
+`checkChatSurfaceSelfHostable()` step asserts (a) the relay's `SyncRelayRoute`
+dispatch union serves every one of those routes, and (b) the relay's runtime
+dependencies resolve entirely to the self-host matrix (the in-repo workspace
+packages plus `better-auth` + `pg`, which ride `postgres`) with no reference to a
+retired/cloud collaboration service. If a future change moves any chat/presence/
+DM feature onto a service outside `REQUIRED_SERVICES`, that step fails.
+
+### Isolation invariants are self-host guarantees
+
+The cross-user isolation the relay enforces is not a hosted-only feature — it
+holds identically on a self-hosted relay, and the consolidated sweep in
+`services/sync-relay/src/crossUserIsolation.test.ts` proves the cross-cutting
+invariants together:
+
+- **Server-derived authorship (MU-C0).** Every chat op is attributed to the
+  authenticated pusher (the Better Auth session identity), never a client-set
+  field; a member cannot speak as another participant. Authorization is derived
+  server-side even when you host it yourself.
+- **Byte-identical denial.** Every share-scoped route denies a non-recipient
+  with the exact same generic 404 as a share that never existed — same status,
+  same body, before any body parse — so existence itself is unconfirmable.
+- **Presence is never journaled.** Presence/typing lives only in the relay's
+  in-memory hub; it is written to no durable table, so a self-hoster's Postgres
+  and the relay's SQLite hold zero presence rows.
+
 ## Prerequisites
 
 - Node matching `package.json` engines.
