@@ -205,7 +205,6 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       serverUrl: "https://cloud.dohc.test",
       workspaceSynced: true,
     })),
-    collabToken: vi.fn(async () => ({ available: false as const })),
     createRelayShare: vi.fn(async () => ({
       shareId: "relay-share-1",
       shareCode: "dohc-share:relay-share-1:http://relay.test",

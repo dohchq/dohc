@@ -456,7 +456,6 @@ export const CHANNELS = {
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   dismissSyncReviewNotice: "desktop:dismiss-sync-review-notice",
-  collabToken: "desktop:collab-token",
   createRelayShare: "desktop:create-relay-share",
   listRelayShares: "desktop:list-relay-shares",
   revokeRelayShare: "desktop:revoke-relay-share",

@@ -1167,31 +1167,6 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 const EMAIL_STRING = z.string().email().max(320);
 const SHARE_ID = z.string().min(1).max(200);
 
-// Live co-editing token: the renderer asks for a short-lived collab JWT for a
-// specific markdown atom in a SHARED cloud workspace. Main mints it
-// by calling the workspace-api POST /workspaces/:id/collab/token endpoint with
-// the cloud session Bearer — the session token never crosses IPC; only the
-// 5-min collab token, the doc name, server body base, and websocket URL come back. Returns
-// { available: false } whenever the workspace isn't a signed-in shared cloud
-// workspace (personal/local-only behaves exactly as before).
-export const CollabTokenPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  relativePath: PATH_STRING,
-});
-export type CollabTokenPayload = z.infer<typeof CollabTokenPayload>;
-
-export const CollabTokenResult = z.union([
-  z.object({
-    available: z.literal(true),
-    token: z.string().min(1),
-    documentName: z.string().min(1),
-    baseMarkdown: z.string(),
-    wsUrl: z.string().min(1),
-  }),
-  z.object({ available: z.literal(false) }),
-]);
-export type CollabTokenResult = z.infer<typeof CollabTokenResult>;
-
 // ---- Relay shares (PR 18, the engine-native cloud) ----
 // A share grant lives on the SYNC RELAY: an explicit path list and/or a
 // version snapshot, addressed to another relay account by email. The grant
@@ -1731,7 +1706,6 @@ export interface DohcDesktopBridge {
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
   dismissSyncReviewNotice(payload: DismissSyncReviewNoticePayload): Promise<void>;
-  collabToken(payload: CollabTokenPayload): Promise<CollabTokenResult>;
   // Relay shares (PR 18): grant side.
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;

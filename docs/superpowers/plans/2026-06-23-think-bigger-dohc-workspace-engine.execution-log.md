@@ -19361,3 +19361,136 @@ service; the `collab-token` route + the `collabToken` IPC + `deriveHocuspocusUrl
 `useCollabDoc` is no longer imported by any editor surface (only its own test +
 `collabSession.test.ts` reference it). Ship the closed-boundary shared-workspace
 migration (file == re-projection, else preserve-both) as part of the retirement.
+
+## Retire Hocuspocus (G2-C-3)
+
+The clean cutover the user chose ("build co-editing, retire Hocuspocus at a clean
+cutover") now that G2-C-2 moved the editor onto the engine Y.Doc. Two parts:
+Part A deleted the Hocuspocus surface; Part B closed the version-switch-reopen
+editor gap G2-C-2 flagged. Tests-first, Linux-green (unit + xvfb Electron e2e).
+
+### Clean cutover — NO migration tool (explicit)
+
+The G2-C handoffs said to "ship the closed-boundary shared-workspace migration
+(file == re-projection, else preserve-both)". That is NOT needed and was NOT
+built: dohc is PRE-LAUNCH with zero users, so there is no existing shared-
+workspace Hocuspocus Y.Doc state to migrate. The retirement is a hard cutover.
+The only code path that used to distinguish a shared workspace for collab (the
+`collabToken` IPC, which returned `available:false` for personal/local) is gone;
+every rich doc now opens the engine Y.Doc session (`useEngineDoc`), and a shared
+workspace co-edits through the engine's `ydoc.update` replication over the
+sync-relay. There is no previously-shared workspace that can hit a Hocuspocus
+code path, because there is no Hocuspocus code path left. A shared workspace
+that has NO engine lineage simply seeds engine-native on first open (the driver's
+first-creation path) — it can never fall back to a collab server that no longer
+exists.
+
+### Part A — what was deleted (≈9.5k LOC net, 40 files removed)
+
+- **`services/hocuspocus`** — the entire Yjs collab server (server/auth/hooks/
+  persistence/postgres-acl/semantic-api/import-export/projection + all suites +
+  Dockerfile + integration harness). The reusable Y.Doc↔markdown projection was
+  already salvaged into `packages/ydoc-projection` (0N3), so nothing durable was
+  lost.
+- **workspace-api collab-token route** (`routes/collab.ts` + `.test.ts`) and its
+  wiring. `server.ts` is now a pure 404 catch-all; `main.ts` dropped the
+  `HOCUSPOCUS_JWT_SECRET` + collab-deps wiring and the now-unused session-actor
+  resolver. `workspaceApi.test.ts` rewritten for the auth-only surface (404s
+  every non-auth route). Deps `@dohc/hocuspocus` + `@dohc/workspace-postgres`
+  removed from its package.json.
+- **Renderer HocuspocusProvider path**: `useCollabDoc.ts` + `collabSession.ts` +
+  `collabSession.test.ts` (grep-confirmed: no live importer — only their own
+  files/tests + narrative comments referenced them; the editor uses
+  `useEngineDoc`). The `collabToken` IPC handler + `deriveHocuspocusUrl` +
+  `DEFAULT_HOCUSPOCUS_URL` in `main.ts`; the `CollabTokenPayload`/`Result`
+  contract, the `collabToken` channel + preload binding + Bridge method; and the
+  `collabToken` mocks in three renderer tests. Dep `@hocuspocus/provider`
+  removed from `apps/desktop` (`pnpm install` dropped 198 packages).
+- **Config/docs**: `hocuspocus` service removed from `docker-compose.dev.yml` +
+  `docker-compose.self-host.yml` (and the workspace-api service's collab-secret
+  env); `HOCUSPOCUS_*` removed from `.env.self-host.example`; `hocuspocus`
+  dropped from `check-self-host.mjs` `REQUIRED_SERVICES` + the package matrix;
+  `dev:hocuspocus` + `test:hocuspocus:integration` removed from root scripts.
+  README, `docs/self-hosting.md`, and `docs/architecture/backend-modes.md`
+  rewritten to describe engine-native co-editing over the relay (historical
+  execution-log records untouched). The `services/hocuspocus/**` rules in
+  `.coderabbit.yaml` removed.
+
+### Part A — what was KEPT and why (workspace-api / workspace-postgres fate)
+
+Neither `services/workspace-api` nor `packages/workspace-postgres` was deleted —
+both survive for AUTH, which is separate from collab. Grep evidence:
+
+- **workspace-api is still the Better Auth server.** The sync-relay
+  (`services/sync-relay/src/main.ts`) reuses Better Auth's Postgres to VALIDATE
+  sessions (`createSessionActorResolver` → `auth.api.getSession`) but explicitly
+  "never mounts better-auth's own routes" (main.ts comment; it hand-rolls a
+  node:http↔fetch adapter for blob PUTs and only exposes the relay + `/health`).
+  So the desktop device sign-in flow (`/api/auth/*`, proven by
+  `workspace-auth/betterAuth.test` device-authorization test) has nowhere else to
+  live. workspace-api is REDUCED to auth-only, not deleted. Relay auth is
+  therefore untouched — it depends on `@dohc/workspace-auth`, not on
+  workspace-api or workspace-postgres (confirmed: the relay imports only
+  `@dohc/workspace-auth/{betterAuth,session}` and `pg`).
+- **workspace-postgres is not fully unused.** The membership slice
+  (`repositories/workspaces.ts` — `hasWorkspaceMembership`/`listUserWorkspaces`)
+  was kept SOLELY for the collab route; grep confirmed `hasWorkspaceMembership`
+  had exactly one live consumer (`routes/collab.ts`, deleted) and
+  `listUserWorkspaces` only its own test. Both deleted. BUT the package also
+  holds `db/migrations/*.sql` — notably `0002_better_auth.sql`, the Better Auth
+  `user`/`session` schema the relay queries directly (`SELECT ... FROM "user"`)
+  and that `workspace-auth/betterAuth.test` + `scripts/reset-postgres-dev-data`
+  apply by relative path. That schema is load-bearing for auth, so the package
+  was REDUCED to its migrations + pg-client (index.ts trimmed, `passWithNoTests`
+  on the now-testless package), NOT deleted.
+
+### Part B — version-switch-reopen editor fix
+
+G2-C-2 made version switch SERVER-side safe (`switchVersion` settles+closes all
+live engine sessions before materializing), but the OPEN editor never re-bound:
+`useEngineDoc` keyed on `(workspaceId, path, enabled)`, so switching the active
+version while the same rich file stayed open left Tiptap on the OLD version's
+live doc. Fix: key `useEngineDoc` on the active version too. The shell's
+`versionEpoch` (bumps on version switch/merge/conflict, NOT on ordinary history
+growth) threads through `FileInspector` as `engineVersionKey` → `MarkdownView`
+`reopenKey` → `useEngineDoc`'s effect deps. A switch flushes+closes the mirror
+session (effect cleanup → `binding.destroy` settles+closes in main) and reopens
+against the now-active version's lineage — RESUME-never-reseed for a replicated
+doc (honors the `replicated:true` durable-lineage contract), reseed-from-the-
+freshly-materialized-file for a local-only doc (`switchVersion` already wrote the
+new version to disk). The reopen is guarded by the existing per-open token, so a
+stale response never repaints (async-state invariant preserved). Deliberately
+NOT keyed on `historyRefreshCounter`, which would churn the live session on every
+agent edit to the SAME version.
+
+New e2e `workspace-version-switch-editor.spec.ts`: open a rich doc on Main,
+fork "Draft" (create-and-switch), type a Draft-only sentinel in the LIVE editor,
+switch back to Main — the editor RE-BINDS to Main's content with NO draft
+sentinel (and disk agrees) — then switch back to Draft and the sentinel returns;
+engine.db proves the edit landed in Draft's snapshot only, Main's untouched. No
+stale doc, no two-lineage bleed, edits in the correct version.
+
+### Verify (Linux-green)
+
+- `pnpm install` after deletions (−198 packages); `pnpm -r typecheck` clean
+  across all 17 surviving projects.
+- Unit suites all green: desktop 1059 pass / 2 skip (101 files); workspace-engine
+  128 pass / 5 skip; sync-relay 67 (incl. `main.integration` "replicates
+  ydoc.update rich-doc edits through the real relay" + bearer auth — engine-native
+  co-editing + auth intact); mcp 74; workspace-auth 8 (incl. device-login flow,
+  0002_better_auth migration path intact); workspace-api 5; ydoc-projection 14;
+  workspace-core/fs/contracts green; workspace-postgres passWithNoTests. The
+  deleted packages' suites (hocuspocus) are gone.
+- `pnpm --filter @dohc/desktop build` green.
+- E2E under xvfb, all green: `workspace-version-switch-editor` (Part B, 3 tests
+  with decoupling), `workspace-collab-decoupling` (adjusted — no collab-token IPC
+  to probe anymore; decoupling pinned by zero WebSockets), `workspace-engine-
+  editor` (reopen-resumes / no-double-journal / live-version-switch still green),
+  and the capture/versions/secret-env/shares regression (13 tests).
+- `node scripts/check-self-host.mjs`: reduced 5-service matrix (workspace-api,
+  sync-relay, postgres, sqlite-worker, agent-sandbox) validates; compose config
+  parses.
+- `git diff --check` clean. Dead-ref sweep: ZERO live refs to `hocuspocus` /
+  `collabToken` / `useCollabDoc` / `collabSession` / `@dohc/hocuspocus` /
+  `workspace-postgres/repositories` across the surviving tree (only historical
+  execution-log records and one `ydoc-projection` provenance comment remain).

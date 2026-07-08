@@ -17,46 +17,44 @@ services:
     volumes:
       - dohc_self_host_postgres:/var/lib/postgresql/data
 
-  hocuspocus:
-    build:
-      context: .
-      dockerfile: services/hocuspocus/Dockerfile
+  # Schema bootstrap: a one-shot init container that applies every Postgres
+  # migration (idempotently) BEFORE the auth stack starts — notably
+  # 0002_better_auth, the Better Auth user/session/deviceCode schema that
+  # workspace-api and sync-relay query. Without this, a fresh Postgres would
+  # start the auth services against tables that do not exist yet. It exits 0 on
+  # success; workspace-api and sync-relay gate on that completion.
+  postgres-migrate:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      HOCUSPOCUS_ADMIN_TOKEN: ${HOCUSPOCUS_ADMIN_TOKEN}
-      HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-false}
-      HOCUSPOCUS_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
-      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:?Set HOCUSPOCUS_JWT_SECRET in .env.self-host}
-      HOCUSPOCUS_PORT: "1234"
-      HOCUSPOCUS_QUIET: ${HOCUSPOCUS_QUIET:-true}
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:1234/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    ports:
-      - "${HOCUSPOCUS_BIND:-127.0.0.1}:${HOCUSPOCUS_PORT:-1234}:1234"
+      POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm migrate"
+    volumes:
+      - .:/workspace
 
-  # Reduced to the collab + auth surface: Better Auth on /api/auth and the
-  # collab-token route the desktop calls to join live co-editing. Needs the
-  # SAME HOCUSPOCUS_JWT_SECRET hocuspocus verifies with; without it the collab
-  # route fails closed (collab-disabled).
+  # The auth surface: Better Auth on /api/auth (the desktop device sign-in flow
+  # that mints the bearer tokens the sync-relay validates). Live co-editing was
+  # retired with Hocuspocus (G2-C-3) and is now engine-native over the relay, so
+  # this service owns no application routes.
   workspace-api:
     image: node:22-bookworm-slim
     working_dir: /workspace
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     environment:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
-      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:?Set HOCUSPOCUS_JWT_SECRET in .env.self-host}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
     command: >
@@ -75,6 +73,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     environment:
       # Must match workspace-api exactly so Better Auth bearer tokens minted by
       # workspace-api's desktop device flow validate at the relay too.

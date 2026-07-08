@@ -130,7 +130,6 @@ describe("markdown editor unmount flush", () => {
     ),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    collabToken: vi.fn(async () => ({ available: false as const })),
   };
 
   beforeEach(() => {
@@ -246,7 +245,6 @@ describe("markdown editor unmount flush", () => {
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     view.unmount();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-    expect(bridgeMock.collabToken).not.toHaveBeenCalled();
   });
 
   it("routes the document header share action to the active path", async () => {

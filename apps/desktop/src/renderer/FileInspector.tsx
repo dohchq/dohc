@@ -456,6 +456,10 @@ function MarkdownView(props: {
   // Read-only shared views (PR 18): editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
+  // G2-C-3 version-switch re-bind token (the shell's versionEpoch), forwarded
+  // to useEngineDoc so switching the active version reopens the engine session
+  // against the new version's lineage.
+  reopenKey?: number;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -555,6 +559,7 @@ function MarkdownView(props: {
     workspaceId: props.workspaceId,
     path: props.path,
     enabled: !props.truncated && !props.forceReadOnly,
+    reopenKey: props.reopenKey,
   });
   const readOnly = !!props.forceReadOnly || (props.truncated && !engine.available);
 
@@ -1573,6 +1578,12 @@ export function FileInspector(props: {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views (PR 18): every editable view refuses edits.
   readOnly?: boolean;
+  // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
+  // workspace changes while the SAME file stays open (the shell's versionEpoch).
+  // Threaded to the engine editor so a version switch re-binds it to the new
+  // version's Y.Doc lineage. Distinct from refreshKey, which ALSO bumps on
+  // ordinary history growth (which must NOT reopen the live engine session).
+  engineVersionKey?: number;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -1647,6 +1658,7 @@ export function FileInspector(props: {
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
+            reopenKey={props.engineVersionKey}
           />
         </div>
       );

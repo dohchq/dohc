@@ -7,10 +7,13 @@ const REQUIRED_SERVICES = [
   'workspace-api',
   'sync-relay',
   'postgres',
-  'hocuspocus',
   'sqlite-worker',
   'agent-sandbox',
 ]
+// A one-shot init container (runs to completion, then exits) — verified for
+// presence but never expected to stay running, so it is not in
+// REQUIRED_SERVICES (which drives the "still running" assertions).
+const MIGRATION_SERVICE = 'postgres-migrate'
 
 const startRequested =
   process.argv.includes('--start') || process.env.DOHC_SELF_HOST_START === '1'
@@ -55,10 +58,20 @@ function checkServiceScripts() {
     root.scripts?.['check:self-host'] === 'node scripts/check-self-host.mjs',
     'package.json exposes pnpm check:self-host',
   )
+  record(
+    'root migrate script',
+    root.scripts?.['migrate'] === 'node scripts/migrate-postgres.mjs',
+    'package.json exposes pnpm migrate (Postgres schema bootstrap)',
+  )
+  record(
+    'migrate script file',
+    existsSync('scripts/migrate-postgres.mjs') &&
+      existsSync('scripts/lib/apply-migrations.mjs'),
+    'scripts/migrate-postgres.mjs + scripts/lib/apply-migrations.mjs',
+  )
   for (const [label, path] of [
     ['workspace API package', 'services/workspace-api/package.json'],
     ['sync relay package', 'services/sync-relay/package.json'],
-    ['Hocuspocus package', 'services/hocuspocus/package.json'],
     ['sqlite worker package', 'services/sqlite-worker/package.json'],
     ['agent sandbox package', 'services/agent-sandbox/package.json'],
   ]) {
@@ -88,7 +101,15 @@ function checkComposeConfig() {
   for (const service of REQUIRED_SERVICES) {
     record(`compose service:${service}`, services.has(service), service)
   }
-  return REQUIRED_SERVICES.every((service) => services.has(service))
+  record(
+    `compose service:${MIGRATION_SERVICE}`,
+    services.has(MIGRATION_SERVICE),
+    'one-shot Postgres migration init container (applies 0001..000N incl. Better Auth)',
+  )
+  return (
+    REQUIRED_SERVICES.every((service) => services.has(service)) &&
+    services.has(MIGRATION_SERVICE)
+  )
 }
 
 function startComposeStack() {

@@ -54,8 +54,6 @@ import {
   CloudStatusPayload,
   CloudStatusResult,
   DismissSyncReviewNoticePayload,
-  CollabTokenPayload,
-  CollabTokenResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   ImportToDatabasePayload,
@@ -911,27 +909,6 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(relayShareErrorCopy(response.status, data));
   }
   return data as T;
-}
-
-// Where the Hocuspocus websocket lives. Decision: an explicit
-// DOHC_HOCUSPOCUS_URL env wins (self-host points it at their collab server);
-// otherwise we derive it from the cloud serverUrl that issued the session by
-// swapping the http(s) scheme for ws(s) (so a localhost dev server ->
-// ws://localhost, and a real https deploy -> wss://...). The default when
-// nothing is known is ws://localhost:1234, the docker-compose.dev.yml port.
-const DEFAULT_HOCUSPOCUS_URL = "ws://localhost:1234";
-function deriveHocuspocusUrl(serverUrl: string): string {
-  const explicit = process.env.DOHC_HOCUSPOCUS_URL?.trim();
-  if (explicit) return explicit;
-  try {
-    const url = new URL(serverUrl);
-    if (url.protocol === "https:") url.protocol = "wss:";
-    else if (url.protocol === "http:") url.protocol = "ws:";
-    else return DEFAULT_HOCUSPOCUS_URL;
-    return url.origin;
-  } catch {
-    return DEFAULT_HOCUSPOCUS_URL;
-  }
 }
 
 // The copyable MCP launch config for a workspace. The user's AI tool spawns the
@@ -1976,10 +1953,15 @@ function registerIpcHandlers(): void {
     notifyRenderer();
   });
 
-  // Enabling sync claims the workspace id on the server (first claimant owns
-  // it; members re-enable idempotently; strangers are refused), records the
-  // remote identity, and starts the merge engine: pull, then push everything
-  // local. Requires a signed-in session.
+  // Enabling sync claims the workspace id on the RELAY (first claimant owns
+  // it; members re-enable idempotently; strangers get the relay's fixed 404 →
+  // "already claimed"), records the remote identity, and starts the merge
+  // engine: pull, then push everything local. Requires a signed-in session.
+  //
+  // The relay's POST /sync/workspaces is the SOLE claim authority: workspace-api
+  // is now auth-only and 404s every non-auth route, so there is no separate
+  // preclaim to make — the relay owns ownership end to end (create / idempotent
+  // same-owner / foreign-refused).
   ipcMain.handle(CHANNELS.cloudEnableSync, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudEnableSyncPayload.parse(payload);
@@ -1989,24 +1971,7 @@ function registerIpcHandlers(): void {
     if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
     setCachedCredentials(credentials);
 
-    const response = await fetch(`${credentials.serverUrl}/workspaces`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${credentials.token}`,
-      },
-      body: JSON.stringify({ workspaceId: workspace.workspaceId, kind: workspace.kind }),
-    });
-    const body = (await response.json()) as { ok?: boolean; error?: string };
-    if (!response.ok || body.ok === false) {
-      throw new Error(
-        response.status === 403
-          ? "This workspace id is already claimed by another account"
-          : (body.error ?? `Enabling sync failed (${response.status})`),
-      );
-    }
-
-    if (credentials.relayUrl) {
+    {
       try {
         await claimRelayWorkspace({
           workspaceId: workspace.workspaceId,
@@ -2408,60 +2373,6 @@ function registerIpcHandlers(): void {
     const input = DismissSyncReviewNoticePayload.parse(payload);
     activity.dismissUnmatchedRemoteResolves(input.workspaceId);
     notifyRenderer();
-  });
-
-  // Mints a short-lived live-co-editing token for one atom. Only available for
-  // a SHARED cloud workspace (registry remote set) with a signed-in session
-  // that belongs to that workspace's server. The session Bearer never crosses
-  // IPC: main calls the workspace-api collab-token endpoint and hands back only
-  // the 5-min collab JWT, the doc name, and the websocket URL. Any other case
-  // (personal/local-only, signed out, server mismatch) returns available:false
-  // so the renderer falls back to the plain local autosave editor.
-  ipcMain.handle(CHANNELS.collabToken, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CollabTokenPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const remote = workspace.remote;
-    if (workspace.kind !== "shared" || !remote) {
-      return CollabTokenResult.parse({ available: false });
-    }
-    await warmCredentialCache();
-    if (!cachedCredentials || !credentialMatchesRemote(remote.serverUrl)) {
-      return CollabTokenResult.parse({ available: false });
-    }
-    const response = await fetch(
-      `${remote.serverUrl}/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/collab/token`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${cachedCredentials.token}`,
-        },
-        body: JSON.stringify({ atomPath: input.relativePath }),
-      },
-    );
-    // Server fails closed on a missing collab secret, non-member, or unknown
-    // atom — treat every non-OK response as "no live session", never throw, so
-    // the editor stays usable in local mode.
-    if (!response.ok) return CollabTokenResult.parse({ available: false });
-    const body = (await response.json().catch(() => null)) as
-      | { ok?: boolean; token?: string; documentName?: string; baseMarkdown?: string }
-      | null;
-    if (
-      !body?.ok ||
-      !body.token ||
-      !body.documentName ||
-      typeof body.baseMarkdown !== "string"
-    ) {
-      return CollabTokenResult.parse({ available: false });
-    }
-    return CollabTokenResult.parse({
-      available: true,
-      token: body.token,
-      documentName: body.documentName,
-      baseMarkdown: body.baseMarkdown,
-      wsUrl: deriveHocuspocusUrl(remote.serverUrl),
-    });
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {

@@ -1,5 +1,4 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import { createSessionActorResolver } from "@dohc/workspace-auth/session";
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
@@ -7,10 +6,11 @@ import { withCors } from "./cors";
 import { createWorkspaceApiHandler } from "./server";
 
 // The dohc Cloud / self-host server process, reduced to its surviving surface:
-// ONE Postgres, Better Auth mounted on /api/auth/*, and the collab-token route
-// behind session-resolved actors (live co-editing). server.ts stays a pure,
-// injectable fetch-handler factory; THIS file is the production wiring (and the
-// only place that reads env).
+// ONE Postgres and Better Auth mounted on /api/auth/* (the desktop's device
+// sign-in flow). server.ts is the pure 404 catch-all for non-auth routes; THIS
+// file is the production wiring (and the only place that reads env). The
+// live-co-editing collab-token route was retired with Hocuspocus (G2-C-3);
+// co-editing is now engine-native over the sync-relay.
 
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
@@ -62,17 +62,10 @@ const auth = createWorkspaceAuth({
   ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
 });
 
-// The HS256 secret shared with the hocuspocus service. Unset means this
-// deployment runs without a collab server, so the collab-token route fails
-// closed instead of minting tokens nothing can verify.
-const hocuspocusJwtSecret = process.env.HOCUSPOCUS_JWT_SECRET?.trim();
-
-const workspaceHandler = createWorkspaceApiHandler({
-  resolveActor: createSessionActorResolver(auth),
-  // Same secret hocuspocus verifies with; self-hosts without a collab server
-  // leave it unset and POST /workspaces/:id/collab/token errors collab-disabled.
-  collab: hocuspocusJwtSecret ? { pool, jwtSecret: hocuspocusJwtSecret } : undefined,
-});
+// No application routes survive on this service — it is the Better Auth server
+// only. Everything that is not /api/auth, /health, or the dev/test device seam
+// falls through to a 404.
+const workspaceHandler = createWorkspaceApiHandler();
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded
 // test user so the desktop E2E can drive the real flow without a browser.

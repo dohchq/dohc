@@ -402,3 +402,91 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     await relay?.stop();
   }
 });
+
+// Enable-sync product proof (G2-C-3 gate fix): turning sync ON for a
+// LOCAL-ONLY workspace must claim the bucket on the RELAY alone. workspace-api
+// is now auth-only and 404s every non-auth route, so the retired
+// `POST ${serverUrl}/workspaces` preclaim would fail the whole flow with
+// "Enabling sync failed (404)" before the relay claim ever ran. This drives
+// the real cloudEnableSync IPC against a real relay (no workspace-api at all)
+// and proves the workspace claims, binds, and pushes its content end to end.
+test("enabling sync claims the workspace on the relay alone (no workspace-api preclaim)", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "enable-e2e";
+  const machine2 = join(temp.baseDir, "machine2");
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "local draft\n" }]);
+
+    // A real relay is the ONLY cloud service. The workspace is NOT pre-claimed:
+    // cloudEnableSync must be the first and sole claimant.
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+
+    // Local-only registry entry (no `remote`): the workspace is not synced yet.
+    await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
+    // serverUrl points at the relay too — exactly the shape that made the old
+    // `${serverUrl}/workspaces` preclaim 404 (the relay 404s any non-/sync path).
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+    });
+
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: {
+        DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+        DOHC_TEST_SYNC_BACKOFF_MS: "250",
+      },
+    });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    // Drive the real enable-sync IPC. Before the fix this rejects with
+    // "Enabling sync failed (404)"; after it, the relay claim is authoritative
+    // and it resolves with a live sync status.
+    const enableResult = await page.evaluate(async (id) => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            cloudEnableSync(payload: { workspaceId: string }): Promise<unknown>;
+          };
+        }
+      ).dohcDesktop;
+      try {
+        const status = await api.cloudEnableSync({ workspaceId: id });
+        return { ok: true as const, status };
+      } catch (error) {
+        return {
+          ok: false as const,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }, workspaceId);
+    expect(enableResult).toMatchObject({ ok: true });
+
+    // The workspace is now bound and pushing: a fresh machine bootstrapping
+    // from the relay pulls the local content — proof the relay owns the bucket
+    // and the enable flow reached the sync engine.
+    await expect
+      .poll(
+        async () => {
+          await pullAndCommit(machine2, workspaceId, relay!.baseUrl);
+          return engineText(machine2, workspaceId, "notes/plan.md");
+        },
+        { timeout: 90_000, intervals: [1000] },
+      )
+      .toBe("local draft\n");
+
+    // The app reflects a synced workspace (the sync-status surface is present,
+    // not the local-only absence).
+    await expect(page.getByTestId("sync-status")).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+    await relay?.stop();
+  }
+});
