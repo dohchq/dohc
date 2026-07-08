@@ -1,3 +1,4 @@
+import { chmodSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,7 +41,55 @@ describe("dmHomeStore", () => {
     expect(claimDmHome(file(), "share-1", "ws-B")).toBe(false);
   });
 
-  it("treats a missing/unreadable map as empty (unhomed)", () => {
+  it("treats a MISSING file (ENOENT) as empty/unhomed", () => {
     expect(readDmHome(file(), "share-x")).toBeNull();
+    // ENOENT is genuinely empty, so a first claim succeeds and persists.
+    expect(claimDmHome(file(), "share-x", "ws-A")).toBe(true);
+    expect(readDmHome(file(), "share-x")).toBe("ws-A");
+  });
+
+  it("does NOT clobber other homes when a POPULATED map is momentarily unreadable (non-ENOENT)", () => {
+    const f = file();
+    expect(claimDmHome(f, "share-A", "ws-A")).toBe(true);
+    expect(claimDmHome(f, "share-B", "ws-B")).toBe(true);
+    // Make the populated file unreadable (EACCES, not ENOENT).
+    chmodSync(f, 0o000);
+    let stillReadable = true;
+    try {
+      readFileSync(f);
+    } catch {
+      stillReadable = false;
+    }
+    if (stillReadable) {
+      // Running as root ignores mode bits — can't simulate the read error here.
+      chmodSync(f, 0o600);
+      return;
+    }
+    // A claim for a NEW share must FAIL CLOSED (return false) and must NOT
+    // rewrite the map from an assumed-empty state.
+    expect(claimDmHome(f, "share-C", "ws-C")).toBe(false);
+    chmodSync(f, 0o600);
+    // The pre-existing pins survived — no partial/clobbering rewrite happened.
+    expect(readDmHome(f, "share-A")).toBe("ws-A");
+    expect(readDmHome(f, "share-B")).toBe("ws-B");
+    expect(readDmHome(f, "share-C")).toBeNull();
+  });
+
+  it("treats an un-persistable claim as unsuccessful (a claim only wins when it reaches disk)", () => {
+    const f = file();
+    expect(claimDmHome(f, "share-A", "ws-A")).toBe(true);
+    // Block the atomic temp write: a directory sits exactly where writeMap's
+    // temp file must go, so writeFileSync fails and the rename never happens.
+    const tmp = `${f}.tmp-${process.pid}`;
+    mkdirSync(tmp);
+    try {
+      // The claim can't be persisted → it must NOT report success…
+      expect(claimDmHome(f, "share-B", "ws-B")).toBe(false);
+      // …and the durable map is untouched: share-A intact, share-B absent.
+      expect(readDmHome(f, "share-A")).toBe("ws-A");
+      expect(readDmHome(f, "share-B")).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
