@@ -143,6 +143,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+// How a threadId resolves against the LOCAL workspace at apply time:
+// "absent" (no such thread yet — a served thread.create may bind it),
+// "granted" (exists and is bound to the granted channel), or "foreign"
+// (exists but belongs to something else — a private/other channel or a
+// file-linked thread).
+type LocalThreadBinding = "absent" | "granted" | "foreign";
+
 // Client-side scope gate for PULL — the third gate behind grant validation
 // and the relay's per-op filter (mirrors syncShareView's pathReplayable): a
 // misbehaving or compromised relay must not be able to plant ANOTHER
@@ -150,20 +157,39 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 // membership is tracked from the ops themselves: a thread belongs to the
 // channel iff its thread.create (seen this pull or a previous one — then the
 // local chat_threads row already binds it) claims the granted wire id.
+//
+// Private-thread injection gate (MU-C4 review HIGH): the served stream is
+// additionally checked against the LOCAL thread→channel binding. A served
+// thread.create reusing a threadId that already exists locally bound
+// elsewhere would no-op on apply — but trusting it would route every
+// follow-up message/reaction for that threadId into the member's PRIVATE
+// (or other-channel / file) thread. So a thread.create is only accepted when
+// the local thread is absent or already bound to the granted channel, and
+// EVERY message/reaction additionally re-verifies the local binding at apply
+// time. Fail closed on anything else.
 function opBelongsToChannel(
   opKind: string,
   payload: Record<string, unknown>,
   channelWireId: string,
   channelThreadIds: Set<string>,
+  localThreadBinding: (threadId: string) => LocalThreadBinding,
 ): boolean {
   if (opKind === "chat.channel.create") return payload.wireId === channelWireId;
   if (opKind === "chat.thread.create") {
     if (payload.channelWireId !== channelWireId) return false;
-    if (typeof payload.threadId === "string") channelThreadIds.add(payload.threadId);
+    if (typeof payload.threadId !== "string" || payload.threadId.length === 0) return false;
+    if (localThreadBinding(payload.threadId) === "foreign") return false;
+    channelThreadIds.add(payload.threadId);
     return true;
   }
   if (opKind === "chat.message.append" || opKind === "chat.reaction.set") {
-    return typeof payload.threadId === "string" && channelThreadIds.has(payload.threadId);
+    if (typeof payload.threadId !== "string" || !channelThreadIds.has(payload.threadId)) {
+      return false;
+    }
+    // The local row the op would land in must be bound to the granted channel
+    // RIGHT NOW — a stream-tracked threadId alone is not enough (its accepted
+    // thread.create may have no-opped against a pre-existing foreign thread).
+    return localThreadBinding(payload.threadId) === "granted";
   }
   return false;
 }
@@ -247,6 +273,24 @@ export async function pullSharedChannel(input: {
            applied_origin_seq = excluded.applied_origin_seq,
            dense_seq = excluded.dense_seq`,
       );
+      // Live local-binding lookups for the injection gate: reads the SAME
+      // engine.db the chat store writes, so a thread.create applied earlier
+      // in this loop already resolves as "granted" for its follow-up ops.
+      const threadExistsStmt = stateDb.prepare(
+        "SELECT 1 AS ok FROM chat_threads WHERE workspace_id = ? AND thread_id = ?",
+      );
+      const threadBoundStmt = stateDb.prepare(
+        `SELECT 1 AS ok FROM chat_threads t
+         JOIN chat_channel_wire_ids w
+           ON w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id
+         WHERE t.workspace_id = ? AND t.thread_id = ? AND w.wire_id = ?`,
+      );
+      const localThreadBinding = (threadId: string): LocalThreadBinding => {
+        if (threadExistsStmt.get(input.workspaceId, threadId) === undefined) return "absent";
+        return threadBoundStmt.get(input.workspaceId, threadId, input.channelWireId) !== undefined
+          ? "granted"
+          : "foreign";
+      };
       for (const op of ops) {
         // Own echo: ops this machine pushed through the member route come
         // back under `share:<shareId>:<localOrigin>` — the local store
@@ -259,7 +303,13 @@ export async function pullSharedChannel(input: {
         if (
           !payload ||
           !CHAT_OP_KINDS.has(op.opKind) ||
-          !opBelongsToChannel(op.opKind, payload, input.channelWireId, channelThreadIds)
+          !opBelongsToChannel(
+            op.opKind,
+            payload,
+            input.channelWireId,
+            channelThreadIds,
+            localThreadBinding,
+          )
         ) {
           // Fail closed on anything the relay should never have served.
           skipped += 1;

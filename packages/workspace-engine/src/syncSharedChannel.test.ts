@@ -270,6 +270,109 @@ describe("pullSharedChannel", () => {
     }
   });
 
+  it("never applies served ops into a LOCAL thread that is not bound to the granted channel (private-thread injection)", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+
+    // A local PRIVATE channel thread the member already has. A hostile member
+    // (or relay) who learns its threadId must not be able to inject into it.
+    const chats = createLinkedChatStore(root);
+    let privateThreadId: string;
+    let privateMessageId: string;
+    try {
+      const personal = await chats.createChannel({ workspaceId: WORKSPACE, name: "personal" });
+      const started = await chats.startChannelThread({
+        workspaceId: WORKSPACE,
+        channelId: personal.id,
+        author: { kind: "human", displayName: "Member" },
+        body: "PRIVATE-original",
+      });
+      privateThreadId = started.thread.id;
+      privateMessageId = started.message.id;
+    } finally {
+      await chats.close();
+    }
+
+    // The served stream re-creates the member's private thread UNDER THE
+    // GRANTED WIRE ID, then posts into it. The thread.create would no-op
+    // locally (the thread exists), so trusting it would let the follow-up
+    // message/reaction land in the PRIVATE thread.
+    fake.addOp("origin-owner", "chat.thread.create", {
+      threadId: privateThreadId,
+      title: "",
+      createdAtMs: 1,
+      channelSlug: "team",
+      channelWireId: WIRE,
+    });
+    fake.addOp("origin-owner", "chat.message.append", {
+      messageId: "msg-inject-1",
+      threadId: privateThreadId,
+      authorKind: "human",
+      authorDisplayName: "Owner",
+      authorUserId: "granter",
+      body: "SENTINEL-injected",
+      createdAtMs: 2,
+    });
+    fake.addOp("origin-owner", "chat.reaction.set", {
+      reactionId: "reaction-inject-1",
+      messageId: privateMessageId,
+      threadId: privateThreadId,
+      emoji: "👍",
+      authorId: "granter",
+      authorKind: "human",
+      authorDisplayName: "Owner",
+      state: "added",
+      atMs: 3,
+    });
+    // A LEGITIMATE shared-channel follow-up after the injection attempt: the
+    // gate must drop the injection without wedging the rest of the stream.
+    fake.addOp("origin-owner", "chat.message.append", {
+      messageId: "msg-owner-2",
+      threadId: "thread-team-1",
+      authorKind: "human",
+      authorDisplayName: "Owner",
+      authorUserId: "granter",
+      body: "still flowing",
+      createdAtMs: 4,
+    });
+
+    const result = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    // Applied: the 3 seed ops + the legit follow-up. Skipped: the forged
+    // thread.create and BOTH ops targeting the private thread.
+    expect(result.applied).toBe(4);
+    expect(result.skipped).toBe(3);
+
+    // The shared channel converged; the private thread is untouched.
+    expect(await teamMessages(root)).toEqual([
+      "msg-owner-1:welcome",
+      "msg-owner-2:still flowing",
+    ]);
+    const verify = createLinkedChatStore(root);
+    try {
+      const messages = await verify.listMessages({ workspaceId: WORKSPACE, threadId: privateThreadId });
+      expect(messages.map((message) => message.body)).toEqual(["PRIVATE-original"]);
+    } finally {
+      await verify.close();
+    }
+    const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+    try {
+      const reactions = db
+        .prepare("SELECT COUNT(*) AS count FROM chat_reactions WHERE workspace_id = ?")
+        .get(WORKSPACE);
+      expect(Number(reactions?.count)).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("replays idempotently across a crash-refetch overlap (cursor reset)", async () => {
     const fake = new FakeChannelRelay();
     seedGrantedChannel(fake);
