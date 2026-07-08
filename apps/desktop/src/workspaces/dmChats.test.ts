@@ -5,6 +5,7 @@ import { createLinkedChatStore, type LinkedChatStore } from "@dohc/workspace-eng
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   dmChannelNameFor,
+  grantDmRecipients,
   listDmRecords,
   matchDmChannelByRecipients,
   parseDmRecipients,
@@ -149,6 +150,60 @@ describe("matchDmChannelByRecipients", () => {
   });
 });
 
+describe("grantDmRecipients", () => {
+  it("grants every missing recipient and skips already-covered ones", async () => {
+    const created: string[] = [];
+    await grantDmRecipients({
+      recipients: ["a@x.com", "b@x.com", "c@x.com"],
+      covered: new Set(["b@x.com"]),
+      createGrant: async (email) => {
+        created.push(email);
+        return `share-${email}`;
+      },
+      revokeGrant: async () => {
+        throw new Error("must not revoke on the happy path");
+      },
+    });
+    expect(created).toEqual(["a@x.com", "c@x.com"]);
+  });
+
+  it("rolls back THIS call's grants and rethrows when a later grant fails (no half-granted channel)", async () => {
+    // Simulate the grant POST failing on the 2nd of 2 recipients.
+    const revoked: string[] = [];
+    await expect(
+      grantDmRecipients({
+        recipients: ["a@x.com", "b@x.com"],
+        covered: new Set(),
+        createGrant: async (email) => {
+          if (email === "b@x.com") throw new Error("grant POST failed");
+          return `share-${email}`;
+        },
+        revokeGrant: async (shareId) => {
+          revoked.push(shareId);
+        },
+      }),
+    ).rejects.toThrow(/grant POST failed/u);
+    // The first recipient's grant was revoked → the channel has zero live grants.
+    expect(revoked).toEqual(["share-a@x.com"]);
+  });
+
+  it("never lets a revoke failure mask the original grant error", async () => {
+    await expect(
+      grantDmRecipients({
+        recipients: ["a@x.com", "b@x.com"],
+        covered: new Set(),
+        createGrant: async (email) => {
+          if (email === "b@x.com") throw new Error("original grant error");
+          return `share-${email}`;
+        },
+        revokeGrant: async () => {
+          throw new Error("revoke also failed");
+        },
+      }),
+    ).rejects.toThrow(/original grant error/u);
+  });
+});
+
 describe("peekReceivedGrantKind", () => {
   // The share-log GET paginates RAW relay rows BEFORE the share filter, so the
   // FIRST page of a normal owner log (workspace.init THEN chat.channel.create)
@@ -247,6 +302,56 @@ describe("listDmRecords", () => {
       peerLabel: "bob@x.com",
       threadId: started.thread.id,
       shareId: null,
+      connected: true,
+    });
+  });
+
+  it("hides an OWNER DM with no thread (aborted/rolled-back start) but keeps a committed owner DM", async () => {
+    const { store } = await makeStore();
+    // An aborted start: the channel was created but grants failed → rolled back
+    // before the first message, so there is no thread.
+    await store.createChannel({ workspaceId: WS, name: "aborted@x.com", kind: "dm" });
+    expect(await listDmRecords({ workspaceId: WS, store, sharedChannels: [] })).toHaveLength(0);
+
+    // A committed owner DM (first message sent → a thread exists) still shows.
+    const live = await store.createChannel({ workspaceId: WS, name: "bob@x.com", kind: "dm" });
+    await store.startChannelThread({
+      workspaceId: WS,
+      channelId: live.id,
+      author: { kind: "human", displayName: "Alice" },
+      authorUserId: "user-alice",
+      body: "hi",
+    });
+    const dms = await listDmRecords({ workspaceId: WS, store, sharedChannels: [] });
+    expect(dms.map((d) => d.channelId)).toEqual([live.id]);
+  });
+
+  it("keeps a PARTICIPANT DM with no thread yet visible (a real pending conversation)", async () => {
+    const { store } = await makeStore();
+    // A replayed DM whose owner granted before sending — channel.create only,
+    // no thread.create yet. It must remain visible (not treated as an orphan).
+    await store.applyReplicationOp({
+      workspaceId: WS,
+      originId: "origin-owner",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "owner-channel-1",
+        name: "bob@x.com",
+        slug: "bob-x-com",
+        kind: "dm",
+        createdAtMs: 1,
+        wireId: "owner-channel-1",
+      },
+      recordedAtMs: 1,
+    });
+    const registry = [joined({ shareId: "share-1", channelWireId: "owner-channel-1" })];
+    const dms = await listDmRecords({ workspaceId: WS, store, sharedChannels: registry });
+    expect(dms).toHaveLength(1);
+    expect(dms[0]).toMatchObject({
+      role: "participant",
+      channelWireId: "owner-channel-1",
+      threadId: null,
       connected: true,
     });
   });

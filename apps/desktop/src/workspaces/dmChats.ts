@@ -87,6 +87,14 @@ export async function listDmRecords(input: {
     });
     const running = runningThread(threads);
     const role = wireId === channel.id ? "owner" : "participant";
+    // An OWNER DM with no running thread is an aborted / rolled-back start: a
+    // committed owner DM always sent its first message (creating the thread),
+    // and startDm revokes this call's grants on a partial grant failure, so the
+    // orphan is left with zero live recipients. Hide it — a failed startDm must
+    // never linger as a broken empty conversation, and a retry mints a fresh
+    // complete DM. A PARTICIPANT with no thread yet is a REAL pending DM (the
+    // owner may grant before sending the first message), so it stays visible.
+    if (role === "owner" && running === undefined) continue;
     const joined = joinedByWire.get(wireId);
     dms.push({
       channelId: channel.id,
@@ -161,6 +169,45 @@ export async function peekReceivedGrantKind(input: {
     since = next;
   }
   return "not-dm";
+}
+
+// Grant every not-yet-covered recipient of a DM ATOMICALLY. Create all missing
+// grants first, tracking the ones created in THIS call; if ANY create fails,
+// best-effort REVOKE the just-created grants before rethrowing — so a partial
+// failure never leaves the channel with an INCOMPLETE live-grant set.
+// matchDmChannelByRecipients requires an EXACT recipient-set match, so a
+// half-granted channel would be missed on the retry and a DUPLICATE DM minted
+// (with a split conversation). Rolling back to zero grants keeps the retry
+// clean: the caller sends the first message only AFTER this resolves, so a
+// thrown rollback means nothing was said yet. A revoke failure never masks the
+// original error (the lingering grant is the owner's to revoke; the local
+// channel stays hidden while it has no committed thread).
+export async function grantDmRecipients(input: {
+  // Normalized recipient set (parseDmRecipients output).
+  recipients: string[];
+  // Recipients that already hold a live grant (skip — don't re-grant).
+  covered: ReadonlySet<string>;
+  // Create one grant; returns its shareId (or null if the relay omitted one).
+  createGrant: (email: string) => Promise<string | null>;
+  revokeGrant: (shareId: string) => Promise<void>;
+}): Promise<void> {
+  const created: string[] = [];
+  try {
+    for (const email of input.recipients) {
+      if (input.covered.has(email)) continue;
+      const shareId = await input.createGrant(email);
+      if (shareId !== null) created.push(shareId);
+    }
+  } catch (error) {
+    for (const shareId of created) {
+      try {
+        await input.revokeGrant(shareId);
+      } catch {
+        // Best-effort rollback; never mask the original grant failure.
+      }
+    }
+    throw error;
+  }
 }
 
 // Normalized, deduped recipient emails for a new DM ("a@x, b@y" input form).

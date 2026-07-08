@@ -213,6 +213,7 @@ import {
 } from "./workspaces/sharedChannels";
 import {
   dmChannelNameFor,
+  grantDmRecipients,
   listDmRecords,
   matchDmChannelByRecipients,
   parseDmRecipients,
@@ -3641,22 +3642,40 @@ function registerIpcHandlers(): void {
         channelId,
       })) ?? channelId;
     // Ensure one LIVE grant per recipient (grants are rows; a re-run after a
-    // revocation re-invites). A freshly created channel has no grants yet.
+    // revocation re-invites). A freshly created channel has no grants yet. The
+    // grants are created ATOMICALLY: if any fails, grantDmRecipients revokes the
+    // ones created in THIS call and rethrows, so no half-granted channel lingers
+    // to be duplicated on retry (matchDmChannelByRecipients needs an EXACT set).
+    // The first message is sent only AFTER this resolves, so a thrown rollback
+    // means nothing was said yet; the orphaned channel (zero live grants, no
+    // thread) is hidden by listDmRecords.
     const covered = liveGrantEmailsByWire.get(wireId) ?? new Set<string>();
-    for (const email of recipients) {
-      if (covered.has(email)) continue;
+    await grantDmRecipients({
+      recipients,
+      covered,
       // FLAT chat-channel grant body (matches shareChatChannel): the relay
       // branches on the top-level channelWireId. A nested chatChannel body
       // would fall through to the path-share validator and silently fail.
-      await relayShareJson(`/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`, {
-        method: "POST",
-        body: JSON.stringify({
-          recipientEmail: email,
-          channelWireId: wireId,
-          access: "read-write",
-        }),
-      });
-    }
+      createGrant: async (email) => {
+        const created = await relayShareJson<{ shareId?: string }>(
+          `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              recipientEmail: email,
+              channelWireId: wireId,
+              access: "read-write",
+            }),
+          },
+        );
+        return typeof created.shareId === "string" ? created.shareId : null;
+      },
+      revokeGrant: async (shareId) => {
+        await relayShareJson(`/sync/shares/${encodeURIComponent(shareId)}/revoke`, {
+          method: "POST",
+        });
+      },
+    });
     // The single running conversation (anti-forum): reuse the oldest thread or
     // start it with this first message. No titles, ever. runningThread is the
     // SAME canonical-thread rule listDmRecords uses (shared so they can't drift).
