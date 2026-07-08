@@ -343,11 +343,15 @@ export function ChatsView(props: {
   }, [refreshDms, refreshOverview]);
 
   // Gentle DM poll while the view is open: the other side's messages arrive
-  // by relay pull, and the sync is cursor-based (no changes = no work).
+  // by relay pull, and the sync is cursor-based (no changes = no work). While a
+  // DM conversation is OPEN the inner 4s poll already runs a full syncDms pass,
+  // so pause this outer poll then — otherwise viewing a DM doubles the
+  // relay/sync cadence for no benefit.
   useEffect(() => {
+    if (nav.level === "dm") return;
     const interval = setInterval(() => void refreshDms(), 5_000);
     return () => clearInterval(interval);
-  }, [refreshDms]);
+  }, [refreshDms, nav.level]);
 
   const openChannel = useCallback(
     async (channel: ChatChannelRecord) => {
@@ -802,6 +806,10 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setMessages([]);
       setComposer("");
+      // Drop the compose draft/recipients so reopening "New message" never
+      // shows a stale, unrelated "To:" that could misdirect the next send.
+      setDmRecipients("");
+      setDmDraft("");
       void refreshDms();
     }
   }, [nav, openChannel, refreshDms, refreshOverview]);
@@ -1306,7 +1314,13 @@ export function ChatsView(props: {
                 <button
                   type="button"
                   data-testid="chats-new-dm"
-                  onClick={() => setNav({ level: "dm-new" })}
+                  onClick={() => {
+                    // Always start compose from a clean slate — never inherit a
+                    // recipient/draft left over from a previous compose.
+                    setDmRecipients("");
+                    setDmDraft("");
+                    setNav({ level: "dm-new" });
+                  }}
                   className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
                 >
                   <Plus size={12} aria-hidden />

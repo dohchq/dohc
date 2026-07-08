@@ -848,6 +848,24 @@ describe("ChatsView direct messages", () => {
     expect(bodies.map((el) => el.textContent)).toEqual(["hello there"]);
   });
 
+  it("clears a stale recipient/draft when backing out of New message and reopening it", async () => {
+    // Backing out of compose without sending must NOT leave the old recipients
+    // pre-filled — a user who reopens compose and types + sends could otherwise
+    // misdirect their message to the wrong person.
+    const user = userEvent.setup();
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
+    renderView();
+    await user.click(await screen.findByTestId("chats-new-dm"));
+    await user.type(screen.getByTestId("chats-dm-recipients"), "stale@example.com");
+    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).value).toBe(
+      "stale@example.com",
+    );
+    // Back out, then reopen: the "To:" field must be empty again.
+    await user.click(screen.getByTestId("chats-dm-new-back"));
+    await user.click(await screen.findByTestId("chats-new-dm"));
+    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).value).toBe("");
+  });
+
   it("closes the composer for an ended DM but keeps the conversation readable", async () => {
     const user = userEvent.setup();
     bridgeMock.syncDms.mockResolvedValue({

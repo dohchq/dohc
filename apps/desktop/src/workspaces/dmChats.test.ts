@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLinkedChatStore, type LinkedChatStore } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { dmChannelNameFor, listDmRecords, parseDmRecipients } from "./dmChats";
+import {
+  dmChannelNameFor,
+  listDmRecords,
+  matchDmChannelByRecipients,
+  parseDmRecipients,
+  peekReceivedGrantKind,
+  type ShareLogPage,
+} from "./dmChats";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // WS-MU-C3 — the desktop DM orchestration: role derivation (owner vs
@@ -58,6 +65,162 @@ describe("parseDmRecipients / dmChannelNameFor", () => {
     const many = Array.from({ length: 6 }, (_, i) => `person-${i}@example.com`);
     expect(dmChannelNameFor(["bob@x.com"])).toBe("bob@x.com");
     expect(dmChannelNameFor(many).length).toBeLessThanOrEqual(80);
+  });
+
+  it("is PRESENTATION-ONLY: distinct recipient sets sharing a long prefix collide, so the name must never be a dedup key", () => {
+    // Two genuinely different recipient sets whose derived names truncate to the
+    // same 80-char string. This collision is EXPECTED and acceptable precisely
+    // because DM identity is the recipient set (matchDmChannelByRecipients),
+    // never this cosmetic name — the regression that fix locks in.
+    const longA = `${"a".repeat(78)}1@example.com`;
+    const longB = `${"a".repeat(78)}2@example.com`;
+    expect(dmChannelNameFor([longA])).toBe(dmChannelNameFor([longB]));
+    // The identity key (the sorted recipient set) DOES differ — see the
+    // matchDmChannelByRecipients suite, which proves the two never dedupe.
+    expect([longA]).not.toEqual([longB]);
+  });
+});
+
+describe("matchDmChannelByRecipients", () => {
+  // The DM's identity is its LIVE grant recipient set — NEVER the (truncatable,
+  // collidable) display name. Two distinct recipient sets whose names collide at
+  // the 80-char cap must resolve to DIFFERENT channels.
+  it("reuses a DM only when its live grant recipient set EXACTLY equals the request, ignoring name collisions", () => {
+    const longA = `${"a".repeat(78)}1@example.com`;
+    const longB = `${"a".repeat(78)}2@example.com`;
+    // Both derive the SAME 80-char-capped display name.
+    expect(dmChannelNameFor([longA])).toBe(dmChannelNameFor([longB]));
+
+    // Channel c1 is the live DM to longA (wire w1).
+    const channels = [{ id: "c1", wireId: "w1" }];
+    const liveGrantEmailsByWire = new Map([["w1", new Set([longA])]]);
+
+    // The colliding request (longB) must NOT reuse c1.
+    expect(
+      matchDmChannelByRecipients({
+        recipients: [longB],
+        channels,
+        liveGrantEmailsByWire,
+      }),
+    ).toBeNull();
+
+    // The SAME recipient set (longA) reuses c1 (existing behaviour preserved).
+    expect(
+      matchDmChannelByRecipients({
+        recipients: [longA],
+        channels,
+        liveGrantEmailsByWire,
+      }),
+    ).toBe("c1");
+  });
+
+  it("requires the FULL set to match — a subset or superset is a different DM", () => {
+    const channels = [{ id: "c1", wireId: "w1" }];
+    const liveGrantEmailsByWire = new Map([["w1", new Set(["a@x.com", "b@x.com"])]]);
+    // Superset request (a,b) reuses; subset (a) or a different member (a,c) do not.
+    expect(
+      matchDmChannelByRecipients({
+        recipients: ["a@x.com", "b@x.com"],
+        channels,
+        liveGrantEmailsByWire,
+      }),
+    ).toBe("c1");
+    expect(
+      matchDmChannelByRecipients({ recipients: ["a@x.com"], channels, liveGrantEmailsByWire }),
+    ).toBeNull();
+    expect(
+      matchDmChannelByRecipients({
+        recipients: ["a@x.com", "c@x.com"],
+        channels,
+        liveGrantEmailsByWire,
+      }),
+    ).toBeNull();
+  });
+
+  it("never matches a channel with no live grants (a fresh/orphaned DM) against a non-empty request", () => {
+    const channels = [{ id: "c1", wireId: "w1" }];
+    expect(
+      matchDmChannelByRecipients({
+        recipients: ["a@x.com"],
+        channels,
+        liveGrantEmailsByWire: new Map(),
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("peekReceivedGrantKind", () => {
+  // The share-log GET paginates RAW relay rows BEFORE the share filter, so the
+  // FIRST page of a normal owner log (workspace.init THEN chat.channel.create)
+  // is served EMPTY with hasMore=true. The peek must page nextCursor until the
+  // first SERVED op — the create bootstrap — appears; matching the relay's real
+  // {ops, nextCursor, hasMore} response shape.
+  it("pages past a filtered prefix and detects kind:dm on the first served op", async () => {
+    const pages = new Map<number, ShareLogPage>([
+      // since=0: workspace.init is filtered out → empty page, cursor advances.
+      [0, { ops: [], nextCursor: 1, hasMore: true }],
+      // since=1: the chat.channel.create bootstrap is the first served op.
+      [
+        1,
+        {
+          ops: [{ opKind: "chat.channel.create", payload: { kind: "dm" } }],
+          nextCursor: 2,
+          hasMore: false,
+        },
+      ],
+    ]);
+    const seen: number[] = [];
+    const kind = await peekReceivedGrantKind({
+      fetchPage: async (since) => {
+        seen.push(since);
+        return pages.get(since) ?? null;
+      },
+    });
+    expect(kind).toBe("dm");
+    // It actually followed the cursor (did not stop on the empty first page).
+    expect(seen).toEqual([0, 1]);
+  });
+
+  it("reports a regular kind:channel grant as a definitive not-dm (cacheable)", async () => {
+    const kind = await peekReceivedGrantKind({
+      fetchPage: async (since) =>
+        since === 0
+          ? { ops: [], nextCursor: 1, hasMore: true }
+          : {
+              ops: [{ opKind: "chat.channel.create", payload: { kind: "channel" } }],
+              nextCursor: 2,
+              hasMore: false,
+            },
+    });
+    expect(kind).toBe("not-dm");
+  });
+
+  it("caps pages scanned and returns a definitive not-dm for an all-filtered log (no infinite since=0 loop)", async () => {
+    let calls = 0;
+    const kind = await peekReceivedGrantKind({
+      // Every page is empty but keeps claiming hasMore with an advancing cursor.
+      fetchPage: async (since) => {
+        calls++;
+        return { ops: [], nextCursor: since + 1, hasMore: true };
+      },
+      maxPages: 5,
+    });
+    expect(kind).toBe("not-dm");
+    expect(calls).toBe(5);
+  });
+
+  it("distinguishes an exhausted log (definitive not-dm) from an un-fetchable page (transient unknown, must be retried not cached)", async () => {
+    await expect(
+      peekReceivedGrantKind({
+        fetchPage: async () => ({ ops: [], nextCursor: 1, hasMore: false }),
+      }),
+    ).resolves.toBe("not-dm");
+    // A page that can't be fetched (network/relay hiccup) is UNKNOWN, never
+    // cached as not-dm — otherwise a transient failure would permanently block
+    // a real DM from ever auto-joining.
+    await expect(
+      peekReceivedGrantKind({ fetchPage: async () => null }),
+    ).resolves.toBe("unknown");
   });
 });
 

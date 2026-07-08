@@ -214,10 +214,16 @@ import {
 import {
   dmChannelNameFor,
   listDmRecords,
+  matchDmChannelByRecipients,
   parseDmRecipients,
+  peekReceivedGrantKind,
+  runningThread,
+  type DmPeekResult,
   type DmRecordInfo,
+  type ShareLogPage,
 } from "./workspaces/dmChats";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { claimDmHome, readDmHome } from "./workspaces/dmHomeStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
@@ -3391,27 +3397,41 @@ function registerIpcHandlers(): void {
     };
   }
 
+  // The account-level DM homing map file (spans every workspace) — lives in the
+  // account/user data dir, never a single workspace's engine db.
+  function dmHomeFile(): string {
+    return join(stateDir(), "dohc-dm-homes.json");
+  }
+
+  // Received chat-channel shares definitively confirmed NOT to be DMs (a
+  // grant's channel kind is immutable). Cached so a regular manual-join channel
+  // invite the user never accepts is probed ONCE, not re-fetched on every 5s
+  // syncDms poll (CodeRabbit: unbounded relay round-trips). Account-wide, so a
+  // share rejected while syncing one workspace stays rejected for all.
+  const peekedNonDmShareIds = new Set<string>();
+
   // Peek a received chat-channel grant's kind WITHOUT mutating the local store:
-  // the share filter always serves the channel.create as the join bootstrap, so
-  // the earliest served op carries the channel kind. Only `kind:"dm"` grants
-  // auto-join — a regular shared-channel grant is left to explicit manual join.
-  async function receivedGrantIsDm(
+  // only `kind:"dm"` grants auto-join — a regular shared-channel grant is left
+  // to explicit manual join. The share-log GET paginates RAW rows before the
+  // share filter, so the peek must PAGE through nextCursor until the first
+  // served op (the channel.create bootstrap) appears — reading only the first
+  // page is a permanent false negative on any log with an earlier filtered op
+  // (e.g. workspace.init). Paging + capping lives in peekReceivedGrantKind.
+  function peekReceivedGrantKindForShare(
     relay: SyncRelayConnection,
     shareId: string,
-  ): Promise<boolean> {
+  ): Promise<DmPeekResult> {
     const base = relay.baseUrl.replace(/\/+$/u, "");
-    const response = await (relay.fetch ?? fetch)(
-      `${base}/sync/shares/${encodeURIComponent(shareId)}/log?since=0&limit=1`,
-      { headers: { authorization: `Bearer ${relay.token}` } },
-    );
-    if (!response.ok) return false;
-    const page = (await response.json().catch(() => null)) as
-      | { ops?: Array<{ opKind?: unknown; payload?: unknown }> }
-      | null;
-    const first = page?.ops?.[0];
-    if (!first || first.opKind !== "chat.channel.create") return false;
-    const payload = first.payload as { kind?: unknown } | null;
-    return payload?.kind === "dm";
+    return peekReceivedGrantKind({
+      fetchPage: async (since) => {
+        const response = await (relay.fetch ?? fetch)(
+          `${base}/sync/shares/${encodeURIComponent(shareId)}/log?since=${since}&limit=200`,
+          { headers: { authorization: `Bearer ${relay.token}` } },
+        );
+        if (!response.ok) return null;
+        return (await response.json().catch(() => null)) as ShareLogPage | null;
+      },
+    });
   }
 
   // Auto-join every received DM grant not yet joined: pull the share's log into
@@ -3447,8 +3467,25 @@ function registerIpcHandlers(): void {
       ) {
         continue;
       }
+      // Probe each received share AT MOST ONCE (CodeRabbit: unbounded relay
+      // round-trips). Skip without a network peek when it is either already
+      // confirmed non-DM, or a DM homed in ANOTHER workspace (cross-workspace
+      // scoping — a received DM is ACCOUNT-wide, so pin it to exactly one local
+      // workspace).
+      if (peekedNonDmShareIds.has(shareId)) continue;
+      const homedIn = readDmHome(dmHomeFile(), shareId);
+      if (homedIn && homedIn !== workspace.workspaceId) continue;
       try {
-        if (!(await receivedGrantIsDm(relay, shareId))) continue;
+        const kind = await peekReceivedGrantKindForShare(relay, shareId);
+        if (kind === "not-dm") {
+          // Definitive (a channel kind never changes) — never re-probe.
+          peekedNonDmShareIds.add(shareId);
+          continue;
+        }
+        // Transient failure: leave un-cached and retry on the next pass.
+        if (kind !== "dm") continue;
+        // The DM peek confirmed it — claim it here (or confirm this is home).
+        if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
         const info = await fetchSharedChannelInfo({ relay, shareId });
         await pullSharedChannel({
           rootDir: workspace.rootPath,
@@ -3542,28 +3579,12 @@ function registerIpcHandlers(): void {
       throw new Error("A direct message needs a recipient other than yourself.");
     }
     const store = linkedChatStoreFor(workspace);
-    const name = dmChannelNameFor(recipients);
-    // Starting a DM with someone you already message opens the existing one.
-    const existing = (await store.listChannels({ workspaceId: workspace.workspaceId })).find(
-      (channel) => channel.kind === "dm" && channel.name === name,
-    );
-    const channelId = existing
-      ? existing.id
-      : (
-          await store.createChannel({
-            workspaceId: workspace.workspaceId,
-            name,
-            kind: "dm",
-          })
-        ).id;
-    const wireId =
-      (await store.getChannelWireId({
-        workspaceId: workspace.workspaceId,
-        channelId,
-      })) ?? channelId;
-    // Ensure one LIVE grant per recipient (grants are rows; a re-run after a
-    // revocation re-invites). The anti-enumeration posture is the relay's:
-    // known and unknown emails create indistinguishable grants.
+    // A DM's identity is its LIVE grant recipient set — NOT its (truncatable,
+    // collidable) display name. Enumerate live chat-channel grants keyed by
+    // wire id ONCE: used both to dedup the DM (exact recipient-set match) and
+    // to compute which recipients still need a grant. The anti-enumeration
+    // posture is the relay's: known and unknown emails create indistinguishable
+    // grants.
     const shares = await relayShareJson<{
       granted?: Array<{
         recipientEmail?: string | null;
@@ -3571,17 +3592,57 @@ function registerIpcHandlers(): void {
         selector?: { kind?: string; channelWireId?: string };
       }>;
     }>("/sync/shares");
-    const covered = new Set(
-      (shares.granted ?? [])
-        .filter(
-          (row) =>
-            (row.revokedAtMs ?? null) === null &&
-            row.selector?.kind === "chat-channel" &&
-            row.selector.channelWireId === wireId &&
-            typeof row.recipientEmail === "string",
-        )
-        .map((row) => (row.recipientEmail as string).toLowerCase()),
+    const liveGrantEmailsByWire = new Map<string, Set<string>>();
+    for (const row of shares.granted ?? []) {
+      if (
+        (row.revokedAtMs ?? null) !== null ||
+        row.selector?.kind !== "chat-channel" ||
+        typeof row.selector.channelWireId !== "string" ||
+        typeof row.recipientEmail !== "string"
+      ) {
+        continue;
+      }
+      const wire = row.selector.channelWireId;
+      const set = liveGrantEmailsByWire.get(wire) ?? new Set<string>();
+      set.add(row.recipientEmail.toLowerCase());
+      liveGrantEmailsByWire.set(wire, set);
+    }
+    // Starting a DM with a recipient set you already message opens the existing
+    // one — matched by its live grant recipients, never by the display name.
+    const dmChannelWires = await Promise.all(
+      (await store.listChannels({ workspaceId: workspace.workspaceId }))
+        .filter((channel) => channel.kind === "dm")
+        .map(async (channel) => ({
+          id: channel.id,
+          wireId:
+            (await store.getChannelWireId({
+              workspaceId: workspace.workspaceId,
+              channelId: channel.id,
+            })) ?? channel.id,
+        })),
     );
+    const matchedId = matchDmChannelByRecipients({
+      recipients,
+      channels: dmChannelWires,
+      liveGrantEmailsByWire,
+    });
+    const channelId =
+      matchedId ??
+      (
+        await store.createChannel({
+          workspaceId: workspace.workspaceId,
+          name: dmChannelNameFor(recipients),
+          kind: "dm",
+        })
+      ).id;
+    const wireId =
+      (await store.getChannelWireId({
+        workspaceId: workspace.workspaceId,
+        channelId,
+      })) ?? channelId;
+    // Ensure one LIVE grant per recipient (grants are rows; a re-run after a
+    // revocation re-invites). A freshly created channel has no grants yet.
+    const covered = liveGrantEmailsByWire.get(wireId) ?? new Set<string>();
     for (const email of recipients) {
       if (covered.has(email)) continue;
       // FLAT chat-channel grant body (matches shareChatChannel): the relay
@@ -3597,18 +3658,13 @@ function registerIpcHandlers(): void {
       });
     }
     // The single running conversation (anti-forum): reuse the oldest thread or
-    // start it with this first message. No titles, ever.
+    // start it with this first message. No titles, ever. runningThread is the
+    // SAME canonical-thread rule listDmRecords uses (shared so they can't drift).
     const threads = await store.listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId,
     });
-    const running = threads
-      .slice()
-      .sort(
-        (a, b) =>
-          a.thread.createdAtMs - b.thread.createdAtMs ||
-          (a.thread.id < b.thread.id ? -1 : 1),
-      )[0];
+    const running = runningThread(threads);
     const author = { kind: "human" as const, displayName: localUserDisplayName() };
     const message = running
       ? await store.sendMessage({

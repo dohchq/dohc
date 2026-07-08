@@ -44,7 +44,9 @@ type DmStore = Pick<
 // The single running conversation (the anti-forum rule): the OLDEST thread in
 // the DM channel, deterministically (createdAtMs, then thread id) — every
 // participant picks the same one even if a race ever minted a duplicate.
-function runningThread<
+// Exported so startDm reuses the SAME canonical-thread rule as listDmRecords
+// (the two must never drift).
+export function runningThread<
   T extends { thread: { id: string; createdAtMs: number } },
 >(threads: T[]): T | undefined {
   return threads
@@ -105,6 +107,62 @@ export async function listDmRecords(input: {
   );
 }
 
+// One page of a relay share-log GET (`/sync/shares/:id/log`): the relay
+// paginates RAW log rows and applies the share filter AFTER, so `ops` can be
+// empty while `hasMore` is true and the cursor still advances over the dropped
+// (filtered-out) rows.
+export interface ShareLogPage {
+  ops?: Array<{ opKind?: unknown; payload?: unknown }>;
+  nextCursor?: unknown;
+  hasMore?: unknown;
+}
+
+// The outcome of peeking a received grant's channel kind:
+//   "dm"      — a DM grant; auto-join it.
+//   "not-dm"  — a DEFINITIVE non-DM answer (regular channel, or an exhausted /
+//               capped log with no served op). Safe to CACHE and never re-probe:
+//               a grant's channel kind is immutable.
+//   "unknown" — could not determine (a page failed to fetch — transient). Do
+//               NOT cache; retry on the next pass.
+export type DmPeekResult = "dm" | "not-dm" | "unknown";
+
+// Peek a received chat-channel grant's KIND without mutating the local store,
+// to decide whether it should AUTO-JOIN (only `kind:"dm"` grants do; a regular
+// shared-channel grant stays manual-join). The share filter serves the
+// channel.create as the join bootstrap, so the EARLIEST SERVED op carries the
+// channel kind. But the log GET paginates raw rows before filtering — a normal
+// owner log has `workspace.init` before `chat.channel.create`, so the first
+// page is served EMPTY (ops:[], hasMore:true). Naively reading only page one
+// is a permanent false negative. Page through `nextCursor` until the first
+// served op appears (inspect its kind) or the log is exhausted. Bounded to
+// `maxPages` so a hostile/huge filtered prefix can't loop forever on since=0;
+// hitting the cap (or an exhausted log) with no served op is a DEFINITIVE
+// "not-dm" (deterministic, cacheable). Only a page that can't be fetched is
+// "unknown" — that one is transient and must be retried, never cached.
+export async function peekReceivedGrantKind(input: {
+  fetchPage: (since: number) => Promise<ShareLogPage | null>;
+  maxPages?: number;
+}): Promise<DmPeekResult> {
+  const maxPages = input.maxPages ?? 50;
+  let since = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await input.fetchPage(since);
+    if (!result) return "unknown";
+    const first = result.ops?.[0];
+    if (first) {
+      if (first.opKind !== "chat.channel.create") return "not-dm";
+      const payload = first.payload as { kind?: unknown } | null;
+      return payload?.kind === "dm" ? "dm" : "not-dm";
+    }
+    if (result.hasMore !== true) return "not-dm";
+    const next = typeof result.nextCursor === "number" ? result.nextCursor : null;
+    // No forward progress ⇒ stop rather than re-request the same cursor forever.
+    if (next === null || next <= since) return "not-dm";
+    since = next;
+  }
+  return "not-dm";
+}
+
 // Normalized, deduped recipient emails for a new DM ("a@x, b@y" input form).
 export function parseDmRecipients(raw: string): string[] {
   const emails = raw
@@ -124,8 +182,40 @@ export function parseDmRecipients(raw: string): string[] {
 }
 
 // The DM channel's display name for its OWNER: the recipient set, bounded to
-// the channel-name cap.
+// the channel-name cap. COSMETIC ONLY — it truncates and can collide across
+// distinct recipient sets, so it must NEVER be a DM's dedup identity (see
+// matchDmChannelByRecipients).
 export function dmChannelNameFor(recipients: string[]): string {
   const name = recipients.join(", ");
   return name.length <= 80 ? name : `${name.slice(0, 77)}...`;
+}
+
+// A DM's true identity is its LIVE grant recipient set — the set of live
+// chat-channel grant recipients on the channel's wire — NOT its (truncatable,
+// collidable) display name. Reuse an existing DM channel ONLY when its live
+// grant recipients EXACTLY equal the requested normalized recipient set;
+// otherwise the caller must create a fresh channel, even if the derived name
+// collides. Matching by name instead would grant a new recipient someone
+// else's existing conversation log when two recipient sets collide at the cap.
+export function matchDmChannelByRecipients(input: {
+  // Normalized (parseDmRecipients output: lowercased, deduped, sorted).
+  recipients: string[];
+  channels: Array<{ id: string; wireId: string }>;
+  liveGrantEmailsByWire: Map<string, Set<string>>;
+}): string | null {
+  const requested = new Set(input.recipients);
+  if (requested.size === 0) return null;
+  for (const channel of input.channels) {
+    const live = input.liveGrantEmailsByWire.get(channel.wireId);
+    if (!live || live.size !== requested.size) continue;
+    let equal = true;
+    for (const email of requested) {
+      if (!live.has(email)) {
+        equal = false;
+        break;
+      }
+    }
+    if (equal) return channel.id;
+  }
+  return null;
 }
