@@ -348,3 +348,121 @@ extended in place) + 128/5-skip serial unchanged. `chat_reactions` gained
 so this is part of the initial shape (no migration). Files touched:
 `engineDbSchema.ts`, `linkedChatStore.ts`, `linkedChatStore.test.ts`, and this
 log + the design doc.
+
+## Presence and Typing MU-C1
+
+Shipped the ephemeral awareness transport (presence / typing / co-viewing) and
+its client bindings — the one lane sequenced behind G2-C's live `session.doc`.
+Presence is opt-in (only under collaboration = signedIn && relayConnected),
+never journaled, dropped on disconnect/TTL, server-attributed, and fully
+self-hostable on the SAME relay process.
+
+### The ephemeral awareness transport (relay)
+
+- `services/sync-relay/src/presence.ts` — `PresenceHub`, an IN-MEMORY,
+  long-poll pub/sub. It is DELIBERATELY separate from the durable op log: it
+  holds no sqlite handle, writes no row, and is lost on relay restart (0P Risk 2
+  / the G2-C awareness rule). `publish`/`leave`/`snapshot`/`wait` with a
+  per-scope monotonic version cursor, TTL expiry (default 30s — a vanished
+  client is dropped even without an explicit leave), a per-scope entry cap, and
+  empty-scope GC so a workspace that opens/closes thousands of docs never
+  accumulates dead scopes.
+- Transport shape is LONG-POLL, not websocket/SSE: the relay's node adapter
+  buffers each request/response, so a streaming body can't flow through it; a
+  GET that parks until a change or a bounded `hold` (default 25s < TTL) and
+  returns a finite `{ version, peers }` fits the existing adapter with no new
+  server primitive. A publisher heartbeats faster than the TTL to stay present;
+  a peer re-polls with the last version.
+- `server.ts` routes: `GET/POST /sync/:workspaceId/presence?topic=…`
+  (owner, gated by `workspaceIsOwnedBy`) and
+  `GET/POST /sync/shares/:shareId/presence?topic=…` (recipient, gated by
+  `shareForRecipient` + a fail-closed topic gate). Both resolve to ONE scope
+  key `ws <ownerWorkspaceId> <topic>`, so an owner and every share recipient of
+  the same (workspace, topic) fan into a single scope and see each other. The
+  share path re-checks revocation in-flight, mirroring `share-log`.
+- `shareFilter.ts` `presenceTopicAllowedForShare` — fail-closed, reuses the
+  durable `pathVisibleThroughShare` check, so presence can never fan out to a
+  topic the grant doesn't already expose (a recipient of `a.md` cannot subscribe
+  to presence for `b.md`). Forward-compatible: a future `chat-channel` selector
+  (MU-C4) extends it to `topic === channelWireId`.
+- `main.ts` constructs one process-wide hub (ephemeral, never persisted).
+
+### Why it's never journaled + self-hostable
+
+Nothing in the presence path touches `storage`. The server test asserts that
+after presence activity the durable log has ZERO rows and the whole state lives
+only in `PresenceHub.stats()`, which returns to zero on leave. It rides the
+relay a self-hoster already runs — no new service, no cloud dependency; if a
+proxy blocks the presence routes, chat/editing still work fully and only
+presence degrades (the design's "awareness-channel-down still allows chat"
+contract).
+
+### Server-derived identity (no spoof)
+
+Each entry's `userId` is stamped from the authenticated Better Auth actor, never
+from the client body. A test publishes a `state` carrying a fake `userId` and
+asserts attribution stays the authenticated actor (the same posture MU-C0
+establishes for authorship). The client `state` is opaque display data only.
+
+### The Yjs-awareness binding for doc co-presence
+
+- `apps/desktop/src/renderer/collab/docPresence.ts` — binds a
+  `y-protocols/awareness` `Awareness` to the engine MIRROR doc and bridges it
+  over the SAME ephemeral transport keyed by the doc path. This is the design's
+  handoff: "the provider exposes the live `session.doc`; presence binds Yjs
+  AWARENESS to it as the ephemeral channel." Each publish carries the encoded
+  awareness update + numeric Yjs clientID; the receiver applies remote updates
+  and prunes a departed editor's state. Surfaces the calm "who's editing"
+  names/count today; the Awareness lives on the doc so a future
+  CollaborationCaret extension (not yet a dependency) renders remote cursors
+  with no rework.
+
+### Channel presence + typing UI (taste)
+
+- `presenceChannel.ts` — transport-agnostic `PresenceChannel` (immediate
+  publish, heartbeat, long-poll loop, graceful degrade, clean stop+leave) + the
+  relay-backed transport.
+- `usePresence.ts` — the React hook. DORMANT for solo (no transport => builds
+  nothing, mirroring the engine co-editing hook), a monotonic-token
+  no-stale-repaint guard (a slow poll for topic/workspace A never repaints B),
+  and self-clearing typing.
+- `PresenceIndicators.tsx` — calm faces ("N here", deduped per user, +overflow)
+  + a subtle "X is typing…" line, both `aria-live="polite"`, rendering NOTHING
+  when alone (no layout thrash).
+- Wired into `ChatsView` (faces in the channel/thread header, typing line above
+  the composer, composer keystrokes drive `setTyping`) behind an optional
+  `collaboration` prop that is null for solo. The final step of exposing relay
+  creds to the renderer to populate that prop is the remaining wiring (handoff).
+
+### Opt-in / solo-dormant proof
+
+With `collaboration === null` the Chats surface constructs no channel, publishes
+nothing, and shows no presence — asserted directly (a solo render never calls
+the transport). The hook returns empty and the indicators render null.
+
+### Two-client-over-relay evidence
+
+`services/sync-relay/src/presence.integration.test.ts` spawns a REAL relay child
+(the `SYNC_RELAY_TEST_AUTH` seam) and proves, over HTTP: client A parks a
+long-poll, client B publishes typing, A wakes and sees B typing, then B's leave
+clears B for A — plus a non-owner gets the generic 404 for another workspace's
+presence.
+
+### Suites
+
+- sync-relay: 67 → 95 (+14 hub unit, +12 server, +2 two-client integration).
+- workspace-engine: 128/5-skip serial — unchanged.
+- desktop: +15 collab-core tests (channel/doc/hook) +2 ChatsView presence =
+  1100 pass / 2 skip. Repo `pnpm -r typecheck` green; sync-relay + desktop
+  builds green; `git diff --check` clean.
+
+### Handoff
+
+The presence primitive (`PresenceHub` scope + the two authenticated routes +
+`createRelayPresenceTransport` + `usePresence`/`bindDocPresence`) is reused
+verbatim by DMs and shared channels: they key the SAME scope by
+`channelWireId`, authorize via the SAME `shareForRecipient` gate (a
+`chat-channel` selector extends `presenceTopicAllowedForShare`), and get
+presence/typing for free. The only remaining live-wiring is exposing the relay
+base URL + bearer to the renderer to populate `ChatsView`'s `collaboration`
+prop (and a matching prop on the editor for doc co-presence).

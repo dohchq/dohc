@@ -1,8 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import {
+  PresenceCapacityError,
+  PresenceHub,
+  presenceScopeKey,
+  type PresenceSnapshot,
+} from "./presence";
+import {
   filterOpForShare,
   parseShareSelectorJson,
+  presenceTopicAllowedForShare,
   validateShareSelector,
   type ShareSelector,
 } from "./shareFilter";
@@ -28,6 +35,11 @@ export interface CreateSyncRelayHandlerOptions {
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   newShareId?: () => string;
+  // The EPHEMERAL awareness transport (presence/typing). Injectable so a
+  // self-hoster's single relay process shares one hub across requests, and so
+  // tests can assert it holds only in-memory state (never a storage row).
+  // Absent => a fresh in-memory hub, which is correct for production too.
+  presence?: PresenceHub;
 }
 
 type SyncRelayRoute =
@@ -42,7 +54,9 @@ type SyncRelayRoute =
   | { route: "share"; shareId: string }
   | { route: "share-revoke"; shareId: string }
   | { route: "share-log"; shareId: string }
-  | { route: "share-blob"; shareId: string; sha256: string };
+  | { route: "share-blob"; shareId: string; sha256: string }
+  | { route: "presence"; workspaceId: string }
+  | { route: "share-presence"; shareId: string };
 
 // Transport cap, deliberately LARGER than the engine's 5 MiB binary-file
 // limit (MAX_VERSIONED_BINARY_FILE_BYTES): text blobs need the headroom and
@@ -56,6 +70,12 @@ export const MAX_OPS_PER_REQUEST = 500;
 export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+// Presence (ephemeral awareness) transport limits.
+export const MAX_PRESENCE_TOPIC_CHARS = 1024;
+export const MAX_CLIENT_ID_CHARS = 128;
+export const MAX_PRESENCE_STATE_BYTES = 8 * 1024;
+export const DEFAULT_PRESENCE_HOLD_MS = 25_000;
+export const MAX_PRESENCE_HOLD_MS = 30_000;
 
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
@@ -71,7 +91,58 @@ export function createSyncRelayHandler({
   resolveUserIdByEmail,
   lookupUserEmail,
   newShareId = () => randomUUID(),
+  presence = new PresenceHub(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+  // Handle a publish (POST) or long-poll (GET) against an already-authorized
+  // presence scope. The actor's user id is the SERVER-DERIVED attribution;
+  // the client-supplied `state` is opaque display data only. `reauthorize`
+  // re-runs the caller's authorization AFTER a long-poll park: a grant revoked
+  // while the poll was parked must fail closed on wake, never return a final
+  // snapshot for a scope the caller no longer has.
+  const respondPresence = async (
+    request: Request,
+    scopeKey: string,
+    userId: string,
+    reauthorize?: () => unknown,
+  ): Promise<Response> => {
+    if (request.method === "POST") {
+      const input = await readJsonObject(request);
+      const clientId = parseString(input.clientId, "clientId", MAX_CLIENT_ID_CHARS);
+      if (input.leave === true) {
+        return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()));
+      }
+      assertPresenceStateSize(input.state);
+      try {
+        return presenceResponse(
+          presence.publish(scopeKey, userId, clientId, input.state ?? null, nowMs()),
+        );
+      } catch (error) {
+        throw presenceCapacityAs429(error);
+      }
+    }
+    if (request.method === "GET") {
+      const url = new URL(request.url);
+      const since = parseCursor(url.searchParams.get("since"));
+      const hold = parsePresenceHold(url.searchParams.get("hold"));
+      let snapshot: PresenceSnapshot;
+      try {
+        snapshot = await presence.wait(scopeKey, since, {
+          holdMs: hold,
+          nowMs: nowMs(),
+          signal: request.signal,
+          actorId: userId,
+        });
+      } catch (error) {
+        throw presenceCapacityAs429(error);
+      }
+      // A 25s park is long enough for a revoke to land mid-poll; re-run the
+      // route's authorization before returning anything.
+      if (reauthorize) await reauthorize();
+      return presenceResponse(snapshot);
+    }
+    throw methodNotAllowed();
+  };
+
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
   // is the same generic 404 the relay uses for absent workspaces, so probing
@@ -256,7 +327,57 @@ export function createSyncRelayHandler({
       }
       if (route.route === "share-blob") throw methodNotAllowed();
 
+      if (route.route === "share-presence") {
+        // Cross-user presence: a recipient joins the ephemeral scope for a
+        // topic their grant exposes. The share is loaded FAIL-CLOSED (generic
+        // 404 for no-grant / revoked / wrong-recipient), and the topic is
+        // gated by the SAME visibility check the durable filter uses, so a
+        // non-member can neither read nor even confirm presence for a
+        // channel/DM they lack a grant for. The scope key resolves to the
+        // granter's workspace, so the owner (workspace route) and recipients
+        // fan into ONE scope and see each other.
+        await claimPendingShares(actor.userId);
+        const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
+        // The share + topic gate, run BEFORE joining AND re-run after a parked
+        // long-poll wakes (respondPresence's reauthorize): a revoke that lands
+        // while a recipient's poll is parked fails closed on wake instead of
+        // leaking one final snapshot.
+        const authorizeShare = () => {
+          const share = shareForRecipient(route.shareId, actor.userId);
+          if (!presenceTopicAllowedForShare(share.selector, topic)) throw notFound();
+          return share;
+        };
+        const share = authorizeShare();
+        // `await` is load-bearing: respondPresence can reject long after this
+        // frame returns (a parked long-poll), and only an awaited rejection
+        // flows through the outer catch into errorResponse.
+        return await respondPresence(
+          request,
+          presenceScopeKey(share.workspaceId, topic),
+          actor.userId,
+          authorizeShare,
+        );
+      }
+
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      if (route.route === "presence") {
+        // The owner's own workspace presence (multi-device co-presence in
+        // their local channels/docs, and the owner side of a shared channel).
+        // Ownership was proven by the gate above; any topic in the owner's own
+        // workspace is theirs to join. Ownership is also re-proven after a
+        // parked long-poll wakes, mirroring the share route's posture.
+        const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
+        // `await` is load-bearing: see the share-presence route above.
+        return await respondPresence(
+          request,
+          presenceScopeKey(route.workspaceId, topic),
+          actor.userId,
+          () => {
+            if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+          },
+        );
+      }
 
       if (route.route === "gc" && request.method === "POST") {
         const result = await storage.collectUnreferencedBlobs(route.workspaceId, {
@@ -507,6 +628,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 3) return { route: "share", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
+    if (parts.length === 4 && parts[3] === "presence") return { route: "share-presence", shareId };
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
       return { route: "share-blob", shareId, sha256: parts[4] };
     }
@@ -524,6 +646,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
+  }
+  if (parts.length === 3 && parts[2] === "presence") {
+    return { route: "presence", workspaceId };
   }
   if (parts.length === 3 && parts[2] === "keys") {
     return { route: "keys", workspaceId };
@@ -576,11 +701,22 @@ function parseWorkspaceId(value: unknown): string {
   return workspaceId;
 }
 
+// C0 controls (including NUL) and DEL. Rejected in every parsed string field:
+// the presence scope key joins workspaceId/topic with NUL separators, so an
+// embedded NUL in one component could collide with a DIFFERENT workspace's
+// scope (workspace "a" + topic "b\0c" vs workspace "a\0b" + topic "c") and
+// leak presence across tenants. Refusing control characters at the parse
+// boundary makes the composite keys unambiguous.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
+
 function parseString(value: unknown, name: string, maxChars: number): string {
   if (typeof value !== "string" || !value.trim() || value !== value.trim()) {
     throw badRequest(`${name} must be a non-empty trimmed string`);
   }
   if (value.length > maxChars) throw badRequest(`${name} is too long`);
+  if (CONTROL_CHARS.test(value)) {
+    throw badRequest(`${name} must not contain control characters`);
+  }
   return value;
 }
 
@@ -707,6 +843,45 @@ function parseLimit(value: string | null): number {
   const limit = Number(value);
   if (!Number.isInteger(limit) || limit < 1) throw badRequest("limit must be a positive integer");
   return Math.min(limit, MAX_LOG_PAGE_SIZE);
+}
+
+function parsePresenceTopic(value: string | null): string {
+  if (value === null) throw badRequest("topic is required");
+  return parseString(value, "topic", MAX_PRESENCE_TOPIC_CHARS);
+}
+
+function parsePresenceHold(value: string | null): number {
+  if (value === null || value === "") return DEFAULT_PRESENCE_HOLD_MS;
+  const hold = Number(value);
+  if (!Number.isInteger(hold) || hold < 0) throw badRequest("hold must be a non-negative integer");
+  return Math.min(hold, MAX_PRESENCE_HOLD_MS);
+}
+
+function assertPresenceStateSize(state: unknown): void {
+  if (state === undefined || state === null) return;
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(state);
+  } catch {
+    throw badRequest("presence state must be JSON-serializable");
+  }
+  if (json === undefined) throw badRequest("presence state must be JSON-serializable");
+  if (Buffer.byteLength(json, "utf8") > MAX_PRESENCE_STATE_BYTES) {
+    throw badRequest("presence state is too large");
+  }
+}
+
+function presenceResponse(snapshot: PresenceSnapshot): Response {
+  return jsonResponse({ ok: true, version: snapshot.version, peers: snapshot.peers });
+}
+
+// Capacity refusals (scope/entry/waiter caps) are a client-visible 429 so a
+// well-behaved client backs off; anything else re-throws unchanged.
+function presenceCapacityAs429(error: unknown): unknown {
+  if (error instanceof PresenceCapacityError) {
+    return new HttpError(429, "presence_capacity", error.message);
+  }
+  return error;
 }
 
 function assertSha256(value: string): void {

@@ -17,6 +17,18 @@ import {
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import { findMentions, type MentionCandidate } from "./mentions";
+import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
+import { usePresence } from "../collab/usePresence";
+import type { PresenceTransport } from "../collab/presenceChannel";
+
+// Multi-user chat presence (MU-C1) is opt-in: only under collaboration
+// (signedIn && relayConnected) is a transport supplied, so a solo/offline user
+// constructs no presence at all. Absent => today's exact single-user Chats.
+export interface ChatPresenceCollaboration {
+  transport: PresenceTransport;
+  clientId: string;
+  displayName: string;
+}
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
 // a read-only "Files" grouping that cross-links to the per-file rail. Built
@@ -58,6 +70,8 @@ function BackHeader(props: {
   testId: string;
   onBack: () => void;
   icon?: React.ReactNode;
+  // Optional calm trailing slot (e.g. presence faces of who else is here).
+  trailing?: React.ReactNode;
 }) {
   return (
     <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
@@ -78,6 +92,7 @@ function BackHeader(props: {
       >
         {props.label}
       </span>
+      {props.trailing}
     </div>
   );
 }
@@ -141,8 +156,11 @@ export function ChatsView(props: {
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
   onOpenAddressed?: (notification: AgentNotification) => void;
+  // Ephemeral presence/typing transport, present ONLY under collaboration.
+  collaboration?: ChatPresenceCollaboration | null;
 }) {
   const { workspaceId } = props;
+  const collaboration = props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
   const agentCandidates = mentionCandidates.filter((candidate) => candidate.kind === "agent");
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
@@ -170,6 +188,24 @@ export function ChatsView(props: {
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Presence topic for the open channel/thread (stable per conversation). A
+  // thread scopes to its OWN id so typing in one thread never bleeds into a
+  // sibling thread of the same channel. A solo user (no collaboration
+  // transport) keeps this dormant.
+  const presenceTopic =
+    nav.level === "channel"
+      ? `chat:channel:${nav.channel.id}`
+      : nav.level === "thread"
+        ? `chat:thread:${nav.thread.id}`
+        : "";
+  const presence = usePresence({
+    enabled: collaboration !== null && presenceTopic !== "",
+    transport: collaboration?.transport ?? null,
+    topic: presenceTopic,
+    clientId: collaboration?.clientId ?? "",
+    displayName: collaboration?.displayName ?? "",
+  });
 
   const refreshOverview = useCallback(async () => {
     const token = ++liveToken.current;
@@ -471,6 +507,7 @@ export function ChatsView(props: {
           label={nav.thread.title}
           testId="chats-thread"
           onBack={goBack}
+          trailing={<PresenceFaces others={presence.others} />}
         />
         <ChatMessageList
           testIdPrefix="chats"
@@ -485,6 +522,7 @@ export function ChatsView(props: {
             onToggle: toggleReaction,
           }}
         />
+        <TypingIndicator names={presence.typingNames} className="px-2" />
         <MentionComposer
           testIdPrefix="chats"
           composerId="chats-composer"
@@ -493,8 +531,14 @@ export function ChatsView(props: {
           placeholder="Write a message…  @ to mention"
           sendLabel="Send message"
           candidates={mentionCandidates}
-          onChange={setComposer}
-          onSend={() => void sendMessage()}
+          onChange={(value) => {
+            setComposer(value);
+            presence.setTyping(value.trim().length > 0);
+          }}
+          onSend={() => {
+            presence.setTyping(false);
+            void sendMessage();
+          }}
         />
       </div>
     );
@@ -512,6 +556,7 @@ export function ChatsView(props: {
           testId="chats-channel"
           onBack={goBack}
           icon={<Hash size={12} aria-hidden className="shrink-0 text-subtle" />}
+          trailing={<PresenceFaces others={presence.others} />}
         />
         <div className="min-h-0 flex-1 overflow-y-auto">
           {threadsLoading ? (
