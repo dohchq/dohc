@@ -208,6 +208,38 @@ export const SYNC_REPLICATION_DDL = `
   )
 `;
 
+// MU-C4 shared channels — the MEMBER side's durable sync state, one row set
+// per chat-channel share this workspace joined. Same lazy additive posture as
+// the other sync tables (NOT in REQUIRED_ENGINE_TABLES): a missing row reads
+// as "nothing pulled/pushed yet".
+//
+// Why the peer table exists: the relay serves a member a FILTERED log, so a
+// source origin's sequence numbers arrive with gaps by construction, while
+// the chat store's applyReplicationOp deliberately fails closed on gaps. The
+// pull therefore renumbers each source origin DENSELY (in relay order, which
+// every member sees identically) under a share-scoped origin id, and this
+// table records both coordinates — the last SOURCE seq consumed (so a
+// crash-refetch is an exact skip, never a double-apply) and the last DENSE
+// seq assigned (so the next apply is exactly acked+1).
+export const SHARED_CHANNEL_SYNC_DDL = `
+  CREATE TABLE IF NOT EXISTS shared_channel_cursors (
+    share_id TEXT PRIMARY KEY,
+    relay_fetch_cursor INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS shared_channel_peers (
+    share_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    applied_origin_seq INTEGER NOT NULL,
+    dense_seq INTEGER NOT NULL,
+    PRIMARY KEY (share_id, origin_id)
+  );
+  CREATE TABLE IF NOT EXISTS shared_channel_push_state (
+    share_id TEXT PRIMARY KEY,
+    scanned_local_seq INTEGER NOT NULL,
+    pushed_share_seq INTEGER NOT NULL
+  )
+`;
+
 // Y.Doc engine content-driver tables are the same lazy additive upgrade
 // (WS-G2-B): existing engine.db files gain them on open without a schema-
 // version bump, and a file with NO ydoc_docs row stays an ordinary text file
@@ -526,6 +558,7 @@ export function initializeOrValidateEngineSchema(
   db.exec(BINARY_BLOBS_DDL);
   db.exec(SECRET_TABLES_DDL);
   db.exec(SYNC_REPLICATION_DDL);
+  db.exec(SHARED_CHANNEL_SYNC_DDL);
   db.exec(ENGINE_YDOC_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
@@ -776,6 +809,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       ${SECRET_TABLES_DDL};
       ${CHAT_CHANNEL_TABLES_DDL};
       ${SYNC_REPLICATION_DDL};
+      ${SHARED_CHANNEL_SYNC_DDL};
       ${ENGINE_YDOC_DDL};
       CREATE INDEX IF NOT EXISTS idx_versions_workspace_name ON versions(workspace_id, name);
       CREATE INDEX IF NOT EXISTS idx_versions_fork ON versions(workspace_id, fork_version_id, fork_moment_id);

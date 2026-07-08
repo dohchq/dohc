@@ -1,0 +1,453 @@
+import { createRequire } from "node:module";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
+import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
+import { createLinkedChatStore } from "./linkedChatStore";
+import { VERSIONED_TEXT_STORE_RELATIVE_PATH } from "./versionedTextStore";
+import {
+  SharedChannelReadOnlyError,
+  fetchSharedChannelInfo,
+  pullSharedChannel,
+  pushSharedChannel,
+} from "./syncSharedChannel";
+import { ShareUnavailableError } from "./syncShareView";
+
+// MU-C4 member-side unit tests against a HAND-ROLLED relay double. The double
+// exists to simulate what the REAL relay must never do (serve another
+// channel's ops, serve non-chat ops) and to capture exactly what the client
+// pushes — the honest end-to-end convergence proof over the real relay lives
+// in services/sync-relay main.integration.test.ts.
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => {
+    prepare(sql: string): {
+      all(...params: unknown[]): Array<Record<string, unknown>>;
+      get(...params: unknown[]): Record<string, unknown> | undefined;
+      run(...params: unknown[]): { changes: number };
+    };
+    close(): void;
+  };
+};
+
+const WORKSPACE = "shared-channel-member-ws" as WorkspaceId;
+const SHARE_ID = "share-chan-1";
+const TOKEN = "token-member";
+const WIRE = "wire-team";
+
+let roots: string[] = [];
+
+beforeEach(() => {
+  roots = [];
+});
+
+afterEach(async () => {
+  closeTrackedEngineDbHandlesForTest();
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function tempRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "dohc-shared-channel-"));
+  roots.push(root);
+  return root;
+}
+
+interface FakeOp {
+  relaySeq: number;
+  originId: string;
+  originSeq: number;
+  opKind: string;
+  payload: Record<string, unknown>;
+  recordedAtMs: number;
+}
+
+class FakeChannelRelay {
+  ops: FakeOp[] = [];
+  ended = false;
+  readOnly = false;
+  appends: Array<{ originId: string; ops: Array<Record<string, unknown>> }> = [];
+  private nextSeq = 1;
+  private originSeqs = new Map<string, number>();
+
+  addOp(originId: string, opKind: string, payload: Record<string, unknown>): void {
+    const originSeq = this.originSeqs.get(originId) ?? 0;
+    this.originSeqs.set(originId, originSeq + 1);
+    this.ops.push({
+      relaySeq: this.nextSeq++,
+      originId,
+      originSeq,
+      opKind,
+      payload,
+      recordedAtMs: 1000 + this.nextSeq,
+    });
+  }
+
+  fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    const parsed = new URL(href);
+    const auth = new Headers(init?.headers).get("authorization");
+    if (auth !== `Bearer ${TOKEN}`) {
+      return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    }
+    const notFound = () =>
+      Response.json({ ok: false, error: "not found", code: "not_found" }, { status: 404 });
+    if (this.ended) return notFound();
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "sync" || parts[1] !== "shares" || parts[2] !== SHARE_ID) return notFound();
+    if (parts.length === 3) {
+      return Response.json({
+        ok: true,
+        shareId: SHARE_ID,
+        granterUserId: "granter",
+        granterEmail: "granter@dohc.test",
+        selector: {
+          kind: "chat-channel",
+          channelWireId: WIRE,
+          access: this.readOnly ? "read-only" : "read-write",
+        },
+        createdAtMs: 42,
+      });
+    }
+    if (parts.length === 4 && parts[3] === "log" && (init?.method ?? "GET") === "POST") {
+      if (this.readOnly) {
+        return Response.json(
+          { ok: false, error: "read only", code: "share_read_only" },
+          { status: 403 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        originId: string;
+        ops: Array<Record<string, unknown>>;
+      };
+      this.appends.push(body);
+      // Mirror the real relay: appended ops re-enter the served log under the
+      // share-namespaced origin.
+      for (const op of body.ops) {
+        this.ops.push({
+          relaySeq: this.nextSeq++,
+          originId: `share:${SHARE_ID}:${body.originId}`,
+          originSeq: Number(op.originSeq),
+          opKind: String(op.opKind),
+          payload: op.payload as Record<string, unknown>,
+          recordedAtMs: Number(op.recordedAtMs),
+        });
+      }
+      return Response.json({
+        ok: true,
+        accepted: body.ops.length,
+        inserted: body.ops.length,
+        skipped: 0,
+        currentMaxOriginSeq: body.ops.length - 1,
+      });
+    }
+    if (parts.length === 4 && parts[3] === "log") {
+      const since = Number(parsed.searchParams.get("since") ?? 0);
+      const limit = Number(parsed.searchParams.get("limit") ?? 100);
+      const rows = this.ops.filter((op) => op.relaySeq > since).slice(0, limit);
+      const last = rows[rows.length - 1];
+      return Response.json({
+        ok: true,
+        ops: rows,
+        nextCursor: last?.relaySeq ?? since,
+        hasMore: rows.length === limit && this.ops.some((op) => op.relaySeq > (last?.relaySeq ?? since)),
+      });
+    }
+    return notFound();
+  };
+}
+
+function relayFor(fake: FakeChannelRelay) {
+  return { baseUrl: "http://relay.test", token: TOKEN, fetch: fake.fetch };
+}
+
+function seedGrantedChannel(fake: FakeChannelRelay): void {
+  fake.addOp("origin-owner", "chat.channel.create", {
+    channelId: "chan-owner",
+    name: "team",
+    slug: "team",
+    kind: "channel",
+    createdAtMs: 1,
+    wireId: WIRE,
+  });
+  fake.addOp("origin-owner", "chat.thread.create", {
+    threadId: "thread-team-1",
+    title: "",
+    createdAtMs: 1,
+    channelSlug: "team",
+    channelWireId: WIRE,
+  });
+  fake.addOp("origin-owner", "chat.message.append", {
+    messageId: "msg-owner-1",
+    threadId: "thread-team-1",
+    authorKind: "human",
+    authorDisplayName: "Owner",
+    authorUserId: "granter",
+    body: "welcome",
+    createdAtMs: 1,
+  });
+}
+
+async function teamMessages(root: string): Promise<string[]> {
+  const chats = createLinkedChatStore(root);
+  try {
+    const channels = await chats.listChannels({ workspaceId: WORKSPACE });
+    const team = channels.find((channel) => channel.slug === "team");
+    if (!team) return [];
+    const threads = await chats.listChannelThreads({ workspaceId: WORKSPACE, channelId: team.id });
+    const rows: string[] = [];
+    for (const summary of threads) {
+      const messages = await chats.listMessages({ workspaceId: WORKSPACE, threadId: summary.thread.id });
+      rows.push(...messages.map((message) => `${message.id}:${message.body}`));
+    }
+    return rows.sort();
+  } finally {
+    await chats.close();
+  }
+}
+
+describe("pullSharedChannel", () => {
+  it("replays the granted channel and fails closed on everything a honest relay would never serve", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    // A HOSTILE/BUGGY relay slipping foreign content into the share stream:
+    // another channel, a foreign thread, a foreign-thread message, a file op,
+    // an unknown kind. The client-side scope gate must drop every one.
+    fake.addOp("origin-owner", "chat.channel.create", {
+      channelId: "chan-leak",
+      name: "SENTINEL-other-channel",
+      slug: "other",
+      kind: "channel",
+      createdAtMs: 1,
+      wireId: "wire-other",
+    });
+    fake.addOp("origin-owner", "chat.thread.create", {
+      threadId: "thread-leak-1",
+      title: "SENTINEL-other-thread",
+      createdAtMs: 1,
+      channelSlug: "other",
+      channelWireId: "wire-other",
+    });
+    fake.addOp("origin-owner", "chat.message.append", {
+      messageId: "msg-leak-1",
+      threadId: "thread-leak-1",
+      authorKind: "human",
+      authorDisplayName: "Owner",
+      body: "SENTINEL-other-message",
+      createdAtMs: 1,
+    });
+    fake.addOp("origin-owner", "moment.append", {
+      versionId: "main",
+      path: "docs/SENTINEL-file.md",
+      operation: "write",
+    });
+    fake.addOp("origin-owner", "made.up.kind", { threadId: "thread-team-1" });
+
+    const root = await tempRoot();
+    const info = await fetchSharedChannelInfo({ relay: relayFor(fake), shareId: SHARE_ID });
+    expect(info).toMatchObject({ channelWireId: WIRE, access: "read-write" });
+    const result = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay: relayFor(fake),
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(result.applied).toBe(3);
+    expect(result.skipped).toBe(5);
+
+    expect(await teamMessages(root)).toEqual(["msg-owner-1:welcome"]);
+    const chats = createLinkedChatStore(root);
+    try {
+      const channels = await chats.listChannels({ workspaceId: WORKSPACE });
+      expect(channels.map((channel) => channel.slug)).toEqual(["team"]);
+      const threads = await chats.listThreads({ workspaceId: WORKSPACE });
+      expect(threads.map((thread) => thread.id)).toEqual(["thread-team-1"]);
+    } finally {
+      await chats.close();
+    }
+  });
+
+  it("replays idempotently across a crash-refetch overlap (cursor reset)", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+    const first = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(first.applied).toBe(3);
+
+    // Simulate the crash-before-cursor-commit window: the cursor rewinds, the
+    // same ops re-arrive, and the per-origin applied_origin_seq skip must
+    // make the replay an exact no-op (no duplicate messages, no new journal
+    // rows under the share origin).
+    const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+    try {
+      db.prepare("UPDATE shared_channel_cursors SET relay_fetch_cursor = 0 WHERE share_id = ?").run(SHARE_ID);
+    } finally {
+      db.close();
+    }
+    const second = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(second.applied).toBe(0);
+    expect(second.skipped).toBe(3);
+    expect(await teamMessages(root)).toEqual(["msg-owner-1:welcome"]);
+  });
+
+  it("surfaces revocation as ShareUnavailableError and leaves the local copy readable", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+    await pullSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE });
+    fake.ended = true;
+    await expect(
+      pullSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE }),
+    ).rejects.toBeInstanceOf(ShareUnavailableError);
+    expect(await teamMessages(root)).toEqual(["msg-owner-1:welcome"]);
+  });
+
+  it("refuses to open a path share as a channel", async () => {
+    const fake = new FakeChannelRelay();
+    const pathInfoFetch = async (): Promise<Response> =>
+      Response.json({
+        ok: true,
+        shareId: SHARE_ID,
+        granterUserId: "granter",
+        selector: { paths: ["docs"], versionId: null },
+        createdAtMs: 42,
+      });
+    await expect(
+      fetchSharedChannelInfo({
+        relay: { baseUrl: "http://relay.test", token: TOKEN, fetch: pathInfoFetch },
+        shareId: SHARE_ID,
+      }),
+    ).rejects.toBeInstanceOf(ShareUnavailableError);
+    expect(fake.appends).toEqual([]);
+  });
+});
+
+describe("pushSharedChannel", () => {
+  it("pushes ONLY the channel's locally-authored ops, densely renumbered, and skips its own echoes on the next pull", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+    await pullSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE });
+
+    // Local activity: a reply in the shared thread (in scope), plus an
+    // UNRELATED private channel with its own thread + message (out of scope).
+    const chats = createLinkedChatStore(root);
+    try {
+      await chats.sendMessage({
+        workspaceId: WORKSPACE,
+        threadId: "thread-team-1",
+        author: { kind: "human", displayName: "Member" },
+        authorUserId: "member",
+        body: "my reply",
+      });
+      const personal = await chats.createChannel({ workspaceId: WORKSPACE, name: "personal" });
+      await chats.startChannelThread({
+        workspaceId: WORKSPACE,
+        channelId: personal.id,
+        author: { kind: "human", displayName: "Member" },
+        body: "PRIVATE-note to self",
+      });
+    } finally {
+      await chats.close();
+    }
+
+    const pushed = await pushSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(pushed.pushed).toBe(1);
+    expect(fake.appends).toHaveLength(1);
+    const batch = fake.appends[0]!;
+    expect(batch.ops).toHaveLength(1);
+    expect(batch.ops[0]).toMatchObject({
+      originSeq: 0,
+      opKind: "chat.message.append",
+      payload: { messageId: expect.any(String), threadId: "thread-team-1", body: "my reply" },
+    });
+    expect(JSON.stringify(batch)).not.toContain("PRIVATE-note");
+
+    // A second local send continues the DENSE share sequence (0, then 1)
+    // even though the local journal interleaved out-of-scope ops between.
+    const chats2 = createLinkedChatStore(root);
+    try {
+      await chats2.sendMessage({
+        workspaceId: WORKSPACE,
+        threadId: "thread-team-1",
+        author: { kind: "human", displayName: "Member" },
+        authorUserId: "member",
+        body: "second reply",
+      });
+    } finally {
+      await chats2.close();
+    }
+    await pushSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE });
+    expect(fake.appends[1]!.ops[0]).toMatchObject({ originSeq: 1, payload: { body: "second reply" } });
+
+    // The relay now serves this member's own appends back; the next pull
+    // must skip them (no duplicate messages, applied 0).
+    const echoPull = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(echoPull.applied).toBe(0);
+    const bodies = (await teamMessages(root)).map((row) => row.split(":")[1]);
+    expect(bodies.sort()).toEqual(["my reply", "second reply", "welcome"]);
+  });
+
+  it("surfaces a read-only refusal as SharedChannelReadOnlyError without losing local ops", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+    await pullSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE });
+    const chats = createLinkedChatStore(root);
+    try {
+      await chats.sendMessage({
+        workspaceId: WORKSPACE,
+        threadId: "thread-team-1",
+        author: { kind: "human", displayName: "Member" },
+        body: "should be refused",
+      });
+    } finally {
+      await chats.close();
+    }
+    fake.readOnly = true;
+    await expect(
+      pushSharedChannel({ rootDir: root, workspaceId: WORKSPACE, relay, shareId: SHARE_ID, channelWireId: WIRE }),
+    ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
+    // Nothing was recorded as pushed: a later read-write flip re-sends it.
+    fake.readOnly = false;
+    const retry = await pushSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(retry.pushed).toBe(1);
+  });
+});

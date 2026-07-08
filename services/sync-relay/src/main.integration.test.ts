@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  ShareUnavailableError,
+  SharedChannelReadOnlyError,
   VERSIONED_TEXT_STORE_RELATIVE_PATH,
   claimRelayWorkspace,
   createLinkedChatStore,
@@ -15,8 +17,11 @@ import {
   createYDocEngineDriver,
   type YDocSession,
   downloadKeyEnvelope,
+  fetchSharedChannelInfo,
   installWorkspaceDataKey,
+  pullSharedChannel,
   pullWorkspaceFromRelay,
+  pushSharedChannel,
   pushWorkspaceToRelay,
   readWorkspaceDataKeyForEnrollment,
   unwrapWorkspaceDataKey,
@@ -1183,6 +1188,299 @@ describe("sync relay main process", () => {
     });
     expect(honest.status).toBe(200);
     expect(await logLength()).toBe(2);
+  });
+
+  // MU-C4 shared channels end-to-end over a LIVE relay child: an owner and
+  // two read-write members converge on one channel through the bidirectional
+  // share path; a read-only member reads but cannot append; a non-member is
+  // denied byte-identically to a share that never existed; the owner's OTHER
+  // channel never leaks into any member's store; revocation closes a member's
+  // view cleanly while their local copy stays readable.
+  it("converges a shared channel across owner and two members over a live relay while isolation holds", async (context) => {
+    const relayRoot = await tempRoot("relay-shared-channel");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const owner = "user-owner";
+    const memberA = "user-member-a";
+    const memberB = "user-member-b";
+    const reader = "user-reader";
+    const stranger = "user-stranger";
+    const wsOwner = "workspace-shared-channel";
+    const relayFor = (userId: string) => ({ baseUrl, token: `test:${userId}` });
+    const human = (displayName: string) => ({ kind: "human" as const, displayName });
+
+    // The owner's workspace: a "team" channel to share and a "leadership"
+    // channel with sentinel content that must never cross the share.
+    expect((await postJsonAs(baseUrl, owner, "/sync/workspaces", { workspaceId: wsOwner })).status).toBe(200);
+    const ownerRoot = await tempRoot("shared-owner");
+    const ownerChats = createLinkedChatStore(ownerRoot);
+    let wireId: string;
+    let teamThreadId: string;
+    try {
+      const team = await ownerChats.createChannel({ workspaceId: wsOwner, name: "team" });
+      wireId = team.id; // a locally created channel's wire identity is its own id
+      const started = await ownerChats.startChannelThread({
+        workspaceId: wsOwner,
+        channelId: team.id,
+        author: human("Owner"),
+        authorUserId: owner,
+        body: "welcome to the shared channel",
+      });
+      teamThreadId = started.thread.id;
+      const leadership = await ownerChats.createChannel({ workspaceId: wsOwner, name: "leadership" });
+      await ownerChats.startChannelThread({
+        workspaceId: wsOwner,
+        channelId: leadership.id,
+        author: human("Owner"),
+        authorUserId: owner,
+        body: "SENTINEL-leadership-plan",
+      });
+    } finally {
+      await ownerChats.close();
+    }
+    await pushWorkspaceToRelay({ rootDir: ownerRoot, workspaceId: wsOwner, relay: relayFor(owner) });
+
+    // Grants: read-write for A and B (the default), read-only for the reader.
+    const createShare = async (recipient: string, access?: string): Promise<string> => {
+      const response = await postJsonAs(baseUrl, owner, `/sync/${wsOwner}/shares`, {
+        recipientUserId: recipient,
+        channelWireId: wireId,
+        ...(access ? { access } : {}),
+      });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { shareId: string }).shareId;
+    };
+    const shareA = await createShare(memberA);
+    const shareB = await createShare(memberB);
+    const shareR = await createShare(reader, "read-only");
+
+    // Member A joins: info -> pull -> the channel materializes locally.
+    const memberARoot = await tempRoot("shared-member-a");
+    const wsA = "workspace-member-a";
+    const infoA = await fetchSharedChannelInfo({ relay: relayFor(memberA), shareId: shareA });
+    expect(infoA).toMatchObject({ channelWireId: wireId, access: "read-write" });
+    await pullSharedChannel({
+      rootDir: memberARoot,
+      workspaceId: wsA,
+      relay: relayFor(memberA),
+      shareId: shareA,
+      channelWireId: wireId,
+    });
+
+    const channelMessages = async (root: string, workspaceId: string): Promise<string[]> => {
+      const chats = createLinkedChatStore(root);
+      try {
+        const channels = await chats.listChannels({ workspaceId });
+        const team = channels.find((channel) => channel.slug === "team");
+        if (!team) return [];
+        const threads = await chats.listChannelThreads({ workspaceId, channelId: team.id });
+        const rows: string[] = [];
+        for (const summary of threads) {
+          const messages = await chats.listMessages({ workspaceId, threadId: summary.thread.id });
+          rows.push(
+            ...messages.map(
+              (message) =>
+                `${summary.thread.id}|${message.author.displayName}|${message.body}|${message.authorUserId ?? "-"}`,
+            ),
+          );
+        }
+        return rows.sort();
+      } finally {
+        await chats.close();
+      }
+    };
+    const channelSlugs = async (root: string, workspaceId: string): Promise<string[]> => {
+      const chats = createLinkedChatStore(root);
+      try {
+        return (await chats.listChannels({ workspaceId })).map((channel) => channel.slug).sort();
+      } finally {
+        await chats.close();
+      }
+    };
+
+    expect(await channelMessages(memberARoot, wsA)).toEqual([
+      `${teamThreadId}|Owner|welcome to the shared channel|${owner}`,
+    ]);
+    // ISOLATION: the owner's other channel never reached member A.
+    expect(await channelSlugs(memberARoot, wsA)).toEqual(["team"]);
+    expect(JSON.stringify(await channelMessages(memberARoot, wsA))).not.toContain("SENTINEL");
+
+    // Member A replies in the owner's thread and starts a thread of their own.
+    const chatsA = createLinkedChatStore(memberARoot);
+    try {
+      await chatsA.sendMessage({
+        workspaceId: wsA,
+        threadId: teamThreadId,
+        author: human("Member A"),
+        authorUserId: memberA,
+        body: "hello from member A",
+      });
+      const teamA = (await chatsA.listChannels({ workspaceId: wsA })).find(
+        (channel) => channel.slug === "team",
+      )!;
+      await chatsA.startChannelThread({
+        workspaceId: wsA,
+        channelId: teamA.id,
+        author: human("Member A"),
+        authorUserId: memberA,
+        body: "a thread started by a member",
+      });
+    } finally {
+      await chatsA.close();
+    }
+    const pushedA = await pushSharedChannel({
+      rootDir: memberARoot,
+      workspaceId: wsA,
+      relay: relayFor(memberA),
+      shareId: shareA,
+      channelWireId: wireId,
+    });
+    expect(pushedA.pushed).toBe(3); // message + thread.create + first message
+
+    // Member B joins fresh and sees the owner's AND member A's messages.
+    const memberBRoot = await tempRoot("shared-member-b");
+    const wsB = "workspace-member-b";
+    await pullSharedChannel({
+      rootDir: memberBRoot,
+      workspaceId: wsB,
+      relay: relayFor(memberB),
+      shareId: shareB,
+      channelWireId: wireId,
+    });
+    const chatsB = createLinkedChatStore(memberBRoot);
+    try {
+      await chatsB.sendMessage({
+        workspaceId: wsB,
+        threadId: teamThreadId,
+        author: human("Member B"),
+        authorUserId: memberB,
+        body: "hello from member B",
+      });
+    } finally {
+      await chatsB.close();
+    }
+    await pushSharedChannel({
+      rootDir: memberBRoot,
+      workspaceId: wsB,
+      relay: relayFor(memberB),
+      shareId: shareB,
+      channelWireId: wireId,
+    });
+
+    // The OWNER converges through their normal own-bucket pull (member ops
+    // landed there under share-namespaced origins)...
+    await pullAndCommit({ rootDir: ownerRoot, workspaceId: wsOwner, relay: relayFor(owner) });
+    // ...and each member converges through another share pull (their own
+    // echoes skip; the other member's ops replay).
+    await pullSharedChannel({ rootDir: memberARoot, workspaceId: wsA, relay: relayFor(memberA), shareId: shareA, channelWireId: wireId });
+    await pullSharedChannel({ rootDir: memberBRoot, workspaceId: wsB, relay: relayFor(memberB), shareId: shareB, channelWireId: wireId });
+
+    const ownerView = await channelMessages(ownerRoot, wsOwner);
+    expect(ownerView).toHaveLength(4);
+    expect(ownerView).toEqual(await channelMessages(memberARoot, wsA));
+    expect(ownerView).toEqual(await channelMessages(memberBRoot, wsB));
+    // A second pull with nothing new applies nothing (idempotent replay).
+    const idle = await pullSharedChannel({ rootDir: memberARoot, workspaceId: wsA, relay: relayFor(memberA), shareId: shareA, channelWireId: wireId });
+    expect(idle.applied).toBe(0);
+
+    // READ-ONLY member: reads flow, appends are refused.
+    const readerRoot = await tempRoot("shared-reader");
+    const wsR = "workspace-reader";
+    await pullSharedChannel({
+      rootDir: readerRoot,
+      workspaceId: wsR,
+      relay: relayFor(reader),
+      shareId: shareR,
+      channelWireId: wireId,
+    });
+    expect(await channelMessages(readerRoot, wsR)).toEqual(ownerView);
+    const chatsR = createLinkedChatStore(readerRoot);
+    try {
+      await chatsR.sendMessage({
+        workspaceId: wsR,
+        threadId: teamThreadId,
+        author: human("Reader"),
+        authorUserId: reader,
+        body: "read-only member tries to post",
+      });
+    } finally {
+      await chatsR.close();
+    }
+    await expect(
+      pushSharedChannel({ rootDir: readerRoot, workspaceId: wsR, relay: relayFor(reader), shareId: shareR, channelWireId: wireId }),
+    ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
+    // The refused message never reached the owner.
+    await pullAndCommit({ rootDir: ownerRoot, workspaceId: wsOwner, relay: relayFor(owner) });
+    expect(JSON.stringify(await channelMessages(ownerRoot, wsOwner))).not.toContain(
+      "read-only member tries to post",
+    );
+
+    // NON-MEMBER isolation: every probe is byte-identical to "never existed".
+    const denial = async (userId: string, path: string, init: RequestInit = {}): Promise<string> => {
+      const response = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        headers: {
+          authorization: `Bearer test:${userId}`,
+          "content-type": "application/json",
+          ...(init.headers as Record<string, string> | undefined),
+        },
+      });
+      expect(response.status).toBe(404);
+      return `${response.status}:${await response.text()}`;
+    };
+    const missingRead = await denial(stranger, "/sync/shares/share-never/log?since=0");
+    expect(await denial(stranger, `/sync/shares/${shareA}/log?since=0`)).toBe(missingRead);
+    expect(await denial(owner, `/sync/shares/${shareA}/log?since=0`)).toBe(missingRead);
+    const appendInit: RequestInit = {
+      method: "POST",
+      body: JSON.stringify({ originId: "origin-x", ops: [] }),
+    };
+    const missingAppend = await denial(stranger, "/sync/shares/share-never/log", appendInit);
+    expect(await denial(stranger, `/sync/shares/${shareA}/log`, appendInit)).toBe(missingAppend);
+
+    // REVOCATION: member B's next pull fails closed; their local copy stays.
+    expect(
+      (await postJsonAs(baseUrl, owner, `/sync/shares/${shareB}/revoke`, {})).status,
+    ).toBe(200);
+    const beforeRevoke = await channelMessages(memberBRoot, wsB);
+    await expect(
+      pullSharedChannel({ rootDir: memberBRoot, workspaceId: wsB, relay: relayFor(memberB), shareId: shareB, channelWireId: wireId }),
+    ).rejects.toBeInstanceOf(ShareUnavailableError);
+    // A push with pending local ops fails closed too (a push with nothing to
+    // send never even reaches the network, so seed one more local message).
+    const chatsB2 = createLinkedChatStore(memberBRoot);
+    try {
+      await chatsB2.sendMessage({
+        workspaceId: wsB,
+        threadId: teamThreadId,
+        author: human("Member B"),
+        authorUserId: memberB,
+        body: "posted after revocation",
+      });
+    } finally {
+      await chatsB2.close();
+    }
+    await expect(
+      pushSharedChannel({ rootDir: memberBRoot, workspaceId: wsB, relay: relayFor(memberB), shareId: shareB, channelWireId: wireId }),
+    ).rejects.toBeInstanceOf(ShareUnavailableError);
+    // The local copy stays readable: the replayed history plus their own
+    // orphaned post — but nothing new arrives and nothing leaves.
+    expect(await channelMessages(memberBRoot, wsB)).toEqual(
+      [...beforeRevoke, `${teamThreadId}|Member B|posted after revocation|${memberB}`].sort(),
+    );
+    await pullAndCommit({ rootDir: ownerRoot, workspaceId: wsOwner, relay: relayFor(owner) });
+    expect(JSON.stringify(await channelMessages(ownerRoot, wsOwner))).not.toContain(
+      "posted after revocation",
+    );
   });
 
   // Gate finding: the transport must cap request bodies AT THE STREAM. A
