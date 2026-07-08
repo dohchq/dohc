@@ -779,10 +779,11 @@ describe("sync relay client", () => {
       relaySeq: relay.nextRelaySeq++,
     } as SyncReplicationEnvelope & { relaySeq: number });
 
-    // The pass fails closed (the engine refuses the malformed envelope)…
+    // The pass fails closed on the ENVELOPE VALIDATION specifically (not some
+    // incidental error): the engine's apply refuses the malformed envelope.
     await expect(
       pullWorkspaceFromRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Replication envelope is invalid");
     // …and no pushed watermark was persisted for the origin — a bogus seq can
     // never make later legitimate ops look already pushed.
     const db = openEngineDb(owner);
