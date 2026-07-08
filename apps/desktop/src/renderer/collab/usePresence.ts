@@ -93,7 +93,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     return () => {
       cancelled = true;
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
-      channel.stop();
+      void channel.stop();
       if (channelRef.current === channel) channelRef.current = null;
       setPeers(EMPTY_PEERS);
     };
@@ -107,7 +107,12 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     () =>
       others
         .filter((peer) => peerState(peer).typing === true)
-        .map((peer) => peerState(peer).displayName ?? "Someone"),
+        .map((peer) => {
+          // Peer state is network payload; only a real string may reach the
+          // `string[]` contract (same guard as PresenceIndicators).
+          const name = peerState(peer).displayName;
+          return typeof name === "string" && name.trim() ? name : "Someone";
+        }),
     [others],
   );
 

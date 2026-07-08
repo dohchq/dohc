@@ -1,3 +1,4 @@
+import { Awareness, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { bindDocPresence } from "./docPresence";
@@ -113,5 +114,64 @@ describe("bindDocPresence", () => {
     expect(names).not.toContain("Bob");
 
     a.destroy();
+  });
+
+  it("tolerates malformed peer state: bad yc/update are skipped, non-string names never reach onPeers", async () => {
+    // A rogue peer publishes a REAL Yjs awareness update whose user.name is an
+    // object — applyAwarenessUpdate accepts it, so the name filter is the only
+    // thing keeping the `string[]` contract of onPeers.
+    const rogueDoc = new Y.Doc();
+    const rogueAwareness = new Awareness(rogueDoc);
+    rogueAwareness.setLocalState({ user: { name: { evil: true }, color: "#000" } });
+    const rogueUpdate = Buffer.from(
+      encodeAwarenessUpdate(rogueAwareness, [rogueAwareness.clientID]),
+    ).toString("base64");
+
+    const malformedPeers: PresencePeer[] = [
+      // Non-numeric yc / non-string update: skipped entirely.
+      { userId: "p1", clientId: "p1", state: { yc: "not-a-number", update: 42 }, updatedAtMs: 0 },
+      // Garbage update payload: applyAwarenessUpdate throws, caught locally.
+      { userId: "p2", clientId: "p2", state: { yc: 7, update: "%%%not-base64%%%" }, updatedAtMs: 0 },
+      // Null state: skipped.
+      { userId: "p3", clientId: "p3", state: null, updatedAtMs: 0 },
+      // Valid update, but the advertised name is not a string.
+      { userId: "p4", clientId: "p4", state: { yc: rogueAwareness.clientID, update: rogueUpdate }, updatedAtMs: 0 },
+    ];
+
+    const onPeers = vi.fn();
+    const doc = new Y.Doc();
+    const binding = bindDocPresence({
+      doc,
+      transport: {
+        async publish() {
+          return { version: 1, peers: malformedPeers };
+        },
+        async leave() {},
+        poll: ({ signal }) =>
+          new Promise((resolve) => {
+            signal.addEventListener("abort", () => resolve({ version: 1, peers: [] }), {
+              once: true,
+            });
+          }),
+      },
+      topic: "notes/a.md",
+      clientId: "me",
+      user: { name: "Me", color: "#fff" },
+      onPeers,
+    });
+    await flush();
+
+    // Nothing threw, and every reported name is a real string (the rogue
+    // object-name peer is represented in awareness but never in names).
+    expect(onPeers).toHaveBeenCalled();
+    for (const call of onPeers.mock.calls) {
+      const names = call[0] as unknown[];
+      expect(names.every((name) => typeof name === "string")).toBe(true);
+      expect(names).not.toContainEqual({ evil: true });
+    }
+
+    binding.destroy();
+    rogueAwareness.destroy();
+    rogueDoc.destroy();
   });
 });

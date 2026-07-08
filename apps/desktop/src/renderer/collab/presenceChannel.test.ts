@@ -146,7 +146,66 @@ describe("createPresenceChannel", () => {
     });
     await flush();
     // No unhandled rejection; stopping is clean.
-    expect(() => channel.stop()).not.toThrow();
+    expect(() => void channel.stop()).not.toThrow();
+  });
+
+  it("stop() during a poll-retry sleep terminates the loop instead of leaking it", async () => {
+    // Relay outage: every poll fails, so the loop parks in its retry sleep.
+    let polls = 0;
+    const transport: PresenceTransport = {
+      publish: async () => ({ version: 1, peers: [] }),
+      leave: async () => undefined,
+      poll: async () => {
+        polls += 1;
+        throw new Error("relay down");
+      },
+    };
+    const channel = createPresenceChannel({
+      transport,
+      topic: "general",
+      clientId: "c1",
+      initialState: {},
+      onPeers: vi.fn(),
+      // A retry window far longer than the test: only stop() can release it.
+      retryMs: 60_000,
+    });
+    await flush(); // the failed poll has parked the loop in its retry sleep
+    expect(polls).toBe(1);
+    // stop() must resolve the sleeping promise so the loop observes `stopped`
+    // and RETURNS — before the fix it dangled until the 60s timer was GC'd.
+    const outcome = await Promise.race([
+      channel.stop().then(() => "terminated"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("leaked"), 250)),
+    ]);
+    expect(outcome).toBe("terminated");
+    expect(polls).toBe(1); // and it never polled again after stop
+  });
+
+  it("stop() tolerates a transport.leave that rejects (no unhandled rejection)", async () => {
+    const transport: PresenceTransport = {
+      publish: async () => ({ version: 1, peers: [] }),
+      leave: async () => {
+        throw new Error("leave failed");
+      },
+      poll: (input) =>
+        new Promise((resolve) => {
+          input.signal.addEventListener(
+            "abort",
+            () => resolve({ version: 0, peers: [] }),
+            { once: true },
+          );
+        }),
+    };
+    const channel = createPresenceChannel({
+      transport,
+      topic: "general",
+      clientId: "c1",
+      initialState: {},
+      onPeers: vi.fn(),
+    });
+    await flush();
+    await expect(channel.stop()).resolves.toBeUndefined();
+    await flush(); // any unhandled rejection would fail the test run here
   });
 });
 

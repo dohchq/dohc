@@ -108,8 +108,10 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
     const names = new Set<string>();
     for (const [clientId, remoteState] of awareness.getStates()) {
       if (clientId === awareness.clientID) continue;
-      const user = (remoteState as { user?: DocPresenceUser }).user;
-      if (user?.name) names.add(user.name);
+      // Remote awareness state is attacker/bug-controllable network payload;
+      // only a real string may enter the `string[]` contract of onPeers.
+      const user = (remoteState as { user?: Partial<DocPresenceUser> }).user;
+      if (typeof user?.name === "string" && user.name.trim()) names.add(user.name);
     }
     options.onPeers([...names]);
   };
@@ -137,7 +139,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
     awareness,
     destroy() {
       awareness.off("update", onLocalChange);
-      channel?.stop();
+      void channel?.stop();
       channel = null;
       // Clear the local awareness entry (peers prune us on their next poll).
       removeAwarenessStates(awareness, [awareness.clientID], "presence-local");

@@ -43,7 +43,7 @@ function Harness(props: {
   transport: PresenceTransport | null;
   topic: string;
 }) {
-  const { others, typingNames } = usePresence({
+  const { others, typingNames, setTyping } = usePresence({
     enabled: props.enabled,
     transport: props.transport,
     topic: props.topic,
@@ -55,6 +55,9 @@ function Harness(props: {
       <PresenceFaces others={others} />
       <TypingIndicator names={typingNames} />
       <span data-testid="count">{others.length}</span>
+      <button data-testid="start-typing" onClick={() => setTyping(true)}>
+        type
+      </button>
     </div>
   );
 }
@@ -92,23 +95,47 @@ describe("usePresence gating + guard", () => {
   });
 
   it("does not repaint after a topic switch (no-stale guard)", async () => {
-    const t = pushableTransport();
-    const view = render(<Harness enabled transport={t.transport} topic="A" />);
+    // Two SEPARATE transports so a late snapshot from the old (A) channel is
+    // distinguishable from anything the live (B) channel could deliver — the
+    // product invariant: a slow response for A must never repaint B.
+    const tA = pushableTransport();
+    const tB = pushableTransport();
+    const view = render(<Harness enabled transport={tA.transport} topic="A" />);
     await flush();
-    // Switch to topic B; a late snapshot from A's channel must not leak in.
-    view.rerender(<Harness enabled transport={t.transport} topic="B" />);
+    view.rerender(<Harness enabled transport={tB.transport} topic="B" />);
     await flush();
     act(() => {
-      // This resolves the OLD (aborted) channel's waiter; it must be ignored.
-      t.set([{ userId: "ghost", clientId: "cg", state: { displayName: "Ghost" }, updatedAtMs: 0 }]);
+      // Late resolution of the OLD channel's in-flight poll: the ghost only
+      // renders if the stale callback slipped past the guard.
+      tA.set([
+        { userId: "ghost", clientId: "cg", state: { displayName: "Ghost" }, updatedAtMs: 0 },
+      ]);
     });
     await flush();
-    // The new channel started fresh; the ghost from the old topic's race is
-    // only shown if the guard failed. Here both channels share the fake
-    // transport, so the NEW channel legitimately sees the peer — the guard we
-    // assert is that the OLD channel's callback no longer fires. Verify no
-    // crash and the component reflects the current channel only.
-    expect(screen.getByTestId("count")).toBeTruthy();
+    expect(screen.queryByLabelText("Ghost is here")).toBeNull();
+    expect(screen.getByTestId("count").textContent).toBe("0");
+  });
+
+  it("auto-clears typing after the idle window even if the caller forgets", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = pushableTransport();
+      render(<Harness enabled transport={t.transport} topic="general" />);
+      await flush();
+      act(() => {
+        screen.getByTestId("start-typing").click();
+      });
+      await flush();
+      expect(t.publishes.at(-1)).toMatchObject({ typing: true });
+      // The caller never calls setTyping(false); the idle window (5s default)
+      // must publish the clear on its own.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(t.publishes.at(-1)).toMatchObject({ typing: false });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("leaves on unmount (disconnect clears presence)", async () => {

@@ -118,8 +118,10 @@ export interface PresenceChannel {
   // Update the local state and publish it immediately (e.g. typing on/off).
   setState(state: unknown): void;
   // Stop heartbeating + polling, abort any in-flight poll, and best-effort
-  // leave. Idempotent. After this, onPeers never fires again.
-  stop(): void;
+  // leave. Idempotent. After this, onPeers never fires again. Resolves once
+  // the internal poll loop has fully exited (including a pending retry
+  // sleep), so teardown is deterministic and nothing dangles.
+  stop(): Promise<void>;
 }
 
 const DEFAULT_HEARTBEAT_MS = 10_000;
@@ -135,7 +137,11 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   let version = 0;
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Resolver for the retry sleep, so stop() can release a loop that is
+  // waiting out a relay outage instead of leaving it suspended forever.
+  let retryResolve: (() => void) | null = null;
   let pollController: AbortController | null = null;
+  let loopDone: Promise<void> | null = null;
 
   function emit(snapshot: PresenceSnapshot): void {
     if (stopped) return;
@@ -177,10 +183,14 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
       } catch {
         if (stopped) return;
         // Relay unreachable / poll aborted mid-switch: back off, then retry.
-        // Presence degrades to dark; it never throws into the UI.
+        // Presence degrades to dark; it never throws into the UI. The sleep
+        // is resolvable by stop() so the loop always exits promptly.
         await new Promise<void>((resolve) => {
+          retryResolve = resolve;
           retryTimer = setTimeout(resolve, retryMs);
         });
+        retryTimer = null;
+        retryResolve = null;
       }
     }
   }
@@ -189,7 +199,7 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   void publishNow().then(() => {
     if (stopped) return;
     scheduleHeartbeat();
-    void pollLoop();
+    loopDone = pollLoop();
   });
 
   return {
@@ -198,13 +208,26 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
       void publishNow();
     },
     stop() {
-      if (stopped) return;
-      stopped = true;
-      if (heartbeatTimer) clearTimeout(heartbeatTimer);
-      if (retryTimer) clearTimeout(retryTimer);
-      pollController?.abort();
-      // Best-effort explicit leave so peers see the departure before the TTL.
-      void options.transport.leave({ topic: options.topic, clientId: options.clientId });
+      if (!stopped) {
+        stopped = true;
+        if (heartbeatTimer) clearTimeout(heartbeatTimer);
+        if (retryTimer) clearTimeout(retryTimer);
+        // Release a pending retry sleep so the loop observes `stopped` and
+        // returns; clearing the timer alone would strand it forever.
+        retryResolve?.();
+        pollController?.abort();
+        // Best-effort explicit leave so peers see the departure before the
+        // TTL. Guarded: this channel accepts any transport, and a rejecting
+        // leave must never surface as an unhandled rejection.
+        try {
+          void Promise.resolve(
+            options.transport.leave({ topic: options.topic, clientId: options.clientId }),
+          ).catch(() => undefined);
+        } catch {
+          // Sync-throwing transports get the same best-effort treatment.
+        }
+      }
+      return loopDone ?? Promise.resolve();
     },
   };
 }

@@ -152,7 +152,16 @@ const relayHandler = createSyncRelayHandler({
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
-  if (url.pathname === "/health") return Response.json({ ok: true, service: "sync-relay" });
+  if (url.pathname === "/health") {
+    // The presence hub footprint is exposed ONLY under the dev/test seam so
+    // integration tests can assert parked waiters are released on disconnect;
+    // production health stays a bare liveness probe.
+    return Response.json({
+      ok: true,
+      service: "sync-relay",
+      ...(testAuthSeam ? { presence: presence.stats() } : {}),
+    });
+  }
   return relayHandler(request);
 };
 
@@ -173,10 +182,18 @@ const server = createServer((request, response) => {
   const chunks: Buffer[] = [];
   let received = 0;
   let rejected = false;
+  // Client-disconnect propagation: the fetch Request below carries this
+  // signal, and the presence long-poll parks on request.signal — so a closed
+  // socket releases its parked waiter IMMEDIATELY instead of holding the slot
+  // for the full hold window ('close' also fires after a normal response
+  // finishes, where the late abort is a no-op).
+  const disconnect = new AbortController();
+  response.on("close", () => disconnect.abort());
   // An aborted upload emits 'error' on the request stream; without a
   // listener that is an uncaught error that crashes the process.
   request.on("error", () => {
     rejected = true;
+    disconnect.abort();
     response.destroy();
   });
   request.on("data", (chunk: Buffer) => {
@@ -204,6 +221,7 @@ const server = createServer((request, response) => {
       method: request.method,
       headers: request.headers as Record<string, string>,
       body: chunks.length === 0 ? undefined : Buffer.concat(chunks),
+      signal: disconnect.signal,
     });
     void fetchHandler(webRequest)
       .then(async (webResponse) => {

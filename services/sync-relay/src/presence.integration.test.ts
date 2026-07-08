@@ -157,7 +157,6 @@ describe("two-client presence over a real relay child", () => {
     expect(afterA.map((p) => p.clientId)).toEqual(["A"]);
 
     // A long-polls (parked); B appears typing -> A wakes and sees B typing.
-    const parked = poll(baseUrl, "owner", ws, "general", afterA.length /* version>=1 */, 10_000);
     // Seed the poll `since` correctly: read the current version first.
     const current = await poll(baseUrl, "owner", ws, "general", 0, 0);
     const wake = poll(baseUrl, "owner", ws, "general", current.version, 10_000);
@@ -168,8 +167,6 @@ describe("two-client presence over a real relay child", () => {
     const woke = await wake;
     const bee = woke.peers.find((p) => p.clientId === "B");
     expect(bee?.state).toMatchObject({ displayName: "Bee", typing: true });
-    // Drain the earlier parked poll so it doesn't leak a handle.
-    await parked.catch(() => undefined);
 
     // B leaves -> A's next read no longer shows B.
     await fetch(`${baseUrl}/sync/${ws}/presence?topic=general`, {
@@ -191,4 +188,43 @@ describe("two-client presence over a real relay child", () => {
     });
     expect(r.status).toBe(404);
   }, 30_000);
+
+  it("a client DISCONNECT releases its parked long-poll waiter promptly", async () => {
+    const relayRoot = await tempDir();
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+    const ws = "workspace-disconnect";
+    await claimWorkspace(baseUrl, "owner", ws);
+    await publish(baseUrl, "owner", ws, "general", { clientId: "A", state: {} });
+    const current = await poll(baseUrl, "owner", ws, "general", 0, 0);
+
+    // Park a long-poll over a REAL socket, then tear the socket down. The
+    // node adapter must propagate the disconnect into the fetch Request's
+    // AbortSignal so the hub releases the parked waiter — long before the
+    // 20s hold would have expired.
+    const controller = new AbortController();
+    const parked = fetch(
+      `${baseUrl}/sync/${ws}/presence?topic=general&since=${current.version}&hold=20000`,
+      { method: "GET", headers: bearer("owner"), signal: controller.signal },
+    ).catch(() => undefined);
+    await waitForWaiters(baseUrl, 1);
+    controller.abort(); // client vanishes mid-park
+    await parked;
+    await waitForWaiters(baseUrl, 0);
+  }, 30_000);
 });
+
+// Poll the test-seam health endpoint until the hub reports `expected` parked
+// waiters (bounded; fails the test with a clear message on timeout).
+async function waitForWaiters(baseUrl: string, expected: number): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let last: unknown;
+  while (Date.now() < deadline) {
+    const health = (await (await fetch(`${baseUrl}/health`)).json()) as {
+      presence?: { waiters: number };
+    };
+    last = health.presence;
+    if (health.presence?.waiters === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`relay never reached ${expected} parked waiter(s); last=${JSON.stringify(last)}`);
+}

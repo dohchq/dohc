@@ -163,6 +163,64 @@ describe("presence transport (workspace-owned)", () => {
     const b = await json(await h(req("owner", "/sync/w/presence?topic=B&since=0&hold=0", { method: "GET" })));
     expect((b.peers as unknown[]).length).toBe(0);
   });
+
+  it("rejects NUL/control characters at the parse boundary (no scope-key collision)", async () => {
+    const storage = await testStorage();
+    const presence = new PresenceHub();
+    const h = makeHandler(storage, presence);
+    await claimWorkspace(h, "owner", "a");
+
+    // A workspace id with an embedded NUL can never be claimed…
+    const claim = await h(post("owner", "/sync/workspaces", { workspaceId: "a\u0000b" }));
+    expect(claim.status).toBe(400);
+    // …or addressed: workspace `a\0b` + topic `c` must NOT collide with
+    // workspace `a` + topic `b\0c` in the NUL-joined scope key.
+    const wsNul = await h(post("owner", "/sync/a%00b/presence?topic=c", { clientId: "x" }));
+    expect(wsNul.status).toBe(400);
+    // A topic with a NUL is refused too (the request above proves the safe
+    // encoding path; this proves the raw body/query path)…
+    const topicNul = await h(post("owner", "/sync/a/presence?topic=b%00c", { clientId: "x" }));
+    expect(topicNul.status).toBe(400);
+    // …and so is a clientId with a control character (entry keys are also
+    // NUL-joined).
+    const clientNul = await h(post("owner", "/sync/a/presence?topic=b", { clientId: "c\u0000d" }));
+    expect(clientNul.status).toBe(400);
+    const clientCtl = await h(post("owner", "/sync/a/presence?topic=b", { clientId: "c\u0001d" }));
+    expect(clientCtl.status).toBe(400);
+    // Nothing above leaked into the hub.
+    expect(presence.stats().entries).toBe(0);
+  });
+
+  it("429s a long-poll beyond the parked-waiter caps", async () => {
+    const storage = await testStorage();
+    const presence = new PresenceHub({ maxWaitersPerActor: 1 });
+    const h = makeHandler(storage, presence);
+    await claimWorkspace(h, "owner", "w");
+    await h(post("owner", "/sync/w/presence?topic=general", { clientId: "c", state: {} }));
+    const seed = await json(
+      await h(req("owner", "/sync/w/presence?topic=general&since=0&hold=0", { method: "GET" })),
+    );
+    // First poll parks…
+    const parked = h(
+      req("owner", `/sync/w/presence?topic=general&since=${seed.version}&hold=10000`, {
+        method: "GET",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(presence.stats().waiters).toBe(1);
+    // …the second (same actor) is refused with 429, not parked.
+    const second = await h(
+      req("owner", `/sync/w/presence?topic=general&since=${seed.version}&hold=10000`, {
+        method: "GET",
+      }),
+    );
+    expect(second.status).toBe(429);
+    // Wake the parked poll so nothing dangles.
+    await h(post("owner", "/sync/w/presence?topic=general", { clientId: "c2", state: {} }));
+    expect((await parked).status).toBe(200);
+    expect(presence.stats().waiters).toBe(0);
+    presence.dispose();
+  });
 });
 
 describe("presence is NEVER journaled (ephemeral invariant)", () => {
@@ -239,6 +297,38 @@ describe("presence over a share (cross-user, gated)", () => {
       }),
     );
     expect(r.status).toBe(404);
+  });
+
+  it("re-authorizes after the park: a revoke DURING a parked long-poll is denied on wake", async () => {
+    const storage = await testStorage();
+    const presence = new PresenceHub();
+    const h = makeHandler(storage, presence);
+    const shareId = await shareFile(h);
+    const topic = encodeURIComponent("notes/a.md");
+
+    // Guest joins and reads the current version.
+    await h(post("guest", `/sync/shares/${shareId}/presence?topic=${topic}`, { clientId: "g", state: {} }));
+    const seed = await json(
+      await h(req("guest", `/sync/shares/${shareId}/presence?topic=${topic}&since=0&hold=0`, { method: "GET" })),
+    );
+    // Guest parks a long-poll at the current version (authorized at park time).
+    const parked = h(
+      req("guest", `/sync/shares/${shareId}/presence?topic=${topic}&since=${seed.version}&hold=10000`, {
+        method: "GET",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(presence.stats().waiters).toBe(1);
+
+    // Owner revokes WHILE the guest is parked, then touches the scope (the
+    // wake that would otherwise hand the revoked guest a final snapshot).
+    await h(post("owner", `/sync/shares/${shareId}/revoke`, {}));
+    await h(post("owner", "/sync/w/presence?topic=notes/a.md", { clientId: "o2", state: {} }));
+
+    // The woken poll re-runs authorization and fails closed.
+    const response = await parked;
+    expect(response.status).toBe(404);
+    presence.dispose();
   });
 
   it("404s presence after the share is revoked", async () => {

@@ -190,12 +190,14 @@ export function ChatsView(props: {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // Presence topic for the open channel/thread (stable per conversation). A
-  // solo user (no collaboration transport) keeps this dormant.
+  // thread scopes to its OWN id so typing in one thread never bleeds into a
+  // sibling thread of the same channel. A solo user (no collaboration
+  // transport) keeps this dormant.
   const presenceTopic =
     nav.level === "channel"
       ? `chat:channel:${nav.channel.id}`
       : nav.level === "thread"
-        ? `chat:channel:${nav.channel.id}`
+        ? `chat:thread:${nav.thread.id}`
         : "";
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "",

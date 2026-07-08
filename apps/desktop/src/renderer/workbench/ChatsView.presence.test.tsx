@@ -39,6 +39,7 @@ const bridgeMock = {
   listChatMessages: vi.fn(),
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
+  sendChatMessage: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -47,13 +48,15 @@ function pushableTransport() {
   let snapshot: PresenceSnapshot = { version: 0, peers: [] };
   const waiters = new Set<(s: PresenceSnapshot) => void>();
   const publishes: unknown[] = [];
+  const topics: string[] = [];
   function set(peers: PresencePeer[]) {
     snapshot = { version: snapshot.version + 1, peers };
     for (const w of [...waiters]) w(snapshot);
     waiters.clear();
   }
   const transport: PresenceTransport = {
-    async publish({ state }) {
+    async publish({ topic, state }) {
+      topics.push(topic);
       publishes.push(state);
       return snapshot;
     },
@@ -67,7 +70,7 @@ function pushableTransport() {
       });
     },
   };
-  return { transport, set, publishes };
+  return { transport, set, publishes, topics };
 }
 
 beforeEach(() => {
@@ -133,6 +136,52 @@ describe("ChatsView presence (MU-C1)", () => {
     expect(await screen.findByLabelText("Bob is here")).toBeTruthy();
     await waitFor(() =>
       expect(screen.getByTestId("presence-typing").textContent).toContain("Bob is typing"),
+    );
+  });
+
+  it("scopes thread presence to the THREAD id, so sibling threads never share typing", async () => {
+    const t = pushableTransport();
+    const user = userEvent.setup();
+    renderView({ transport: t.transport, clientId: "me", displayName: "Me" });
+    // Channel view publishes into the channel topic…
+    await user.click(await screen.findByTestId("chats-channel"));
+    await waitFor(() => expect(t.topics).toContain("chat:channel:channel-1"));
+    // …and opening a thread re-scopes presence to the thread's own topic.
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(t.topics).toContain("chat:thread:thread-1"));
+    expect(t.topics.at(-1)).toBe("chat:thread:thread-1");
+  });
+
+  it("publishes typing while composing and clears it on send", async () => {
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: {
+        id: "message-9",
+        threadId: "thread-1",
+        authorKind: "human",
+        authorDisplayName: "You",
+        body: "hi",
+        createdAtMs: NOW,
+      },
+    });
+    const t = pushableTransport();
+    const user = userEvent.setup();
+    renderView({ transport: t.transport, clientId: "me", displayName: "Me" });
+    await openThread(user);
+    await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
+
+    // Typing into the composer publishes typing: true…
+    await user.type(screen.getByTestId("chats-composer"), "hi");
+    await waitFor(() =>
+      expect(
+        t.publishes.some((state) => (state as { typing?: boolean }).typing === true),
+      ).toBe(true),
+    );
+    // …and sending clears it.
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
+    await waitFor(() =>
+      expect((t.publishes.at(-1) as { typing?: boolean }).typing).toBe(false),
     );
   });
 });
