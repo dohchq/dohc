@@ -143,6 +143,23 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+// Fail-closed coordinate validation for served ops (the relay is not
+// trusted): a malformed originSeq would poison shared_channel_peers (NaN
+// binds as NULL and trips NOT NULL mid-pull), a malformed clock would wedge
+// the pull before its cursor commit. Skip such ops without touching state.
+function validSharedLogOp(op: SharedLogPage["ops"][number]): boolean {
+  return (
+    typeof op.originId === "string" &&
+    op.originId.length > 0 &&
+    Number.isSafeInteger(op.originSeq) &&
+    op.originSeq >= 0 &&
+    typeof op.opKind === "string" &&
+    op.opKind.length > 0 &&
+    typeof op.recordedAtMs === "number" &&
+    Number.isFinite(op.recordedAtMs)
+  );
+}
+
 // How a threadId resolves against the LOCAL workspace at apply time:
 // "absent" (no such thread yet — a served thread.create may bind it),
 // "granted" (exists and is bound to the granted channel), or "foreign"
@@ -208,8 +225,10 @@ export async function pullSharedChannel(input: {
   const channelThreadIds = new Set<string>();
   try {
     const cursorRow = db
-      .prepare("SELECT relay_fetch_cursor FROM shared_channel_cursors WHERE share_id = ?")
-      .get(input.shareId);
+      .prepare(
+        "SELECT relay_fetch_cursor FROM shared_channel_cursors WHERE workspace_id = ? AND share_id = ?",
+      )
+      .get(input.workspaceId, input.shareId);
     since = Number(cursorRow?.relay_fetch_cursor ?? 0);
     const identityRow = db
       .prepare("SELECT origin_id FROM sync_identity WHERE workspace_id = ?")
@@ -217,9 +236,10 @@ export async function pullSharedChannel(input: {
     localOriginId = typeof identityRow?.origin_id === "string" ? identityRow.origin_id : null;
     for (const row of db
       .prepare(
-        "SELECT origin_id, applied_origin_seq, dense_seq FROM shared_channel_peers WHERE share_id = ?",
+        `SELECT origin_id, applied_origin_seq, dense_seq FROM shared_channel_peers
+         WHERE workspace_id = ? AND share_id = ?`,
       )
-      .all(input.shareId)) {
+      .all(input.workspaceId, input.shareId)) {
       peers.set(String(row.origin_id), {
         applied: Number(row.applied_origin_seq),
         dense: Number(row.dense_seq),
@@ -251,6 +271,16 @@ export async function pullSharedChannel(input: {
     );
     if (!response.ok) throw new Error(`Shared channel request failed (${response.status})`);
     const page = (await response.json()) as SharedLogPage;
+    // Page-shape gate (same distrust as validSharedLogOp): a garbage cursor
+    // must abort the pass BEFORE it can be persisted as the durable fetch
+    // cursor, and a non-array ops field must never reach the apply loop.
+    if (
+      !Array.isArray(page.ops) ||
+      !Number.isSafeInteger(page.nextCursor) ||
+      page.nextCursor < cursor
+    ) {
+      throw new Error("Shared channel log page is malformed; aborting pull.");
+    }
     ops.push(...page.ops);
     fetched += page.ops.length;
     if (page.hasMore && page.nextCursor <= cursor) {
@@ -267,9 +297,9 @@ export async function pullSharedChannel(input: {
     const stateDb = openEngineDb(input.rootDir);
     try {
       const upsertPeer = stateDb.prepare(
-        `INSERT INTO shared_channel_peers (share_id, origin_id, applied_origin_seq, dense_seq)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(share_id, origin_id) DO UPDATE SET
+        `INSERT INTO shared_channel_peers (workspace_id, share_id, origin_id, applied_origin_seq, dense_seq)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(workspace_id, share_id, origin_id) DO UPDATE SET
            applied_origin_seq = excluded.applied_origin_seq,
            dense_seq = excluded.dense_seq`,
       );
@@ -292,6 +322,11 @@ export async function pullSharedChannel(input: {
           : "foreign";
       };
       for (const op of ops) {
+        // Malformed coordinates never touch peer state or the apply path.
+        if (!validSharedLogOp(op)) {
+          skipped += 1;
+          continue;
+        }
         // Own echo: ops this machine pushed through the member route come
         // back under `share:<shareId>:<localOrigin>` — the local store
         // already holds them, so skip without minting a duplicate journal row.
@@ -335,7 +370,7 @@ export async function pullSharedChannel(input: {
         peer.applied = op.originSeq;
         peer.dense = denseSeq;
         peers.set(op.originId, peer);
-        upsertPeer.run(input.shareId, op.originId, peer.applied, peer.dense);
+        upsertPeer.run(input.workspaceId, input.shareId, op.originId, peer.applied, peer.dense);
       }
       // Chat replay owes no disk materialization, so the cursor commits as
       // soon as the applies land (unlike pullWorkspaceFromRelay's deferred
@@ -343,12 +378,12 @@ export async function pullSharedChannel(input: {
       // applied_origin_seq skip above makes the replay an exact no-op.
       stateDb
         .prepare(
-          `INSERT INTO shared_channel_cursors (share_id, relay_fetch_cursor)
-           VALUES (?, ?)
-           ON CONFLICT(share_id) DO UPDATE SET
+          `INSERT INTO shared_channel_cursors (workspace_id, share_id, relay_fetch_cursor)
+           VALUES (?, ?, ?)
+           ON CONFLICT(workspace_id, share_id) DO UPDATE SET
              relay_fetch_cursor = excluded.relay_fetch_cursor`,
         )
-        .run(input.shareId, cursor);
+        .run(input.workspaceId, input.shareId, cursor);
     } finally {
       stateDb.close();
     }
@@ -385,9 +420,10 @@ export async function pushSharedChannel(input: {
     if (localOriginId === null) return { pushed: 0 }; // never journaled anything
     const stateRow = db
       .prepare(
-        "SELECT scanned_local_seq, pushed_share_seq FROM shared_channel_push_state WHERE share_id = ?",
+        `SELECT scanned_local_seq, pushed_share_seq FROM shared_channel_push_state
+         WHERE workspace_id = ? AND share_id = ?`,
       )
-      .get(input.shareId);
+      .get(input.workspaceId, input.shareId);
     scannedLocalSeq = Number(stateRow?.scanned_local_seq ?? -1);
     pushedShareSeq = Number(stateRow?.pushed_share_seq ?? -1);
 
@@ -447,7 +483,7 @@ export async function pushSharedChannel(input: {
   }
 
   if (rows.length === 0) {
-    commitPushState(input.rootDir, input.shareId, scannedLocalSeq, pushedShareSeq);
+    commitPushState(input.rootDir, input.workspaceId, input.shareId, scannedLocalSeq, pushedShareSeq);
     return { pushed: 0 };
   }
 
@@ -486,18 +522,20 @@ export async function pushSharedChannel(input: {
     // idempotent skips.
     commitPushState(
       input.rootDir,
+      input.workspaceId,
       input.shareId,
       batch[batch.length - 1]!.originSeq,
       pushedShareSeq,
     );
   }
   // Everything scanned (including trailing non-channel rows) is done.
-  commitPushState(input.rootDir, input.shareId, scannedLocalSeq, pushedShareSeq);
+  commitPushState(input.rootDir, input.workspaceId, input.shareId, scannedLocalSeq, pushedShareSeq);
   return { pushed };
 }
 
 function commitPushState(
   rootDir: string,
+  workspaceId: WorkspaceId,
   shareId: string,
   scannedLocalSeq: number,
   pushedShareSeq: number,
@@ -505,12 +543,12 @@ function commitPushState(
   const db = openEngineDb(rootDir);
   try {
     db.prepare(
-      `INSERT INTO shared_channel_push_state (share_id, scanned_local_seq, pushed_share_seq)
-       VALUES (?, ?, ?)
-       ON CONFLICT(share_id) DO UPDATE SET
+      `INSERT INTO shared_channel_push_state (workspace_id, share_id, scanned_local_seq, pushed_share_seq)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(workspace_id, share_id) DO UPDATE SET
          scanned_local_seq = excluded.scanned_local_seq,
          pushed_share_seq = excluded.pushed_share_seq`,
-    ).run(shareId, scannedLocalSeq, pushedShareSeq);
+    ).run(workspaceId, shareId, scannedLocalSeq, pushedShareSeq);
   } finally {
     db.close();
   }

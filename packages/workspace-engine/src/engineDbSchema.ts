@@ -209,9 +209,14 @@ export const SYNC_REPLICATION_DDL = `
 `;
 
 // MU-C4 shared channels — the MEMBER side's durable sync state, one row set
-// per chat-channel share this workspace joined. Same lazy additive posture as
-// the other sync tables (NOT in REQUIRED_ENGINE_TABLES): a missing row reads
-// as "nothing pulled/pushed yet".
+// per (workspace, chat-channel share) this workspace joined. Same lazy
+// additive posture as the other sync tables (NOT in REQUIRED_ENGINE_TABLES):
+// a missing row reads as "nothing pulled/pushed yet". Every key includes
+// workspace_id (the product invariant: all durable state is workspace-
+// scoped), so cursors/peers/push progress can never bleed across workspaces
+// that happen to share an engine.db. These tables are new in the MU-C4 lane
+// and never shipped, so the scoping is part of the initial shape (no
+// migration needed).
 //
 // Why the peer table exists: the relay serves a member a FILTERED log, so a
 // source origin's sequence numbers arrive with gaps by construction, while
@@ -223,20 +228,25 @@ export const SYNC_REPLICATION_DDL = `
 // seq assigned (so the next apply is exactly acked+1).
 export const SHARED_CHANNEL_SYNC_DDL = `
   CREATE TABLE IF NOT EXISTS shared_channel_cursors (
-    share_id TEXT PRIMARY KEY,
-    relay_fetch_cursor INTEGER NOT NULL
+    workspace_id TEXT NOT NULL,
+    share_id TEXT NOT NULL,
+    relay_fetch_cursor INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, share_id)
   );
   CREATE TABLE IF NOT EXISTS shared_channel_peers (
+    workspace_id TEXT NOT NULL,
     share_id TEXT NOT NULL,
     origin_id TEXT NOT NULL,
     applied_origin_seq INTEGER NOT NULL,
     dense_seq INTEGER NOT NULL,
-    PRIMARY KEY (share_id, origin_id)
+    PRIMARY KEY (workspace_id, share_id, origin_id)
   );
   CREATE TABLE IF NOT EXISTS shared_channel_push_state (
-    share_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    share_id TEXT NOT NULL,
     scanned_local_seq INTEGER NOT NULL,
-    pushed_share_seq INTEGER NOT NULL
+    pushed_share_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, share_id)
   )
 `;
 

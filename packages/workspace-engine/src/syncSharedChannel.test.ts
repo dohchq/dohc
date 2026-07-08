@@ -409,6 +409,199 @@ describe("pullSharedChannel", () => {
     expect(await teamMessages(root)).toEqual(["msg-owner-1:welcome"]);
   });
 
+  it("keeps cursor, peer, and push state isolated per workspace (same root, same share id)", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+    const workspaceB = "shared-channel-member-ws-b" as WorkspaceId;
+
+    const first = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(first.applied).toBe(3);
+    // Workspace A sends and pushes, advancing ITS scan/push watermarks.
+    const chatsA = createLinkedChatStore(root);
+    try {
+      await chatsA.sendMessage({
+        workspaceId: WORKSPACE,
+        threadId: "thread-team-1",
+        author: { kind: "human", displayName: "A" },
+        authorUserId: "member-a",
+        body: "from A",
+      });
+    } finally {
+      await chatsA.close();
+    }
+    const pushedA = await pushSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(pushedA.pushed).toBe(1);
+
+    // Workspace B in the SAME root joins the same share. Its pull must start
+    // from ITS OWN cursor (3 seed ops + A's pushed echo), not resume A's...
+    const second = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: workspaceB,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(second.applied).toBe(4);
+    // ...and its push must scan B's OWN journal from the start, not skip
+    // everything below A's scanned watermark.
+    const chatsB = createLinkedChatStore(root);
+    try {
+      await chatsB.sendMessage({
+        workspaceId: workspaceB,
+        threadId: "thread-team-1",
+        author: { kind: "human", displayName: "B" },
+        authorUserId: "member-b",
+        body: "from B",
+      });
+    } finally {
+      await chatsB.close();
+    }
+    const pushedB = await pushSharedChannel({
+      rootDir: root,
+      workspaceId: workspaceB,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(pushedB.pushed).toBe(1);
+    expect(JSON.stringify(fake.appends.at(-1))).toContain("from B");
+  });
+
+  it("skips malformed relay op coordinates without poisoning durable peer state", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    // Malformed coordinates a hostile relay could serve, pushed RAW into the
+    // stream (addOp would mint valid ones). relaySeqs continue 4..9 after the
+    // three seed ops; the trailing op is the LEGIT continuation (origin seq 3)
+    // that must still apply after the garbage is skipped.
+    const malformedMessage = (over: Partial<FakeOp>, id: string): FakeOp => ({
+      relaySeq: 0,
+      originId: "origin-owner",
+      originSeq: 3,
+      opKind: "chat.message.append",
+      payload: {
+        messageId: id,
+        threadId: "thread-team-1",
+        authorKind: "human",
+        authorDisplayName: "Owner",
+        body: "SENTINEL-malformed",
+        createdAtMs: 9,
+      },
+      recordedAtMs: 1009,
+      ...over,
+    });
+    fake.ops.push(
+      malformedMessage({ relaySeq: 4, originId: "" }, "msg-bad-1"),
+      malformedMessage({ relaySeq: 5, originSeq: Number.NaN }, "msg-bad-2"),
+      malformedMessage({ relaySeq: 6, originSeq: -1 }, "msg-bad-3"),
+      malformedMessage({ relaySeq: 7, originSeq: 2.5 }, "msg-bad-4"),
+      malformedMessage({ relaySeq: 8, recordedAtMs: Number.POSITIVE_INFINITY }, "msg-bad-5"),
+      malformedMessage(
+        { relaySeq: 9, payload: {
+          messageId: "msg-owner-3",
+          threadId: "thread-team-1",
+          authorKind: "human",
+          authorDisplayName: "Owner",
+          body: "still alive",
+          createdAtMs: 10,
+        }, recordedAtMs: 1010 },
+        "msg-owner-3",
+      ),
+    );
+
+    const root = await tempRoot();
+    const relay = relayFor(fake);
+    const result = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(result.applied).toBe(4);
+    expect(result.skipped).toBe(5);
+    expect(await teamMessages(root)).toEqual([
+      "msg-owner-1:welcome",
+      "msg-owner-3:still alive",
+    ]);
+
+    // Durable state stayed sane: the peers table holds only safe integers and
+    // the next pull is a clean no-op (nothing wedged before cursor commit).
+    const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+    try {
+      const rows = db
+        .prepare("SELECT applied_origin_seq, dense_seq FROM shared_channel_peers")
+        .all();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(Number.isSafeInteger(Number(row.applied_origin_seq))).toBe(true);
+        expect(Number.isSafeInteger(Number(row.dense_seq))).toBe(true);
+      }
+    } finally {
+      db.close();
+    }
+    const again = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay,
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    expect(again.fetched).toBe(0);
+    expect(await teamMessages(root)).toEqual([
+      "msg-owner-1:welcome",
+      "msg-owner-3:still alive",
+    ]);
+  });
+
+  it("aborts a pull on a malformed relay page cursor before persisting anything", async () => {
+    const fake = new FakeChannelRelay();
+    seedGrantedChannel(fake);
+    const root = await tempRoot();
+    const badPageFetch = async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (new URL(href).pathname.endsWith("/log") && (init?.method ?? "GET") === "GET") {
+        return Response.json({ ok: true, ops: [], nextCursor: Number.NaN, hasMore: false });
+      }
+      return fake.fetch(url, init);
+    };
+    await expect(
+      pullSharedChannel({
+        rootDir: root,
+        workspaceId: WORKSPACE,
+        relay: { baseUrl: "http://relay.test", token: TOKEN, fetch: badPageFetch },
+        shareId: SHARE_ID,
+        channelWireId: WIRE,
+      }),
+    ).rejects.toThrow(/malformed/iu);
+    const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+    try {
+      const row = db
+        .prepare("SELECT COUNT(*) AS count FROM shared_channel_cursors")
+        .get();
+      expect(Number(row?.count)).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("surfaces revocation as ShareUnavailableError and leaves the local copy readable", async () => {
     const fake = new FakeChannelRelay();
     seedGrantedChannel(fake);
