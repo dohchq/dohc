@@ -507,6 +507,19 @@ export function createSyncRelayHandler({
         // anti-enumeration behavior below is identical for both.
         let selector: AnyShareSelector;
         if (input.channelWireId !== undefined) {
+          // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
+          // also carry a path/version selector. Silently preferring
+          // channelWireId (and dropping the paths) would turn a stale/leftover
+          // `paths` field into a full chat-channel grant — a silent intent
+          // mismatch. Reject it instead (hardens regular shared-channel grants
+          // too).
+          if (input.paths !== undefined || input.versionId !== undefined) {
+            throw new HttpError(
+              400,
+              "ambiguous_selector",
+              "a chat-channel share must not also carry paths or versionId",
+            );
+          }
           const chatValidation = validateChatChannelShareSelector({
             channelWireId: input.channelWireId,
             access: input.access,

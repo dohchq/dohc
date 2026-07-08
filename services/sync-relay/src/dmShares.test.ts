@@ -350,9 +350,11 @@ describe("DM grants over the relay", () => {
     expect(badAccess.status).toBe(400);
     expect((await json(badAccess)).code).toBe("invalid_access");
 
-    // NOTE (weaker guarantee than MU-C3): main branches on channelWireId FIRST
-    // and ignores any paths in the same body, so a "mixed" selector is accepted
-    // as a chat grant (200) rather than rejected as 400.
+    // Defense in depth: an AMBIGUOUS body carrying BOTH a chat-channel selector
+    // (channelWireId) AND a path/version selector is a caller intent mismatch
+    // (e.g. reused request plumbing leaving a stale `paths`). It fails closed
+    // with 400 rather than silently dropping the paths and minting a full
+    // chat-channel grant.
     const mixed = await h(
       request(
         OWNER,
@@ -360,12 +362,8 @@ describe("DM grants over the relay", () => {
         jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"], channelWireId: DM_WIRE }),
       ),
     );
-    expect(mixed.status).toBe(200);
-    expect((await json(mixed)).selector).toEqual({
-      kind: "chat-channel",
-      channelWireId: DM_WIRE,
-      access: "read-write",
-    });
+    expect(mixed.status).toBe(400);
+    expect((await json(mixed)).code).toBe("ambiguous_selector");
 
     const granted = await json(await h(request(OWNER, "/sync/shares")));
     const grantedRow = (granted.granted as Array<Record<string, unknown>>).find(
