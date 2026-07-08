@@ -823,6 +823,73 @@ export const StartDmResult = z.object({
 });
 export type StartDmResult = z.infer<typeof StartDmResult>;
 
+// Ephemeral presence (MU-C1 / MU-C5). The renderer's presence transport is
+// IPC-PROXIED so the relay bearer token NEVER reaches the renderer: main holds
+// cachedCredentials.token and makes the actual relay presence request. These
+// payloads carry only the scope, an opaque display state, and the long-poll
+// bookkeeping. The scope is authorized in MAIN (the caller's own workspace, or
+// a share they hold a grant for) BEFORE the relay — which re-authorizes from
+// the bearer independently.
+export const PresenceScopeInput = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("workspace"), workspaceId: WORKSPACE_ID }),
+  z.object({ kind: z.literal("share"), shareId: z.string().min(1).max(200) }),
+]);
+export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
+
+// Bounds mirror the relay's presence parser (MAX_PRESENCE_TOPIC_CHARS /
+// MAX_CLIENT_ID_CHARS): reject early rather than round-trip an over-long value.
+const PRESENCE_TOPIC = z.string().min(1).max(1024);
+const PRESENCE_CLIENT_ID = z.string().min(1).max(128);
+const PRESENCE_POLL_ID = z.string().min(1).max(128);
+
+export const PresencePublishPayload = z.object({
+  scope: PresenceScopeInput,
+  topic: PRESENCE_TOPIC,
+  clientId: PRESENCE_CLIENT_ID,
+  // Opaque display payload (e.g. { displayName, typing }) — forwarded verbatim
+  // to the relay, which caps its serialized size. Absent on a leave.
+  state: z.unknown().optional(),
+  leave: z.boolean().optional(),
+});
+export type PresencePublishPayload = z.infer<typeof PresencePublishPayload>;
+
+export const PresencePollPayload = z.object({
+  scope: PresenceScopeInput,
+  topic: PRESENCE_TOPIC,
+  since: z.number().int().min(0),
+  // Renderer-minted correlation id so an in-flight long-poll can be aborted
+  // over IPC (presenceCancel) on unmount / workspace switch.
+  pollId: PRESENCE_POLL_ID,
+});
+export type PresencePollPayload = z.infer<typeof PresencePollPayload>;
+
+export const PresenceCancelPayload = z.object({
+  pollId: PRESENCE_POLL_ID,
+});
+export type PresenceCancelPayload = z.infer<typeof PresenceCancelPayload>;
+
+const PresencePeerRecord = z.object({
+  userId: z.string().max(256),
+  clientId: z.string().max(128),
+  // Opaque peer display payload — the renderer's resolvePeerDisplayName is the
+  // sole guard that turns it into a shown name.
+  state: z.unknown(),
+  updatedAtMs: z.number(),
+});
+const PresenceSnapshotRecord = z.object({
+  version: z.number(),
+  peers: z.array(PresencePeerRecord),
+});
+
+// Discriminated so a dropped session / no-relay / aborted long-poll is a
+// well-defined "unavailable"/"aborted" result the renderer treats as dormant,
+// never a thrown IPC error that would churn a retry loop.
+export const PresenceResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), snapshot: PresenceSnapshotRecord }),
+  z.object({ ok: z.literal(false), reason: z.enum(["unavailable", "aborted"]) }),
+]);
+export type PresenceResult = z.infer<typeof PresenceResult>;
+
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
@@ -1932,6 +1999,12 @@ export interface DohcDesktopBridge {
   // workspace's DMs; start (or continue) a DM with a recipient set.
   syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;
   startDm(payload: StartDmPayload): Promise<StartDmResult>;
+  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
+  // main. publish (or leave) a presence state and long-poll for peer changes;
+  // presenceCancel aborts an in-flight poll on unmount / workspace switch.
+  presencePublish(payload: PresencePublishPayload): Promise<PresenceResult>;
+  presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
+  presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
