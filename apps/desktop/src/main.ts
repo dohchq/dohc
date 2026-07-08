@@ -182,6 +182,7 @@ import {
   createRelayPresenceTransport,
   type PresenceScope as RelayPresenceScope,
 } from "./renderer/collab/presenceChannel";
+import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import type { EngineYDocProviderSession } from "./collab/ydocEngineProviderSession";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
@@ -982,9 +983,27 @@ const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
 // (<=30s) so an IPC invoke can never dangle forever.
 const PRESENCE_PUBLISH_TIMEOUT_MS = 15_000;
 const PRESENCE_POLL_SAFETY_MS = 35_000;
-// In-flight presence long-polls keyed by the renderer's poll id, so
-// presenceCancel can abort the exact relay fetch on unmount / workspace switch.
-const presencePollControllers = new Map<string, AbortController>();
+// In-flight presence long-polls, owned by (senderId + pollId) so a poll can only
+// be cancelled/superseded by its own window, and bounded so a renderer can't
+// open unbounded relay long-polls / controllers / timers.
+const presencePollRegistry = createPresencePollRegistry();
+// Senders whose presence-poll 'destroyed' cleanup hook is already attached.
+const presencePollCleanupHooked = new WeakSet<Electron.WebContents>();
+// A stable ownership key so one window holds at most ONE poll per (scope, topic):
+// a new poll for the same key supersedes (aborts) the prior long-poll.
+function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string {
+  return JSON.stringify(
+    scope.kind === "workspace"
+      ? ["w", scope.workspaceId, topic]
+      : ["s", scope.shareId, topic],
+  );
+}
+function hookPresencePollCleanup(sender: Electron.WebContents): void {
+  if (presencePollCleanupHooked.has(sender)) return;
+  presencePollCleanupHooked.add(sender);
+  // Window closed / renderer gone: abort every long-poll this window still owns.
+  sender.once("destroyed", () => presencePollRegistry.disposeSender(sender.id));
+}
 
 const serializeSharedChannelSync = createKeyedSerializer();
 function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
@@ -3794,9 +3813,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.presencePublish, async (event, payload) => {
     assertTrustedSender(event);
     const input = PresencePublishPayload.parse(payload);
-    const transport = await presenceRelayTransportForScope(input.scope);
-    if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
     try {
+      // Scope resolution (warms the credential cache) runs INSIDE the try so a
+      // throw degrades to the dormant "unavailable" result, never a rejected
+      // IPC promise — presence is best-effort.
+      const transport = await presenceRelayTransportForScope(input.scope);
+      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
       if (input.leave === true) {
         await transport.leave({ topic: input.topic, clientId: input.clientId });
         // A leave has no snapshot to echo; report an empty one so the renderer
@@ -3819,20 +3841,29 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.presencePoll, async (event, payload) => {
     assertTrustedSender(event);
     const input = PresencePollPayload.parse(payload);
-    const transport = await presenceRelayTransportForScope(input.scope);
-    if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
-    // One AbortController per renderer poll id: presenceCancel aborts the
-    // in-flight relay long-poll on unmount / workspace switch. A safety timeout
-    // caps a hung relay (the hold is <=30s; give headroom then abort) so the
-    // IPC invoke can never dangle forever.
-    const controller = new AbortController();
-    presencePollControllers.set(input.pollId, controller);
-    const safety = setTimeout(() => controller.abort(), PRESENCE_POLL_SAFETY_MS);
+    // Register the controller BEFORE any await: scope resolution warms the
+    // credential cache, and a presenceCancel arriving during that window must
+    // abort THIS poll promptly (workspace-switch repaint), not wait out the 35s
+    // safety cap. Ownership keys on (senderId + pollId) so only this window can
+    // cancel it, and at most one poll runs per (sender, scope, topic).
+    hookPresencePollCleanup(event.sender);
+    const handle = presencePollRegistry.begin(
+      event.sender.id,
+      input.pollId,
+      presenceScopeTopicKey(input.scope, input.topic),
+    );
+    // Safety timeout caps a hung relay (the hold is <=30s; give headroom then
+    // abort) so the IPC invoke can never dangle forever.
+    const safety = setTimeout(() => handle.abort(), PRESENCE_POLL_SAFETY_MS);
     try {
+      const transport = await presenceRelayTransportForScope(input.scope);
+      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      // A cancel could have landed while scope was resolving.
+      if (handle.signal.aborted) return PresenceResult.parse({ ok: false, reason: "aborted" });
       const snapshot = await transport.poll({
         topic: input.topic,
         since: input.since,
-        signal: controller.signal,
+        signal: handle.signal,
       });
       return PresenceResult.parse({ ok: true, snapshot });
     } catch {
@@ -3840,18 +3871,22 @@ function registerIpcHandlers(): void {
       // dark, but "aborted" tells the renderer this was an intentional stop.
       return PresenceResult.parse({
         ok: false,
-        reason: controller.signal.aborted ? "aborted" : "unavailable",
+        reason: handle.signal.aborted ? "aborted" : "unavailable",
       });
     } finally {
       clearTimeout(safety);
-      presencePollControllers.delete(input.pollId);
+      // Removes only THIS poll's entry — a superseding poll under the same id is
+      // left untouched.
+      handle.release();
     }
   });
 
   ipcMain.handle(CHANNELS.presenceCancel, (event, payload) => {
     assertTrustedSender(event);
     const input = PresenceCancelPayload.parse(payload);
-    presencePollControllers.get(input.pollId)?.abort();
+    // Only aborts a poll THIS sender owns; a cancel for another window's pollId
+    // is a no-op.
+    presencePollRegistry.cancel(event.sender.id, input.pollId);
     return undefined;
   });
 
