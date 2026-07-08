@@ -6,6 +6,7 @@ import type {
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
+  DmRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import { ChatsView } from "./ChatsView";
@@ -64,6 +65,20 @@ const fileThread: FileChatThreadRecord = {
   path: "notes/topic.md",
 };
 
+function dm(overrides: Partial<DmRecord> = {}): DmRecord {
+  return {
+    channelId: "channel-dm-1",
+    channelWireId: "wire-dm-1",
+    name: "bob@example.com",
+    peerLabel: "bob@example.com",
+    role: "owner",
+    threadId: "thread-dm-1",
+    unreadCount: 0,
+    connected: true,
+    ...overrides,
+  };
+}
+
 const bridgeMock = {
   listChatChannels: vi.fn(),
   listChatChannelShares: vi.fn(),
@@ -79,6 +94,8 @@ const bridgeMock = {
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
+  syncDms: vi.fn(),
+  startDm: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -117,6 +134,8 @@ beforeEach(() => {
     },
     viewerAuthorId: "you@example.com",
   });
+  // Solo default (collaboration off): the DM surface stays invisible.
+  bridgeMock.syncDms.mockResolvedValue({ available: false, dms: [] });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 
@@ -719,5 +738,130 @@ describe("ChatsView shared channels (MU-C4)", () => {
     const note = await screen.findByTestId("chats-readonly-note");
     expect(note.textContent).toContain("no longer shared");
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+  });
+});
+
+// Direct messages (WS-MU-C3): participants-only conversations behind the
+// collaboration gate. Solo (available:false, no DMs) renders NOTHING — the
+// zero-bloat rule — and the DM conversation is one running thread whose
+// composer sends on Enter (anti-forum).
+describe("ChatsView direct messages", () => {
+  it("shows no DM surface at all for a solo user", async () => {
+    // Even a stray dm-kind channel row never leaks into the channel list.
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({ id: "channel-dm-1", name: "bob@example.com", slug: "bob-example-com", kind: "dm" }),
+      ],
+      fileThreads: [],
+    });
+    renderView();
+    await screen.findByTestId("chats-channel");
+    expect(screen.queryByTestId("chats-dms-section")).toBeNull();
+    expect(screen.queryByTestId("chats-new-dm")).toBeNull();
+    const names = screen.getAllByTestId("chats-channel-name").map((el) => el.textContent);
+    expect(names).toEqual(["general"]);
+  });
+
+  it("lists DMs by peer label with unread badges when collaboration is on", async () => {
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [
+        dm({ peerLabel: "bob@example.com", unreadCount: 2 }),
+        dm({
+          channelId: "channel-dm-2",
+          channelWireId: "wire-dm-2",
+          role: "participant",
+          peerLabel: "carol@example.com",
+          connected: false,
+        }),
+      ],
+    });
+    renderView();
+    await screen.findByTestId("chats-dms-section");
+    const names = screen.getAllByTestId("chats-dm-name").map((el) => el.textContent);
+    expect(names).toEqual(["bob@example.com", "carol@example.com"]);
+    expect(screen.getByTestId("chats-dm-unread").textContent).toBe("2");
+    expect(screen.getByTestId("chats-new-dm")).toBeTruthy();
+  });
+
+  it("opens a DM into its single running conversation and sends on Enter", async () => {
+    const user = userEvent.setup();
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({ id: "m-1", threadId: "thread-dm-1", authorDisplayName: "bob@example.com", body: "hey" }),
+      ],
+    });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "m-2", threadId: "thread-dm-1", body: "hi bob" }),
+    });
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    expect(screen.getByTestId("chats-dm-title").textContent).toBe("bob@example.com");
+    const bodies = await screen.findAllByTestId("chats-dm-message-body");
+    expect(bodies.map((el) => el.textContent)).toEqual(["hey"]);
+    // On-screen == read: the cursor advances like the thread view.
+    await waitFor(() =>
+      expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-dm-1",
+        upToSequence: 1,
+      }),
+    );
+    await user.type(screen.getByTestId("chats-dm-composer"), "hi bob{Enter}");
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-dm-1",
+        body: "hi bob",
+      }),
+    );
+    const updated = await screen.findAllByTestId("chats-dm-message-body");
+    expect(updated[updated.length - 1].textContent).toBe("hi bob");
+  });
+
+  it("starts a new DM from the recipient step and opens the conversation", async () => {
+    const user = userEvent.setup();
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
+    bridgeMock.startDm.mockResolvedValue({
+      dm: dm(),
+      message: message({ id: "m-1", threadId: "thread-dm-1", body: "hello there" }),
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "hello there" })],
+    });
+    renderView();
+    await user.click(await screen.findByTestId("chats-new-dm"));
+    await user.type(screen.getByTestId("chats-dm-recipients"), "bob@example.com");
+    await user.type(screen.getByTestId("chats-dm-new-composer"), "hello there{Enter}");
+    await waitFor(() =>
+      expect(bridgeMock.startDm).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        recipients: "bob@example.com",
+        body: "hello there",
+      }),
+    );
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    const bodies = await screen.findAllByTestId("chats-dm-message-body");
+    expect(bodies.map((el) => el.textContent)).toEqual(["hello there"]);
+  });
+
+  it("closes the composer for an ended DM but keeps the conversation readable", async () => {
+    const user = userEvent.setup();
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [dm({ role: "participant", peerLabel: "alice@example.com", connected: false })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "old message" })],
+    });
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByTestId("chats-dm-ended")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
+    const bodies = await screen.findAllByTestId("chats-dm-message-body");
+    expect(bodies.map((el) => el.textContent)).toEqual(["old message"]);
   });
 });

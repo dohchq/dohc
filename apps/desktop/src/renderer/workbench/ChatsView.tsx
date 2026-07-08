@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, FileText, Hash, MessagesSquare, Plus, Users } from "lucide-react";
+import { ArrowLeft, AtSign, Bot, FileText, Hash, MessagesSquare, Plus, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -6,6 +6,7 @@ import type {
   ChatChannelShareGrantRow,
   ChatMessageRecord,
   ChatReactionRecord,
+  DmRecord,
   FileChatThreadRecord,
   JoinedSharedChannelRow,
   ListChatChannelSharesResult,
@@ -65,7 +66,11 @@ type OverviewState =
 type Nav =
   | { level: "channels" }
   | { level: "channel"; channel: ChatChannelRecord }
-  | { level: "thread"; channel: ChatChannelRecord; thread: ChannelThreadRecord };
+  | { level: "thread"; channel: ChatChannelRecord; thread: ChannelThreadRecord }
+  // Direct messages (WS-MU-C3): one running conversation per DM (the
+  // anti-forum rule), plus a one-step "new message" composer.
+  | { level: "dm"; dm: DmRecord }
+  | { level: "dm-new" };
 
 function UnreadPill(props: { count: number; testId: string }) {
   if (props.count <= 0) return null;
@@ -216,6 +221,15 @@ export function ChatsView(props: {
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  // Direct messages (WS-MU-C3). The section renders only when collaboration
+  // is on (signed in + relay) or a DM already exists locally — a solo user
+  // sees none of it.
+  const [dms, setDms] = useState<DmRecord[]>([]);
+  const [dmAvailable, setDmAvailable] = useState(false);
+  const [dmRecipients, setDmRecipients] = useState("");
+  const [dmDraft, setDmDraft] = useState("");
+  const [startingDm, setStartingDm] = useState(false);
+  const startingDmRef = useRef(false);
   // MU-C4 shared channels. null = the sharing surface is unavailable (signed
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
@@ -286,6 +300,22 @@ export function ChatsView(props: {
     }
   }, [workspaceId]);
 
+  // DM sync: reconcile with the relay (auto-join received DM grants, push the
+  // member's local ops, pull the peers') and refresh the list. Best-effort —
+  // offline keeps the current list and the next pass retries. A late response
+  // for a stale workspace/nav is dropped by the token guard.
+  const refreshDms = useCallback(async () => {
+    const token = liveToken.current;
+    try {
+      const result = await bridge().syncDms({ workspaceId });
+      if (token !== liveToken.current) return;
+      setDmAvailable(result.available);
+      setDms(result.dms);
+    } catch {
+      // DMs are optional: Chats stays fully usable without them.
+    }
+  }, [workspaceId]);
+
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
     liveToken.current += 1;
@@ -300,12 +330,24 @@ export function ChatsView(props: {
     setShareEmail("");
     setShareReadOnly(false);
     setJoiningShareId(null);
+    setDms([]);
+    setDmAvailable(false);
+    setDmRecipients("");
+    setDmDraft("");
     setOverview({ status: "loading" });
     void refreshOverview();
+    void refreshDms();
     return () => {
       liveToken.current += 1;
     };
-  }, [refreshOverview]);
+  }, [refreshDms, refreshOverview]);
+
+  // Gentle DM poll while the view is open: the other side's messages arrive
+  // by relay pull, and the sync is cursor-based (no changes = no work).
+  useEffect(() => {
+    const interval = setInterval(() => void refreshDms(), 5_000);
+    return () => clearInterval(interval);
+  }, [refreshDms]);
 
   const openChannel = useCallback(
     async (channel: ChatChannelRecord) => {
@@ -478,6 +520,133 @@ export function ChatsView(props: {
     [nav, props, viewerAuthorId, workspaceId],
   );
 
+  // --- Direct messages (WS-MU-C3) -----------------------------------------
+
+  const loadDmConversation = useCallback(
+    async (dm: DmRecord, token: number) => {
+      if (!dm.threadId) return;
+      const [result, reactionResult] = await Promise.all([
+        bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
+        bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
+      ]);
+      if (token !== liveToken.current) return;
+      setMessages(result.messages);
+      setReactions(reactionResult.reactions);
+      setViewerAuthorId(reactionResult.viewerAuthorId);
+      void bridge()
+        .markChatThreadRead({
+          workspaceId,
+          threadId: dm.threadId,
+          upToSequence: result.messages.length,
+        })
+        .catch(() => {
+          // Best-effort, like the thread view.
+        });
+    },
+    [workspaceId],
+  );
+
+  const openDm = useCallback(
+    async (dm: DmRecord) => {
+      const token = ++liveToken.current;
+      setNav({ level: "dm", dm });
+      setMessages([]);
+      setReactions([]);
+      setMessagesLoading(true);
+      try {
+        await loadDmConversation(dm, token);
+        if (token !== liveToken.current) return;
+        setDms((current) =>
+          current.map((entry) =>
+            entry.channelId === dm.channelId ? { ...entry, unreadCount: 0 } : entry,
+          ),
+        );
+        requestAnimationFrame(() =>
+          messagesEndRef.current?.scrollIntoView({ block: "end" }),
+        );
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not load this conversation."));
+      } finally {
+        if (token === liveToken.current) setMessagesLoading(false);
+      }
+    },
+    [loadDmConversation, props],
+  );
+
+  // While a DM is open, poll: sync (push the member's ops, pull the peers')
+  // then reload the conversation. Token-guarded so a stale response never
+  // repaints a view the user already left.
+  useEffect(() => {
+    if (nav.level !== "dm" || !nav.dm.threadId) return;
+    const dm = nav.dm;
+    const token = liveToken.current;
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          await bridge().syncDms({ workspaceId });
+          if (token !== liveToken.current) return;
+          await loadDmConversation(dm, token);
+        } catch {
+          // Offline: keep the conversation as-is; the next tick retries.
+        }
+      })();
+    }, 4_000);
+    return () => clearInterval(interval);
+  }, [loadDmConversation, nav, workspaceId]);
+
+  const sendDmMessage = useCallback(async () => {
+    if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return;
+    const body = composer.trim();
+    if (body.length === 0 || sending || sendingRef.current) return;
+    const threadId = nav.dm.threadId;
+    const token = liveToken.current;
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      const result = await bridge().sendChatMessage({ workspaceId, threadId, body });
+      if (token !== liveToken.current) return;
+      setMessages((current) => [...current, result.message]);
+      setComposer("");
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      props.onError(ipcErrorMessage(error, "Could not send that message."));
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }, [composer, nav, props, sending, workspaceId]);
+
+  // Starting a DM = pick who + say something, one step. Starting one with
+  // someone you already message opens the existing conversation.
+  const startDm = useCallback(async () => {
+    const body = dmDraft.trim();
+    const recipients = dmRecipients.trim();
+    if (body.length === 0 || recipients.length === 0) return;
+    if (startingDm || startingDmRef.current) return;
+    const token = liveToken.current;
+    startingDmRef.current = true;
+    setStartingDm(true);
+    try {
+      const result = await bridge().startDm({ workspaceId, recipients, body });
+      if (token !== liveToken.current) return;
+      setDmDraft("");
+      setDmRecipients("");
+      setDms((current) => [
+        result.dm,
+        ...current.filter((dm) => dm.channelId !== result.dm.channelId),
+      ]);
+      void openDm(result.dm);
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      props.onError(ipcErrorMessage(error, "Could not start that conversation."));
+    } finally {
+      startingDmRef.current = false;
+      setStartingDm(false);
+    }
+  }, [dmDraft, dmRecipients, openDm, props, startingDm, workspaceId]);
+
   // MU-C4 derived lookups: a channel matches a grant by its WIRE id.
   const joinedByWire = useMemo(() => {
     const map = new Map<string, JoinedSharedChannelRow>();
@@ -629,8 +798,13 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setChannelThreads([]);
       void refreshOverview();
+    } else if (nav.level === "dm" || nav.level === "dm-new") {
+      setNav({ level: "channels" });
+      setMessages([]);
+      setComposer("");
+      void refreshDms();
     }
-  }, [nav, openChannel, refreshOverview]);
+  }, [nav, openChannel, refreshDms, refreshOverview]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -670,6 +844,114 @@ export function ChatsView(props: {
         >
           Try again
         </button>
+      </div>
+    );
+  }
+
+  if (nav.level === "dm-new") {
+    return (
+      <div
+        data-testid="chats-dm-new"
+        className="flex min-h-0 flex-1 flex-col"
+        onKeyDownCapture={onKeyDownCapture}
+      >
+        <BackHeader
+          label="New message"
+          testId="chats-dm-new"
+          onBack={goBack}
+          icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
+        />
+        <div className="flex flex-col gap-1 border-b border-line p-2">
+          <label className="sr-only" htmlFor="chats-dm-recipients">
+            To
+          </label>
+          <input
+            id="chats-dm-recipients"
+            data-testid="chats-dm-recipients"
+            autoFocus
+            value={dmRecipients}
+            placeholder="To: email@example.com"
+            onChange={(event) => setDmRecipients(event.target.value)}
+            className="h-7 w-full rounded border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+          />
+          <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
+            Separate several people with commas. They&apos;ll see the conversation on
+            their next sync.
+          </p>
+        </div>
+        <div className="min-h-0 flex-1" />
+        <MentionComposer
+          testIdPrefix="chats-dm-new"
+          composerId="chats-dm-new-composer"
+          value={dmDraft}
+          sending={startingDm}
+          placeholder="Write the first message…"
+          sendLabel="Start conversation"
+          candidates={mentionCandidates}
+          onChange={setDmDraft}
+          onSend={() => void startDm()}
+        />
+      </div>
+    );
+  }
+
+  if (nav.level === "dm") {
+    const dm = nav.dm;
+    return (
+      <div
+        data-testid="chats-dm-view"
+        className="flex min-h-0 flex-1 flex-col"
+        onKeyDownCapture={onKeyDownCapture}
+      >
+        <BackHeader
+          label={dm.peerLabel}
+          testId="chats-dm"
+          onBack={goBack}
+          icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
+        />
+        {/* Presence seam (MU-C1): once the awareness channel lands, "viewing"
+            and "typing…" render here, keyed by this DM's channelWireId and
+            fanned out through the SAME shareForRecipient grant gate. Until
+            then the header stays calm — no fake liveness. */}
+        {dm.threadId ? (
+          <ChatMessageList
+            testIdPrefix="chats-dm"
+            messages={messages}
+            loading={messagesLoading}
+            emptyLabel="No messages yet."
+            endRef={messagesEndRef}
+            mentionCandidates={mentionCandidates}
+            reactionControls={{
+              reactions,
+              viewerAuthorId,
+              onToggle: toggleReaction,
+            }}
+          />
+        ) : (
+          <div
+            data-testid="chats-dm-waiting"
+            className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
+          >
+            Waiting for this conversation to sync…
+          </div>
+        )}
+        {dm.connected ? (
+          <MentionComposer
+            testIdPrefix="chats-dm"
+            composerId="chats-dm-composer"
+            value={composer}
+            sending={sending || !dm.threadId}
+            placeholder={`Message ${dm.peerLabel}…`}
+            sendLabel="Send message"
+            candidates={mentionCandidates}
+            onChange={setComposer}
+            onSend={() => void sendDmMessage()}
+          />
+        ) : (
+          <ComposerNotice testId="chats-dm-ended">
+            This conversation has ended. You can still read it.
+          </ComposerNotice>
+        )}
       </div>
     );
   }
@@ -941,7 +1223,9 @@ export function ChatsView(props: {
           onOpen={props.onOpenAddressed}
         />
         <ul className="m-0 list-none p-0">
-          {overview.channels.map((channel) => {
+          {overview.channels
+            .filter((channel) => channel.kind !== "dm")
+            .map((channel) => {
             const joined = joinedFor(channel);
             const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
             const sharedLabel = joined
@@ -985,6 +1269,53 @@ export function ChatsView(props: {
             );
           })}
         </ul>
+        {dmAvailable || dms.length > 0 ? (
+          <div data-testid="chats-dms-section">
+            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              Direct messages
+            </p>
+            <ul className="m-0 list-none p-0">
+              {dms.map((dm) => (
+                <li key={dm.channelId} className="border-b border-line">
+                  <button
+                    type="button"
+                    data-testid="chats-dm-item"
+                    data-channel-id={dm.channelId}
+                    onClick={() => void openDm(dm)}
+                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  >
+                    <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
+                    <span className="min-w-0 flex-1">
+                      <span
+                        data-testid="chats-dm-name"
+                        className="block truncate text-[12px] font-medium text-ink"
+                      >
+                        {dm.peerLabel}
+                      </span>
+                      <span className="block text-[10px] text-subtle">
+                        {dm.connected ? "Direct message" : "Ended"}
+                      </span>
+                    </span>
+                    <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {dmAvailable ? (
+              <div className="px-3 py-1.5">
+                <button
+                  type="button"
+                  data-testid="chats-new-dm"
+                  onClick={() => setNav({ level: "dm-new" })}
+                  className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+                >
+                  <Plus size={12} aria-hidden />
+                  New message
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {receivedNotJoined.length > 0 ? (
           <div data-testid="chats-shared-with-you">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
