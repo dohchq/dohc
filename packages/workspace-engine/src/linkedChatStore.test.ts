@@ -656,6 +656,82 @@ describe("chat channels", () => {
   });
 });
 
+// MU-C4 shared-channel grant lookups: the wire identity a grant keys on, and
+// the thread→channel point lookup the read-only write gate uses.
+describe("shared-channel lookups", () => {
+  it("getChannelWireId returns the wire id for an existing channel and rejects a missing or cross-workspace one", async () => {
+    const chats = chatStore();
+    const channel = await chats.createChannel({ workspaceId: "workspace-a", name: "team" });
+    // A locally created channel's wire identity is its own id.
+    expect(
+      await chats.getChannelWireId({ workspaceId: "workspace-a", channelId: channel.id }),
+    ).toBe(channel.id);
+    // A missing channel and a cross-workspace one fail loudly (the caller wraps
+    // this in a catch → null): neither can be mistaken for a real grant.
+    await expect(
+      chats.getChannelWireId({ workspaceId: "workspace-a", channelId: "channel-missing" }),
+    ).rejects.toMatchObject({ code: "channel-not-found" });
+    await expect(
+      chats.getChannelWireId({ workspaceId: "workspace-b", channelId: channel.id }),
+    ).rejects.toMatchObject({ code: "workspace-mismatch" });
+    await chats.close();
+  });
+
+  it("findThreadChannelId resolves a channel-bound thread and returns null for file-linked, missing, or cross-workspace threads", async () => {
+    const versions = versionStore();
+    const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+    const file = await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes.md",
+      text: "seed\n",
+      metadata: { origin: "local-file", summary: "seed file" },
+    });
+    const chats = chatStore();
+    const channel = await chats.createChannel({ workspaceId: "workspace-a", name: "team" });
+    const started = await chats.startChannelThread({
+      workspaceId: "workspace-a",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Member" },
+      body: "hi",
+    });
+    // A channel-bound thread resolves to its channel via a single lookup.
+    expect(
+      await chats.findThreadChannelId({
+        workspaceId: "workspace-a",
+        threadId: started.thread.id,
+      }),
+    ).toBe(channel.id);
+    // A file-linked thread has no channel binding → null.
+    const fileThread = await chats.createThread({
+      workspaceId: "workspace-a",
+      title: "File chat",
+      linkedFile: { objectId: file.object.id },
+    });
+    expect(
+      await chats.findThreadChannelId({
+        workspaceId: "workspace-a",
+        threadId: fileThread.id,
+      }),
+    ).toBeNull();
+    // A missing thread and a cross-workspace one both resolve to null (they
+    // pass through the write gate; the store's own write path owns their error).
+    expect(
+      await chats.findThreadChannelId({
+        workspaceId: "workspace-a",
+        threadId: "thread-missing",
+      }),
+    ).toBeNull();
+    expect(
+      await chats.findThreadChannelId({
+        workspaceId: "workspace-b",
+        threadId: started.thread.id,
+      }),
+    ).toBeNull();
+    await chats.close();
+  });
+});
+
 describe("channel threads", () => {
   it("starts an untitled thread whose display title is the first-message snippet", async () => {
     const chats = chatStore();

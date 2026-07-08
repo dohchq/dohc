@@ -1179,6 +1179,14 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
   }): Promise<string | null>;
+  // MU-C4 read-only write gate: resolve a thread to its bound channel with a
+  // single indexed lookup (no workspace-wide thread scan). Null when the
+  // thread is missing, cross-workspace, or not channel-bound (a file-linked
+  // thread).
+  findThreadChannelId(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+  }): Promise<ChatChannelId | null>;
   // The fast composer path: thread + first message land in ONE transaction so
   // a failed send can never strand an empty thread. Title is optional — an
   // untitled thread displays its first-message snippet (the anti-forum rule).

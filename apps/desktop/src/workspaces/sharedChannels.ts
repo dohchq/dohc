@@ -84,7 +84,10 @@ export async function assertSharedChannelWritable(input: {
   workspaceId: string;
   sharedChannels: readonly JoinedSharedChannel[] | undefined;
   store: {
-    listThreads(input: { workspaceId: string }): Promise<Array<{ id: string; channelId?: string }>>;
+    findThreadChannelId(input: {
+      workspaceId: string;
+      threadId: string;
+    }): Promise<string | null>;
     getChannelWireId(input: { workspaceId: string; channelId: string }): Promise<string | null>;
   };
   target: { channelId: string } | { threadId: string };
@@ -99,11 +102,12 @@ export async function assertSharedChannelWritable(input: {
   if ("channelId" in input.target) {
     channelId = input.target.channelId;
   } else {
-    const { threadId } = input.target;
-    const thread = (await input.store.listThreads({ workspaceId: input.workspaceId })).find(
-      (row) => row.id === threadId,
-    );
-    channelId = thread?.channelId ?? null;
+    // Point lookup, not a workspace-wide thread scan: every gated write pays
+    // this once a read-only share exists.
+    channelId = await input.store.findThreadChannelId({
+      workspaceId: input.workspaceId,
+      threadId: input.target.threadId,
+    });
   }
   if (!channelId) return;
   const wireId = await input.store.getChannelWireId({

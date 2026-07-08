@@ -1268,6 +1268,24 @@ export function createLinkedChatStore(
       });
     },
 
+    // MU-C4: point lookup for the read-only write gate — resolve a thread to
+    // its channel WITHOUT scanning every thread in the workspace. Null when
+    // the thread is missing, cross-workspace, or not channel-bound (a
+    // file-linked thread).
+    findThreadChannelId(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        return withDb((db) => {
+          const row = db
+            .prepare(
+              "SELECT channel_id FROM chat_threads WHERE workspace_id = ? AND thread_id = ?",
+            )
+            .get(workspaceId, input.threadId) as { channel_id?: unknown } | undefined;
+          return row ? optionalString(row.channel_id) ?? null : null;
+        });
+      });
+    },
+
     // Thread + first message in ONE transaction (the fast composer path): a
     // failed send can never strand an empty thread.
     startChannelThread(input) {
