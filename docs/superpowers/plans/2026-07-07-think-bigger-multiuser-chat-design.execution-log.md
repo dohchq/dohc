@@ -466,3 +466,216 @@ verbatim by DMs and shared channels: they key the SAME scope by
 presence/typing for free. The only remaining live-wiring is exposing the relay
 base URL + bearer to the renderer to populate `ChatsView`'s `collaboration`
 prop (and a matching prop on the editor for doc co-presence).
+## Shared Channels MU-C4
+
+The bidirectional chat-channel share: a whole channel (threads + messages +
+reactions) shared across accounts through a new grant kind on PR-18's share
+rows, replicated over the relay, behind the signed-in collaboration surface.
+This is the lane that adds the design's one genuinely new mechanism — the
+first place a non-owner WRITES into an owner's bucket.
+
+### The grant model (relay)
+
+- `sync_relay_shares.selector_json` gains a second kind:
+  `{ kind: "chat-channel", channelWireId, access }` with
+  `access ∈ {"read-write" (default), "read-only"}` — the design's accepted
+  recommendation (collaborative by default, read-only as the broadcast
+  opt-in). `validateChatChannelShareSelector` gates grant time;
+  `parseAnyShareSelectorJson` re-validates every stored row on load and fails
+  closed (null → the generic 404). The PR-18 create/claim/revoke surface —
+  email invites, pending claims, anti-enumeration, revocation stamping — is
+  reused verbatim; the create route just accepts `channelWireId`/`access`
+  beside `paths`/`versionId` (`services/sync-relay/src/shareFilter.ts`,
+  `server.ts`).
+
+### The fail-closed chat branch of `filterOpForShare`
+
+`filterOpForShare` (which EXCLUDED all chat ops) gains a chat branch used
+only by chat-channel selectors, allowlisting exactly:
+`chat.channel.create` whose `wireId` IS the granted wire id;
+`chat.thread.create` carrying the granted `channelWireId` (a linked-file
+claim, a missing threadId, or a foreign wire id is excluded);
+`chat.message.append` / `chat.reaction.set` whose thread RESOLVES to the
+granted channel. Resolution is the load-bearing security decision: those ops
+carry only a `threadId`, so the relay resolves the binding from its OWN log —
+`storage.findThreadCreateChannelWireId` returns the channelWireId of the
+EARLIEST `chat.thread.create` for that thread (relay order, LIKE-prefiltered
+with escaped wildcards, JSON-verified). Earliest-wins mirrors the engine's
+insert-if-absent apply, so a member pushing a FORGED thread.create that
+claims the granted channel for the owner's existing private thread can never
+re-bind it: the batch is rejected at append, and even a hand-inserted forgery
+would be out-resolved by the true earlier op at serve time. Everything else —
+other channels, DMs, file moments, secrets, version ops, `workspace.init`,
+unknown kinds — falls to the terminal deny. Chat decisions carry
+`blobSha256s: []`, so a chat share can never make any blob reachable
+(byte-identical 404 on every blob probe). Path selectors are untouched: chat
+ops stay excluded from file shares, file ops from chat shares — the two kinds
+cannot widen each other.
+
+### The member append route — `POST /sync/shares/:shareId/log`
+
+The bidirectional extension of PR-18's read-only recipient model. Gauntlet in
+order: (1) `shareForRecipient` — membership/revocation/granter-standing, every
+denial the same byte-identical generic 404; (2) chat-channel selector with
+`access === "read-write"` — a read-only member (or any path share) gets an
+explicit 403 `share_read_only` (a refusal, not a 404: the member legitimately
+knows the share exists); (3) MU-C0's `assertChatAuthorship` — every authored
+op must claim the AUTHENTICATED pusher (missing `authorUserId` is stamped),
+so no member can forge a message or reaction as another member; (4) every op
+through the SAME chat filter that scopes reads, batch-aware (a thread created
+earlier in the batch is a valid in-batch target, but the log's earliest
+binding always outranks the batch) — one rejected op 403s the WHOLE batch
+atomically (`share_op_rejected`, deliberately unspecific). Accepted ops land
+in the OWNER's bucket under a share-namespaced origin
+(`share:<shareId>:<clientOriginId>`), so a member can never extend or collide
+with the owner's — or another member's — origin sequence space (tested: a
+member deliberately claiming the owner's origin id lands in its own
+namespace and the owner's next contiguous append still succeeds). A revoke
+racing the append is re-checked immediately before `appendLogBatch`.
+
+### How the channel converges (one log, many writers)
+
+All members read the SAME owner-bucket log through their own share
+(server-filtered); the owner reads it as their normal own-bucket pull, which
+now applies member ops like any remote origin's. The member side is
+`packages/workspace-engine/src/syncSharedChannel.ts`:
+
+- `pullSharedChannel` replays the filtered log into the member's OWN chat
+  store. A filtered log has per-source-origin seq gaps by construction and
+  `applyReplicationOp` fails closed on gaps, so each source origin is
+  renumbered DENSELY (in relay order — identical for every member) under
+  `shared:<shareId>:<originId>`; `shared_channel_peers` records (last source
+  seq consumed, last dense seq assigned) so a crash-refetch is an exact skip,
+  never a double-apply. The member's own pushed ops echo back under their
+  namespaced origin and are skipped outright. A client-side scope gate
+  (mirroring `syncShareView`'s `pathReplayable` third-gate posture) drops
+  anything a hostile relay serves outside the granted channel. Engine wire-id
+  / thread-id / message-id convergence then makes every member's channel copy
+  identical.
+- `pushSharedChannel` scans the LOCAL origin's journal for chat ops that
+  belong to the channel (channel.create for the wire id, threads bound to it,
+  messages/reactions in those threads — resolved against the local store),
+  renumbers them densely into the share's own contiguous sequence
+  (`shared_channel_push_state`, committed per accepted batch so retries
+  resend identical seqs the relay dedups), and appends through the member
+  route under this machine's own origin id. 403 `share_read_only` surfaces as
+  `SharedChannelReadOnlyError` (nothing marked pushed — a later access flip
+  re-sends); every 404 as `ShareUnavailableError`.
+- State tables are `SHARED_CHANNEL_SYNC_DDL` in `engineDbSchema.ts` (lazy
+  additive, same posture as the other sync tables).
+
+### Revocation (honest end-of-share)
+
+Server: revoke stamps `revoked_at_ms`; the member's next fetch AND next
+append are the byte-identical generic 404; the in-flight re-checks abort a
+racing read or append. Client: `ShareUnavailableError` marks the registry row
+`ended: true` — the locally replayed copy stays readable (they legitimately
+saw it), nothing new arrives, nothing leaves, and the UI says so plainly.
+Member-initiated LEAVE is purely local (registry removal; only the granter
+revokes the grant itself).
+
+### Desktop UI (Chats)
+
+Channels you own get a Share affordance keyed on the channel's wire id
+(header button → member list with per-person access + Remove, an email +
+"View only" form, one honest sentence about what sharing means). Invitations
+appear under "Shared with you" with one-click Join (info → pull → registry
+record with an origin-relay pin, mirroring the shared-view rule). Joined
+channels show calm provenance ("Shared by owner@… — read-only"), disable
+composers when read-only or ended, and offer Leave. `general` is REFUSED at
+share time: its well-known wire id is the same in every workspace by design,
+so sharing it would merge strangers' personal chats. Refresh rides
+`listChatChannels` (fresh on open), fire-and-forget pushes after
+send/thread/reaction, and the workspace's relay sync cadence through a
+contained best-effort seam (`relaySyncEngine.syncSharedChannels`) that can
+never fail the file-sync pass. Solo/signed-out renders byte-identically to
+before — every sharing affordance hides when share listing is unavailable.
+
+**Presence seam (MU-C1):** PR #97 was not merged into this lane's base
+(d856b688), so presence is a documented seam, not wired: once the awareness
+channel lands, member presence attaches in ChatsView keyed by
+`(shareId | channelWireId)` with fan-out gated by the same grant check.
+
+### Adversarial evidence (the blocking gate)
+
+- Sentinel no-leak: the owner's bucket seeded with a private channel
+  (`SENTINEL-private-*`), a file moment, and a secret op — a member's share
+  page never contains any sentinel, the private wire id, or `.env`
+  (`sharedChannels.test.ts`, plus filter-level sentinel matrix in
+  `shareFilter.test.ts`, plus store-level over the live relay).
+- Non-member isolation: read AND append probes on a real share are
+  byte-identical to a share that never existed; the granter probing the
+  recipient route is denied identically; unauthenticated stays 401.
+- No-forge: a member's message/reaction claiming another user 403s
+  (`authorship_mismatch`) atomically; a missing author is stamped to the
+  authenticated pusher.
+- Atomic batch rejection: six escape attempts (private-thread message,
+  private thread.create, foreign channel.create, file moment, unknown-thread
+  message, forged re-bind of an existing private thread) each 403 the whole
+  batch — the valid leading op never lands.
+- Read-only: reads flow, appends 403 `share_read_only`, nothing reaches the
+  owner's log; path shares refuse appends with the same code.
+- Revocation: next fetch/append 404 byte-identically; mid-append revoke race
+  aborts with nothing landed; the member's received list empties.
+- Live relay (child process, `main.integration.test.ts`): owner + two
+  read-write members CONVERGE on one channel (identical message sets
+  including verified author ids) through push/pull over real HTTP; a
+  read-only member reads everything and is refused append; a non-member is
+  denied byte-identically; the owner's other channel never reaches any
+  member's store; revocation closes member B's view while their local copy
+  (plus their orphaned post-revocation message) stays readable and never
+  reaches the owner.
+- Hostile-relay client gate: a relay double serving foreign-channel ops,
+  file ops, and unknown kinds — the member's pull drops every one
+  (`syncSharedChannel.test.ts`).
+- Solo unaffected: no grant → no route reachable; the desktop suite's solo
+  Chats tests pass unchanged, and sharing UI is provably absent when the
+  surface is unavailable.
+
+### Suite counts (Linux)
+
+- sync-relay: 100 (was 78) — +13 `sharedChannels.test.ts`, +8 chat filter
+  tests in `shareFilter.test.ts`, +1 live-relay convergence e2e in
+  `main.integration.test.ts`.
+- workspace-engine: 382 parallel (+6 `syncSharedChannel.test.ts`) +
+  128/5-skip serial unchanged.
+- desktop: 1095 passed / 2 skipped (+12: 5 `sharedChannels.test.ts`, 5
+  ChatsView shared-channel tests, 1 registry, 1 relaySyncEngine).
+- `pnpm -r typecheck`, `pnpm build`, docs link checker: green.
+
+### Files changed
+
+- `services/sync-relay/src/shareFilter.ts` — chat-channel selector,
+  validation, union parser, `ChatShareThreadResolver`, the chat filter branch.
+- `services/sync-relay/src/storage.ts` — `findThreadCreateChannelWireId`
+  (earliest-binding lookup).
+- `services/sync-relay/src/server.ts` — chat grants on shares-create, the
+  member append route, resolver-wired share-log/share-blob, `share_read_only`
+  / `share_op_rejected`.
+- `packages/workspace-engine/src/syncSharedChannel.ts` (+ engineDbSchema DDL,
+  linkedChatStore `getChannelWireId`, contracts, index exports).
+- `apps/desktop`: `workspaces/sharedChannels.ts` (best-effort syncer),
+  `workspaces/registryStore.ts`/`WorkspaceRegistry.ts` (joined set),
+  `workspaces/relaySyncEngine.ts` (contained cadence seam), `main.ts`
+  (share/list/join/leave IPC, wire-id plumbing, prompt pushes, general
+  refusal, path-share listing untouched by chat grants), `ipc/bridgeContract`
+  / `channels` / `preload`, `renderer/workbench/ChatsView.tsx`.
+- Tests: `sharedChannels.test.ts` (relay), `shareFilter.test.ts`,
+  `main.integration.test.ts`, `syncSharedChannel.test.ts` (engine),
+  `sharedChannels.test.ts` (desktop), `ChatsView.test.tsx`,
+  `registryStore.test.ts`, `relaySyncEngine.test.ts`.
+
+### Handoff to MU-C5 (final isolation sweep)
+
+Everything the sweep needs is in place and named: the isolation matrix lives
+in `sharedChannels.test.ts` + `shares.test.ts` (byte-identical denials), the
+forgery gate in `server.test.ts` + the live-relay authorship test, the leak
+sentinels in `shareFilter.test.ts`/`sharedChannels.test.ts`, and the
+self-host posture is unchanged (the chat-channel grant is rows in the
+existing `sync_relay_shares` table + one route on the existing relay — no new
+service, nothing cloud-locked). Named follow-ups for the sweep to press on:
+(1) MU-C3 DMs will rebase onto this relay surface (the DM recipient-set model
+should reuse `shareNotAppendable`/`share_op_rejected` and the earliest-binding
+resolver); (2) shared read cursors stay local-only by design; (3) log growth
+in the owner bucket from member appends rides the existing GC-before-GA
+framing; (4) presence wiring once MU-C1 merges.
