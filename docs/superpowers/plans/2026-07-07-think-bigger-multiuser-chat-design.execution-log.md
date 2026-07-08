@@ -679,3 +679,116 @@ should reuse `shareNotAppendable`/`share_op_rejected` and the earliest-binding
 resolver); (2) shared read cursors stay local-only by design; (3) log growth
 in the owner bucket from member appends rides the existing GC-before-GA
 framing; (4) presence wiring once MU-C1 merges.
+
+## Direct Messages MU-C3
+
+DMs are built ENTIRELY on MU-C4's shared-channel lane — no new engine apply
+path, no new relay route, no new tables, no new op field. The reconcile that
+produced this lane deliberately DROPPED the earlier MU-C3 draft's competing
+foundation (a `channelWireId` stamp on message/reaction payloads, a parallel
+`syncChatShare.ts`/outbox/links mechanism, a server-owned member sequence
+space with hashed origins, and a second `applySharedChannelOp` apply path):
+every one of those regressed forge-resistance, leaked internal fields, or
+broke the solo byte-identical invariant. What remains is the smallest possible
+delta on top of MU-C4.
+
+### The data model — a DM is a channel + grants
+
+A DM is **one `kind:"dm"` channel plus one MU-C4 `chatChannel` grant per
+participant.** The owner mints the channel locally (its wire id IS its channel
+id) and addresses each recipient by email through the SAME `shares-create`
+chat branch MU-C4 uses (`{recipientEmail, channelWireId, access}`, flat). A
+participant discovers the grant and JOINS it exactly like any shared channel:
+`fetchSharedChannelInfo` → `pullSharedChannel` → `JoinedSharedChannel`
+registry row. `kind:"dm"` was already reserved at both tiers
+(`normalizeChannelKind`, `createChannel` stamping a wire id for every channel);
+the DM channel converges through `pushSharedChannel`/`pullSharedChannel`
+byte-identically to a regular channel.
+
+### Scope binds by THREAD, never by a self-claimed field
+
+A DM message/reaction op carries ONLY a `threadId` — the exact solo/MU-C4
+shape, with NO `channelWireId` stamp. Both tiers derive the channel from the
+thread's earliest `chat.thread.create`: the relay via
+`filterChatOpForChannelShare` + `findThreadCreateChannelWireId`
+(earliest-binding-wins, `pickServed` redaction), the participant pull via
+`opBelongsToChannel` + the local thread→channel binding. A forged
+`channelWireId`, a forged author (MU-C0 `assertChatAuthorship`), or a
+cross-thread op therefore cannot cross a DM grant at EITHER tier — proven
+below. Because a DM op is byte-identical to a MU-C4 channel op and to a solo
+op, the solo store shape is unchanged.
+
+### The only genuinely-new behavior: born-shared auto-grant / auto-join
+
+Lives in the DESKTOP layer, not the engine:
+
+- **`startDm` (owner)** parses the recipient set, dedupes an existing DM
+  channel by name, `createChannel(kind:"dm")`, resolves the wire id with
+  `getChannelWireId`, ensures ONE live grant per recipient (a `GET /sync/shares`
+  dedupe re-invites after a revoke), sends the first message into the single
+  running thread (anti-forum), and nudges `activity.queueCloudSync` so the
+  owner bucket replicates promptly (chat writes bypass the file watcher).
+- **`syncDms` (participant + owner)** keeps the solo zero-bloat gate
+  (`available = signed-in-with-relay`, else `false` and the renderer hides the
+  whole DM surface). When available it runs an **auto-join pass** over received
+  chat-channel grants not yet joined — but ONLY `kind:"dm"` ones: it peeks the
+  share log's bootstrap `chat.channel.create` (read-only, no store mutation),
+  and only for a DM does it `fetchSharedChannelInfo` + `pullSharedChannel` +
+  register in the shared-channel registry. Regular shared-channel grants are
+  left to explicit manual join. Then `syncWorkspaceSharedChannels` (push local,
+  pull peers) and `listDmRecords`.
+
+`listDmRecords` derives role from `wireId === channelId` (owner) vs a replayed
+channel's fresh local id (participant), and sources participant `peerLabel`
+(the GRANTER's email — the replicated channel name is the participant's OWN
+address), `connected` (owner ⇒ true; participant ⇒ joined && !ended), and
+`shareId` from the `JoinedSharedChannel` registry, NOT a links table. A
+participant send goes through the SAME `store.sendMessage` +
+`syncWorkspaceSharedChannels` as an owner — `assertSharedChannelWritable`
+enforces read-only/ended honesty; there is no DM send bridge.
+
+### Adversarial evidence (the blocking gate)
+
+- `services/sync-relay/src/dmShares.test.ts` (13, route-level): a DM op serves
+  byte-identically to a MU-C4 channel op with NO `channelWireId` on the served
+  message payload; injection-drop retargeted to threads bound to ANOTHER wire
+  (thread-binding, not a self-claimed field); forged-author, out-of-scope,
+  read-only, revocation, and email anti-enumeration denials.
+- `services/sync-relay/src/dm.integration.test.ts` (1, live relay, 120s):
+  Alice↔Bob converge a DM (message + reaction) through the REAL relay driving
+  main's engine helpers (`fetchSharedChannelInfo`/`pullSharedChannel`/
+  `pushSharedChannel`), Carol (authenticated non-participant) is denied
+  byte-identically to an absent share on every surface (she 404s at
+  `shareForRecipient` before any body parse), and revocation closes Bob's
+  access cleanly while his replayed copy stays readable.
+- `packages/workspace-engine/src/syncSharedChannel.test.ts` (+1): a
+  `kind:"dm"` channel replays byte-identically AND a foreign-channel / unknown
+  thread injection is dropped on the participant pull (`opBelongsToChannel`).
+- `apps/desktop/src/workspaces/dmChats.test.ts`,
+  `renderer/workbench/ChatsView.test.tsx` (+5): role/label/connected from the
+  registry (the participant is labelled by the granter, not their own address),
+  solo zero-bloat renders nothing, one-step start-DM, single running
+  conversation with send-on-Enter, ended-DM read-only-but-readable.
+
+### Files changed
+
+- `apps/desktop/src/ipc/channels.ts` / `preload.ts` / `ipc/bridgeContract.ts`
+  — `syncDms`/`startDm` IPC + `DmRecord`/`SyncDms*`/`StartDm*` contracts.
+- `apps/desktop/src/workspaces/dmChats.ts` — `parseDmRecipients`,
+  `dmChannelNameFor`, `listDmRecords` (registry-sourced).
+- `apps/desktop/src/main.ts` — `syncDms`/`startDm` handlers, `autoJoinReceivedDms`
+  (DM-only auto-join), `dmRelayConnection`, `dmRecordForIpc`.
+- `apps/desktop/src/renderer/workbench/ChatsView.tsx` — DM nav levels, polling,
+  "Direct messages" section, `.filter(kind!=="dm")` on the channel list (MU-C4
+  share/join affordances preserved), one-step start-DM.
+- Tests: `dmShares.test.ts` + `dm.integration.test.ts` (relay),
+  `syncSharedChannel.test.ts` (engine), `dmChats.test.ts` +
+  `ChatsView.test.tsx` (desktop).
+
+### Deliberately NOT added (the DROP list)
+
+No `channelWireId` on message/reaction payloads; no `syncChatShare.ts`,
+`chat_share_outbox`/`cursors`/`links` tables, `appendServerSequencedOps`,
+hashed member origins, `applySharedChannelOp`/`sendMessageViaShare`/
+`setReactionViaShare`, `resolveDmSendRoute`, or a second apply path. DMs ride
+`syncSharedChannel.ts` + `shared_channel_*` unchanged.

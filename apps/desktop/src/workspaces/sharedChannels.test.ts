@@ -312,6 +312,33 @@ describe("assertSharedChannelWritable", () => {
           target: { threadId: "thread-missing" },
         }),
       ).resolves.toBeUndefined();
+
+      // An ENDED grant rejects writes even when its recorded access is
+      // read-write (revocation → "ended means read-only local copy"): the
+      // renderer skipping ended composers is honesty, not authorization.
+      const endedRows = [joined({ channelWireId: teamWire!, access: "read-write", ended: true })];
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: endedRows,
+          store: chats,
+          target: { threadId: started.thread.id },
+        }),
+      ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: endedRows,
+          store: chats,
+          target: { channelId: team.id },
+        }),
+      ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
+      // Nothing durable landed for the ended channel either.
+      const afterEnded = await chats.listMessages({
+        workspaceId: "ws-1",
+        threadId: started.thread.id,
+      });
+      expect(afterEnded).toHaveLength(1);
     } finally {
       await chats.close();
       await rm(root, { recursive: true, force: true });
