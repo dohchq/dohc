@@ -165,11 +165,23 @@ export function createSyncRelayHandler({
 
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's OWN log (earliest chat.thread.create wins), so a
-  // member-pushed forgery can never re-bind an existing thread.
-  const chatResolverFor = (workspaceId: string): ChatShareThreadResolver => ({
-    threadChannelWireId: (threadId) =>
-      storage.findThreadCreateChannelWireId(workspaceId, threadId),
-  });
+  // member-pushed forgery can never re-bind an existing thread. Memoized per
+  // resolver (= per request): the filter asks about the SAME threadId once per
+  // message/reaction row on the hot read path, and the underlying lookup is a
+  // log scan. Safe because a resolver never outlives its request and the log
+  // it reads is append-only with earliest-binding-wins semantics.
+  const chatResolverFor = (workspaceId: string): ChatShareThreadResolver => {
+    const cache = new Map<string, string | null>();
+    return {
+      threadChannelWireId: (threadId) => {
+        const cached = cache.get(threadId);
+        if (cached !== undefined || cache.has(threadId)) return cached ?? null;
+        const bound = storage.findThreadCreateChannelWireId(workspaceId, threadId);
+        cache.set(threadId, bound);
+        return bound;
+      },
+    };
+  };
 
   // Lazy claim of pending email invites (PR 18 gate fix): the first time an
   // invited account authenticates to the relay, any share addressed to its

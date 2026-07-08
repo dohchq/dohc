@@ -522,6 +522,82 @@ describe("shared channels (MU-C4)", () => {
     expect(memberView).not.toContain("SENTINEL-private-message");
   });
 
+  it("accepts a member re-pushing a legitimate chat.channel.create for the SAME granted wire id", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    const shareA = await createChannelShare(h, MEMBER_A);
+    const shareB = await createChannelShare(h, MEMBER_B);
+
+    // The member's own journal legitimately holds a channel.create for the
+    // granted wire id (every joiner's local store mints one); re-pushing it
+    // must be admitted, not rejected as out-of-scope.
+    const append = await h(
+      request(
+        MEMBER_A,
+        `/sync/shares/${shareA}/log`,
+        jsonBody({
+          originId: "origin-member-a",
+          ops: [
+            { ...channelCreate(SHARED_WIRE, "team"), originSeq: 0 },
+            { ...messageAppend("msg-after-cc", "thread-shared-1", "after re-create", MEMBER_A), originSeq: 1 },
+          ],
+        }),
+      ),
+    );
+    expect(append.status).toBe(200);
+    expect(await json(append)).toMatchObject({ ok: true, accepted: 2, inserted: 2 });
+
+    // Every other member is served BOTH channel.creates, each carrying the
+    // GRANTED wire id — the engine's wire-id identity (insert-if-absent)
+    // makes them one channel, so the duplicate can never mint or corrupt a
+    // channel row on any member's machine.
+    const opsForB = await fetchSharePage(h, MEMBER_B, shareB);
+    const creates = opsForB.filter((op) => op.opKind === "chat.channel.create");
+    expect(creates).toHaveLength(2);
+    for (const create of creates) expect(create.payload.wireId).toBe(SHARED_WIRE);
+    const bodies = opsForB
+      .filter((op) => op.opKind === "chat.message.append")
+      .map((op) => op.payload.body);
+    expect(bodies).toContain("after re-create");
+  });
+
+  it("serves chat ops rebuilt from an explicit allowlist — unexpected payload fields never leak", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    // A stored op that grew an internal-only field (audit metadata, device
+    // id, ...): the share filter must rebuild the served payload from its
+    // per-kind allowlist instead of passing the record through verbatim.
+    const extra = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({
+          originId: "origin-owner",
+          ops: [
+            chatOp("chat.message.append", {
+              messageId: "msg-extra",
+              threadId: "thread-shared-1",
+              authorKind: "human",
+              authorDisplayName: "Owner",
+              authorUserId: OWNER,
+              body: "public body",
+              createdAtMs: 9,
+              SENTINELInternalDeviceId: "device-123",
+            }),
+          ],
+        }),
+      ),
+    );
+    expect(extra.status).toBe(200);
+    const shareId = await createChannelShare(h, MEMBER_A);
+    const served = JSON.stringify(await fetchSharePage(h, MEMBER_A, shareId));
+    expect(served).toContain("public body");
+    expect(served).not.toContain("SENTINELInternalDeviceId");
+    expect(served).not.toContain("device-123");
+  });
+
   it("never serves a blob through a chat-channel share (chat ops are blob-free)", async () => {
     const storage = await testStorage();
     const h = handler(storage);

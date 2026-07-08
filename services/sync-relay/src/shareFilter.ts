@@ -271,6 +271,22 @@ function collectString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+// Rebuilds the SERVED payload from an explicit per-kind allowlist (the same
+// posture as the moment.append/version.create branches): a stored payload
+// that grows an internal-only field (audit metadata, device ids, ...) must
+// never cross the share boundary un-redacted. Absent optional fields stay
+// absent.
+function pickServed(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const served: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (record[key] !== undefined) served[key] = record[key];
+  }
+  return served;
+}
+
 // MU-C4: how the chat branch resolves a message/reaction op's channel. The
 // ops themselves carry only a threadId; the thread→channel binding lives in
 // the owner's OWN log, in the chat.thread.create op for that thread. The
@@ -308,7 +324,11 @@ function filterChatOpForChannelShare(
 
   if (opKind === "chat.channel.create") {
     if (collectString(record.wireId) !== selector.channelWireId) return { allowed: false };
-    return { allowed: true, payload, blobSha256s: [] };
+    return {
+      allowed: true,
+      payload: pickServed(record, ["channelId", "name", "slug", "kind", "createdAtMs", "wireId"]),
+      blobSha256s: [],
+    };
   }
 
   if (opKind === "chat.thread.create") {
@@ -325,7 +345,13 @@ function filterChatOpForChannelShare(
     // log). A non-null binding must be the granted channel — otherwise this
     // op is a forged re-bind of an existing foreign thread.
     if (bound !== null && bound !== selector.channelWireId) return { allowed: false };
-    return { allowed: true, payload, blobSha256s: [] };
+    // linkedObjectId/linkedPathHint/linkedAtMs are deliberately NOT served: a
+    // channel thread never carries a linked-file owner (enforced above).
+    return {
+      allowed: true,
+      payload: pickServed(record, ["threadId", "title", "createdAtMs", "channelSlug", "channelWireId"]),
+      blobSha256s: [],
+    };
   }
 
   if (opKind === "chat.message.append" || opKind === "chat.reaction.set") {
@@ -334,7 +360,32 @@ function filterChatOpForChannelShare(
     if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
       return { allowed: false };
     }
-    return { allowed: true, payload, blobSha256s: [] };
+    return {
+      allowed: true,
+      payload:
+        opKind === "chat.message.append"
+          ? pickServed(record, [
+              "messageId",
+              "threadId",
+              "authorKind",
+              "authorDisplayName",
+              "authorUserId",
+              "body",
+              "createdAtMs",
+            ])
+          : pickServed(record, [
+              "reactionId",
+              "messageId",
+              "threadId",
+              "emoji",
+              "authorId",
+              "authorKind",
+              "authorDisplayName",
+              "state",
+              "atMs",
+            ]),
+      blobSha256s: [],
+    };
   }
 
   return { allowed: false };

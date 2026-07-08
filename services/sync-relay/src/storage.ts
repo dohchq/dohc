@@ -222,6 +222,16 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       );
       CREATE INDEX IF NOT EXISTS idx_sync_relay_log_page
         ON sync_relay_log(workspace_id, relay_seq);
+      -- MU-C4: findThreadCreateChannelWireId's LIKE pre-filter cannot use an
+      -- index on payload_json, but this PARTIAL index confines the scan to a
+      -- workspace's chat.thread.create rows (a tiny slice of a busy log) in
+      -- relay order, instead of every log row. Per-request memoization in the
+      -- caller (server.ts chatResolverFor) removes the per-message repeats;
+      -- if channel history ever makes even the confined scan hot, the upgrade
+      -- path is a dedicated thread_channel_bindings table filled at insert.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_thread_creates
+        ON sync_relay_log(workspace_id, relay_seq)
+        WHERE op_kind = 'chat.thread.create';
 
       CREATE TABLE IF NOT EXISTS sync_relay_blobs (
         workspace_id TEXT NOT NULL,
