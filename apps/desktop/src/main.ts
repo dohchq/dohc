@@ -201,6 +201,7 @@ import {
 } from "./workspaces/WorkspaceRegistry";
 import type { JoinedSharedChannel } from "./workspaces/registryStore";
 import {
+  assertSharedChannelWritable,
   createKeyedSerializer,
   mergeJoinedChannel,
   relayFetchWithTimeout,
@@ -2452,8 +2453,14 @@ function registerIpcHandlers(): void {
     if (!cachedCredentials.relayUrl) {
       throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
     }
+    // Capture the credentials BEFORE the awaits below (CodeRabbit Data
+    // Integrity): cachedCredentials can change during fetch/pull (logout,
+    // relay switch) — re-reading it afterwards can crash on null or pin the
+    // joined channel to the WRONG relay. The join is atomic against the
+    // credentials it started with.
+    const joinedRelayUrl = cachedCredentials.relayUrl;
     const relay = {
-      baseUrl: normalizeServerUrl(cachedCredentials.relayUrl),
+      baseUrl: normalizeServerUrl(joinedRelayUrl),
       token: cachedCredentials.token,
     };
     let info;
@@ -2477,7 +2484,7 @@ function registerIpcHandlers(): void {
       channelWireId: info.channelWireId,
       access: info.access,
       granterEmail: info.granterEmail,
-      relayUrl: cachedCredentials.relayUrl,
+      relayUrl: joinedRelayUrl,
     };
     // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
     // re-join of the same channel under a NEW share id (revoked + re-granted)
@@ -3052,6 +3059,15 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
+    // writes at the main boundary, BEFORE any durable local row — the
+    // renderer disabling its composer is honesty, not authorization.
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target: { threadId: input.threadId },
+    });
     // WS-MU-C0: the credential cache must be warm BEFORE relayAuthorUserId()
     // reads it — a send racing an unfinished async cache load would otherwise
     // stamp solo (authorUserId omitted) and lose relay provenance for a
@@ -3210,6 +3226,14 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4 (CodeRabbit security): read-only shared channels reject the
+    // composer at the main boundary, before any durable row.
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target: { channelId: input.channelId },
+    });
     // WS-MU-C0: warm the credential cache before relayAuthorUserId() reads it,
     // so a thread opened before the async cache load finishes still stamps the
     // signed-in author (never falsely solo). Idempotent.
@@ -3294,6 +3318,14 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
+    // shared channel rejects them before any durable row.
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target: { threadId: input.threadId },
+    });
     const reaction = await linkedChatStoreFor(workspace).setReaction({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,

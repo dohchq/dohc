@@ -1,9 +1,14 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  createLinkedChatStore,
 } from "@dohc/workspace-engine";
 import {
+  assertSharedChannelWritable,
   createKeyedSerializer,
   mergeJoinedChannel,
   relayFetchWithTimeout,
@@ -222,5 +227,94 @@ describe("mergeJoinedChannel", () => {
     );
     expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-other", "share-old"]);
     expect(rejoinedSameShare[1]!.access).toBe("read-only");
+  });
+});
+
+describe("assertSharedChannelWritable", () => {
+  it("rejects writes into a READ-ONLY joined channel before any durable mutation, leaving other channels writable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-shared-channel-gate-"));
+    const chats = createLinkedChatStore(root);
+    try {
+      const team = await chats.createChannel({ workspaceId: "ws-1", name: "team" });
+      const teamWire = await chats.getChannelWireId({ workspaceId: "ws-1", channelId: team.id });
+      expect(teamWire).not.toBeNull();
+      const started = await chats.startChannelThread({
+        workspaceId: "ws-1",
+        channelId: team.id,
+        author: { kind: "human", displayName: "Member" },
+        body: "seeded",
+      });
+      const personal = await chats.createChannel({ workspaceId: "ws-1", name: "personal" });
+      const personalThread = await chats.startChannelThread({
+        workspaceId: "ws-1",
+        channelId: personal.id,
+        author: { kind: "human", displayName: "Member" },
+        body: "mine",
+      });
+
+      const readOnlyRows = [joined({ channelWireId: teamWire!, access: "read-only" })];
+      // All three write shapes gate: send/reaction target a THREAD, the
+      // composer targets a CHANNEL.
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: readOnlyRows,
+          store: chats,
+          target: { threadId: started.thread.id },
+        }),
+      ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: readOnlyRows,
+          store: chats,
+          target: { channelId: team.id },
+        }),
+      ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
+      // Nothing durable landed: the seeded message is still alone.
+      const messages = await chats.listMessages({ workspaceId: "ws-1", threadId: started.thread.id });
+      expect(messages).toHaveLength(1);
+
+      // The SAME channel under a read-write grant stays writable…
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: [joined({ channelWireId: teamWire!, access: "read-write" })],
+          store: chats,
+          target: { threadId: started.thread.id },
+        }),
+      ).resolves.toBeUndefined();
+      // …a plain local channel is unaffected even while a read-only grant
+      // exists elsewhere…
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: readOnlyRows,
+          store: chats,
+          target: { channelId: personal.id },
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: readOnlyRows,
+          store: chats,
+          target: { threadId: personalThread.thread.id },
+        }),
+      ).resolves.toBeUndefined();
+      // …and an unknown thread is not this gate's problem (the store's own
+      // write path fails it honestly).
+      await expect(
+        assertSharedChannelWritable({
+          workspaceId: "ws-1",
+          sharedChannels: readOnlyRows,
+          store: chats,
+          target: { threadId: "thread-missing" },
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      await chats.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

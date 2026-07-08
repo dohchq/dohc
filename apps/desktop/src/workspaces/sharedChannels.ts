@@ -70,6 +70,53 @@ export function mergeJoinedChannel(
   ];
 }
 
+// MU-C4 write gate (CodeRabbit security; product invariant "agent writes must
+// respect sharing boundaries"): a READ-ONLY shared-channel grant must reject
+// chat writes BEFORE any durable local mutation. The renderer disabling its
+// composers is honesty, not authorization — main is the boundary; without
+// this gate a crafted IPC call would mint durable local messages/reactions
+// that sync forever refuses to deliver. Resolution is by the channel's WIRE
+// identity (thread → channel → wire) against the joined registry rows.
+// Targets that resolve OUTSIDE any read-only grant — plain local channels,
+// file-linked threads, unknown ids — pass through; the store's own write
+// path owns those errors.
+export async function assertSharedChannelWritable(input: {
+  workspaceId: string;
+  sharedChannels: readonly JoinedSharedChannel[] | undefined;
+  store: {
+    listThreads(input: { workspaceId: string }): Promise<Array<{ id: string; channelId?: string }>>;
+    getChannelWireId(input: { workspaceId: string; channelId: string }): Promise<string | null>;
+  };
+  target: { channelId: string } | { threadId: string };
+}): Promise<void> {
+  const readOnlyWires = new Set(
+    (input.sharedChannels ?? [])
+      .filter((channel) => channel.access === "read-only")
+      .map((channel) => channel.channelWireId),
+  );
+  if (readOnlyWires.size === 0) return;
+  let channelId: string | null;
+  if ("channelId" in input.target) {
+    channelId = input.target.channelId;
+  } else {
+    const { threadId } = input.target;
+    const thread = (await input.store.listThreads({ workspaceId: input.workspaceId })).find(
+      (row) => row.id === threadId,
+    );
+    channelId = thread?.channelId ?? null;
+  }
+  if (!channelId) return;
+  const wireId = await input.store.getChannelWireId({
+    workspaceId: input.workspaceId,
+    channelId,
+  });
+  if (wireId !== null && readOnlyWires.has(wireId)) {
+    // The engine's read-only refusal, reused verbatim so the IPC error copy
+    // matches what the relay-side downgrade path surfaces.
+    throw new SharedChannelReadOnlyError();
+  }
+}
+
 export interface SyncJoinedSharedChannelsResult {
   // Shares whose relay view closed (revoked / gone): mark ended, stop syncing.
   endedShareIds: string[];
