@@ -771,6 +771,58 @@ export const SetChatReactionResult = z.object({
 });
 export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 
+// Direct messages (WS-MU-C3). A DM is a `kind:"dm"` channel plus one MU-C4
+// chat-channel grant per participant, riding the shared-channel lane. The
+// whole surface is gated on collaboration (signed in + relay): a solo user
+// sees none of it. Identity is always main-derived — the renderer never
+// supplies who is sending or who a grant belongs to.
+export const DmRecord = z.object({
+  channelId: CHAT_CHANNEL_ID,
+  channelWireId: z.string().min(1).max(256),
+  name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  // What this viewer calls the DM: the owner sees the recipients they
+  // addressed; a participant sees the granter (the replicated channel name
+  // is the owner's recipient list — often the participant's own address).
+  peerLabel: z.string().min(1).max(320),
+  role: z.enum(["owner", "participant"]),
+  // The single running conversation (the anti-forum rule). Null only in the
+  // brief window before the creator's first message replicates.
+  threadId: CHAT_THREAD_ID.nullable(),
+  unreadCount: z.number().int().min(0),
+  // False for a participant whose grant ended: already-replayed messages
+  // stay readable, sending is closed.
+  connected: z.boolean(),
+});
+export type DmRecord = z.infer<typeof DmRecord>;
+
+export const SyncDmsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
+
+export const SyncDmsResult = z.object({
+  // False when signed out / no relay: the renderer hides the whole DM
+  // surface (solo zero-bloat).
+  available: z.boolean(),
+  dms: z.array(DmRecord),
+});
+export type SyncDmsResult = z.infer<typeof SyncDmsResult>;
+
+export const StartDmPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  // One or more recipient emails ("a@x.com, b@y.com") — parsed/validated in
+  // main; grants are addressed per recipient.
+  recipients: z.string().min(3).max(2000),
+  body: CHAT_BODY,
+});
+export type StartDmPayload = z.infer<typeof StartDmPayload>;
+
+export const StartDmResult = z.object({
+  dm: DmRecord,
+  message: ChatMessageRecord,
+});
+export type StartDmResult = z.infer<typeof StartDmResult>;
+
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
@@ -1876,6 +1928,10 @@ export interface DohcDesktopBridge {
   setChatReaction(
     payload: SetChatReactionPayload,
   ): Promise<SetChatReactionResult>;
+  // Direct messages (WS-MU-C3): reconcile DM state with the relay and list the
+  // workspace's DMs; start (or continue) a DM with a recipient set.
+  syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;
+  startDm(payload: StartDmPayload): Promise<StartDmResult>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;

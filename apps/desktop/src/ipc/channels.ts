@@ -487,6 +487,8 @@ export const CHANNELS = {
   markChatThreadRead: "desktop:mark-chat-thread-read",
   listChatReactions: "desktop:list-chat-reactions",
   setChatReaction: "desktop:set-chat-reaction",
+  syncDms: "desktop:sync-dms",
+  startDm: "desktop:start-dm",
   getSyncStatus: "desktop:get-sync-status",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",
