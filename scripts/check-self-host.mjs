@@ -79,6 +79,94 @@ function checkServiceScripts() {
   }
 }
 
+// MU-C5 self-host proof: the WHOLE multi-user chat surface (presence,
+// reactions, shares, shared channels, DMs) must run on the services this script
+// already validates — sync-relay + Better Auth over Postgres — with NO new
+// service and nothing cloud-locked. Purely static (reads source + package.json),
+// so it is deterministic and needs neither Docker nor --start.
+function checkChatSurfaceSelfHostable() {
+  const relaySource = 'services/sync-relay/src/server.ts'
+  if (!existsSync(relaySource)) {
+    record('chat surface: relay source present', false, relaySource)
+    return
+  }
+  const source = readFileSync(relaySource, 'utf8')
+
+  // (a) The relay must serve every route the multi-user chat surface needs.
+  // Inspect the handler's canonical `SyncRelayRoute` dispatch union rather than
+  // line-grepping the file: parsing the route-kind literals out of the union
+  // survives reordering, added routes, and whitespace churn, and trips ONLY
+  // when a served route is renamed or removed — exactly when it should.
+  const unionMatch = source.match(/type SyncRelayRoute =([\s\S]*?);\n/)
+  const routeKinds = new Set(
+    unionMatch
+      ? [...unionMatch[1].matchAll(/route:\s*"([^"]+)"/g)].map((match) => match[1])
+      : [],
+  )
+  const REQUIRED_CHAT_ROUTES = [
+    'presence', // /sync/:ws/presence — owner + shared-channel presence
+    'share-presence', // /sync/shares/:id/presence — recipient/DM presence
+    'shares-create', // POST /sync/:ws/shares — path / channel / DM grants
+    'shares-list', // GET /sync/shares
+    'share', // GET /sync/shares/:id — grant metadata
+    'share-revoke', // POST /sync/shares/:id/revoke
+    'share-log', // GET read-view + POST member-append
+    'share-blob', // GET /sync/shares/:id/blobs/:sha
+  ]
+  const missingRoutes = REQUIRED_CHAT_ROUTES.filter((route) => !routeKinds.has(route))
+  record(
+    'chat surface: sync-relay serves every multi-user route',
+    missingRoutes.length === 0 && routeKinds.size > 0,
+    missingRoutes.length === 0 && routeKinds.size > 0
+      ? 'presence, share-presence, shares-create/list, share, share-revoke, share-log (member-append), share-blob'
+      : `missing served route kind(s): ${missingRoutes.join(', ') || 'route union not found'}`,
+  )
+
+  // (b) No chat/presence/DM feature may pull in a service outside
+  // REQUIRED_SERVICES. The relay's runtime dependencies must resolve entirely to
+  // the self-host matrix: the in-repo workspace packages, plus better-auth + pg
+  // (which ride the `postgres` + `workspace-api` auth core). Anything else would
+  // be a new service the compose stack does not run.
+  const relayPkg = readPackageJson('services/sync-relay/package.json')
+  const deps = Object.keys(relayPkg.dependencies ?? {})
+  const ALLOWED_RUNTIME_DEPS = new Set([
+    '@dohc/workspace-auth', // Better Auth session verification (workspace-api core)
+    '@dohc/workspace-core',
+    '@dohc/workspace-engine',
+    'better-auth', // rides the `postgres` auth core
+    'pg', // rides the `postgres` auth core
+  ])
+  const foreignDeps = deps.filter((dep) => !ALLOWED_RUNTIME_DEPS.has(dep))
+  record(
+    'chat surface: relay runtime deps stay within the self-host matrix',
+    foreignDeps.length === 0,
+    foreignDeps.length === 0
+      ? deps.join(', ') || 'no runtime deps'
+      : `unexpected runtime dep(s) imply a service outside REQUIRED_SERVICES: ${foreignDeps.join(', ')}`,
+  )
+
+  // Defense in depth: no chat/presence/DM source references a retired or
+  // cloud-locked collaboration service (Hocuspocus / Convex).
+  const CHAT_SOURCES = [
+    'services/sync-relay/src/server.ts',
+    'services/sync-relay/src/presence.ts',
+    'services/sync-relay/src/shareFilter.ts',
+    'services/sync-relay/src/storage.ts',
+    'services/sync-relay/src/main.ts',
+  ]
+  const FORBIDDEN = /hocuspocus|convex/i
+  const offenders = CHAT_SOURCES.filter(
+    (path) => existsSync(path) && FORBIDDEN.test(readFileSync(path, 'utf8')),
+  )
+  record(
+    'chat surface: no cloud-locked collaboration service referenced',
+    offenders.length === 0,
+    offenders.length === 0
+      ? 'no hocuspocus/convex references in the chat/presence/DM sources'
+      : `cloud-locked service referenced in: ${offenders.join(', ')}`,
+  )
+}
+
 function checkComposeConfig() {
   if (!existsSync(COMPOSE_FILE)) {
     record('self-host compose file', false, COMPOSE_FILE)
@@ -134,6 +222,8 @@ function startComposeStack() {
 requireCommand('docker', ['--version'], 'Docker CLI')
 requireCommand('docker', ['compose', 'version'], 'Docker Compose')
 checkServiceScripts()
+// Static self-host proof for the multi-user chat surface (no Docker needed).
+checkChatSurfaceSelfHostable()
 const composeOk = checkComposeConfig()
 
 if (startRequested && composeOk) {
@@ -143,6 +233,9 @@ if (startRequested && composeOk) {
     'Self-host preflight passed. To start the stack, run: pnpm check:self-host -- --start',
   )
 }
+
+const passed = results.filter((result) => result.ok).length
+console.log(`Self-host check summary: ${passed}/${results.length} checks passed.`)
 
 if (results.some((result) => !result.ok)) {
   console.error('Self-host check failed. Missing dependencies are listed above.')
