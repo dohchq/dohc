@@ -40,9 +40,8 @@ export interface PresenceTransport {
 // future sanitization/length caps here so all callers stay in sync.
 export function resolvePeerDisplayName(peer: PresencePeer): string {
   const state = (peer.state ?? {}) as { displayName?: unknown };
-  return typeof state.displayName === "string" && state.displayName.trim()
-    ? state.displayName
-    : "Someone";
+  const name = typeof state.displayName === "string" ? state.displayName.trim() : "";
+  return name ? name.slice(0, 64) : "Someone";
 }
 
 export type PresenceScope =

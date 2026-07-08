@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPresenceChannel,
   createRelayPresenceTransport,
+  resolvePeerDisplayName,
   type PresenceSnapshot,
   type PresenceTransport,
 } from "./presenceChannel";
@@ -278,5 +279,23 @@ describe("createRelayPresenceTransport", () => {
     await flush();
     expect(peers).not.toHaveBeenCalled();
     await expect(channel.stop()).resolves.toBeUndefined();
+  });
+});
+
+describe("resolvePeerDisplayName", () => {
+  const peer = (state: unknown) => ({ userId: "u", clientId: "c", state, updatedAtMs: 0 });
+
+  it("returns the trimmed name and caps hostile lengths", () => {
+    // The name a peer publishes is untrusted payload: padding must not leak
+    // into faces/typing text, and an unbounded string must not reach the UI.
+    expect(resolvePeerDisplayName(peer({ displayName: "  Alice  " }))).toBe("Alice");
+    expect(resolvePeerDisplayName(peer({ displayName: "x".repeat(500) }))).toBe("x".repeat(64));
+  });
+
+  it("falls back to Someone for missing/blank/non-string names", () => {
+    expect(resolvePeerDisplayName(peer(null))).toBe("Someone");
+    expect(resolvePeerDisplayName(peer({}))).toBe("Someone");
+    expect(resolvePeerDisplayName(peer({ displayName: "   " }))).toBe("Someone");
+    expect(resolvePeerDisplayName(peer({ displayName: 42 }))).toBe("Someone");
   });
 });
