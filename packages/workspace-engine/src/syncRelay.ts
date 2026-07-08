@@ -876,6 +876,35 @@ export async function pullWorkspaceFromRelay(
     );
   }
 
+  // MU-C4 gate fix: relay-learned FOREIGN-origin ops are by definition
+  // already at the relay and must never become re-push candidates.
+  // pushWorkspaceToRelay scans EVERY distinct origin in the local journal, so
+  // ops that entered it through this pull (e.g. member appends landed in the
+  // owner's bucket under share-namespaced origins) would otherwise be offered
+  // back — and the relay's MU-C0 authorship gate 403s member-authored chat
+  // ops pushed by the owner, wedging the owner's sync permanently. Advance
+  // the pushed watermark to exactly the seqs FETCHED FROM THE RELAY (never
+  // backwards, never past them): bundle-imported foreign ops the relay never
+  // served stay above the watermark and remain pushable.
+  const maxPulledByOrigin = new Map<string, number>();
+  for (const op of ops) {
+    if (op.originId === localOriginId) continue;
+    const current = maxPulledByOrigin.get(op.originId) ?? -1;
+    if (op.originSeq > current) maxPulledByOrigin.set(op.originId, op.originSeq);
+  }
+  if (maxPulledByOrigin.size > 0) {
+    const db = openEngineDb(input.rootDir);
+    try {
+      for (const [originId, maxSeq] of maxPulledByOrigin) {
+        if (maxSeq > readPushedSeq(db, input.workspaceId, originId)) {
+          writePushedSeq(db, input.workspaceId, originId, maxSeq);
+        }
+      }
+    } finally {
+      db.close();
+    }
+  }
+
   // Retry safety for the cursor-commit contract: ops below the un-committed
   // cursor are re-fetched after a failed materialization, but their re-apply
   // is an idempotent SKIP — the before/after diff alone would silently drop

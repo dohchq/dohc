@@ -226,6 +226,28 @@ class FakeRelay {
       if (body.ops.length > 500) {
         return Response.json({ ok: false, error: "too many ops" }, { status: 400 });
       }
+      // Mirrors the real relay's MU-C0 verified-authorship gate: a chat op
+      // claiming an author identity must claim the AUTHENTICATED pusher, and
+      // one forged op rejects the WHOLE batch. This is what wedges an owner
+      // that re-pushes member-authored ops it merely pulled from the relay.
+      for (const op of body.ops) {
+        const payload =
+          op.payload && typeof op.payload === "object" && !Array.isArray(op.payload)
+            ? (op.payload as Record<string, unknown>)
+            : null;
+        const claimed =
+          op.opKind === "chat.message.append"
+            ? payload?.authorUserId
+            : op.opKind === "chat.reaction.set"
+              ? payload?.authorId
+              : undefined;
+        if (typeof claimed === "string" && claimed !== userId) {
+          return Response.json(
+            { ok: false, error: "authorship mismatch", code: "authorship_mismatch" },
+            { status: 403 },
+          );
+        }
+      }
       const currentMax = Math.max(
         -1,
         ...this.log
@@ -560,6 +582,107 @@ describe("sync relay client", () => {
     } finally {
       await bChats.close();
     }
+  });
+
+  // MU-C4 gate fix (HIGH 3): member appends land in the owner's bucket under
+  // share-namespaced origins. When the owner PULLS its own bucket those ops
+  // enter the local journal under that foreign origin — and the owner's next
+  // push must NOT offer them back to the relay, or the relay's MU-C0
+  // authorship gate 403s the batch and the owner's sync wedges permanently.
+  it("never re-pushes relay-learned foreign-origin ops, while bundle-imported foreign ops stay pushable", async () => {
+    const relay = new FakeRelay();
+    const owner = await tempRoot("owner-converge");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(owner);
+    await pushWorkspaceToRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    // A member's appends, exactly as the member-append route lands them:
+    // share-namespaced origin, chat ops authored by the MEMBER's user id.
+    const memberOrigin = "share:share-chan-1:origin-member";
+    const memberOps: Array<[SyncReplicationEnvelope["opKind"], Record<string, unknown>]> = [
+      [
+        "chat.channel.create",
+        { channelId: "chan-m", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-team" },
+      ],
+      [
+        "chat.thread.create",
+        { threadId: "thread-m-1", title: "", createdAtMs: 2, channelSlug: "team", channelWireId: "wire-team" },
+      ],
+      [
+        "chat.message.append",
+        {
+          messageId: "msg-m-1",
+          threadId: "thread-m-1",
+          authorKind: "human",
+          authorDisplayName: "Member",
+          authorUserId: "user-member",
+          body: "hi from the member",
+          createdAtMs: 3,
+        },
+      ],
+    ];
+    memberOps.forEach(([opKind, payload], index) => {
+      relay.log.push({
+        workspaceId: WORKSPACE_ID,
+        originId: memberOrigin,
+        originSeq: index,
+        opKind,
+        payload: payload as never,
+        recordedAtMs: 100 + index,
+        relaySeq: relay.nextRelaySeq++,
+      } as SyncReplicationEnvelope & { relaySeq: number });
+    });
+
+    // The owner converges its own bucket (member ops included).
+    const pulled = await pullWorkspaceFromRelay({
+      rootDir: owner,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    await pulled.commitFetchCursor();
+    expect(pulled.applied).toBe(3);
+
+    // Bundle-imported foreign ops the relay has NEVER seen must stay
+    // pushable: only relay-learned seqs may advance the pushed watermark.
+    const importedOrigin = "origin-import";
+    const db = openEngineDb(owner);
+    try {
+      db.prepare(
+        `INSERT INTO replication_log (
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        WORKSPACE_ID,
+        importedOrigin,
+        0,
+        "chat.message.append",
+        JSON.stringify({
+          messageId: "msg-import-1",
+          threadId: "thread-m-1",
+          authorKind: "human",
+          authorDisplayName: "Importer",
+          body: "bundle-imported",
+          createdAtMs: 4,
+        }),
+        200,
+      );
+    } finally {
+      db.close();
+    }
+
+    // New local work, then push. Pre-fix this rejects: the member ops are
+    // re-push candidates and the relay's authorship gate 403s the batch.
+    await seedText(owner, "docs/after-converge.md", "more\n");
+    const pushed = await pushWorkspaceToRelay({
+      rootDir: owner,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    expect(pushed.originsPushed).not.toContain(memberOrigin);
+    expect(pushed.originsPushed).toContain(importedOrigin);
+    // The member ops exist at the relay exactly once; the imported op landed.
+    expect(relay.log.filter((op) => op.originId === memberOrigin)).toHaveLength(3);
+    expect(relay.log.filter((op) => op.originId === importedOrigin)).toHaveLength(1);
   });
 
   // Data-safety gate finding 1: a failed disk materialization must never
