@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useMemo } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatPresenceCollaboration } from "../workbench/ChatsView";
@@ -28,7 +29,7 @@ describe("buildChatCollaboration", () => {
     ).toBeNull();
   });
 
-  it("builds a workspace-scoped transport when signed in with a relay", () => {
+  it("builds a per-scope transport factory when signed in with a relay", () => {
     const collaboration = buildChatCollaboration({
       connected: true,
       relayUrl: "https://relay.example",
@@ -40,9 +41,13 @@ describe("buildChatCollaboration", () => {
     expect(collaboration?.clientId).toBe("device-1");
     // Display name comes from the email, trimmed.
     expect(collaboration?.displayName).toBe("ada@x.com");
-    expect(typeof collaboration?.transport.publish).toBe("function");
-    expect(typeof collaboration?.transport.poll).toBe("function");
-    expect(typeof collaboration?.transport.leave).toBe("function");
+    // The factory yields a real transport for either scope kind.
+    const wsTransport = collaboration?.transportForScope({ kind: "workspace", workspaceId: "ws-a" });
+    expect(typeof wsTransport?.publish).toBe("function");
+    expect(typeof wsTransport?.poll).toBe("function");
+    expect(typeof wsTransport?.leave).toBe("function");
+    const shareTransport = collaboration?.transportForScope({ kind: "share", shareId: "share-1" });
+    expect(typeof shareTransport?.publish).toBe("function");
   });
 
   it("falls back to 'You' when no email is present", () => {
@@ -101,10 +106,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function Harness(props: { collaboration: ChatPresenceCollaboration | null; topic: string }) {
+function Harness(props: {
+  collaboration: ChatPresenceCollaboration | null;
+  topic: string;
+  workspaceId: string;
+}) {
+  // Mirror ChatsView: the workspace scope is resolved through the factory at
+  // call time and memoized per (collaboration, workspaceId), so a switch tears
+  // the old transport down.
+  const transport = useMemo(
+    () =>
+      props.collaboration?.transportForScope({
+        kind: "workspace",
+        workspaceId: props.workspaceId,
+      }) ?? null,
+    [props.collaboration, props.workspaceId],
+  );
   const { others } = usePresence({
     enabled: props.collaboration !== null,
-    transport: props.collaboration?.transport ?? null,
+    transport,
     topic: props.topic,
     clientId: props.collaboration?.clientId ?? "",
     displayName: props.collaboration?.displayName ?? "",
@@ -133,7 +153,9 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       workspaceId: "ws-a",
       clientId: "me",
     });
-    const view = render(<Harness collaboration={collabA} topic="chat:channel:1" />);
+    const view = render(
+      <Harness collaboration={collabA} topic="chat:channel:1" workspaceId="ws-a" />,
+    );
     await flush();
     // A registered exactly one poll, scoped to ws-a.
     const pollIdA = pollIdForWorkspace("ws-a");
@@ -147,7 +169,9 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       workspaceId: "ws-b",
       clientId: "me",
     });
-    view.rerender(<Harness collaboration={collabB} topic="chat:channel:1" />);
+    view.rerender(
+      <Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />,
+    );
     await flush();
 
     // The switch aborted A's in-flight poll over IPC (abort → presenceCancel).

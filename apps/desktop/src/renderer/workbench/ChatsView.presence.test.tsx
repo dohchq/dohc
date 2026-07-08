@@ -4,7 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord, ChannelThreadRecord } from "../../ipc/bridgeContract";
 import { ChatsView, type ChatPresenceCollaboration } from "./ChatsView";
-import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
+import type {
+  PresencePeer,
+  PresenceScope,
+  PresenceSnapshot,
+  PresenceTransport,
+} from "../collab/presenceChannel";
 
 // MU-C1 — presence in the Chats surface: gated by collaboration, calm, and
 // dormant for solo.
@@ -102,6 +107,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+// A collaboration whose factory returns the SAME recording transport for every
+// scope — the presence tests here exercise a solo/owner (workspace) surface, so
+// one transport is enough to observe topics/publishes.
+function collabWith(transport: PresenceTransport): ChatPresenceCollaboration {
+  return { transportForScope: () => transport, clientId: "me", displayName: "Me" };
+}
+
 function renderView(collaboration: ChatPresenceCollaboration | null) {
   render(
     <ChatsView
@@ -137,7 +149,7 @@ describe("ChatsView presence (MU-C1)", () => {
   it("shows presence faces + typing when a peer is present", async () => {
     const t = pushableTransport();
     const user = userEvent.setup();
-    renderView({ transport: t.transport, clientId: "me", displayName: "Me" });
+    renderView(collabWith(t.transport));
     await openThread(user);
     // A published presence op should have fired for the open thread.
     await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
@@ -156,10 +168,13 @@ describe("ChatsView presence (MU-C1)", () => {
   it("scopes thread presence to the THREAD id, so sibling threads never share typing", async () => {
     const t = pushableTransport();
     const user = userEvent.setup();
-    renderView({ transport: t.transport, clientId: "me", displayName: "Me" });
-    // Channel view publishes into the channel topic…
+    renderView(collabWith(t.transport));
+    // Channel view publishes into the channel topic — the bare channel wireId
+    // (here it falls back to channel.id, "channel-1", since this fixture has no
+    // recorded wire mapping), which is exactly the topic the relay's share gate
+    // admits so owner + participant meet.
     await user.click(await screen.findByTestId("chats-channel"));
-    await waitFor(() => expect(t.topics).toContain("chat:channel:channel-1"));
+    await waitFor(() => expect(t.topics).toContain("channel-1"));
     // …and opening a thread re-scopes presence to the thread's own topic.
     await user.click(await screen.findByTestId("chats-thread"));
     await screen.findByTestId("chats-thread-view");
@@ -180,7 +195,7 @@ describe("ChatsView presence (MU-C1)", () => {
     });
     const t = pushableTransport();
     const user = userEvent.setup();
-    renderView({ transport: t.transport, clientId: "me", displayName: "Me" });
+    renderView(collabWith(t.transport));
     await openThread(user);
     await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
 
@@ -197,5 +212,139 @@ describe("ChatsView presence (MU-C1)", () => {
     await waitFor(() =>
       expect((t.publishes.at(-1) as { typing?: boolean }).typing).toBe(false),
     );
+  });
+});
+
+// A collaboration that records EVERY scope its factory is asked for, and tags
+// each publish with the scope it went out on — so a test can assert which relay
+// presence scope (workspace vs share) a conversation lands in, and prove the
+// memoized transport is only rebuilt on a real scope switch.
+function recordingCollab() {
+  const calls: PresenceScope[] = [];
+  const publishes: { scope: PresenceScope; topic: string }[] = [];
+  const collaboration: ChatPresenceCollaboration = {
+    transportForScope: (scope) => {
+      calls.push(scope);
+      return {
+        async publish({ topic }) {
+          publishes.push({ scope, topic });
+          return { version: 0, peers: [] };
+        },
+        async leave() {},
+        poll: ({ signal }) =>
+          new Promise<PresenceSnapshot>((resolve) => {
+            if (signal.aborted) return resolve({ version: 0, peers: [] });
+            signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+              once: true,
+            });
+          }),
+      };
+    },
+    clientId: "me",
+    displayName: "Me",
+  };
+  return { collaboration, calls, publishes };
+}
+
+function scopeKey(scope: PresenceScope): string {
+  return scope.kind === "share" ? `share:${scope.shareId}` : `ws:${scope.workspaceId}`;
+}
+
+describe("ChatsView presence scope selection (participant vs owner)", () => {
+  const ownedChannel: ChatChannelRecord = {
+    id: "channel-owned",
+    name: "owned",
+    slug: "owned",
+    kind: "channel",
+    createdAtMs: NOW,
+    updatedAtMs: NOW,
+    threadCount: 0,
+    unreadCount: 0,
+    // A plain/owned channel: its local id and cross-machine wire id agree here.
+    wireId: "wire-owned",
+  };
+  const joinedChannel: ChatChannelRecord = {
+    id: "channel-joined",
+    name: "joined",
+    slug: "joined",
+    kind: "channel",
+    createdAtMs: NOW,
+    updatedAtMs: NOW,
+    threadCount: 0,
+    unreadCount: 0,
+    // Shared TO this account: the participant's local id ("channel-joined")
+    // differs from the owner's, but the wire id is shared across machines.
+    wireId: "wire-joined",
+  };
+
+  async function openChannelById(
+    user: ReturnType<typeof userEvent.setup>,
+    channelId: string,
+  ): Promise<void> {
+    const buttons = await screen.findAllByTestId("chats-channel");
+    const target = buttons.find((b) => b.getAttribute("data-channel-id") === channelId);
+    if (!target) throw new Error(`no channel button for ${channelId}`);
+    await user.click(target);
+    await screen.findByTestId("chats-channel-view");
+  }
+
+  it("uses SHARE scope + wire-id topic for a joined channel and WORKSPACE scope for a plain one, rebuilding the transport only on the switch", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [ownedChannel, joinedChannel],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-1",
+          channelWireId: "wire-joined",
+          access: "read-write",
+          granterEmail: null,
+          ended: false,
+        },
+      ],
+    });
+    const rec = recordingCollab();
+    const user = userEvent.setup();
+    render(
+      <ChatsView
+        workspaceId="workspace-a"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+        collaboration={rec.collaboration}
+      />,
+    );
+
+    // PARTICIPANT: the joined channel lands in the GRANTER's scope via a SHARE
+    // scope keyed by the grant's shareId, on the channel's cross-machine wireId.
+    await openChannelById(user, "channel-joined");
+    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-joined")).toBe(true));
+    expect(rec.publishes.find((p) => p.topic === "wire-joined")?.scope).toEqual({
+      kind: "share",
+      shareId: "share-1",
+    });
+
+    // OWNER/PLAIN: switching to a channel this account owns flips to the plain
+    // WORKSPACE scope, on that channel's own wireId topic.
+    await user.click(screen.getByTestId("chats-channel-back"));
+    await openChannelById(user, "channel-owned");
+    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-owned")).toBe(true));
+    expect(rec.publishes.find((p) => p.topic === "wire-owned")?.scope).toEqual({
+      kind: "workspace",
+      workspaceId: "workspace-a",
+    });
+
+    // The memoized transport is rebuilt ONLY when the scope actually changes:
+    // no two consecutive factory calls share a scope identity (no per-render
+    // churn), and both the share and workspace scopes were exercised.
+    const keys = rec.calls.map(scopeKey);
+    for (let i = 1; i < keys.length; i += 1) {
+      expect(keys[i]).not.toBe(keys[i - 1]);
+    }
+    expect(keys).toContain("share:share-1");
+    expect(keys).toContain("ws:workspace-a");
   });
 });
