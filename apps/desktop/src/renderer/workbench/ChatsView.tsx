@@ -565,7 +565,13 @@ export function ChatsView(props: {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not join that channel."));
       } finally {
-        if (token === liveToken.current) setJoiningShareId(null);
+        // Unconditional reset (the sendingRef/startingThreadRef precedent):
+        // refreshOverview bumps liveToken ITSELF, so a token-equality check
+        // here can never pass after a successful join and would leave every
+        // other Join button dead for the session. A workspace switch already
+        // clears joiningShareId in its own effect, so resetting late is
+        // harmless there.
+        setJoiningShareId(null);
       }
     },
     [joiningShareId, props, refreshOverview, workspaceId],

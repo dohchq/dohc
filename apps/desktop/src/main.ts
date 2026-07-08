@@ -950,16 +950,25 @@ async function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
       relay: { baseUrl: normalizeServerUrl(relayUrl), token: cachedCredentials.token },
       channels: matching,
     });
-    if (result.endedShareIds.length > 0) {
+    if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
       const ended = new Set(result.endedShareIds);
+      // A read-write grant that turned out read-only on push (flipped or
+      // recorded stale) downgrades the registry row too: the renderer's
+      // composer honesty keys off `joined.access`, and a corrected row stops
+      // every future pass from re-attempting the same doomed push.
+      const readOnly = new Set(result.readOnlyShareIds);
       setWorkspaceSharedChannels(
         workspaceId,
-        (findWorkspace(workspaceId)?.sharedChannels ?? []).map((channel) =>
-          ended.has(channel.shareId) ? { ...channel, ended: true } : channel,
-        ),
+        (findWorkspace(workspaceId)?.sharedChannels ?? []).map((channel) => {
+          if (ended.has(channel.shareId)) return { ...channel, ended: true };
+          if (readOnly.has(channel.shareId)) return { ...channel, access: "read-only" as const };
+          return channel;
+        }),
       );
     }
-    if (result.changed || result.endedShareIds.length > 0) notifyRenderer();
+    if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
+      notifyRenderer();
+    }
   } catch (error) {
     console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
   }

@@ -577,7 +577,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
   });
 
-  it("lists an invitation under Shared with you and joins it", async () => {
+  it("lists invitations under Shared with you, joins one, and re-enables the other Join buttons", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue({
       granted: [],
@@ -587,6 +587,12 @@ describe("ChatsView shared channels (MU-C4)", () => {
           channelWireId: "wire-in",
           access: "read-write",
           granterEmail: "owner@example.com",
+        },
+        {
+          shareId: "share-in-2",
+          channelWireId: "wire-in-2",
+          access: "read-write",
+          granterEmail: "other@example.com",
         },
       ],
       joined: [],
@@ -603,7 +609,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
     renderView();
     const section = await screen.findByTestId("chats-shared-with-you");
     expect(section.textContent).toContain("owner@example.com");
-    await userEvent.click(screen.getByTestId("chats-join-shared"));
+    expect(section.textContent).toContain("other@example.com");
+    await userEvent.click(screen.getAllByTestId("chats-join-shared")[0]!);
     await waitFor(() =>
       expect(bridgeMock.joinSharedChannel).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
@@ -612,6 +619,17 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     // The overview reloads after joining (channel + shares re-fetch).
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
+    // Regression (CodeRabbit critical): the join-in-flight flag must reset
+    // after a successful join even though refreshOverview bumps the liveness
+    // token — the OTHER invitation's Join button re-enables instead of
+    // staying dead for the rest of the session.
+    await waitFor(() => {
+      const buttons = screen.getAllByTestId("chats-join-shared");
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        expect((button as HTMLButtonElement).disabled).toBe(false);
+      }
+    });
   });
 
   it("shows a joined channel's provenance, disables composers when read-only, and can leave", async () => {
