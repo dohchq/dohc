@@ -685,6 +685,143 @@ describe("sync relay client", () => {
     expect(relay.log.filter((op) => op.originId === importedOrigin)).toHaveLength(1);
   });
 
+  // Divergence guard on the watermark advance: the engine's imported-op apply
+  // is idempotent on COORDINATES ONLY (importedReplicationLogExists never
+  // byte-compares), so a relay serving different content for a same-origin
+  // seq the local journal already holds would be silently skipped — and the
+  // watermark advance would then mark the local divergent op as pushed
+  // forever. The pull must byte-compare overlaps and fail closed instead.
+  it("fails closed when the relay serves DIFFERENT content for a same-origin seq the local journal already holds", async () => {
+    const relay = new FakeRelay();
+    const owner = await tempRoot("foreign-diverged");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(owner);
+    await pushWorkspaceToRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    // A locally-imported row under a foreign shared-channel origin…
+    const foreignOrigin = "share:s1:origin-member";
+    const localPayload = {
+      messageId: "msg-1",
+      threadId: "thread-x",
+      authorKind: "human",
+      authorDisplayName: "Member",
+      body: "msg-local-only",
+      createdAtMs: 5,
+    };
+    const db = openEngineDb(owner);
+    try {
+      db.prepare(
+        `INSERT INTO replication_log (
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(WORKSPACE_ID, foreignOrigin, 0, "chat.message.append", JSON.stringify(localPayload), 50);
+    } finally {
+      db.close();
+    }
+    // …while the relay serves the SAME coordinates with DIFFERENT content.
+    relay.log.push({
+      workspaceId: WORKSPACE_ID,
+      originId: foreignOrigin,
+      originSeq: 0,
+      opKind: "chat.message.append",
+      payload: { ...localPayload, body: "msg-relay" } as never,
+      recordedAtMs: 50,
+      relaySeq: relay.nextRelaySeq++,
+    } as SyncReplicationEnvelope & { relaySeq: number });
+
+    await expect(
+      pullWorkspaceFromRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
+    ).rejects.toBeInstanceOf(RelayOriginDivergedError);
+
+    // The watermark did NOT advance: the divergent local op stays
+    // push-visible…
+    const state = openEngineDb(owner);
+    try {
+      const row = state
+        .prepare(
+          "SELECT pushed_seq FROM sync_relay_push_state WHERE workspace_id = ? AND origin_id = ?",
+        )
+        .get(WORKSPACE_ID, foreignOrigin);
+      expect(row).toBeUndefined();
+    } finally {
+      state.close();
+    }
+    // …and pushing surfaces the SAME divergence through the established
+    // push-time path instead of silently dropping the local op.
+    await expect(
+      pushWorkspaceToRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
+    ).rejects.toBeInstanceOf(RelayOriginDivergedError);
+  });
+
+  it("advances the watermark over a byte-identical same-origin overlap (true idempotent echo)", async () => {
+    const relay = new FakeRelay();
+    const owner = await tempRoot("foreign-echo");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(owner);
+    await pushWorkspaceToRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    // The local row and the relay's copy are the SAME op — serialized with
+    // different key orders, which must not read as divergence.
+    const echoOrigin = "share:s1:origin-echo";
+    const db = openEngineDb(owner);
+    try {
+      db.prepare(
+        `INSERT INTO replication_log (
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        WORKSPACE_ID,
+        echoOrigin,
+        0,
+        "chat.message.append",
+        JSON.stringify({
+          messageId: "msg-echo",
+          threadId: "thread-x",
+          authorKind: "human",
+          authorDisplayName: "Member",
+          body: "same everywhere",
+          createdAtMs: 5,
+        }),
+        60,
+      );
+    } finally {
+      db.close();
+    }
+    relay.log.push({
+      workspaceId: WORKSPACE_ID,
+      originId: echoOrigin,
+      originSeq: 0,
+      opKind: "chat.message.append",
+      payload: {
+        body: "same everywhere",
+        createdAtMs: 5,
+        authorDisplayName: "Member",
+        authorKind: "human",
+        threadId: "thread-x",
+        messageId: "msg-echo",
+      } as never,
+      recordedAtMs: 60,
+      relaySeq: relay.nextRelaySeq++,
+    } as SyncReplicationEnvelope & { relaySeq: number });
+
+    const pulled = await pullWorkspaceFromRelay({
+      rootDir: owner,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    await pulled.commitFetchCursor();
+
+    // The echo counted toward the watermark: the next push does not re-offer
+    // it, and the relay still holds it exactly once.
+    const pushed = await pushWorkspaceToRelay({
+      rootDir: owner,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+    });
+    expect(pushed.originsPushed).not.toContain(echoOrigin);
+    expect(relay.log.filter((op) => op.originId === echoOrigin)).toHaveLength(1);
+  });
+
   // Data-safety gate finding 1: a failed disk materialization must never
   // permanently skip a remote op. The fetch cursor only moves when the
   // caller commits (after materialization), and a retry pass re-reports the
