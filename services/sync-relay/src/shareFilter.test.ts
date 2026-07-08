@@ -333,6 +333,16 @@ describe("chat-channel share selector", () => {
     expect(
       parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w","access":"all"}'),
     ).toBeNull();
+    // A stored row MISSING an explicit access fails closed on reload — the
+    // create-time default must not resurrect a tampered/legacy row into a
+    // read-write grant.
+    expect(
+      parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w"}'),
+    ).toBeNull();
+    // …but an explicit access still round-trips.
+    expect(
+      parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w","access":"read-write"}'),
+    ).toEqual({ kind: "chat-channel", channelWireId: "w", access: "read-write" });
     // Legacy path selectors still parse through the union parser.
     expect(parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null}')).toEqual({
       paths: ["docs"],

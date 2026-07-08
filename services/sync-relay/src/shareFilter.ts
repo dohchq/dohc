@@ -205,6 +205,11 @@ export function parseAnyShareSelectorJson(selectorJson: string): AnyShareSelecto
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     if ((parsed as { kind?: unknown }).kind === "chat-channel") {
+      // A persisted row must carry an EXPLICIT access: the create-time default
+      // in validateChatChannelShareSelector must not silently promote a
+      // tampered/legacy row with no access into a read-write grant. Fail closed
+      // to null (the routes answer that with the generic 404).
+      if (typeof (parsed as { access?: unknown }).access !== "string") return null;
       const validation = validateChatChannelShareSelector(
         parsed as { channelWireId?: unknown; access?: unknown },
       );
