@@ -43,6 +43,13 @@ import {
   CreateRelayShareResult,
   ListRelaySharesResult,
   RevokeRelaySharePayload,
+  ShareChatChannelPayload,
+  ShareChatChannelResult,
+  ListChatChannelSharesPayload,
+  ListChatChannelSharesResult,
+  JoinSharedChannelPayload,
+  JoinSharedChannelResult,
+  LeaveSharedChannelPayload,
   OpenSharedViewPayload,
   OpenSharedViewResult,
   RefreshSharedViewPayload,
@@ -189,8 +196,17 @@ import {
   removeWorkspace,
   setWorkspaceRemote,
   setWorkspaceShareView,
+  setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import type { JoinedSharedChannel } from "./workspaces/registryStore";
+import {
+  assertSharedChannelWritable,
+  createKeyedSerializer,
+  mergeJoinedChannel,
+  relayFetchWithTimeout,
+  syncJoinedSharedChannels,
+} from "./workspaces/sharedChannels";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
@@ -218,7 +234,10 @@ import {
   searchWorkspaceEngine,
   SecretKeyEnvelopeError,
   ShareUnavailableError,
+  GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
+  fetchSharedChannelInfo,
+  pullSharedChannel,
   unwrapWorkspaceDataKey,
   uploadKeyEnvelope,
   wrapWorkspaceDataKey,
@@ -911,6 +930,74 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+// MU-C4 shared channels: one best-effort refresh pass over every shared
+// channel this workspace has JOINED — push the member's local channel ops,
+// pull everyone else's. Never throws (transient failures log and retry on
+// the next pass); a revoked share is marked ENDED in the registry so it
+// stops syncing while the local copy stays readable. Runs from the Chats
+// IPC surface (fresh on open, prompt push after a send) and from the
+// workspace's relay sync engine cadence.
+//
+// Concurrency (CodeRabbit Stability): those triggers can fire together for
+// the SAME workspace, and overlapping passes would race the per-share
+// cursor/peer state in engine.db — so passes are serialized per workspace
+// (queued, never dropped). Every relay request inside a pass is also bounded
+// by a timeout so a hung relay can't block the awaited listChatChannels path.
+const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
+const serializeSharedChannelSync = createKeyedSerializer();
+function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
+  return serializeSharedChannelSync(workspaceId, () =>
+    runSharedChannelSyncPass(workspaceId),
+  );
+}
+
+async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
+  try {
+    const entry = findWorkspace(workspaceId);
+    const channels = (entry?.sharedChannels ?? []).filter((channel) => !channel.ended);
+    if (!entry || channels.length === 0) return;
+    await warmCredentialCache();
+    if (!cachedCredentials?.relayUrl) return;
+    const relayUrl = cachedCredentials.relayUrl;
+    // Origin-relay pin (mirrors the shared-view refresh rule): a share is
+    // only ever refreshed against the relay it was joined from — signed into
+    // a DIFFERENT relay, skip rather than misread a 404 as "ended".
+    const matching = channels.filter((channel) => relayUrlsMatch(channel.relayUrl, relayUrl));
+    if (matching.length === 0) return;
+    const result = await syncJoinedSharedChannels({
+      rootDir: entry.rootPath,
+      workspaceId: entry.workspaceId,
+      relay: {
+        baseUrl: normalizeServerUrl(relayUrl),
+        token: cachedCredentials.token,
+        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+      },
+      channels: matching,
+    });
+    if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
+      const ended = new Set(result.endedShareIds);
+      // A read-write grant that turned out read-only on push (flipped or
+      // recorded stale) downgrades the registry row too: the renderer's
+      // composer honesty keys off `joined.access`, and a corrected row stops
+      // every future pass from re-attempting the same doomed push.
+      const readOnly = new Set(result.readOnlyShareIds);
+      setWorkspaceSharedChannels(
+        workspaceId,
+        (findWorkspace(workspaceId)?.sharedChannels ?? []).map((channel) => {
+          if (ended.has(channel.shareId)) return { ...channel, ended: true };
+          if (readOnly.has(channel.shareId)) return { ...channel, access: "read-only" as const };
+          return channel;
+        }),
+      );
+    }
+    if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
+      notifyRenderer();
+    }
+  } catch (error) {
+    console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
+  }
+}
+
 // The copyable MCP launch config for a workspace. The user's AI tool spawns the
 // dohc MCP stdio server with these args; --workspace scopes every tool to this
 // root (path containment), --home points it at the desktop registry/state dir.
@@ -1013,6 +1100,9 @@ function engineForWorkspace(
     },
     capture,
     onChange: notifyRenderer,
+    // MU-C4: joined shared channels refresh on the same cadence as the
+    // workspace's own sync (best-effort; never fails the pass).
+    syncSharedChannels: () => syncWorkspaceSharedChannels(workspace.workspaceId),
     // Post-pass open-conflict truth: pulled peer resolutions and local
     // resolutions both clear the status-bar/notice conflict state, and the
     // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
@@ -2215,10 +2305,17 @@ function registerIpcHandlers(): void {
       granted: Array<Record<string, unknown>>;
     }>("/sync/shares");
     const relayUrl = cachedCredentials?.relayUrl;
-    const granted = (result.granted ?? []).map((row) => ({
-      ...row,
-      shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
-    }));
+    const granted = (result.granted ?? [])
+      // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
+      // this surface stays the PR-18 path/version share manager.
+      .filter(
+        (row) =>
+          (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel",
+      )
+      .map((row) => ({
+        ...row,
+        shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
+      }));
     return ListRelaySharesResult.parse({ granted });
   });
 
@@ -2229,6 +2326,190 @@ function registerIpcHandlers(): void {
       method: "POST",
       body: JSON.stringify({}),
     });
+    return undefined;
+  });
+
+  // --- Shared channels (MU-C4) --------------------------------------------
+  // A chat-channel grant shares a WHOLE channel (threads/messages/reactions)
+  // with another account, read-write by default. The relay owns every
+  // security decision (membership, authorship, channel scoping, revocation);
+  // these handlers only address grants and move the member-side sync.
+
+  ipcMain.handle(CHANNELS.shareChatChannel, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ShareChatChannelPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const wireId = await linkedChatStoreFor(workspace).getChannelWireId({
+      workspaceId: workspace.workspaceId,
+      channelId: input.channelId,
+    });
+    if (!wireId) throw new Error("This channel can't be shared yet.");
+    // "general" is every workspace's personal default channel — the SAME wire
+    // id everywhere by design, so sharing it would merge strangers' personal
+    // chats. Refuse with a way forward.
+    if (wireId === GENERAL_CHANNEL_WIRE_ID) {
+      throw new Error(
+        "The general channel is personal to each workspace. Create a channel to share it.",
+      );
+    }
+    const entry = findWorkspace(input.workspaceId);
+    if (entry?.sharedChannels?.some((channel) => channel.channelWireId === wireId)) {
+      throw new Error(
+        "This channel was shared with you — ask the person who shared it to add more people.",
+      );
+    }
+    const { remote } = await remoteForWorkspace(input.workspaceId);
+    const created = await relayShareJson<{ shareId: string }>(
+      `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          recipientEmail: input.recipientEmail,
+          channelWireId: wireId,
+          ...(input.access ? { access: input.access } : {}),
+        }),
+      },
+    );
+    return ShareChatChannelResult.parse({ shareId: created.shareId });
+  });
+
+  ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatChannelSharesPayload.parse(payload);
+    const entry = requireWorkspace(input.workspaceId);
+    const joined = (entry.sharedChannels ?? []).map((channel) => ({
+      shareId: channel.shareId,
+      channelWireId: channel.channelWireId,
+      access: channel.access,
+      granterEmail: channel.granterEmail,
+      ended: channel.ended === true,
+    }));
+    // Relay-side listings need a signed-in session; without one the local
+    // joined set still answers (their local copies keep working offline).
+    let granted: Array<Record<string, unknown>> = [];
+    let received: Array<Record<string, unknown>> = [];
+    try {
+      const result = await relayShareJson<{
+        granted?: Array<Record<string, unknown>>;
+        received?: Array<Record<string, unknown>>;
+      }>("/sync/shares");
+      const chatSelector = (row: Record<string, unknown>) => {
+        const selector = row.selector as
+          | { kind?: unknown; channelWireId?: unknown; access?: unknown }
+          | undefined;
+        return selector?.kind === "chat-channel" &&
+          typeof selector.channelWireId === "string"
+          ? {
+              channelWireId: selector.channelWireId,
+              access: selector.access === "read-only" ? "read-only" : "read-write",
+            }
+          : null;
+      };
+      const remoteId = entry.remote?.remoteWorkspaceId ?? null;
+      for (const row of result.granted ?? []) {
+        const selector = chatSelector(row);
+        // Grants are scoped to THIS workspace's remote identity: a channel
+        // shared from another workspace is managed there.
+        if (!selector || remoteId === null || row.workspaceId !== remoteId) continue;
+        granted.push({
+          shareId: row.shareId,
+          ...selector,
+          recipientEmail: row.recipientEmail ?? null,
+          revokedAtMs: row.revokedAtMs ?? null,
+        });
+      }
+      for (const row of result.received ?? []) {
+        const selector = chatSelector(row);
+        if (!selector) continue;
+        received.push({
+          shareId: row.shareId,
+          ...selector,
+          granterEmail: row.granterEmail ?? null,
+        });
+      }
+    } catch {
+      granted = [];
+      received = [];
+    }
+    return ListChatChannelSharesResult.parse({ granted, received, joined });
+  });
+
+  ipcMain.handle(CHANNELS.joinSharedChannel, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = JoinSharedChannelPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const entry = requireWorkspace(input.workspaceId);
+    if (entry.shareView) {
+      throw new Error("Shared views are read-only — join channels from a workspace you own.");
+    }
+    await warmCredentialCache();
+    if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
+    if (!cachedCredentials.relayUrl) {
+      throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+    }
+    // Capture the credentials BEFORE the awaits below (CodeRabbit Data
+    // Integrity): cachedCredentials can change during fetch/pull (logout,
+    // relay switch) — re-reading it afterwards can crash on null or pin the
+    // joined channel to the WRONG relay. The join is atomic against the
+    // credentials it started with.
+    const joinedRelayUrl = cachedCredentials.relayUrl;
+    const relay = {
+      baseUrl: normalizeServerUrl(joinedRelayUrl),
+      token: cachedCredentials.token,
+      // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
+      // unresponsive relay must abort the join's fetch/pull instead of leaving
+      // the renderer's "Joining…" button stuck forever.
+      fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+    };
+    let info;
+    try {
+      info = await fetchSharedChannelInfo({ relay, shareId: input.shareId });
+      await pullSharedChannel({
+        rootDir: workspace.rootPath,
+        workspaceId: workspace.workspaceId,
+        relay,
+        shareId: info.shareId,
+        channelWireId: info.channelWireId,
+      });
+    } catch (error) {
+      if (error instanceof ShareUnavailableError) {
+        throw new Error("That shared channel isn't available anymore.");
+      }
+      throw error;
+    }
+    const joined: JoinedSharedChannel = {
+      shareId: info.shareId,
+      channelWireId: info.channelWireId,
+      access: info.access,
+      granterEmail: info.granterEmail,
+      relayUrl: joinedRelayUrl,
+    };
+    // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
+    // re-join of the same channel under a NEW share id (revoked + re-granted)
+    // replaces the stale row instead of listing and syncing the channel twice.
+    setWorkspaceSharedChannels(
+      input.workspaceId,
+      mergeJoinedChannel(entry.sharedChannels ?? [], joined),
+    );
+    return JoinSharedChannelResult.parse({ joined: { ...joined, ended: false } });
+  });
+
+  // Member-initiated leave: purely local — the channel stops syncing and its
+  // rows stay readable. (Only the granter can revoke the grant itself.)
+  ipcMain.handle(CHANNELS.leaveSharedChannel, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = LeaveSharedChannelPayload.parse(payload);
+    const entry = requireWorkspace(input.workspaceId);
+    setWorkspaceSharedChannels(
+      input.workspaceId,
+      (entry.sharedChannels ?? []).filter((channel) => channel.shareId !== input.shareId),
+    );
     return undefined;
   });
 
@@ -2782,6 +3063,15 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
+    // writes at the main boundary, BEFORE any durable local row — the
+    // renderer disabling its composer is honesty, not authorization.
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target: { threadId: input.threadId },
+    });
     // WS-MU-C0: the credential cache must be warm BEFORE relayAuthorUserId()
     // reads it — a send racing an unfinished async cache load would otherwise
     // stamp solo (authorUserId omitted) and lose relay provenance for a
@@ -2800,6 +3090,9 @@ function registerIpcHandlers(): void {
       authorUserId: relayAuthorUserId(),
       body: input.body,
     });
+    // MU-C4: if this thread lives in a joined shared channel, push it out
+    // promptly (fire-and-forget; the sync cadence is the backstop).
+    void syncWorkspaceSharedChannels(workspace.workspaceId);
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
   });
 
@@ -2838,10 +3131,24 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4: refresh joined shared channels BEFORE reading, so opening Chats
+    // shows other members' latest messages. Never throws; offline it returns
+    // fast and the local rows answer.
+    await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     // First chat use auto-creates the workspace's default channel.
     await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
     const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
+    // Wire identities let the renderer match channels against share grants.
+    const wireIdEntries = await Promise.all(
+      channels.map(async (channel) => [
+        channel.id,
+        await store
+          .getChannelWireId({ workspaceId: workspace.workspaceId, channelId: channel.id })
+          .catch(() => null),
+      ] as const),
+    );
+    const wireIds = new Map(wireIdEntries);
     // The "Files" grouping: file-linked Chats with their CURRENT path (the
     // stable object id resolved through the active version), falling back to
     // the captured hint when the engine no longer owns the file.
@@ -2867,7 +3174,10 @@ function registerIpcHandlers(): void {
       }
     }
     return ListChatChannelsResult.parse({
-      channels: channels.map(chatChannelForIpc),
+      channels: channels.map((channel) => ({
+        ...chatChannelForIpc(channel),
+        wireId: wireIds.get(channel.id) ?? null,
+      })),
       fileThreads: fileThreads.map((thread) => ({
         ...chatThreadForIpc(thread),
         path:
@@ -2892,7 +3202,8 @@ function registerIpcHandlers(): void {
       kind: "channel",
     });
     return CreateChatChannelResult.parse({
-      channel: chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }),
+      // A locally created channel's wire identity is its own id.
+      channel: { ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }), wireId: channel.id },
     });
   });
 
@@ -2919,6 +3230,14 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4 (CodeRabbit security): read-only shared channels reject the
+    // composer at the main boundary, before any durable row.
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target: { channelId: input.channelId },
+    });
     // WS-MU-C0: warm the credential cache before relayAuthorUserId() reads it,
     // so a thread opened before the async cache load finishes still stamps the
     // signed-in author (never falsely solo). Idempotent.
@@ -2933,6 +3252,7 @@ function registerIpcHandlers(): void {
       authorUserId: relayAuthorUserId(),
       body: input.body,
     });
+    void syncWorkspaceSharedChannels(workspace.workspaceId);
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
         thread: started.thread,
@@ -3002,6 +3322,14 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
+    // shared channel rejects them before any durable row.
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target: { threadId: input.threadId },
+    });
     const reaction = await linkedChatStoreFor(workspace).setReaction({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
@@ -3014,6 +3342,8 @@ function registerIpcHandlers(): void {
       },
       state: input.state,
     });
+    // MU-C4: reactions in a joined shared channel push out promptly too.
+    void syncWorkspaceSharedChannels(workspace.workspaceId);
     return SetChatReactionResult.parse({
       reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
       viewerAuthorId: localUserId(),

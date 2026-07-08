@@ -40,6 +40,16 @@ const bridgeMock = {
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   sendChatMessage: vi.fn(),
+  // MU-C4 shared-channel surface: ChatsView loads share state on mount, so
+  // the presence tests must stub it even though they exercise a solo view.
+  listChatChannelShares: vi.fn(),
+  shareChatChannel: vi.fn(),
+  joinSharedChannel: vi.fn(),
+  leaveSharedChannel: vi.fn(),
+  revokeRelayShare: vi.fn(),
+  createChatChannel: vi.fn(),
+  startChannelThread: vi.fn(),
+  setChatReaction: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -80,6 +90,9 @@ beforeEach(() => {
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });
   bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "you" });
+  // Solo/dormant default: no grants, nothing received, nothing joined — the
+  // share load resolves so the overview reaches its ready state.
+  bridgeMock.listChatChannelShares.mockResolvedValue({ granted: [], received: [], joined: [] });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 

@@ -82,6 +82,29 @@ describe("registry store", () => {
     expect(() => future.list()).toThrow(/newer than supported|refusing to overwrite/i);
   });
 
+  it("records, marks ended, and clears joined shared channels (MU-C4)", () => {
+    store.register(personal);
+    const joined = {
+      shareId: "share-1",
+      channelWireId: "wire-team",
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+      relayUrl: "http://relay.test",
+    };
+    store.setSharedChannels("ws-1", [joined]);
+    expect(store.find("ws-1")?.sharedChannels).toEqual([joined]);
+
+    // Revocation stamps ended (replace-the-set write) and persists across
+    // store instances.
+    store.setSharedChannels("ws-1", [{ ...joined, ended: true }]);
+    const reopened = createRegistryStore(registryPath);
+    expect(reopened.find("ws-1")?.sharedChannels).toEqual([{ ...joined, ended: true }]);
+
+    // Leaving the last shared channel removes the key entirely.
+    store.setSharedChannels("ws-1", []);
+    expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
+  });
+
   it("remove unregisters a workspace and tolerates unknown ids (failed-join rollback)", () => {
     store.register(personal);
     store.remove("ws-1");

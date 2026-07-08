@@ -1,11 +1,14 @@
-import { ArrowLeft, Bot, FileText, Hash, MessagesSquare, Plus } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowLeft, Bot, FileText, Hash, MessagesSquare, Plus, Users } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatChannelShareGrantRow,
   ChatMessageRecord,
   ChatReactionRecord,
   FileChatThreadRecord,
+  JoinedSharedChannelRow,
+  ListChatChannelSharesResult,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { AgentNotification } from "./agentNotifications";
@@ -37,6 +40,18 @@ export interface ChatPresenceCollaboration {
 //
 // Every async response is gated by a liveness token before it touches state
 // (workspace switches and rapid navigation must never repaint stale data).
+//
+// Shared channels (MU-C4): a channel can be shared to other accounts through
+// a relay chat-channel grant. This view marks shared/joined channels, offers
+// share/revoke on channels you own, lists invitations under "Shared with
+// you", and disables composers in read-only channels. All sharing affordances
+// require the signed-in collaboration surface — when share listing fails
+// (signed out, local-only workspace), the solo view renders byte-identically
+// to before.
+//
+// Presence seam (MU-C1): once the ephemeral awareness channel lands, member
+// presence for a shared channel attaches here keyed by (shareId |
+// channelWireId) — no durable state involved.
 
 type OverviewState =
   | { status: "loading" }
@@ -72,6 +87,7 @@ function BackHeader(props: {
   icon?: React.ReactNode;
   // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
+  action?: React.ReactNode;
 }) {
   return (
     <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
@@ -92,8 +108,32 @@ function BackHeader(props: {
       >
         {props.label}
       </span>
+      {props.action}
       {props.trailing}
     </div>
+  );
+}
+
+// One line describing who a joined channel came from — calm, not a banner.
+function joinedChannelLabel(joined: JoinedSharedChannelRow): string {
+  const from = joined.granterEmail ?? "someone else";
+  const suffix = joined.ended
+    ? " — no longer shared"
+    : joined.access === "read-only"
+      ? " — read-only"
+      : "";
+  return `Shared by ${from}${suffix}`;
+}
+
+// The read-only / ended composer replacement: honest and quiet.
+function ComposerNotice(props: { testId: string; children: React.ReactNode }) {
+  return (
+    <p
+      data-testid={props.testId}
+      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+    >
+      {props.children}
+    </p>
   );
 }
 
@@ -176,6 +216,15 @@ export function ChatsView(props: {
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  // MU-C4 shared channels. null = the sharing surface is unavailable (signed
+  // out / listing failed) and every sharing affordance stays hidden — the
+  // solo view is unchanged.
+  const [channelShares, setChannelShares] = useState<ListChatChannelSharesResult | null>(null);
+  const [sharePanelOpen, setSharePanelOpen] = useState(false);
+  const [shareEmail, setShareEmail] = useState("");
+  const [shareReadOnly, setShareReadOnly] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [joiningShareId, setJoiningShareId] = useState<string | null>(null);
   // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
   // and stay false until the next render, so a double-send (two Enters in one
   // tick) can fire TWO IPC sends — and two agent invocations — before the state
@@ -213,8 +262,16 @@ export function ChatsView(props: {
       current.status === "ready" ? current : { status: "loading" },
     );
     try {
-      const result = await bridge().listChatChannels({ workspaceId });
+      const [result, shares] = await Promise.all([
+        bridge().listChatChannels({ workspaceId }),
+        // Sharing is OPTIONAL: solo / signed-out workspaces simply render
+        // without the sharing affordances.
+        bridge()
+          .listChatChannelShares({ workspaceId })
+          .catch(() => null),
+      ]);
       if (token !== liveToken.current) return;
+      setChannelShares(shares);
       setOverview({
         status: "ready",
         channels: result.channels,
@@ -238,6 +295,11 @@ export function ChatsView(props: {
     setComposer("");
     setNewThreadBody("");
     setCreatingChannel(null);
+    setChannelShares(null);
+    setSharePanelOpen(false);
+    setShareEmail("");
+    setShareReadOnly(false);
+    setJoiningShareId(null);
     setOverview({ status: "loading" });
     void refreshOverview();
     return () => {
@@ -249,6 +311,7 @@ export function ChatsView(props: {
     async (channel: ChatChannelRecord) => {
       const token = ++liveToken.current;
       setNav({ level: "channel", channel });
+      setSharePanelOpen(false);
       setChannelThreads([]);
       setThreadsLoading(true);
       try {
@@ -415,6 +478,121 @@ export function ChatsView(props: {
     [nav, props, viewerAuthorId, workspaceId],
   );
 
+  // MU-C4 derived lookups: a channel matches a grant by its WIRE id.
+  const joinedByWire = useMemo(() => {
+    const map = new Map<string, JoinedSharedChannelRow>();
+    for (const row of channelShares?.joined ?? []) map.set(row.channelWireId, row);
+    return map;
+  }, [channelShares]);
+  const grantedByWire = useMemo(() => {
+    const map = new Map<string, ChatChannelShareGrantRow[]>();
+    for (const row of channelShares?.granted ?? []) {
+      if (row.revokedAtMs !== null) continue;
+      map.set(row.channelWireId, [...(map.get(row.channelWireId) ?? []), row]);
+    }
+    return map;
+  }, [channelShares]);
+  const receivedNotJoined = useMemo(() => {
+    if (!channelShares) return [];
+    const joinedIds = new Set(channelShares.joined.map((row) => row.shareId));
+    return channelShares.received.filter((row) => !joinedIds.has(row.shareId));
+  }, [channelShares]);
+  const joinedFor = useCallback(
+    (channel: ChatChannelRecord) =>
+      channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
+    [joinedByWire],
+  );
+
+  const refreshShares = useCallback(async () => {
+    const token = liveToken.current;
+    const shares = await bridge()
+      .listChatChannelShares({ workspaceId })
+      .catch(() => null);
+    if (token !== liveToken.current) return;
+    setChannelShares(shares);
+  }, [workspaceId]);
+
+  const submitShare = useCallback(async () => {
+    if (nav.level !== "channel" || shareBusy) return;
+    const recipientEmail = shareEmail.trim();
+    if (recipientEmail.length === 0) return;
+    const token = liveToken.current;
+    setShareBusy(true);
+    try {
+      await bridge().shareChatChannel({
+        workspaceId,
+        channelId: nav.channel.id,
+        recipientEmail,
+        ...(shareReadOnly ? { access: "read-only" as const } : {}),
+      });
+      if (token !== liveToken.current) return;
+      setShareEmail("");
+      setShareReadOnly(false);
+      await refreshShares();
+    } catch (error) {
+      if (token !== liveToken.current) return;
+      props.onError(ipcErrorMessage(error, "Could not share that channel."));
+    } finally {
+      setShareBusy(false);
+    }
+  }, [nav, props, refreshShares, shareBusy, shareEmail, shareReadOnly, workspaceId]);
+
+  const revokeShare = useCallback(
+    async (shareId: string) => {
+      const token = liveToken.current;
+      try {
+        await bridge().revokeRelayShare({ shareId });
+        if (token !== liveToken.current) return;
+        await refreshShares();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not remove that person."));
+      }
+    },
+    [props, refreshShares],
+  );
+
+  const joinShared = useCallback(
+    async (shareId: string) => {
+      if (joiningShareId !== null) return;
+      const token = liveToken.current;
+      setJoiningShareId(shareId);
+      try {
+        await bridge().joinSharedChannel({ workspaceId, shareId });
+        if (token !== liveToken.current) return;
+        await refreshOverview();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not join that channel."));
+      } finally {
+        // Unconditional reset (the sendingRef/startingThreadRef precedent):
+        // refreshOverview bumps liveToken ITSELF, so a token-equality check
+        // here can never pass after a successful join and would leave every
+        // other Join button dead for the session. A workspace switch already
+        // clears joiningShareId in its own effect, so resetting late is
+        // harmless there.
+        setJoiningShareId(null);
+      }
+    },
+    [joiningShareId, props, refreshOverview, workspaceId],
+  );
+
+  const leaveShared = useCallback(
+    async (shareId: string) => {
+      const token = liveToken.current;
+      try {
+        await bridge().leaveSharedChannel({ workspaceId, shareId });
+        if (token !== liveToken.current) return;
+        setNav({ level: "channels" });
+        await refreshOverview();
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        props.onError(ipcErrorMessage(error, "Could not leave that channel."));
+      }
+    },
+    [props, refreshOverview, workspaceId],
+  );
+
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -497,6 +675,8 @@ export function ChatsView(props: {
   }
 
   if (nav.level === "thread") {
+    const threadJoined = joinedFor(nav.channel);
+    const threadLocked = threadJoined !== null && (threadJoined.access === "read-only" || threadJoined.ended);
     return (
       <div
         data-testid="chats-thread-view"
@@ -523,28 +703,45 @@ export function ChatsView(props: {
           }}
         />
         <TypingIndicator names={presence.typingNames} className="px-2" />
-        <MentionComposer
-          testIdPrefix="chats"
-          composerId="chats-composer"
-          value={composer}
-          sending={sending}
-          placeholder="Write a message…  @ to mention"
-          sendLabel="Send message"
-          candidates={mentionCandidates}
-          onChange={(value) => {
-            setComposer(value);
-            presence.setTyping(value.trim().length > 0);
-          }}
-          onSend={() => {
-            presence.setTyping(false);
-            void sendMessage();
-          }}
-        />
+        {threadLocked ? (
+          <ComposerNotice testId="chats-readonly-note">
+            {threadJoined.ended
+              ? "This channel is no longer shared with you. You can still read it."
+              : "This channel is read-only for you."}
+          </ComposerNotice>
+        ) : (
+          <MentionComposer
+            testIdPrefix="chats"
+            composerId="chats-composer"
+            value={composer}
+            sending={sending}
+            placeholder="Write a message…  @ to mention"
+            sendLabel="Send message"
+            candidates={mentionCandidates}
+            onChange={(value) => {
+              setComposer(value);
+              presence.setTyping(value.trim().length > 0);
+            }}
+            onSend={() => {
+              presence.setTyping(false);
+              void sendMessage();
+            }}
+          />
+        )}
       </div>
     );
   }
 
   if (nav.level === "channel") {
+    const channelJoined = joinedFor(nav.channel);
+    const channelLocked =
+      channelJoined !== null && (channelJoined.access === "read-only" || channelJoined.ended);
+    const channelGrants = nav.channel.wireId
+      ? grantedByWire.get(nav.channel.wireId) ?? []
+      : [];
+    // Sharing an OWNED channel needs the sharing surface up; a joined channel
+    // is never re-shareable from here (only its owner manages members).
+    const canShare = channelShares !== null && channelJoined === null && !!nav.channel.wireId;
     return (
       <div
         data-testid="chats-channel-view"
@@ -557,7 +754,115 @@ export function ChatsView(props: {
           onBack={goBack}
           icon={<Hash size={12} aria-hidden className="shrink-0 text-subtle" />}
           trailing={<PresenceFaces others={presence.others} />}
+          action={
+            canShare ? (
+              <button
+                type="button"
+                data-testid="chats-share-channel"
+                title="Share this channel"
+                onClick={() => setSharePanelOpen((open) => !open)}
+                className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+              >
+                <Users size={11} aria-hidden />
+                {channelGrants.length > 0 ? `Shared · ${channelGrants.length}` : "Share"}
+              </button>
+            ) : undefined
+          }
         />
+        {channelJoined !== null ? (
+          <div
+            data-testid="chats-joined-banner"
+            className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
+          >
+            <Users size={11} aria-hidden className="shrink-0 text-subtle" />
+            <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
+              {joinedChannelLabel(channelJoined)}
+            </span>
+            <button
+              type="button"
+              data-testid="chats-leave-shared"
+              onClick={() => void leaveShared(channelJoined.shareId)}
+              className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+            >
+              Leave
+            </button>
+          </div>
+        ) : null}
+        {canShare && sharePanelOpen ? (
+          <div
+            data-testid="chats-share-panel"
+            className="shrink-0 border-b border-line bg-panel-2/40 px-3 py-2"
+          >
+            {channelGrants.length > 0 ? (
+              <ul className="m-0 mb-2 list-none p-0">
+                {channelGrants.map((grant) => (
+                  <li
+                    key={grant.shareId}
+                    data-testid="chats-share-member"
+                    className="flex items-center gap-1.5 py-0.5"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                      {grant.recipientEmail ?? "Invited"}
+                    </span>
+                    {grant.access === "read-only" ? (
+                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
+                    ) : null}
+                    <button
+                      type="button"
+                      data-testid="chats-share-revoke"
+                      onClick={() => void revokeShare(grant.shareId)}
+                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <form
+              className="flex items-center gap-1.5"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitShare();
+              }}
+            >
+              <label className="sr-only" htmlFor="chats-share-email">
+                Share with email
+              </label>
+              <input
+                id="chats-share-email"
+                data-testid="chats-share-email"
+                type="email"
+                value={shareEmail}
+                maxLength={320}
+                placeholder="teammate@example.com"
+                onChange={(event) => setShareEmail(event.target.value)}
+                className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              />
+              <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted">
+                <input
+                  data-testid="chats-share-readonly"
+                  type="checkbox"
+                  checked={shareReadOnly}
+                  onChange={(event) => setShareReadOnly(event.target.checked)}
+                />
+                View only
+              </label>
+              <button
+                type="submit"
+                data-testid="chats-share-submit"
+                disabled={shareBusy || shareEmail.trim().length === 0}
+                className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
+              >
+                Share
+              </button>
+            </form>
+            <p className="mb-0 mt-1 text-[10px] leading-4 text-subtle">
+              They see this whole channel and can post in it{shareReadOnly ? " (view only)" : ""}.
+              You can remove anyone later.
+            </p>
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
           {threadsLoading ? (
             <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
@@ -601,17 +906,25 @@ export function ChatsView(props: {
             </ul>
           )}
         </div>
-        <MentionComposer
-          testIdPrefix="chats-new-thread"
-          composerId="chats-new-thread-composer"
-          value={newThreadBody}
-          sending={startingThread}
-          placeholder={`Message #${nav.channel.name}…  @ to mention`}
-          sendLabel="Start a new chat"
-          candidates={mentionCandidates}
-          onChange={setNewThreadBody}
-          onSend={() => void startThread()}
-        />
+        {channelLocked ? (
+          <ComposerNotice testId="chats-readonly-note">
+            {channelJoined.ended
+              ? "This channel is no longer shared with you. You can still read it."
+              : "This channel is read-only for you."}
+          </ComposerNotice>
+        ) : (
+          <MentionComposer
+            testIdPrefix="chats-new-thread"
+            composerId="chats-new-thread-composer"
+            value={newThreadBody}
+            sending={startingThread}
+            placeholder={`Message #${nav.channel.name}…  @ to mention`}
+            sendLabel="Start a new chat"
+            candidates={mentionCandidates}
+            onChange={setNewThreadBody}
+            onSend={() => void startThread()}
+          />
+        )}
       </div>
     );
   }
@@ -628,35 +941,85 @@ export function ChatsView(props: {
           onOpen={props.onOpenAddressed}
         />
         <ul className="m-0 list-none p-0">
-          {overview.channels.map((channel) => (
-            <li key={channel.id} className="border-b border-line">
-              <button
-                type="button"
-                data-testid="chats-channel"
-                data-channel-id={channel.id}
-                data-channel-slug={channel.slug}
-                onClick={() => void openChannel(channel)}
-                className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
-              >
-                <Hash size={13} aria-hidden className="shrink-0 text-subtle" />
-                <span className="min-w-0 flex-1">
-                  <span
-                    data-testid="chats-channel-name"
-                    className="block truncate text-[12px] font-medium text-ink"
-                  >
-                    {channel.name}
+          {overview.channels.map((channel) => {
+            const joined = joinedFor(channel);
+            const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
+            const sharedLabel = joined
+              ? joinedChannelLabel(joined)
+              : grants.length > 0
+                ? `Shared with ${grants.length}`
+                : null;
+            return (
+              <li key={channel.id} className="border-b border-line">
+                <button
+                  type="button"
+                  data-testid="chats-channel"
+                  data-channel-id={channel.id}
+                  data-channel-slug={channel.slug}
+                  onClick={() => void openChannel(channel)}
+                  className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                >
+                  <Hash size={13} aria-hidden className="shrink-0 text-subtle" />
+                  <span className="min-w-0 flex-1">
+                    <span
+                      data-testid="chats-channel-name"
+                      className="block truncate text-[12px] font-medium text-ink"
+                    >
+                      {channel.name}
+                    </span>
+                    <span className="block truncate text-[10px] text-subtle">
+                      {channel.threadCount === 1
+                        ? "1 chat"
+                        : `${channel.threadCount} chats`}
+                      {sharedLabel ? (
+                        <span data-testid="chats-channel-shared"> · {sharedLabel}</span>
+                      ) : null}
+                    </span>
                   </span>
-                  <span className="block text-[10px] text-subtle">
-                    {channel.threadCount === 1
-                      ? "1 chat"
-                      : `${channel.threadCount} chats`}
-                  </span>
-                </span>
-                <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
-              </button>
-            </li>
-          ))}
+                  {sharedLabel ? (
+                    <Users size={11} aria-hidden className="shrink-0 text-subtle" />
+                  ) : null}
+                  <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
+                </button>
+              </li>
+            );
+          })}
         </ul>
+        {receivedNotJoined.length > 0 ? (
+          <div data-testid="chats-shared-with-you">
+            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              Shared with you
+            </p>
+            <ul className="m-0 list-none p-0">
+              {receivedNotJoined.map((row) => (
+                <li key={row.shareId} className="border-b border-line">
+                  <div className="flex items-center gap-1.5 px-3 py-2">
+                    <Users size={13} aria-hidden className="shrink-0 text-subtle" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-medium text-ink">
+                        A channel from {row.granterEmail ?? "a teammate"}
+                      </span>
+                      <span className="block text-[10px] text-subtle">
+                        {row.access === "read-only"
+                          ? "You can read it"
+                          : "You can read and post"}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="chats-join-shared"
+                      disabled={joiningShareId !== null}
+                      onClick={() => void joinShared(row.shareId)}
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
+                    >
+                      {joiningShareId === row.shareId ? "Joining…" : "Join"}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {overview.fileThreads.length > 0 ? (
           <div data-testid="chats-files-section">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">

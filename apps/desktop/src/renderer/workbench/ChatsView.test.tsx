@@ -66,6 +66,11 @@ const fileThread: FileChatThreadRecord = {
 
 const bridgeMock = {
   listChatChannels: vi.fn(),
+  listChatChannelShares: vi.fn(),
+  shareChatChannel: vi.fn(),
+  joinSharedChannel: vi.fn(),
+  leaveSharedChannel: vi.fn(),
+  revokeRelayShare: vi.fn(),
   createChatChannel: vi.fn(),
   listChannelThreads: vi.fn(),
   startChannelThread: vi.fn(),
@@ -83,6 +88,11 @@ beforeEach(() => {
   bridgeMock.listChatChannels.mockResolvedValue({
     channels: [channel()],
     fileThreads: [],
+  });
+  bridgeMock.listChatChannelShares.mockResolvedValue({
+    granted: [],
+    received: [],
+    joined: [],
   });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
@@ -490,5 +500,224 @@ describe("ChatsView liveness", () => {
 
     await screen.findAllByTestId("chats-channel-name");
     expect(screen.queryByText("Stale thread")).toBeNull();
+  });
+});
+
+// --- Shared channels (MU-C4) -----------------------------------------------
+
+describe("ChatsView shared channels (MU-C4)", () => {
+  const teamChannel = () =>
+    channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
+
+  it("hides every sharing affordance when the sharing surface is unavailable (solo unchanged)", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
+    renderView();
+    await screen.findByTestId("chats-channel-name");
+    expect(screen.queryByTestId("chats-shared-with-you")).toBeNull();
+    expect(screen.queryByTestId("chats-channel-shared")).toBeNull();
+    // Entering the channel offers no share button either.
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+  });
+
+  it("marks a granted channel as shared and manages members through the share panel", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [
+        {
+          shareId: "share-1",
+          channelWireId: "wire-team",
+          access: "read-write",
+          recipientEmail: "ana@example.com",
+          revokedAtMs: null,
+        },
+      ],
+      received: [],
+      joined: [],
+    });
+    bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
+    bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
+    renderView();
+    expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
+      "Shared with 1",
+    );
+
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    const shareButton = await screen.findByTestId("chats-share-channel");
+    expect(shareButton.textContent).toContain("Shared · 1");
+    await userEvent.click(shareButton);
+
+    // The member list shows who has it, and Remove revokes their grant.
+    const member = await screen.findByTestId("chats-share-member");
+    expect(member.textContent).toContain("ana@example.com");
+    await userEvent.click(screen.getByTestId("chats-share-revoke"));
+    await waitFor(() =>
+      expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
+    );
+
+    // Sharing to a new address, read-only via the checkbox.
+    await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
+    await userEvent.click(screen.getByTestId("chats-share-readonly"));
+    await userEvent.click(screen.getByTestId("chats-share-submit"));
+    await waitFor(() =>
+      expect(bridgeMock.shareChatChannel).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        channelId: "channel-team",
+        recipientEmail: "bo@example.com",
+        access: "read-only",
+      }),
+    );
+  });
+
+  it("lists invitations under Shared with you, joins one, and re-enables the other Join buttons", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-in",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+        },
+        {
+          shareId: "share-in-2",
+          channelWireId: "wire-in-2",
+          access: "read-write",
+          granterEmail: "other@example.com",
+        },
+      ],
+      joined: [],
+    });
+    bridgeMock.joinSharedChannel.mockResolvedValue({
+      joined: {
+        shareId: "share-in",
+        channelWireId: "wire-in",
+        access: "read-write",
+        granterEmail: "owner@example.com",
+        ended: false,
+      },
+    });
+    renderView();
+    const section = await screen.findByTestId("chats-shared-with-you");
+    expect(section.textContent).toContain("owner@example.com");
+    expect(section.textContent).toContain("other@example.com");
+    await userEvent.click(screen.getAllByTestId("chats-join-shared")[0]!);
+    await waitFor(() =>
+      expect(bridgeMock.joinSharedChannel).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        shareId: "share-in",
+      }),
+    );
+    // The overview reloads after joining (channel + shares re-fetch).
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
+    // Regression (CodeRabbit critical): the join-in-flight flag must reset
+    // after a successful join even though refreshOverview bumps the liveness
+    // token — the OTHER invitation's Join button re-enables instead of
+    // staying dead for the rest of the session.
+    await waitFor(() => {
+      const buttons = screen.getAllByTestId("chats-join-shared");
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        expect((button as HTMLButtonElement).disabled).toBe(false);
+      }
+    });
+  });
+
+  it("shows a joined channel's provenance, disables composers when read-only, and can leave", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-team",
+          access: "read-only",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+      ],
+    });
+    bridgeMock.leaveSharedChannel.mockResolvedValue(undefined);
+    renderView();
+    expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
+      "Shared by owner@example.com — read-only",
+    );
+
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    await screen.findByTestId("chats-joined-banner");
+    // Read-only: the thread composer is replaced by an honest notice, and a
+    // joined channel is never re-shareable from here.
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("chats-leave-shared"));
+    await waitFor(() =>
+      expect(bridgeMock.leaveSharedChannel).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        shareId: "share-in",
+      }),
+    );
+  });
+
+  it("keeps a read-write joined channel's composer and blocks it once the share ends", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-team",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+      ],
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-joined-banner");
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    cleanup();
+
+    // The same channel after revocation (ended): still readable, no posting.
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-team",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: true,
+        },
+      ],
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const note = await screen.findByTestId("chats-readonly-note");
+    expect(note.textContent).toContain("no longer shared");
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
   });
 });

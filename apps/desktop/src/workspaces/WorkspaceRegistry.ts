@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createRegistryStore,
+  type JoinedSharedChannel,
   type RegistryEntry,
   type ShareViewIdentity,
 } from "./registryStore";
@@ -68,4 +69,12 @@ export function setWorkspaceShareView(
   shareView: ShareViewIdentity,
 ): void {
   store().setShareView(workspaceId, shareView);
+}
+
+// MU-C4: the workspace's joined shared channels (replace-the-set write).
+export function setWorkspaceSharedChannels(
+  workspaceId: string,
+  sharedChannels: JoinedSharedChannel[],
+): void {
+  store().setSharedChannels(workspaceId, sharedChannels);
 }

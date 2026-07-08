@@ -108,6 +108,15 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
+    // MU-C4 revoke-race gate: runs INSIDE the append's BEGIN IMMEDIATE
+    // transaction, i.e. under the SQLite write lock that serializes revokes,
+    // before anything is inserted. A throwing guard rolls the whole batch
+    // back. This is how the member-append route re-verifies the share
+    // (recipient-owned, unrevoked, granter in standing) with NO window left
+    // between the check and the insert — a route-level re-check alone leaves
+    // a gap where a concurrent revoke commits after the check but before the
+    // transaction opens.
+    guard?: () => void;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;
@@ -137,6 +146,14 @@ export interface SyncRelayStorage {
   // the actual decision). sha256 is validated hex upstream, so it cannot
   // carry LIKE wildcards.
   listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
+  // MU-C4 shared channels: the channelWireId bound by the EARLIEST
+  // chat.thread.create op for this threadId in the workspace's log (relay
+  // order), or null when the log holds no binding. Earliest-wins mirrors the
+  // engine's insert-if-absent thread apply, so a later forged re-create can
+  // never re-bind an existing thread across a share boundary. Returns null
+  // (fail-closed: the filter then excludes) rather than a fallback for a
+  // binding op that carries no channelWireId (a file-linked thread).
+  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null;
 }
 
 interface SqliteRunResult {
@@ -205,6 +222,16 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       );
       CREATE INDEX IF NOT EXISTS idx_sync_relay_log_page
         ON sync_relay_log(workspace_id, relay_seq);
+      -- MU-C4: findThreadCreateChannelWireId's LIKE pre-filter cannot use an
+      -- index on payload_json, but this PARTIAL index confines the scan to a
+      -- workspace's chat.thread.create rows (a tiny slice of a busy log) in
+      -- relay order, instead of every log row. Per-request memoization in the
+      -- caller (server.ts chatResolverFor) removes the per-message repeats;
+      -- if channel history ever makes even the confined scan hot, the upgrade
+      -- path is a dedicated thread_channel_bindings table filled at insert.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_thread_creates
+        ON sync_relay_log(workspace_id, relay_seq)
+        WHERE op_kind = 'chat.thread.create';
 
       CREATE TABLE IF NOT EXISTS sync_relay_blobs (
         workspace_id TEXT NOT NULL,
@@ -655,9 +682,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
+    guard?: () => void;
   }): AppendLogBatchResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Authorization re-verification under the write lock (see the interface
+      // comment): BEGIN IMMEDIATE serializes writers, so a revoke committed
+      // by another writer is either already visible here (guard throws, batch
+      // rolls back) or must wait for this COMMIT — there is no in-between.
+      input.guard?.();
       let inserted = 0;
       let skipped = 0;
       let addedLogBytes = 0;
@@ -920,6 +953,43 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       )
       .all(workspaceId, `%${sha256}%`)
       .map(rowToLogRow);
+  }
+
+  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null {
+    if (!threadId) return null;
+    // LIKE pre-filter on the exact JSON fragment the canonical (sorted-key,
+    // JSON.stringify-escaped) payload stores, wildcards escaped so a hostile
+    // threadId cannot widen the match; the JSON.parse comparison below makes
+    // the real decision.
+    const needle = `"threadId":${JSON.stringify(threadId)}`
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
+           AND payload_json LIKE ? ESCAPE '\\'
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${needle}%`);
+    for (const row of rows) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row.payload_json));
+      } catch {
+        continue;
+      }
+      const record = asObject(payload);
+      if (!record || record.threadId !== threadId) continue;
+      // The EARLIEST matching op is authoritative, whatever it says: a string
+      // channelWireId is the binding; anything else (a file-linked thread, a
+      // pre-wire-id slug binding) is "no shareable binding" — fail closed.
+      return typeof record.channelWireId === "string" && record.channelWireId.length > 0
+        ? record.channelWireId
+        : null;
+    }
+    return null;
   }
 
   fetchLogPage(input: {

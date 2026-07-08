@@ -84,6 +84,18 @@ export type {
   ShareViewInfo,
   ShareViewSelector,
 } from "./syncShareView";
+export {
+  SharedChannelAppendRejectedError,
+  SharedChannelReadOnlyError,
+  fetchSharedChannelInfo,
+  pullSharedChannel,
+  pushSharedChannel,
+} from "./syncSharedChannel";
+export type {
+  PullSharedChannelResult,
+  PushSharedChannelResult,
+  SharedChannelInfo,
+} from "./syncSharedChannel";
 export type {
   PendingConflictResolve,
   SyncApplyResult,

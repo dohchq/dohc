@@ -76,13 +76,18 @@ function capture(): WorkspaceEngineCapture {
   } as unknown as WorkspaceEngineCapture;
 }
 
-function engine(input: { capture: WorkspaceEngineCapture; onChange?: () => void }) {
+function engine(input: {
+  capture: WorkspaceEngineCapture;
+  onChange?: () => void;
+  syncSharedChannels?: () => Promise<void>;
+}) {
   return createRelaySyncEngine({
     rootDir: "/tmp/workspace",
     remoteWorkspaceId: "workspace-a",
     relay: { baseUrl: "http://relay.test", token: "token" },
     capture: input.capture,
     onChange: input.onChange ?? vi.fn(),
+    ...(input.syncSharedChannels ? { syncSharedChannels: input.syncSharedChannels } : {}),
     debounceMs: 100,
     initialBackoffMs: 500,
     maxBackoffMs: 2000,
@@ -110,6 +115,24 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("refreshes shared channels on every pass and contains their failures (MU-C4)", async () => {
+    const cap = capture();
+    // The callback REJECTING must not fail the workspace pass: shared-channel
+    // refresh is best-effort (a revoked share can't wedge file sync).
+    const syncSharedChannels = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValue(new Error("shared channel relay down"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: cap, syncSharedChannels });
+    await sync.start();
+    expect(syncSharedChannels).toHaveBeenCalledTimes(1);
+    const snapshot = sync.snapshot();
+    expect(snapshot.lastSyncedAtMs).toBe(12345);
+    expect(snapshot.syncFailing).toBeFalsy();
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
   it("wires push then pull through the capture callback and folds conflicts into the snapshot", async () => {
     const cap = capture();
     const commit = vi.fn(async () => {});

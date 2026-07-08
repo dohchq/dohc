@@ -187,6 +187,22 @@ function rowToOp(row: Record<string, unknown>): SyncReplicationEnvelope {
   } as SyncReplicationEnvelope;
 }
 
+// Key-order-independent JSON form for byte-comparing op payloads: the journal
+// serializes with plain JSON.stringify (writer key order) while the relay
+// stores a sorted-key canonical form, so equality must be decided on content,
+// not on the accidental serialization. Mirrors the relay's stableJsonStringify.
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function readPushedSeq(db: EngineSqliteDb, workspaceId: WorkspaceId, originId: string): number {
   const row = db
     .prepare(
@@ -851,6 +867,68 @@ export async function pullWorkspaceFromRelay(
     };
   }
 
+  // MU-C4 gate fix: relay-learned FOREIGN-origin ops are by definition
+  // already at the relay and must never become re-push candidates.
+  // pushWorkspaceToRelay scans EVERY distinct origin in the local journal, so
+  // ops that entered it through this pull (e.g. member appends landed in the
+  // owner's bucket under share-namespaced origins) would otherwise be offered
+  // back — and the relay's MU-C0 authorship gate 403s member-authored chat
+  // ops pushed by the owner, wedging the owner's sync permanently. Advance
+  // the pushed watermark to exactly the seqs FETCHED FROM THE RELAY (never
+  // backwards, never past them): bundle-imported foreign ops the relay never
+  // served stay above the watermark and remain pushable.
+  //
+  // DIVERGENCE GUARD (adversarial-review follow-up): the imported-op apply is
+  // idempotent on COORDINATES ONLY (importedReplicationLogExists never
+  // byte-compares), so a fetched op colliding with an EXISTING local row must
+  // be byte-compared HERE before it may count toward the watermark. Identical
+  // row = a true idempotent echo, safe to watermark. Different row = the same
+  // same-origin divergence the push path fails closed on (syncRelay push's
+  // RelayOriginDivergedError) — watermarking past it would silently retire
+  // the local op AND hide the divergence forever, so refuse the whole pass
+  // before anything is applied or persisted. Recovery stays an origin reset
+  // (0P-C), exactly like push-time divergence.
+  const maxPulledByOrigin = new Map<string, number>();
+  {
+    const db = openEngineDb(input.rootDir);
+    try {
+      const localRowStmt = db.prepare(
+        `SELECT op_kind, payload_json, recorded_at_ms FROM replication_log
+         WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
+      );
+      for (const op of ops) {
+        if (op.originId === localOriginId) continue;
+        // Relay-fed coordinates are untrusted (same posture as the
+        // shared-channel pull's validSharedLogOp): a malformed originSeq must
+        // never reach the divergence lookup or the watermark map. The apply
+        // below fail-closes on such an op anyway (envelope validation + gap
+        // check reject the whole pass), but the watermark must stay
+        // fail-closed on its own, independent of apply semantics.
+        if (!Number.isSafeInteger(op.originSeq) || op.originSeq < 0) continue;
+        const existing = localRowStmt.get(input.workspaceId, op.originId, op.originSeq);
+        if (existing) {
+          const identical =
+            String(existing.op_kind) === op.opKind &&
+            Number(existing.recorded_at_ms) === op.recordedAtMs &&
+            canonicalJson(JSON.parse(String(existing.payload_json))) === canonicalJson(op.payload);
+          if (!identical) {
+            throw new RelayOriginDivergedError(
+              `Relay log for origin ${op.originId} diverged from the local journal at ` +
+                `seq ${op.originSeq}: the relay serves different content for an op this ` +
+                "workspace already holds, and the coordinate-idempotent apply would hide " +
+                "it. Refusing to mark the local op as pushed. Recovering requires an " +
+                "origin reset (0P-C).",
+            );
+          }
+        }
+        const current = maxPulledByOrigin.get(op.originId) ?? -1;
+        if (op.originSeq > current) maxPulledByOrigin.set(op.originId, op.originSeq);
+      }
+    } finally {
+      db.close();
+    }
+  }
+
   const paths = candidateMaterializationPaths(ops);
   const before = await activeSnapshotMap(input.rootDir, input.workspaceId, paths);
   const result = await applySyncQueues({
@@ -874,6 +952,21 @@ export async function pullWorkspaceFromRelay(
             contentKind: beforeSnapshot?.contentKind ?? "text",
           },
     );
+  }
+
+  // Commit the pushed watermarks computed (and divergence-vetted) above, now
+  // that the apply landed.
+  if (maxPulledByOrigin.size > 0) {
+    const db = openEngineDb(input.rootDir);
+    try {
+      for (const [originId, maxSeq] of maxPulledByOrigin) {
+        if (maxSeq > readPushedSeq(db, input.workspaceId, originId)) {
+          writePushedSeq(db, input.workspaceId, originId, maxSeq);
+        }
+      }
+    } finally {
+      db.close();
+    }
   }
 
   // Retry safety for the cursor-commit contract: ops below the un-committed

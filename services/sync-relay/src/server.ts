@@ -8,10 +8,13 @@ import {
 } from "./presence";
 import {
   filterOpForShare,
-  parseShareSelectorJson,
+  isChatChannelSelector,
+  parseAnyShareSelectorJson,
   presenceTopicAllowedForShare,
+  validateChatChannelShareSelector,
   validateShareSelector,
-  type ShareSelector,
+  type AnyShareSelector,
+  type ChatShareThreadResolver,
 } from "./shareFilter";
 import {
   SyncRelayBlobMissingError,
@@ -148,16 +151,36 @@ export function createSyncRelayHandler({
   // is the same generic 404 the relay uses for absent workspaces, so probing
   // recipients cannot distinguish "never existed" from "exists but not
   // yours" from "was revoked".
-  const shareForRecipient = (shareId: string, userId: string): SyncRelayShareRow & { selector: ShareSelector } => {
+  const shareForRecipient = (shareId: string, userId: string): SyncRelayShareRow & { selector: AnyShareSelector } => {
     const share = storage.getShare(shareId);
     if (!share) throw notFound();
     if (share.recipientUserId !== userId) throw notFound();
     if (share.revokedAtMs !== null) throw notFound();
     // Defensive: the grant is only as good as the granter's own standing.
     if (!storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) throw notFound();
-    const selector = parseShareSelectorJson(share.selectorJson);
+    const selector = parseAnyShareSelectorJson(share.selectorJson);
     if (!selector) throw notFound();
     return { ...share, selector };
+  };
+
+  // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
+  // by the shared workspace's OWN log (earliest chat.thread.create wins), so a
+  // member-pushed forgery can never re-bind an existing thread. Memoized per
+  // resolver (= per request): the filter asks about the SAME threadId once per
+  // message/reaction row on the hot read path, and the underlying lookup is a
+  // log scan. Safe because a resolver never outlives its request and the log
+  // it reads is append-only with earliest-binding-wins semantics.
+  const chatResolverFor = (workspaceId: string): ChatShareThreadResolver => {
+    const cache = new Map<string, string | null>();
+    return {
+      threadChannelWireId: (threadId) => {
+        const cached = cache.get(threadId);
+        if (cached !== undefined || cache.has(threadId)) return cached ?? null;
+        const bound = storage.findThreadCreateChannelWireId(workspaceId, threadId);
+        cache.set(threadId, bound);
+        return bound;
+      },
+    };
   };
 
   // Lazy claim of pending email invites (PR 18 gate fix): the first time an
@@ -175,7 +198,7 @@ export function createSyncRelayHandler({
     share: SyncRelayShareRow,
     side: "granted" | "received",
   ): Promise<Record<string, unknown>> => {
-    const selector = parseShareSelectorJson(share.selectorJson);
+    const selector = parseAnyShareSelectorJson(share.selectorJson);
     const base = {
       shareId: share.shareId,
       selector: selector ?? { paths: [], versionId: null },
@@ -273,9 +296,10 @@ export function createSyncRelayHandler({
         // or is dropped from the response. The cursor still advances over
         // dropped rows (the recipient sees a sparser page, never a stalled
         // one), and payloads are the filter's (possibly redacted) copy.
+        const chatResolver = chatResolverFor(share.workspaceId);
         const ops: Array<Record<string, unknown>> = [];
         for (const row of page.rows) {
-          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson);
+          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson, chatResolver);
           if (!decision.allowed) continue;
           ops.push({
             relaySeq: row.relaySeq,
@@ -298,6 +322,90 @@ export function createSyncRelayHandler({
           hasMore: page.hasMore,
         });
       }
+
+      // MU-C4 member append — the bidirectional extension of the PR-18
+      // recipient model, and the first place a non-owner writes into an
+      // owner's bucket. Fail-closed gauntlet, in order:
+      //   1. shareForRecipient: membership, revocation, granter standing —
+      //      every denial is the same byte-identical generic 404.
+      //   2. The selector must be a chat-channel grant with read-write
+      //      access; a read-only member (and any path/version share) is
+      //      REFUSED with an explicit 403 — the member legitimately knows the
+      //      share exists, so this is a refusal, not a 404.
+      //   3. MU-C0 verified authorship: every authored chat op must claim the
+      //      AUTHENTICATED pusher (assertChatAuthorship stamps/verifies) — a
+      //      member cannot forge a message or reaction as another member.
+      //   4. Every op must pass the SAME fail-closed chat filter that scopes
+      //      reads: chat.* only, granted channel only, earliest-thread-binding
+      //      honored. One rejected op rejects the WHOLE batch atomically.
+      // Accepted ops land in the OWNER's workspace bucket under a
+      // share-namespaced origin id, so a member can never extend (or collide
+      // with) the owner's — or another member's — origin sequence space; the
+      // relay still assigns no cross-origin order.
+      if (route.route === "share-log" && request.method === "POST") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!isChatChannelSelector(share.selector)) throw shareNotAppendable();
+        if (share.selector.access !== "read-write") throw shareNotAppendable();
+        const input = await readJsonObject(request);
+        const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
+        if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
+        if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
+        // Authorship BEFORE the filter so a stamped authorUserId is what the
+        // filter sees and parseLogOp freezes into payloadJson (MU-C0).
+        assertChatAuthorship(input.ops, actor.userId);
+        // Batch-aware channel scoping: a thread created earlier in THIS batch
+        // is a valid target for later ops in the same batch (the composer's
+        // thread.create + first message.append), but the LOG's earliest
+        // binding always wins over the batch — a batch cannot re-bind an
+        // existing thread.
+        const pendingThreadBindings = new Map<string, string>();
+        const resolver: ChatShareThreadResolver = {
+          threadChannelWireId: (threadId) =>
+            storage.findThreadCreateChannelWireId(share.workspaceId, threadId) ??
+            pendingThreadBindings.get(threadId) ??
+            null,
+        };
+        const ops = input.ops.map(parseLogOp);
+        for (const op of ops) {
+          const decision = filterOpForShare(share.selector, op.opKind, op.payloadJson, resolver);
+          if (!decision.allowed) throw shareOpRejected();
+          if (op.opKind === "chat.thread.create") {
+            const threadId = (JSON.parse(op.payloadJson) as { threadId?: unknown }).threadId;
+            if (typeof threadId === "string" && threadId.length > 0) {
+              pendingThreadBindings.set(threadId, share.selector.channelWireId);
+            }
+          }
+        }
+        const result = storage.appendLogBatch({
+          workspaceId: share.workspaceId,
+          // Namespaced per share (= per member): member origins live in their
+          // own corner of the owner bucket's origin space.
+          originId: `share:${share.shareId}:${originId}`,
+          ops,
+          // Close the revoke race COMPLETELY: the share is re-verified inside
+          // the append's own BEGIN IMMEDIATE transaction (the same write lock
+          // revokeShare takes), so a revoke committed after the entry check
+          // above can never slip a write in — the guard sees it and the whole
+          // batch rolls back as the same generic 404. The guard re-runs the
+          // full appendability gauntlet: recipient-owned, unrevoked, granter
+          // in standing, still a read-write chat-channel grant on the same
+          // workspace bucket.
+          guard: () => {
+            const fresh = shareForRecipient(route.shareId, actor.userId);
+            if (fresh.workspaceId !== share.workspaceId) throw notFound();
+            if (!isChatChannelSelector(fresh.selector)) throw shareNotAppendable();
+            if (fresh.selector.access !== "read-write") throw shareNotAppendable();
+          },
+        });
+        return jsonResponse({
+          ok: true,
+          accepted: ops.length,
+          inserted: result.inserted,
+          skipped: result.skipped,
+          currentMaxOriginSeq: result.currentMaxOriginSeq,
+        });
+      }
       if (route.route === "share-log") throw methodNotAllowed();
 
       if (route.route === "share-blob" && request.method === "GET") {
@@ -309,8 +417,12 @@ export function createSyncRelayHandler({
         // else — a blob of an unshared file, a secret ciphertext blob, a
         // random hash — is the same generic 404 as a nonexistent share.
         const candidates = storage.listLogRowsReferencing(share.workspaceId, route.sha256);
+        const chatResolver = chatResolverFor(share.workspaceId);
+        // Chat ops are blob-free (their decisions carry no blobSha256s), so a
+        // chat-channel share can never make ANY blob reachable — every blob
+        // probe on one is the same generic 404.
         const reachable = candidates.some((row) => {
-          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson);
+          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson, chatResolver);
           return decision.allowed && decision.blobSha256s.includes(route.sha256);
         });
         if (!reachable) throw notFound();
@@ -389,12 +501,29 @@ export function createSyncRelayHandler({
 
       if (route.route === "shares-create" && request.method === "POST") {
         const input = await readJsonObject(request);
-        const validation = validateShareSelector({
-          paths: input.paths,
-          versionId: input.versionId,
-        });
-        if (!validation.ok) {
-          throw new HttpError(400, validation.code, validation.message);
+        // Two grant kinds share one create surface: a chat-channel grant
+        // (MU-C4, addressed by channelWireId + optional access) or the PR-18
+        // path/version grant. The recipient addressing, pending-invite, and
+        // anti-enumeration behavior below is identical for both.
+        let selector: AnyShareSelector;
+        if (input.channelWireId !== undefined) {
+          const chatValidation = validateChatChannelShareSelector({
+            channelWireId: input.channelWireId,
+            access: input.access,
+          });
+          if (!chatValidation.ok) {
+            throw new HttpError(400, chatValidation.code, chatValidation.message);
+          }
+          selector = chatValidation.selector;
+        } else {
+          const validation = validateShareSelector({
+            paths: input.paths,
+            versionId: input.versionId,
+          });
+          if (!validation.ok) {
+            throw new HttpError(400, validation.code, validation.message);
+          }
+          selector = validation.selector;
         }
         const shareId = newShareId();
         const createdAtMs = nowMs();
@@ -414,7 +543,7 @@ export function createSyncRelayHandler({
             granterUserId: actor.userId,
             recipientUserId,
             recipientEmail: null,
-            selectorJson: JSON.stringify(validation.selector),
+            selectorJson: JSON.stringify(selector),
             createdAtMs,
           });
           return jsonResponse({
@@ -422,7 +551,7 @@ export function createSyncRelayHandler({
             shareId,
             workspaceId: route.workspaceId,
             recipientUserId,
-            selector: validation.selector,
+            selector: selector,
             createdAtMs,
           });
         }
@@ -446,14 +575,14 @@ export function createSyncRelayHandler({
           granterUserId: actor.userId,
           recipientUserId: resolved ?? null,
           recipientEmail: resolved ? null : email.trim().toLowerCase(),
-          selectorJson: JSON.stringify(validation.selector),
+          selectorJson: JSON.stringify(selector),
           createdAtMs,
         });
         return jsonResponse({
           ok: true,
           shareId,
           workspaceId: route.workspaceId,
-          selector: validation.selector,
+          selector: selector,
           createdAtMs,
         });
       }
@@ -996,6 +1125,23 @@ function authorshipMismatch(): HttpError {
 // learns to verify it. Non-retryable as sent.
 function unknownChatOp(): HttpError {
   return new HttpError(403, "unknown_chat_op", "unrecognized chat op cannot be authorship-verified");
+}
+
+// MU-C4: an append addressed to a share that takes no appends — a read-only
+// chat-channel grant (the broadcast opt-in) or a PR-18 path/version share
+// (read-only by contract). 403, not 404: the caller IS the legitimate
+// recipient and may keep reading; only writing is refused. Deliberately one
+// code for both cases so the response does not reveal the selector kind.
+function shareNotAppendable(): HttpError {
+  return new HttpError(403, "share_read_only", "this share does not accept appends");
+}
+
+// MU-C4 fail-closed append scoping: an op in the batch is not a chat op for
+// the granted channel (wrong channel, foreign thread, a file/secret/unknown
+// op, or a forged thread re-bind). The whole batch is rejected atomically.
+// Deliberately does not name which op failed or why.
+function shareOpRejected(): HttpError {
+  return new HttpError(403, "share_op_rejected", "an op is outside the shared channel");
 }
 
 function notFound(): HttpError {
