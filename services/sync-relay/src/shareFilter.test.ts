@@ -5,6 +5,7 @@ import {
   filterOpForShare,
   parseAnyShareSelectorJson,
   parseShareSelectorJson,
+  presenceTopicAllowedForShare,
   validateChatChannelShareSelector,
   validateShareSelector,
   type ChatChannelShareSelector,
@@ -337,6 +338,32 @@ describe("chat-channel share selector", () => {
       paths: ["docs"],
       versionId: null,
     });
+  });
+});
+
+describe("presence topic gate (MU-C1 x MU-C4)", () => {
+  const channelShare: ChatChannelShareSelector = {
+    kind: "chat-channel",
+    channelWireId: "wire-1",
+    access: "read-write",
+  };
+  const pathShare: ShareSelector = { paths: ["docs"], versionId: null };
+
+  it("scopes a chat-channel member's presence to exactly the granted wire id", () => {
+    // The one allowed topic is the granted channel's wire id: a member joins
+    // co-presence for that channel and nothing else.
+    expect(presenceTopicAllowedForShare(channelShare, "wire-1")).toBe(true);
+    // Another channel, a file path, or an empty topic are all refused — a
+    // chat-channel grant exposes no path-based (doc) presence at all.
+    for (const topic of ["wire-2", "docs/a.md", "docs", ""]) {
+      expect(presenceTopicAllowedForShare(channelShare, topic), topic).toBe(false);
+    }
+  });
+
+  it("keeps path shares gated to their visible paths and never to a wire id", () => {
+    expect(presenceTopicAllowedForShare(pathShare, "docs/a.md")).toBe(true);
+    expect(presenceTopicAllowedForShare(pathShare, "wire-1")).toBe(false);
+    expect(presenceTopicAllowedForShare(pathShare, "secrets/b.md")).toBe(false);
   });
 });
 

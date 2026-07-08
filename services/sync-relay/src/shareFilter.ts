@@ -238,16 +238,19 @@ function targetVersionId(selector: ShareSelector): string {
 // MU-C1 presence gate: whether a share RECIPIENT may join the ephemeral
 // awareness scope for `topic`. Fail-closed and reuses the SAME visibility
 // check the durable filter uses, so presence can never fan out to a scope the
-// share does not already expose. Today a topic is a workspace-relative path
-// (doc co-presence on a shared file); a future chat-channel selector (MU-C4)
-// extends this to allow `topic === selector.channelWireId`. Everything the
-// share does not positively expose is refused — a recipient of `a.md` cannot
-// subscribe to presence for `b.md`.
+// share does not already expose. For a path/version selector a topic is a
+// workspace-relative path (doc co-presence on a shared file); for a MU-C4
+// chat-channel selector the only allowed topic is the granted channel's wire
+// id, so a member sees co-presence for exactly the channel they were granted.
+// Everything the share does not positively expose is refused — a recipient of
+// `a.md` cannot subscribe to presence for `b.md`, and a chat-channel member
+// cannot subscribe to any other channel's or file's presence.
 export function presenceTopicAllowedForShare(
-  selector: ShareSelector,
+  selector: AnyShareSelector,
   topic: string,
 ): boolean {
   if (typeof topic !== "string" || topic.length === 0) return false;
+  if (isChatChannelSelector(selector)) return topic === selector.channelWireId;
   return pathVisibleThroughShare(selector, topic);
 }
 
