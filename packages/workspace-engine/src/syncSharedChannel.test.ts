@@ -270,6 +270,84 @@ describe("pullSharedChannel", () => {
     }
   });
 
+  it("replays a kind:\"dm\" channel byte-identically and still drops a foreign-channel injection (WS-MU-C3)", async () => {
+    // A DM rides the SAME shared-channel lane as a regular channel — the only
+    // difference on the wire is `kind:"dm"` on the channel.create. The
+    // participant-side scope gate (opBelongsToChannel) must replay the DM and
+    // drop anything a hostile/buggy relay slips in, exactly as for a channel.
+    const fake = new FakeChannelRelay();
+    fake.addOp("origin-owner", "chat.channel.create", {
+      channelId: "chan-dm-owner",
+      name: "bob@dohc.test",
+      slug: "bob-dohc-test",
+      kind: "dm",
+      createdAtMs: 1,
+      wireId: WIRE,
+    });
+    fake.addOp("origin-owner", "chat.thread.create", {
+      threadId: "thread-dm-1",
+      title: "",
+      createdAtMs: 1,
+      channelSlug: "bob-dohc-test",
+      channelWireId: WIRE,
+    });
+    fake.addOp("origin-owner", "chat.message.append", {
+      messageId: "msg-dm-1",
+      threadId: "thread-dm-1",
+      authorKind: "human",
+      authorDisplayName: "Alice",
+      authorUserId: "granter",
+      body: "hello bob",
+      createdAtMs: 1,
+    });
+    // Injection: another channel's thread + message, and a message into an
+    // unknown thread. Both must be dropped on the participant's pull.
+    fake.addOp("origin-owner", "chat.thread.create", {
+      threadId: "thread-other-1",
+      title: "SENTINEL-other-thread",
+      createdAtMs: 1,
+      channelSlug: "other",
+      channelWireId: "wire-other",
+    });
+    fake.addOp("origin-owner", "chat.message.append", {
+      messageId: "msg-inject-1",
+      threadId: "thread-nowhere",
+      authorKind: "human",
+      authorDisplayName: "Alice",
+      body: "SENTINEL-injected",
+      createdAtMs: 1,
+    });
+
+    const root = await tempRoot();
+    const info = await fetchSharedChannelInfo({ relay: relayFor(fake), shareId: SHARE_ID });
+    expect(info).toMatchObject({ channelWireId: WIRE, access: "read-write" });
+    const result = await pullSharedChannel({
+      rootDir: root,
+      workspaceId: WORKSPACE,
+      relay: relayFor(fake),
+      shareId: SHARE_ID,
+      channelWireId: WIRE,
+    });
+    // The 3 DM ops applied; the 2 injected ops skipped.
+    expect(result.applied).toBe(3);
+    expect(result.skipped).toBe(2);
+
+    const chats = createLinkedChatStore(root);
+    try {
+      const channels = await chats.listChannels({ workspaceId: WORKSPACE });
+      // The channel materialized as a DM — kind preserved across the share —
+      // and no foreign channel leaked in.
+      expect(channels).toHaveLength(1);
+      expect(channels[0]!.kind).toBe("dm");
+      const messages = await chats.listMessages({ workspaceId: WORKSPACE, threadId: "thread-dm-1" });
+      expect(messages.map((m) => m.body)).toEqual(["hello bob"]);
+      const serialized = JSON.stringify(await chats.listThreads({ workspaceId: WORKSPACE }));
+      expect(serialized).not.toContain("SENTINEL");
+    } finally {
+      await chats.close();
+    }
+  });
+
   it("never applies served ops into a LOCAL thread that is not bound to the granted channel (private-thread injection)", async () => {
     const fake = new FakeChannelRelay();
     seedGrantedChannel(fake);
