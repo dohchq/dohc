@@ -157,6 +157,36 @@ async function createChatShare(
   return ((await r.json()) as { shareId: string }).shareId;
 }
 
+// Append a real chat.thread.create to the owner's log, binding a thread to a
+// channel wire id. The relay's forge-resistant resolver reads THIS op to decide
+// whether a `chat:thread:<threadId>` presence topic is bound to a granted
+// channel — so a thread topic is only authorized once such a binding exists.
+async function appendThreadCreate(
+  baseUrl: string,
+  owner: string,
+  workspaceId: string,
+  originSeq: number,
+  threadId: string,
+  channelWireId: string,
+): Promise<void> {
+  const r = await fetch(`${baseUrl}/sync/${workspaceId}/log`, {
+    method: "POST",
+    headers: { ...bearer(owner), "content-type": "application/json" },
+    body: JSON.stringify({
+      originId: "owner-origin",
+      ops: [
+        {
+          originSeq,
+          opKind: "chat.thread.create",
+          recordedAtMs: 1,
+          payload: { threadId, channelSlug: "team", channelWireId, title: "", createdAtMs: 1 },
+        },
+      ],
+    }),
+  });
+  expect(r.status).toBe(200);
+}
+
 // Presence via the SHARE route (a participant's path). The relay resolves the
 // share to the GRANTER's workspace, so this lands in the owner's scope.
 async function sharePresenceRaw(
@@ -275,6 +305,81 @@ describe("two-client presence over a real relay child", () => {
     // The stranger's rejected probe left the shared scope untouched: still just
     // the owner + the member.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
+    expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+  }, 30_000);
+
+  it("converges owner + participant on a THREAD topic bound to the granted channel, and isolates other/unknown threads", async () => {
+    const relayRoot = await tempDir();
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+
+    const ownerWs = "workspace-thread";
+    const grantedWire = "wire-general";
+    const otherWire = "wire-private";
+    await claimWorkspace(baseUrl, "owner", ownerWs);
+    // Real thread bindings in the owner's own log: `thread-in` -> the granted
+    // channel, `thread-out` -> a DIFFERENT (ungranted) channel. `thread-unknown`
+    // is left unbound (no chat.thread.create at all).
+    await appendThreadCreate(baseUrl, "owner", ownerWs, 0, "thread-in", grantedWire);
+    await appendThreadCreate(baseUrl, "owner", ownerWs, 1, "thread-out", otherWire);
+    // Owner grants ONLY the general channel to the participant.
+    const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", grantedWire);
+
+    const threadTopic = "chat:thread:thread-in";
+    // OWNER publishes thread presence via the WORKSPACE route (workspace scope).
+    const ownerView = await publish(baseUrl, "owner", ownerWs, threadTopic, {
+      clientId: "owner-1",
+      state: { displayName: "Owner", typing: false },
+    });
+    expect(ownerView.map((p) => p.clientId)).toEqual(["owner-1"]);
+
+    // PARTICIPANT publishes via the SHARE route on the SAME thread topic. The
+    // gate admits it because thread-in binds to the granted channel; the relay
+    // maps the share to the granter's workspace, so both land in ONE scope.
+    const memberView = await sharePublish(baseUrl, "member", shareId, threadTopic, {
+      clientId: "member-1",
+      state: { displayName: "Member", typing: true },
+    });
+    expect(memberView.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+
+    // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT.
+    const ownerRead = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
+    const member = ownerRead.peers.find((p) => p.clientId === "member-1");
+    expect(member?.userId).toBe("member");
+    expect(member?.state).toMatchObject({ displayName: "Member", typing: true });
+
+    // ISOLATION — a thread bound to a DIFFERENT channel is refused byte-identical
+    // to a share that never existed (no oracle that the thread even exists).
+    const absent = await sharePresenceRaw(baseUrl, "member", "never-existed", threadTopic, {
+      clientId: "x",
+    });
+    const otherThread = await sharePresenceRaw(
+      baseUrl,
+      "member",
+      shareId,
+      "chat:thread:thread-out",
+      { clientId: "x" },
+    );
+    expect(absent.status).toBe(404);
+    expect([otherThread.status, otherThread.body]).toEqual([absent.status, absent.body]);
+
+    // ISOLATION — an unbound/unknown thread topic is refused the same way.
+    const unknownThread = await sharePresenceRaw(
+      baseUrl,
+      "member",
+      shareId,
+      "chat:thread:thread-unknown",
+      { clientId: "x" },
+    );
+    expect([unknownThread.status, unknownThread.body]).toEqual([absent.status, absent.body]);
+
+    // NO REGRESSION — the bare granted channel wire id still converges.
+    const channelView = await sharePublish(baseUrl, "member", shareId, grantedWire, {
+      clientId: "member-ch",
+    });
+    expect(channelView.map((p) => p.userId)).toEqual(["member"]);
+
+    // The rejected thread probes left the shared thread scope untouched.
+    const afterProbe = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
     expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
   }, 30_000);
 
