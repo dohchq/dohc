@@ -842,13 +842,87 @@ const PRESENCE_TOPIC = z.string().min(1).max(1024);
 const PRESENCE_CLIENT_ID = z.string().min(1).max(128);
 const PRESENCE_POLL_ID = z.string().min(1).max(128);
 
+// Cap the opaque presence state at the IPC boundary, mirroring the relay's
+// MAX_PRESENCE_STATE_BYTES (services/sync-relay). Presence carries small display
+// data ({ displayName, typing }); bounding it HERE stops a renderer from forcing
+// main to JSON.stringify an attacker-sized (or cyclic / non-JSON) payload before
+// the relay's own cap applies.
+export const PRESENCE_STATE_MAX_BYTES = 8 * 1024;
+const PRESENCE_STATE_MAX_DEPTH = 32;
+
+// A CHEAP, short-circuiting size guard: it walks the already-deserialized value
+// accumulating an UPPER BOUND on the serialized UTF-8 byte size and bails the
+// moment it exceeds the cap — so an oversized payload is rejected WITHOUT a full
+// JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
+// values (bigint), which the relay would reject or main would throw on anyway.
+export function presenceStateWithinCap(
+  value: unknown,
+  maxBytes: number = PRESENCE_STATE_MAX_BYTES,
+): boolean {
+  let budget = maxBytes;
+  const seen = new Set<object>();
+  const spend = (n: number): boolean => {
+    budget -= n;
+    return budget >= 0;
+  };
+  const walk = (v: unknown, depth: number): boolean => {
+    if (depth > PRESENCE_STATE_MAX_DEPTH) return false;
+    if (v === null) return spend(4); // "null"
+    switch (typeof v) {
+      case "boolean":
+        return spend(5); // up to "false"
+      case "number":
+        return spend(v && Number.isFinite(v) ? 24 : 4); // non-finite → "null"
+      case "string":
+        // Upper bound: a JSON string is the UTF-8 bytes plus quotes/escapes; 6
+        // bytes per char covers the worst-case "\uXXXX" escape.
+        return spend(2 + v.length * 6);
+      case "object": {
+        const obj = v as object;
+        if (seen.has(obj)) return false; // cycle → reject as over-cap
+        seen.add(obj);
+        try {
+          if (Array.isArray(v)) {
+            if (!spend(2)) return false; // []
+            for (const item of v) {
+              if (!spend(1)) return false; // element separator
+              if (!walk(item, depth + 1)) return false;
+            }
+            return true;
+          }
+          if (!spend(2)) return false; // {}
+          for (const [key, item] of Object.entries(v as Record<string, unknown>)) {
+            if (item === undefined) continue; // omitted by JSON.stringify
+            if (!spend(4 + key.length * 6)) return false; // "key": plus separator
+            if (!walk(item, depth + 1)) return false;
+          }
+          return true;
+        } finally {
+          seen.delete(obj);
+        }
+      }
+      default:
+        // bigint isn't JSON-serializable (JSON.stringify throws); undefined /
+        // function / symbol are omitted and cost nothing.
+        return typeof v !== "bigint";
+    }
+  };
+  return walk(value, 0);
+}
+
 export const PresencePublishPayload = z.object({
   scope: PresenceScopeInput,
   topic: PRESENCE_TOPIC,
   clientId: PRESENCE_CLIENT_ID,
   // Opaque display payload (e.g. { displayName, typing }) — forwarded verbatim
-  // to the relay, which caps its serialized size. Absent on a leave.
-  state: z.unknown().optional(),
+  // to the relay, which caps its serialized size. Absent on a leave; bounded
+  // here so main never serializes an attacker-sized payload.
+  state: z
+    .unknown()
+    .optional()
+    .refine((v) => v === undefined || presenceStateWithinCap(v), {
+      message: "presence state exceeds the size cap",
+    }),
   leave: z.boolean().optional(),
 });
 export type PresencePublishPayload = z.infer<typeof PresencePublishPayload>;
