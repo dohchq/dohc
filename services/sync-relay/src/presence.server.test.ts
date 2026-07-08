@@ -76,6 +76,19 @@ async function claimWorkspace(h: SyncRelayHandler, userId: string, workspaceId: 
   expect(r.status).toBe(200);
 }
 
+// Deterministically wait for a long-poll to park (the request promise offers
+// no "parked" signal, so poll the hub's stats with a hard deadline instead of
+// sleeping a heuristic amount — flake-proof under CI load).
+async function waitForWaiters(presence: PresenceHub, count: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (presence.stats().waiters < count) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${count} parked waiter(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 describe("presence transport (workspace-owned)", () => {
   it("rejects an unauthenticated presence request", async () => {
     const storage = await testStorage();
@@ -189,6 +202,7 @@ describe("presence transport (workspace-owned)", () => {
     expect(clientCtl.status).toBe(400);
     // Nothing above leaked into the hub.
     expect(presence.stats().entries).toBe(0);
+    presence.dispose();
   });
 
   it("429s a long-poll beyond the parked-waiter caps", async () => {
@@ -206,7 +220,7 @@ describe("presence transport (workspace-owned)", () => {
         method: "GET",
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForWaiters(presence, 1);
     expect(presence.stats().waiters).toBe(1);
     // …the second (same actor) is refused with 429, not parked.
     const second = await h(
@@ -317,7 +331,7 @@ describe("presence over a share (cross-user, gated)", () => {
         method: "GET",
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForWaiters(presence, 1);
     expect(presence.stats().waiters).toBe(1);
 
     // Owner revokes WHILE the guest is parked, then touches the scope (the
