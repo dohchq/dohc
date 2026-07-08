@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
+import { useMemo } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatPresenceCollaboration } from "../workbench/ChatsView";
 import { buildChatCollaboration } from "./chatCollaboration";
 import { PresenceFaces } from "./PresenceIndicators";
+import type { PresenceScope } from "./presenceChannel";
 import { usePresence } from "./usePresence";
 
 // MU-C5 — the collaboration construction + the workspace-switch no-repaint
@@ -28,7 +30,7 @@ describe("buildChatCollaboration", () => {
     ).toBeNull();
   });
 
-  it("builds a workspace-scoped transport when signed in with a relay", () => {
+  it("builds a per-scope transport factory when signed in with a relay", () => {
     const collaboration = buildChatCollaboration({
       connected: true,
       relayUrl: "https://relay.example",
@@ -40,9 +42,13 @@ describe("buildChatCollaboration", () => {
     expect(collaboration?.clientId).toBe("device-1");
     // Display name comes from the email, trimmed.
     expect(collaboration?.displayName).toBe("ada@x.com");
-    expect(typeof collaboration?.transport.publish).toBe("function");
-    expect(typeof collaboration?.transport.poll).toBe("function");
-    expect(typeof collaboration?.transport.leave).toBe("function");
+    // The factory yields a real transport for either scope kind.
+    const wsTransport = collaboration?.transportForScope({ kind: "workspace", workspaceId: "ws-a" });
+    expect(typeof wsTransport?.publish).toBe("function");
+    expect(typeof wsTransport?.poll).toBe("function");
+    expect(typeof wsTransport?.leave).toBe("function");
+    const shareTransport = collaboration?.transportForScope({ kind: "share", shareId: "share-1" });
+    expect(typeof shareTransport?.publish).toBe("function");
   });
 
   it("falls back to 'You' when no email is present", () => {
@@ -71,7 +77,8 @@ const bridgeMock = {
 };
 
 interface PollControl {
-  scope: { kind: string; workspaceId?: string };
+  scope: { kind: string; workspaceId?: string; shareId?: string };
+  topic: string;
   resolve: (result: unknown) => void;
 }
 const pollControls = new Map<string, PollControl>();
@@ -84,9 +91,13 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ ok: true, snapshot: { version: 0, peers: [] } });
   bridgeMock.presencePoll.mockReset().mockImplementation(
-    (payload: { scope: PollControl["scope"]; pollId: string }) =>
+    (payload: { scope: PollControl["scope"]; topic: string; pollId: string }) =>
       new Promise((resolve) => {
-        pollControls.set(payload.pollId, { scope: payload.scope, resolve });
+        pollControls.set(payload.pollId, {
+          scope: payload.scope,
+          topic: payload.topic,
+          resolve,
+        });
       }),
   );
   bridgeMock.presenceCancel.mockReset().mockImplementation(async ({ pollId }: { pollId: string }) => {
@@ -101,10 +112,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function Harness(props: { collaboration: ChatPresenceCollaboration | null; topic: string }) {
+function Harness(props: {
+  collaboration: ChatPresenceCollaboration | null;
+  topic: string;
+  workspaceId: string;
+}) {
+  // Mirror ChatsView: the workspace scope is resolved through the factory at
+  // call time and memoized per (collaboration, workspaceId), so a switch tears
+  // the old transport down.
+  const transport = useMemo(
+    () =>
+      props.collaboration?.transportForScope({
+        kind: "workspace",
+        workspaceId: props.workspaceId,
+      }) ?? null,
+    [props.collaboration, props.workspaceId],
+  );
   const { others } = usePresence({
     enabled: props.collaboration !== null,
-    transport: props.collaboration?.transport ?? null,
+    transport,
     topic: props.topic,
     clientId: props.collaboration?.clientId ?? "",
     displayName: props.collaboration?.displayName ?? "",
@@ -133,7 +159,9 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       workspaceId: "ws-a",
       clientId: "me",
     });
-    const view = render(<Harness collaboration={collabA} topic="chat:channel:1" />);
+    const view = render(
+      <Harness collaboration={collabA} topic="chat:channel:1" workspaceId="ws-a" />,
+    );
     await flush();
     // A registered exactly one poll, scoped to ws-a.
     const pollIdA = pollIdForWorkspace("ws-a");
@@ -147,7 +175,9 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       workspaceId: "ws-b",
       clientId: "me",
     });
-    view.rerender(<Harness collaboration={collabB} topic="chat:channel:1" />);
+    view.rerender(
+      <Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />,
+    );
     await flush();
 
     // The switch aborted A's in-flight poll over IPC (abort → presenceCancel).
@@ -186,5 +216,128 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
     await flush();
     expect(screen.getByLabelText("Bob is here")).toBeTruthy();
     expect(screen.getByTestId("count").textContent).toBe("1"); // self filtered out
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope-switch no-repaint: the SAME workspace, but a conversation switches
+// scope (a joined/shared channel in a SHARE scope -> a plain channel in the
+// WORKSPACE scope). Both the transport AND the topic change, and the old
+// scope's parked poll must be aborted and its late response dropped — the same
+// invariant as the ws->ws switch, mirrored for a scope change.
+// ---------------------------------------------------------------------------
+
+// Mirrors ChatsView: the transport is memoized on the SCOPE identity (kind +
+// shareId/workspaceId), built from primitive props so a real scope switch tears
+// the old channel down.
+function ScopeHarness(props: {
+  collaboration: ChatPresenceCollaboration | null;
+  scopeKind: "share" | "workspace";
+  scopeId: string;
+  topic: string;
+}) {
+  const transport = useMemo(() => {
+    if (!props.collaboration) return null;
+    const scope: PresenceScope =
+      props.scopeKind === "share"
+        ? { kind: "share", shareId: props.scopeId }
+        : { kind: "workspace", workspaceId: props.scopeId };
+    return props.collaboration.transportForScope(scope);
+  }, [props.collaboration, props.scopeKind, props.scopeId]);
+  const { others } = usePresence({
+    enabled: props.collaboration !== null,
+    transport,
+    topic: props.topic,
+    clientId: props.collaboration?.clientId ?? "",
+    displayName: props.collaboration?.displayName ?? "",
+  });
+  return (
+    <div>
+      <PresenceFaces others={others} />
+      <span data-testid="count">{others.length}</span>
+    </div>
+  );
+}
+
+function pollIdForScopeKind(kind: string): string {
+  for (const [pollId, control] of pollControls) {
+    if (control.scope.kind === kind) return pollId;
+  }
+  throw new Error(`no poll registered for scope kind ${kind}`);
+}
+
+describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
+  it("aborts the share scope's poll, changes both transport and topic, and drops the share's late response", async () => {
+    const collab = buildChatCollaboration({
+      connected: true,
+      relayUrl: "https://relay.example",
+      email: "a@x.com",
+      workspaceId: "ws-a",
+      clientId: "me",
+    });
+    // A joined channel: SHARE scope, keyed on the channel's cross-machine wireId.
+    const view = render(
+      <ScopeHarness
+        collaboration={collab}
+        scopeKind="share"
+        scopeId="share-1"
+        topic="wire-joined"
+      />,
+    );
+    await flush();
+    const sharePollId = pollIdForScopeKind("share");
+    expect(pollControls.get(sharePollId)?.topic).toBe("wire-joined");
+
+    // Switch to a plain owned channel: WORKSPACE scope, on that channel's OWN
+    // topic — both the scope AND the topic change at once.
+    view.rerender(
+      <ScopeHarness
+        collaboration={collab}
+        scopeKind="workspace"
+        scopeId="ws-a"
+        topic="wire-owned"
+      />,
+    );
+    await flush();
+
+    // The scope switch aborted the share scope's in-flight poll over IPC.
+    expect(cancelledPollIds).toContain(sharePollId);
+    const wsPollId = pollIdForScopeKind("workspace");
+    expect(wsPollId).not.toBe(sharePollId);
+    // The new poll runs under the NEW scope AND the NEW topic.
+    expect(pollControls.get(wsPollId)?.scope.kind).toBe("workspace");
+    expect(pollControls.get(wsPollId)?.topic).toBe("wire-owned");
+
+    // A slow response for the OLD share scope arrives with a ghost peer…
+    act(() => {
+      pollControls.get(sharePollId)?.resolve({
+        ok: true,
+        snapshot: {
+          version: 1,
+          peers: [{ userId: "ghost", clientId: "cg", state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+        },
+      });
+    });
+    await flush();
+    // …and it must NEVER repaint the workspace-scoped view.
+    expect(screen.queryByLabelText("Ghost is here")).toBeNull();
+    expect(screen.getByTestId("count").textContent).toBe("0");
+
+    // The new workspace scope still works: a real peer renders.
+    act(() => {
+      pollControls.get(wsPollId)?.resolve({
+        ok: true,
+        snapshot: {
+          version: 1,
+          peers: [
+            { userId: "me", clientId: "me", state: { displayName: "a@x.com" }, updatedAtMs: 0 },
+            { userId: "bob", clientId: "cb", state: { displayName: "Bob" }, updatedAtMs: 0 },
+          ],
+        },
+      });
+    });
+    await flush();
+    expect(screen.getByLabelText("Bob is here")).toBeTruthy();
+    expect(screen.getByTestId("count").textContent).toBe("1");
   });
 });

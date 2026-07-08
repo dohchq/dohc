@@ -72,6 +72,7 @@ function dm(overrides: Partial<DmRecord> = {}): DmRecord {
     name: "bob@example.com",
     peerLabel: "bob@example.com",
     role: "owner",
+    shareId: null,
     threadId: "thread-dm-1",
     unreadCount: 0,
     connected: true,

@@ -453,10 +453,14 @@ export function createSyncRelayHandler({
         // The share + topic gate, run BEFORE joining AND re-run after a parked
         // long-poll wakes (respondPresence's reauthorize): a revoke that lands
         // while a recipient's poll is parked fails closed on wake instead of
-        // leaking one final snapshot.
+        // leaking one final snapshot. The resolver lets a chat-channel grant
+        // admit a `chat:thread:<threadId>` topic for a thread BOUND (earliest
+        // binding, forge-resistant) to the granted channel — the same authority
+        // the durable chat filter uses; a bare wire id needs no resolver.
         const authorizeShare = () => {
           const share = shareForRecipient(route.shareId, actor.userId);
-          if (!presenceTopicAllowedForShare(share.selector, topic)) throw notFound();
+          const chatResolver = chatResolverFor(share.workspaceId);
+          if (!presenceTopicAllowedForShare(share.selector, topic, chatResolver)) throw notFound();
           return share;
         };
         const share = authorizeShare();

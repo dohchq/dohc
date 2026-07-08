@@ -240,22 +240,66 @@ function targetVersionId(selector: ShareSelector): string {
   return selector.versionId ?? MAIN_VERSION_ID;
 }
 
+// The presence-topic prefix for a chat THREAD (a thread is a sub-conversation
+// of a channel). The renderer sends `chat:thread:<threadId>` for a thread view;
+// the bare channel wire id remains the channel-level topic.
+export const CHAT_THREAD_TOPIC_PREFIX = "chat:thread:";
+
+// Parses the threadId out of a `chat:thread:<threadId>` presence topic. Returns
+// null for anything that is not EXACTLY that prefix followed by a non-empty
+// threadId. Defensive: a NUL would be a presenceScopeKey separator, so a
+// threadId carrying one is rejected outright (the topic parser already refuses
+// control characters, but the gate must fail closed on its own). No other shape
+// is a thread topic — a bare wire id, a path, or a malformed `chat:thread:`
+// (empty tail) all return null.
+export function parseChatThreadTopic(topic: string): string | null {
+  if (typeof topic !== "string" || !topic.startsWith(CHAT_THREAD_TOPIC_PREFIX)) return null;
+  const threadId = topic.slice(CHAT_THREAD_TOPIC_PREFIX.length);
+  if (threadId.length === 0 || threadId.includes("\u0000")) return null;
+  return threadId;
+}
+
 // MU-C1 presence gate: whether a share RECIPIENT may join the ephemeral
 // awareness scope for `topic`. Fail-closed and reuses the SAME visibility
 // check the durable filter uses, so presence can never fan out to a scope the
 // share does not already expose. For a path/version selector a topic is a
-// workspace-relative path (doc co-presence on a shared file); for a MU-C4
-// chat-channel selector the only allowed topic is the granted channel's wire
-// id, so a member sees co-presence for exactly the channel they were granted.
+// workspace-relative path (doc co-presence on a shared file). For a MU-C4
+// chat-channel selector two topic shapes are allowed, both scoped to EXACTLY
+// the granted channel:
+//   - the bare granted channel wire id (channel-level co-presence), and
+//   - `chat:thread:<threadId>` for a thread that BINDS to the granted channel,
+//     resolved via the same forge-resistant earliest-binding resolver the
+//     durable chat filter uses (`chat.threadChannelWireId`). A thread bound to
+//     ANOTHER channel, an unbound/unknown thread, a forged re-bind, or a
+//     malformed `chat:thread:` topic is refused. Without a resolver a thread
+//     topic can never be authorized (fail closed).
 // Everything the share does not positively expose is refused — a recipient of
 // `a.md` cannot subscribe to presence for `b.md`, and a chat-channel member
-// cannot subscribe to any other channel's or file's presence.
+// cannot subscribe to any other channel's or thread's presence.
 export function presenceTopicAllowedForShare(
   selector: AnyShareSelector,
   topic: string,
+  chat?: ChatShareThreadResolver,
 ): boolean {
   if (typeof topic !== "string" || topic.length === 0) return false;
-  if (isChatChannelSelector(selector)) return topic === selector.channelWireId;
+  if (isChatChannelSelector(selector)) {
+    // Thread-shape is decided FIRST, before any bare-wireId equality. A
+    // `chat:thread:<threadId>` topic is ALWAYS routed through the forge-resistant
+    // resolver — never admitted by `topic === channelWireId`. Otherwise a crafted
+    // grant whose channelWireId literally equals "chat:thread:<foreignThreadId>"
+    // would match the bare branch and admit presence for a thread it must not.
+    // A thread topic is authorized ONLY when the thread binds (earliest binding)
+    // to THIS selector's granted channel; without a resolver it is refused
+    // (fail closed).
+    const threadId = parseChatThreadTopic(topic);
+    if (threadId !== null) {
+      if (!chat) return false;
+      return chat.threadChannelWireId(threadId) === selector.channelWireId;
+    }
+    // A non-thread-shaped topic is channel-level co-presence: exactly the bare
+    // granted channel wire id, nothing else.
+    return topic === selector.channelWireId;
+  }
   return pathVisibleThroughShare(selector, topic);
 }
 

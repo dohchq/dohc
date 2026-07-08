@@ -23,13 +23,20 @@ import { MentionComposer } from "./MentionComposer";
 import { findMentions, type MentionCandidate } from "./mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
-import type { PresenceTransport } from "../collab/presenceChannel";
+import type { PresenceScope, PresenceTransport } from "../collab/presenceChannel";
 
 // Multi-user chat presence (MU-C1) is opt-in: only under collaboration
 // (signedIn && relayConnected) is a transport supplied, so a solo/offline user
 // constructs no presence at all. Absent => today's exact single-user Chats.
+//
+// The collaboration hands back a transport PER SCOPE rather than a single baked
+// one: a participant viewing a channel shared TO them must publish into a SHARE
+// scope (which the relay maps to the granter's workspace) so they land in the
+// SAME relay presence scope as the owner (who publishes into their WORKSPACE
+// scope). See the scope/topic derivation in ChatsView below. Still null when
+// solo/offline — the transport factory is simply never called.
 export interface ChatPresenceCollaboration {
-  transport: PresenceTransport;
+  transportForScope: (scope: PresenceScope) => PresenceTransport;
   clientId: string;
   displayName: string;
 }
@@ -234,6 +241,13 @@ export function ChatsView(props: {
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ListChatChannelSharesResult | null>(null);
+  // The workspace `channelShares` was last DEFINITIVELY resolved for (even when
+  // that resolution is `null` — signed out / listing failed). Presence stays
+  // dormant until this equals the current workspaceId, so a conversation's
+  // SCOPE (which for a joined channel is derived from channelShares) is never
+  // computed from not-yet-loaded share state, and a workspace switch can never
+  // publish under the previous workspace's scope. Reset on every switch.
+  const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
   const [shareEmail, setShareEmail] = useState("");
   const [shareReadOnly, setShareReadOnly] = useState(false);
@@ -252,24 +266,6 @@ export function ChatsView(props: {
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Presence topic for the open channel/thread (stable per conversation). A
-  // thread scopes to its OWN id so typing in one thread never bleeds into a
-  // sibling thread of the same channel. A solo user (no collaboration
-  // transport) keeps this dormant.
-  const presenceTopic =
-    nav.level === "channel"
-      ? `chat:channel:${nav.channel.id}`
-      : nav.level === "thread"
-        ? `chat:thread:${nav.thread.id}`
-        : "";
-  const presence = usePresence({
-    enabled: collaboration !== null && presenceTopic !== "",
-    transport: collaboration?.transport ?? null,
-    topic: presenceTopic,
-    clientId: collaboration?.clientId ?? "",
-    displayName: collaboration?.displayName ?? "",
-  });
-
   const refreshOverview = useCallback(async () => {
     const token = ++liveToken.current;
     setOverview((current) =>
@@ -286,6 +282,7 @@ export function ChatsView(props: {
       ]);
       if (token !== liveToken.current) return;
       setChannelShares(shares);
+      setSharesWorkspaceId(workspaceId);
       setOverview({
         status: "ready",
         channels: result.channels,
@@ -326,6 +323,7 @@ export function ChatsView(props: {
     setNewThreadBody("");
     setCreatingChannel(null);
     setChannelShares(null);
+    setSharesWorkspaceId(null);
     setSharePanelOpen(false);
     setShareEmail("");
     setShareReadOnly(false);
@@ -676,6 +674,78 @@ export function ChatsView(props: {
     [joinedByWire],
   );
 
+  // Cross-user co-presence for the open channel/thread turns on two decisions
+  // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
+  //
+  //  • SCOPE — where the presence lands on the relay. A PARTICIPANT viewing a
+  //    channel shared TO them must publish into a SHARE scope keyed by their
+  //    grant's shareId: the relay maps a {kind:"share"} request to the GRANTER's
+  //    workspace, so the owner (workspace scope) and every participant (share
+  //    scope) fan into ONE relay scope and see each other. An owner of a shared
+  //    channel — and any plain local channel — uses the plain workspace scope.
+  //
+  //  • TOPIC — the per-conversation key BOTH sides must agree on. A channel's
+  //    LOCAL id differs across machines (a replicated channel gets a fresh local
+  //    id), so channel presence keys on the cross-machine wireId instead — that
+  //    unification is what lets owner + participant meet. The relay's share gate
+  //    admits exactly the bare channel wireId as a chat-share presence topic
+  //    (presenceTopicAllowedForShare), so the channel topic IS the wireId. For a
+  //    plain local channel wireId === channel.id, so solo/owner presence is
+  //    functionally unchanged. A thread keys on its own id (already cross-machine)
+  //    so typing in one thread never bleeds into a sibling thread.
+  //
+  // A DIRECT MESSAGE is a kind:"dm" chat channel backed by a chat-channel
+  // grant, so it folds into the SAME derivation: its TOPIC is the DM channel's
+  // cross-machine wireId (channel-level co-presence — a DM has one running
+  // thread, so this is the natural "who's here", and both participants agree on
+  // the wireId), and its SCOPE is the grant's share scope for the PARTICIPANT
+  // (who was shared to) or the plain workspace scope for the OWNER — exactly the
+  // owner/participant convergence a joined channel uses.
+  const activeDm = nav.level === "dm" ? nav.dm : null;
+  const activeChannel =
+    nav.level === "channel" || nav.level === "thread" ? nav.channel : null;
+  const activeJoined = activeChannel ? joinedFor(activeChannel) : null;
+  const activeWireId = activeChannel ? activeChannel.wireId ?? activeChannel.id : null;
+  const presenceTopic =
+    nav.level === "channel"
+      ? activeWireId ?? ""
+      : nav.level === "thread"
+        ? `chat:thread:${nav.thread.id}`
+        : nav.level === "dm"
+          ? nav.dm.channelWireId
+          : "";
+  // The scope's stable identity for memoization: a joined channel pins to its
+  // grant's shareId, a DM the viewer PARTICIPATES in pins to that DM grant's
+  // shareId (both fan into the granter's workspace scope so both sides meet),
+  // and everything the viewer OWNS — plain channels and owned DMs — pins to the
+  // workspace. The transport is rebuilt ONLY when this changes, so usePresence
+  // re-creates its channel on a real scope switch (aborting the old poll — the
+  // no-repaint invariant) and never churns on an unrelated re-render.
+  const scopeShareId =
+    activeJoined?.shareId ??
+    (activeDm?.role === "participant" ? activeDm.shareId : null);
+  const presenceTransport = useMemo(() => {
+    if (!collaboration) return null;
+    const scope: PresenceScope = scopeShareId
+      ? { kind: "share", shareId: scopeShareId }
+      : { kind: "workspace", workspaceId };
+    return collaboration.transportForScope(scope);
+  }, [collaboration, scopeShareId, workspaceId]);
+  // Presence stays dormant until the scope is DEFINITIVELY resolved for the
+  // active conversation in the CURRENT workspace: a joined channel's scope is
+  // derived from channelShares, so publishing before that share state loads
+  // would land a participant in their OWN workspace scope (convergence lost)
+  // and a workspace switch could briefly publish under the previous workspace's
+  // scope. Gating on (channelShares loaded for THIS workspaceId) closes both.
+  const scopeResolved = sharesWorkspaceId === workspaceId;
+  const presence = usePresence({
+    enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
+    transport: presenceTransport,
+    topic: presenceTopic,
+    clientId: collaboration?.clientId ?? "",
+    displayName: collaboration?.displayName ?? "",
+  });
+
   const refreshShares = useCallback(async () => {
     const token = liveToken.current;
     const shares = await bridge()
@@ -683,6 +753,7 @@ export function ChatsView(props: {
       .catch(() => null);
     if (token !== liveToken.current) return;
     setChannelShares(shares);
+    setSharesWorkspaceId(workspaceId);
   }, [workspaceId]);
 
   const submitShare = useCallback(async () => {
@@ -916,11 +987,11 @@ export function ChatsView(props: {
           testId="chats-dm"
           onBack={goBack}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
+          trailing={<PresenceFaces others={presence.others} />}
         />
-        {/* Presence seam (MU-C1): once the awareness channel lands, "viewing"
-            and "typing…" render here, keyed by this DM's channelWireId and
-            fanned out through the SAME shareForRecipient grant gate. Until
-            then the header stays calm — no fake liveness. */}
+        {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
+            its channelWireId and fanned out through the SAME shareForRecipient
+            grant gate. Dormant (calm header, no fake liveness) when solo. */}
         {dm.threadId ? (
           <ChatMessageList
             testIdPrefix="chats-dm"
@@ -943,6 +1014,7 @@ export function ChatsView(props: {
             Waiting for this conversation to sync…
           </div>
         )}
+        <TypingIndicator names={presence.typingNames} className="px-2" />
         {dm.connected ? (
           <MentionComposer
             testIdPrefix="chats-dm"
@@ -952,8 +1024,14 @@ export function ChatsView(props: {
             placeholder={`Message ${dm.peerLabel}…`}
             sendLabel="Send message"
             candidates={mentionCandidates}
-            onChange={setComposer}
-            onSend={() => void sendDmMessage()}
+            onChange={(value) => {
+              setComposer(value);
+              presence.setTyping(value.trim().length > 0);
+            }}
+            onSend={() => {
+              presence.setTyping(false);
+              void sendDmMessage();
+            }}
           />
         ) : (
           <ComposerNotice testId="chats-dm-ended">

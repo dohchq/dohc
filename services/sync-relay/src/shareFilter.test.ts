@@ -4,6 +4,7 @@ import {
   MAX_SHARE_PATHS,
   filterOpForShare,
   parseAnyShareSelectorJson,
+  parseChatThreadTopic,
   parseShareSelectorJson,
   presenceTopicAllowedForShare,
   validateChatChannelShareSelector,
@@ -374,6 +375,97 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     expect(presenceTopicAllowedForShare(pathShare, "docs/a.md")).toBe(true);
     expect(presenceTopicAllowedForShare(pathShare, "wire-1")).toBe(false);
     expect(presenceTopicAllowedForShare(pathShare, "secrets/b.md")).toBe(false);
+  });
+
+  // MU-C6 thread presence: a chat-channel grant also admits `chat:thread:<tid>`
+  // — but ONLY for a thread that binds to the granted channel via the same
+  // forge-resistant earliest-binding resolver the durable chat filter uses.
+  const threadResolver: ChatShareThreadResolver = {
+    threadChannelWireId: (threadId) =>
+      threadId === "thread-in" ? "wire-1" : threadId === "thread-out" ? "wire-2" : null,
+  };
+
+  it("admits a thread topic bound to the granted channel", () => {
+    expect(
+      presenceTopicAllowedForShare(channelShare, "chat:thread:thread-in", threadResolver),
+    ).toBe(true);
+  });
+
+  it("denies a thread topic bound to a DIFFERENT channel", () => {
+    expect(
+      presenceTopicAllowedForShare(channelShare, "chat:thread:thread-out", threadResolver),
+    ).toBe(false);
+  });
+
+  it("denies an unbound/unknown thread topic", () => {
+    expect(
+      presenceTopicAllowedForShare(channelShare, "chat:thread:thread-unknown", threadResolver),
+    ).toBe(false);
+  });
+
+  it("denies a thread topic when no resolver is wired (fail closed)", () => {
+    expect(presenceTopicAllowedForShare(channelShare, "chat:thread:thread-in")).toBe(false);
+  });
+
+  it("denies a malformed chat:thread: topic", () => {
+    for (const topic of ["chat:thread:", "chat:thread", "chat:thread:thread in"]) {
+      expect(
+        presenceTopicAllowedForShare(channelShare, topic, threadResolver),
+        topic,
+      ).toBe(false);
+    }
+  });
+
+  it("still admits the bare granted wire id (no regression) and a path share ignores threads", () => {
+    expect(presenceTopicAllowedForShare(channelShare, "wire-1", threadResolver)).toBe(true);
+    // A path share never gains thread presence, resolver or not.
+    expect(
+      presenceTopicAllowedForShare(pathShare, "chat:thread:thread-in", threadResolver),
+    ).toBe(false);
+  });
+
+  // Ordering-collision guard: a chat:thread:-shaped topic must ALWAYS resolve
+  // via the resolver — bare-wireId equality must never admit it, even when the
+  // grant's channelWireId is itself a chat:thread:<id> string. Otherwise a
+  // crafted grant could smuggle presence for a foreign thread through the bare
+  // branch.
+  it("routes a thread-shaped topic through the resolver even when channelWireId equals it (no bare-equality bypass)", () => {
+    const forged: ChatChannelShareSelector = {
+      kind: "chat-channel",
+      channelWireId: "chat:thread:thread-foreign",
+      access: "read-write",
+    };
+    const topic = "chat:thread:thread-foreign";
+    // Bare equality (topic === channelWireId) would have admitted this thread
+    // topic with NO binding check. It must go through the resolver instead —
+    // and an unbound thread is denied.
+    expect(presenceTopicAllowedForShare(forged, topic, threadResolver)).toBe(false);
+    // No resolver => a thread-shaped topic can never be authorized (fail
+    // closed), even against a chat:thread:<id> channelWireId.
+    expect(presenceTopicAllowedForShare(forged, topic)).toBe(false);
+    // Only a GENUINE earliest binding to this selector's channelWireId admits
+    // it — proving the resolver, not bare equality, is the sole authority.
+    const boundResolver: ChatShareThreadResolver = {
+      threadChannelWireId: (tid) =>
+        tid === "thread-foreign" ? "chat:thread:thread-foreign" : null,
+    };
+    expect(presenceTopicAllowedForShare(forged, topic, boundResolver)).toBe(true);
+  });
+});
+
+describe("parseChatThreadTopic", () => {
+  it("extracts the threadId from a well-formed thread topic", () => {
+    expect(parseChatThreadTopic("chat:thread:t-123")).toBe("t-123");
+    // The threadId stays opaque — only the exact prefix is consumed, so a
+    // threadId containing colons is returned verbatim for the resolver to judge.
+    expect(parseChatThreadTopic("chat:thread:a:b")).toBe("a:b");
+  });
+
+  it("returns null for a non-thread or malformed topic", () => {
+    // No prefix, empty tail, or a tail carrying the scope-key NUL separator.
+    for (const topic of ["wire-1", "docs/a.md", "chat:thread:", "chat:thread", "", "chat:thread:a b"]) {
+      expect(parseChatThreadTopic(topic), topic).toBeNull();
+    }
   });
 });
 
