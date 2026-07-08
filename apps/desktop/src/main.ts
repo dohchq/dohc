@@ -125,6 +125,11 @@ import {
   SyncDmsResult,
   StartDmPayload,
   StartDmResult,
+  PresencePublishPayload,
+  PresencePollPayload,
+  PresenceCancelPayload,
+  PresenceResult,
+  type PresenceScopeInput,
   ChatThreadRecord,
   ChatMessageRecord,
   OpenFileExternallyPayload,
@@ -169,6 +174,15 @@ import {
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
 import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "./ipc/channels";
+// The relay presence transport is a dependency-free module (no DOM/React): main
+// reuses it so the presence wire contract (routes, publish/leave/poll) lives in
+// ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
+// presence transport calls the presence IPC handlers below, never the relay.
+import {
+  createRelayPresenceTransport,
+  type PresenceScope as RelayPresenceScope,
+} from "./renderer/collab/presenceChannel";
+import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import type { EngineYDocProviderSession } from "./collab/ydocEngineProviderSession";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
@@ -962,6 +976,35 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 // (queued, never dropped). Every relay request inside a pass is also bounded
 // by a timeout so a hung relay can't block the awaited listChatChannels path.
 const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
+
+// Presence (MU-C5) relay bounds. Publish/leave are quick, so a 15s cap frees a
+// hung socket. The poll is a long-poll: its own AbortSignal (presenceCancel)
+// governs, and this safety cap only fires if the relay stalls past its hold
+// (<=30s) so an IPC invoke can never dangle forever.
+const PRESENCE_PUBLISH_TIMEOUT_MS = 15_000;
+const PRESENCE_POLL_SAFETY_MS = 35_000;
+// In-flight presence long-polls, owned by (senderId + pollId) so a poll can only
+// be cancelled/superseded by its own window, and bounded so a renderer can't
+// open unbounded relay long-polls / controllers / timers.
+const presencePollRegistry = createPresencePollRegistry();
+// Senders whose presence-poll 'destroyed' cleanup hook is already attached.
+const presencePollCleanupHooked = new WeakSet<Electron.WebContents>();
+// A stable ownership key so one window holds at most ONE poll per (scope, topic):
+// a new poll for the same key supersedes (aborts) the prior long-poll.
+function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string {
+  return JSON.stringify(
+    scope.kind === "workspace"
+      ? ["w", scope.workspaceId, topic]
+      : ["s", scope.shareId, topic],
+  );
+}
+function hookPresencePollCleanup(sender: Electron.WebContents): void {
+  if (presencePollCleanupHooked.has(sender)) return;
+  presencePollCleanupHooked.add(sender);
+  // Window closed / renderer gone: abort every long-poll this window still owns.
+  sender.once("destroyed", () => presencePollRegistry.disposeSender(sender.id));
+}
+
 const serializeSharedChannelSync = createKeyedSerializer();
 function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
   return serializeSharedChannelSync(workspaceId, () =>
@@ -3717,6 +3760,134 @@ function registerIpcHandlers(): void {
       dm: dmRecordForIpc(dm),
       message: chatMessageForIpc(message),
     });
+  });
+
+  // Ephemeral presence (MU-C5): the renderer NEVER receives the relay bearer
+  // token — its presence transport calls presencePublish/presencePoll/
+  // presenceCancel, and MAIN (the sole token holder) makes the actual relay
+  // presence request. Scope is authorized HERE before the relay (which
+  // re-authorizes from the bearer anyway): a workspace scope must be a synced
+  // workspace this account owns; a share scope must be a grant this account has
+  // joined. An unauthorized/unavailable scope returns null (renderer → dormant),
+  // never a leak.
+  //
+  // Resolve the caller's scope to a relay-backed transport, or null when
+  // there is no signed-in relay session or the scope is not the caller's to
+  // join. The transport's fetch bounds publish/leave with a timeout; the poll
+  // passes its own AbortSignal (the presenceCancel controller), so that timeout
+  // is bypassed and the relay's long-poll hold governs instead.
+  const presenceRelayTransportForScope = async (
+    scope: PresenceScopeInput,
+  ): Promise<ReturnType<typeof createRelayPresenceTransport> | null> => {
+    await warmCredentialCache();
+    if (!cachedCredentials?.relayUrl) return null;
+    const baseUrl = normalizeServerUrl(cachedCredentials.relayUrl);
+    const token = cachedCredentials.token;
+    const fetchImpl = relayFetchWithTimeout(PRESENCE_PUBLISH_TIMEOUT_MS);
+    let relayScope: RelayPresenceScope;
+    if (scope.kind === "workspace") {
+      // Own-workspace presence: the workspace must be synced (relay-claimed) and
+      // signed into the SAME cloud server that issued the token. The relay scope
+      // keys on the REMOTE workspace id so this account's devices — and the
+      // owner side of a shared channel — fan into one scope.
+      const entry = findWorkspace(scope.workspaceId);
+      const remote = entry?.remote;
+      if (!remote) return null;
+      if (!credentialMatchesRemote(remote.serverUrl)) return null;
+      relayScope = { kind: "workspace", workspaceId: remote.remoteWorkspaceId };
+    } else {
+      // Share-scope presence (recipient side): only a share this account has
+      // actually JOINED (a live registry grant) is the caller's to address. The
+      // relay independently re-checks the grant + topic visibility.
+      const joined = listWorkspaces().some((entry) =>
+        (entry.sharedChannels ?? []).some(
+          (channel) => channel.shareId === scope.shareId && channel.ended !== true,
+        ),
+      );
+      if (!joined) return null;
+      relayScope = { kind: "share", shareId: scope.shareId };
+    }
+    return createRelayPresenceTransport({ baseUrl, token, scope: relayScope, fetch: fetchImpl });
+  };
+
+  ipcMain.handle(CHANNELS.presencePublish, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PresencePublishPayload.parse(payload);
+    try {
+      // Scope resolution (warms the credential cache) runs INSIDE the try so a
+      // throw degrades to the dormant "unavailable" result, never a rejected
+      // IPC promise — presence is best-effort.
+      const transport = await presenceRelayTransportForScope(input.scope);
+      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      if (input.leave === true) {
+        await transport.leave({ topic: input.topic, clientId: input.clientId });
+        // A leave has no snapshot to echo; report an empty one so the renderer
+        // clears without treating it as a failure.
+        return PresenceResult.parse({ ok: true, snapshot: { version: 0, peers: [] } });
+      }
+      const snapshot = await transport.publish({
+        topic: input.topic,
+        clientId: input.clientId,
+        state: input.state ?? null,
+      });
+      return PresenceResult.parse({ ok: true, snapshot });
+    } catch {
+      // Presence is best-effort: a transient relay failure is "unavailable",
+      // never a thrown IPC error.
+      return PresenceResult.parse({ ok: false, reason: "unavailable" });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.presencePoll, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PresencePollPayload.parse(payload);
+    // Register the controller BEFORE any await: scope resolution warms the
+    // credential cache, and a presenceCancel arriving during that window must
+    // abort THIS poll promptly (workspace-switch repaint), not wait out the 35s
+    // safety cap. Ownership keys on (senderId + pollId) so only this window can
+    // cancel it, and at most one poll runs per (sender, scope, topic).
+    hookPresencePollCleanup(event.sender);
+    const handle = presencePollRegistry.begin(
+      event.sender.id,
+      input.pollId,
+      presenceScopeTopicKey(input.scope, input.topic),
+    );
+    // Safety timeout caps a hung relay (the hold is <=30s; give headroom then
+    // abort) so the IPC invoke can never dangle forever.
+    const safety = setTimeout(() => handle.abort(), PRESENCE_POLL_SAFETY_MS);
+    try {
+      const transport = await presenceRelayTransportForScope(input.scope);
+      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      // A cancel could have landed while scope was resolving.
+      if (handle.signal.aborted) return PresenceResult.parse({ ok: false, reason: "aborted" });
+      const snapshot = await transport.poll({
+        topic: input.topic,
+        since: input.since,
+        signal: handle.signal,
+      });
+      return PresenceResult.parse({ ok: true, snapshot });
+    } catch {
+      // Aborted (cancel/switch/timeout) vs a relay error: both degrade to
+      // dark, but "aborted" tells the renderer this was an intentional stop.
+      return PresenceResult.parse({
+        ok: false,
+        reason: handle.signal.aborted ? "aborted" : "unavailable",
+      });
+    } finally {
+      clearTimeout(safety);
+      // Removes only THIS poll's entry — a superseding poll under the same id is
+      // left untouched.
+      handle.release();
+    }
+  });
+
+  ipcMain.handle(CHANNELS.presenceCancel, (event, payload) => {
+    assertTrustedSender(event);
+    const input = PresenceCancelPayload.parse(payload);
+    // Only aborts a poll THIS sender owns; a cancel for another window's pollId
+    // is a no-op.
+    presencePollRegistry.cancel(event.sender.id, input.pollId);
+    return undefined;
   });
 
   ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {

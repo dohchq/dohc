@@ -7,6 +7,9 @@ import {
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   ListFileChatsPayload,
+  PRESENCE_STATE_MAX_BYTES,
+  PresencePublishPayload,
+  presenceStateWithinCap,
   RestoreEngineMomentFileResult,
   SendChatMessagePayload,
   SendChatMessageResult,
@@ -698,5 +701,58 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
     };
     expect(ChatReactionRecord.safeParse({ ...base, emoji: "🎉" }).success).toBe(true);
     expect(ChatReactionRecord.safeParse({ ...base, emoji: "not-an-emoji" }).success).toBe(false);
+  });
+});
+
+describe("presence state size cap (MU-C5 DoS boundary)", () => {
+  function publishPayload(state: unknown) {
+    return PresencePublishPayload.safeParse({
+      scope: { kind: "workspace", workspaceId: "ws-1" },
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      state,
+    });
+  }
+
+  it("accepts legitimate small display state", () => {
+    expect(publishPayload({ displayName: "Ada", typing: true }).success).toBe(true);
+  });
+
+  it("accepts an absent state (a leave / heartbeat with no payload)", () => {
+    const result = PresencePublishPayload.safeParse({
+      scope: { kind: "workspace", workspaceId: "ws-1" },
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      leave: true,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an oversized JSON state before main would serialize it", () => {
+    expect(publishPayload({ blob: "x".repeat(64 * 1024) }).success).toBe(false);
+  });
+
+  it("presenceStateWithinCap short-circuits huge, cyclic, and non-JSON state", () => {
+    expect(presenceStateWithinCap({ displayName: "Ada" })).toBe(true);
+    expect(presenceStateWithinCap(null)).toBe(true);
+    expect(presenceStateWithinCap("x".repeat(64 * 1024))).toBe(false);
+
+    // A cycle would make JSON.stringify throw; the guard rejects it as over-cap.
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    expect(presenceStateWithinCap(cyclic)).toBe(false);
+
+    // bigint isn't JSON-serializable.
+    expect(presenceStateWithinCap({ n: 1n })).toBe(false);
+
+    // Pathologically deep nesting is rejected without a full walk to the leaf.
+    let deep: unknown = 0;
+    for (let i = 0; i < 200; i += 1) deep = { deep };
+    expect(presenceStateWithinCap(deep)).toBe(false);
+  });
+
+  it("honors an explicit smaller cap", () => {
+    expect(presenceStateWithinCap({ a: "hello" }, 4)).toBe(false);
+    expect(presenceStateWithinCap(true, PRESENCE_STATE_MAX_BYTES)).toBe(true);
   });
 });

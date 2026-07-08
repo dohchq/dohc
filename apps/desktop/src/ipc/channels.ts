@@ -489,6 +489,12 @@ export const CHANNELS = {
   setChatReaction: "desktop:set-chat-reaction",
   syncDms: "desktop:sync-dms",
   startDm: "desktop:start-dm",
+  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token never
+  // reaches the renderer — main holds the token and makes the relay presence
+  // request. publish (or leave), long-poll, and cancel an in-flight poll.
+  presencePublish: "desktop:presence-publish",
+  presencePoll: "desktop:presence-poll",
+  presenceCancel: "desktop:presence-cancel",
   getSyncStatus: "desktop:get-sync-status",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",

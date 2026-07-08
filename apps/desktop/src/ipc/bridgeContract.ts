@@ -823,6 +823,147 @@ export const StartDmResult = z.object({
 });
 export type StartDmResult = z.infer<typeof StartDmResult>;
 
+// Ephemeral presence (MU-C1 / MU-C5). The renderer's presence transport is
+// IPC-PROXIED so the relay bearer token NEVER reaches the renderer: main holds
+// cachedCredentials.token and makes the actual relay presence request. These
+// payloads carry only the scope, an opaque display state, and the long-poll
+// bookkeeping. The scope is authorized in MAIN (the caller's own workspace, or
+// a share they hold a grant for) BEFORE the relay — which re-authorizes from
+// the bearer independently.
+export const PresenceScopeInput = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("workspace"), workspaceId: WORKSPACE_ID }),
+  z.object({ kind: z.literal("share"), shareId: z.string().min(1).max(200) }),
+]);
+export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
+
+// Bounds mirror the relay's presence parser (MAX_PRESENCE_TOPIC_CHARS /
+// MAX_CLIENT_ID_CHARS): reject early rather than round-trip an over-long value.
+const PRESENCE_TOPIC = z.string().min(1).max(1024);
+const PRESENCE_CLIENT_ID = z.string().min(1).max(128);
+const PRESENCE_POLL_ID = z.string().min(1).max(128);
+
+// Cap the opaque presence state at the IPC boundary, mirroring the relay's
+// MAX_PRESENCE_STATE_BYTES (services/sync-relay). Presence carries small display
+// data ({ displayName, typing }); bounding it HERE stops a renderer from forcing
+// main to JSON.stringify an attacker-sized (or cyclic / non-JSON) payload before
+// the relay's own cap applies.
+export const PRESENCE_STATE_MAX_BYTES = 8 * 1024;
+const PRESENCE_STATE_MAX_DEPTH = 32;
+
+// A CHEAP, short-circuiting size guard: it walks the already-deserialized value
+// accumulating an UPPER BOUND on the serialized UTF-8 byte size and bails the
+// moment it exceeds the cap — so an oversized payload is rejected WITHOUT a full
+// JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
+// values (bigint), which the relay would reject or main would throw on anyway.
+export function presenceStateWithinCap(
+  value: unknown,
+  maxBytes: number = PRESENCE_STATE_MAX_BYTES,
+): boolean {
+  let budget = maxBytes;
+  const seen = new Set<object>();
+  const spend = (n: number): boolean => {
+    budget -= n;
+    return budget >= 0;
+  };
+  const walk = (v: unknown, depth: number): boolean => {
+    if (depth > PRESENCE_STATE_MAX_DEPTH) return false;
+    if (v === null) return spend(4); // "null"
+    switch (typeof v) {
+      case "boolean":
+        return spend(5); // up to "false"
+      case "number":
+        return spend(v && Number.isFinite(v) ? 24 : 4); // non-finite → "null"
+      case "string":
+        // Upper bound: a JSON string is the UTF-8 bytes plus quotes/escapes; 6
+        // bytes per char covers the worst-case "\uXXXX" escape.
+        return spend(2 + v.length * 6);
+      case "object": {
+        const obj = v as object;
+        if (seen.has(obj)) return false; // cycle → reject as over-cap
+        seen.add(obj);
+        try {
+          if (Array.isArray(v)) {
+            if (!spend(2)) return false; // []
+            for (const item of v) {
+              if (!spend(1)) return false; // element separator
+              if (!walk(item, depth + 1)) return false;
+            }
+            return true;
+          }
+          if (!spend(2)) return false; // {}
+          for (const [key, item] of Object.entries(v as Record<string, unknown>)) {
+            if (item === undefined) continue; // omitted by JSON.stringify
+            if (!spend(4 + key.length * 6)) return false; // "key": plus separator
+            if (!walk(item, depth + 1)) return false;
+          }
+          return true;
+        } finally {
+          seen.delete(obj);
+        }
+      }
+      default:
+        // bigint isn't JSON-serializable (JSON.stringify throws); undefined /
+        // function / symbol are omitted and cost nothing.
+        return typeof v !== "bigint";
+    }
+  };
+  return walk(value, 0);
+}
+
+export const PresencePublishPayload = z.object({
+  scope: PresenceScopeInput,
+  topic: PRESENCE_TOPIC,
+  clientId: PRESENCE_CLIENT_ID,
+  // Opaque display payload (e.g. { displayName, typing }) — forwarded verbatim
+  // to the relay, which caps its serialized size. Absent on a leave; bounded
+  // here so main never serializes an attacker-sized payload.
+  state: z
+    .unknown()
+    .optional()
+    .refine((v) => v === undefined || presenceStateWithinCap(v), {
+      message: "presence state exceeds the size cap",
+    }),
+  leave: z.boolean().optional(),
+});
+export type PresencePublishPayload = z.infer<typeof PresencePublishPayload>;
+
+export const PresencePollPayload = z.object({
+  scope: PresenceScopeInput,
+  topic: PRESENCE_TOPIC,
+  since: z.number().int().min(0),
+  // Renderer-minted correlation id so an in-flight long-poll can be aborted
+  // over IPC (presenceCancel) on unmount / workspace switch.
+  pollId: PRESENCE_POLL_ID,
+});
+export type PresencePollPayload = z.infer<typeof PresencePollPayload>;
+
+export const PresenceCancelPayload = z.object({
+  pollId: PRESENCE_POLL_ID,
+});
+export type PresenceCancelPayload = z.infer<typeof PresenceCancelPayload>;
+
+const PresencePeerRecord = z.object({
+  userId: z.string().max(256),
+  clientId: z.string().max(128),
+  // Opaque peer display payload — the renderer's resolvePeerDisplayName is the
+  // sole guard that turns it into a shown name.
+  state: z.unknown(),
+  updatedAtMs: z.number(),
+});
+const PresenceSnapshotRecord = z.object({
+  version: z.number(),
+  peers: z.array(PresencePeerRecord),
+});
+
+// Discriminated so a dropped session / no-relay / aborted long-poll is a
+// well-defined "unavailable"/"aborted" result the renderer treats as dormant,
+// never a thrown IPC error that would churn a retry loop.
+export const PresenceResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), snapshot: PresenceSnapshotRecord }),
+  z.object({ ok: z.literal(false), reason: z.enum(["unavailable", "aborted"]) }),
+]);
+export type PresenceResult = z.infer<typeof PresenceResult>;
+
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
@@ -1932,6 +2073,12 @@ export interface DohcDesktopBridge {
   // workspace's DMs; start (or continue) a DM with a recipient set.
   syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;
   startDm(payload: StartDmPayload): Promise<StartDmResult>;
+  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
+  // main. publish (or leave) a presence state and long-poll for peer changes;
+  // presenceCancel aborts an in-flight poll on unmount / workspace switch.
+  presencePublish(payload: PresencePublishPayload): Promise<PresenceResult>;
+  presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
+  presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;

@@ -28,6 +28,7 @@ import {
 } from "react";
 import type {
   ChatThreadRecord,
+  CloudStatusResult,
   EngineMomentDetailRecord,
   EngineMomentRecord,
   SyncStatusResult,
@@ -36,6 +37,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
@@ -759,6 +761,13 @@ export function DesktopWorkspaceShell(props: {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
+  // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
+  // gets a live presence transport (connected + relayUrl) or stays dormant.
+  const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
+  // Stable per-session client id so this device's own presence entry is
+  // identifiable and filtered out of "others". Lazily minted ONCE — a fresh id
+  // per render would churn the presence channel.
+  const [presenceClientId] = useState(() => crypto.randomUUID());
   const [agentActive, setAgentActive] = useState(false);
   // Synchronous guard against a mention-invoke race: two quick @agent sends
   // must start ONE session, not overlap into two (see handleAgentMentioned).
@@ -834,6 +843,53 @@ export function DesktopWorkspaceShell(props: {
     setShellError(null);
     setShellNotice(null);
   }, [workspaceId]);
+
+  // MU-C5 presence: track the signed-in relay session for this workspace. The
+  // request token + workspaceId key uphold the no-repaint invariant — a slow
+  // cloud-status response for workspace A must never set state after a switch
+  // to B. `refreshCloudStatus` is also called when the cloud dialog closes so a
+  // fresh sign-in lights presence up without waiting for a workspace switch.
+  const cloudStatusToken = useRef(0);
+  const refreshCloudStatus = useCallback(() => {
+    const token = ++cloudStatusToken.current;
+    bridge()
+      .cloudStatus({ workspaceId })
+      .then((status) => {
+        if (token === cloudStatusToken.current) setCloudStatus(status);
+      })
+      .catch(() => {
+        if (token === cloudStatusToken.current) setCloudStatus(null);
+      });
+  }, [workspaceId]);
+  useEffect(() => {
+    setCloudStatus(null);
+    refreshCloudStatus();
+    return () => {
+      // A pending response after unmount / switch must never repaint.
+      cloudStatusToken.current += 1;
+    };
+  }, [refreshCloudStatus]);
+
+  // The presence collaboration for the ACTIVE workspace, rebuilt per workspace
+  // (keyed by workspaceId) so a switch tears the old transport down and aborts
+  // its in-flight poll — dormant (null) when signed out / no relay.
+  const chatCollaboration = useMemo(
+    () =>
+      buildChatCollaboration({
+        connected: cloudStatus?.connected ?? false,
+        relayUrl: cloudStatus?.relayUrl,
+        email: cloudStatus?.email,
+        workspaceId,
+        clientId: presenceClientId,
+      }),
+    [
+      cloudStatus?.connected,
+      cloudStatus?.relayUrl,
+      cloudStatus?.email,
+      workspaceId,
+      presenceClientId,
+    ],
+  );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -2148,6 +2204,7 @@ export function DesktopWorkspaceShell(props: {
                     onAgentMentioned={handleAgentMentioned}
                     addressedToMe={addressedToMe}
                     onOpenAddressed={openAgentNotification}
+                    collaboration={chatCollaboration}
                   />
                 </Suspense>
               ) : (
@@ -2518,8 +2575,15 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {cloudOpen ? (
-        <Overlay onClose={() => setCloudOpen(false)}>
-          <CloudLogin workspaceId={workspaceId} />
+        <Overlay
+          onClose={() => {
+            setCloudOpen(false);
+            // A sign-in/out inside the dialog changes the relay session —
+            // refresh so Chats presence lights up (or goes dormant) at once.
+            refreshCloudStatus();
+          }}
+        >
+          <CloudLogin workspaceId={workspaceId} onConnected={refreshCloudStatus} />
         </Overlay>
       ) : null}
       {conflictReviewOpen ? (
