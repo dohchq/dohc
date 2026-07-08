@@ -202,6 +202,24 @@ describe("grantDmRecipients", () => {
       }),
     ).rejects.toThrow(/original grant error/u);
   });
+
+  it("treats a null shareId as a failed grant and rolls back the rest", async () => {
+    // The relay accepting a grant but withholding its id leaves an untrackable
+    // grant we could never revoke — so it must fail the call (and roll back the
+    // grants we CAN revoke), not slip through untracked.
+    const revoked: string[] = [];
+    await expect(
+      grantDmRecipients({
+        recipients: ["a@x.com", "b@x.com"],
+        covered: new Set(),
+        createGrant: async (email) => (email === "b@x.com" ? null : `share-${email}`),
+        revokeGrant: async (shareId) => {
+          revoked.push(shareId);
+        },
+      }),
+    ).rejects.toThrow(/no share id/u);
+    expect(revoked).toEqual(["share-a@x.com"]);
+  });
 });
 
 describe("peekReceivedGrantKind", () => {

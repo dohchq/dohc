@@ -187,7 +187,10 @@ export async function grantDmRecipients(input: {
   recipients: string[];
   // Recipients that already hold a live grant (skip — don't re-grant).
   covered: ReadonlySet<string>;
-  // Create one grant; returns its shareId (or null if the relay omitted one).
+  // Create one grant; returns its shareId. A null shareId means the relay
+  // accepted the grant but withheld its id — an untrackable grant we could
+  // never revoke, so it is treated as a FAILURE (roll back the rest) rather
+  // than left dangling.
   createGrant: (email: string) => Promise<string | null>;
   revokeGrant: (shareId: string) => Promise<void>;
 }): Promise<void> {
@@ -196,7 +199,10 @@ export async function grantDmRecipients(input: {
     for (const email of input.recipients) {
       if (input.covered.has(email)) continue;
       const shareId = await input.createGrant(email);
-      if (shareId !== null) created.push(shareId);
+      if (shareId === null) {
+        throw new Error(`DM grant for ${email} returned no share id`);
+      }
+      created.push(shareId);
     }
   } catch (error) {
     for (const shareId of created) {
