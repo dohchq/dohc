@@ -898,6 +898,13 @@ export async function pullWorkspaceFromRelay(
       );
       for (const op of ops) {
         if (op.originId === localOriginId) continue;
+        // Relay-fed coordinates are untrusted (same posture as the
+        // shared-channel pull's validSharedLogOp): a malformed originSeq must
+        // never reach the divergence lookup or the watermark map. The apply
+        // below fail-closes on such an op anyway (envelope validation + gap
+        // check reject the whole pass), but the watermark must stay
+        // fail-closed on its own, independent of apply semantics.
+        if (!Number.isSafeInteger(op.originSeq) || op.originSeq < 0) continue;
         const existing = localRowStmt.get(input.workspaceId, op.originId, op.originSeq);
         if (existing) {
           const identical =

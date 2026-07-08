@@ -753,6 +753,51 @@ describe("sync relay client", () => {
     ).rejects.toBeInstanceOf(RelayOriginDivergedError);
   });
 
+  it("never advances a push watermark from a malformed relay originSeq (fail-closed pull, no state)", async () => {
+    const relay = new FakeRelay();
+    const owner = await tempRoot("bad-seq");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(owner);
+    await pushWorkspaceToRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    // A hostile relay feeds a non-integer originSeq for a foreign origin.
+    const evilOrigin = "share:s1:origin-evil";
+    relay.log.push({
+      workspaceId: WORKSPACE_ID,
+      originId: evilOrigin,
+      originSeq: 2.5,
+      opKind: "chat.message.append",
+      payload: {
+        messageId: "msg-evil",
+        threadId: "thread-x",
+        authorKind: "human",
+        authorDisplayName: "Evil",
+        body: "bad coordinates",
+        createdAtMs: 7,
+      } as never,
+      recordedAtMs: 70,
+      relaySeq: relay.nextRelaySeq++,
+    } as SyncReplicationEnvelope & { relaySeq: number });
+
+    // The pass fails closed (the engine refuses the malformed envelope)…
+    await expect(
+      pullWorkspaceFromRelay({ rootDir: owner, workspaceId: WORKSPACE_ID, relay: relay.connection() }),
+    ).rejects.toThrow();
+    // …and no pushed watermark was persisted for the origin — a bogus seq can
+    // never make later legitimate ops look already pushed.
+    const db = openEngineDb(owner);
+    try {
+      const row = db
+        .prepare(
+          "SELECT pushed_seq FROM sync_relay_push_state WHERE workspace_id = ? AND origin_id = ?",
+        )
+        .get(WORKSPACE_ID, evilOrigin);
+      expect(row).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
   it("advances the watermark over a byte-identical same-origin overlap (true idempotent echo)", async () => {
     const relay = new FakeRelay();
     const owner = await tempRoot("foreign-echo");
