@@ -283,11 +283,22 @@ export function presenceTopicAllowedForShare(
 ): boolean {
   if (typeof topic !== "string" || topic.length === 0) return false;
   if (isChatChannelSelector(selector)) {
-    if (topic === selector.channelWireId) return true;
+    // Thread-shape is decided FIRST, before any bare-wireId equality. A
+    // `chat:thread:<threadId>` topic is ALWAYS routed through the forge-resistant
+    // resolver — never admitted by `topic === channelWireId`. Otherwise a crafted
+    // grant whose channelWireId literally equals "chat:thread:<foreignThreadId>"
+    // would match the bare branch and admit presence for a thread it must not.
+    // A thread topic is authorized ONLY when the thread binds (earliest binding)
+    // to THIS selector's granted channel; without a resolver it is refused
+    // (fail closed).
     const threadId = parseChatThreadTopic(topic);
-    if (threadId === null) return false;
-    if (!chat) return false;
-    return chat.threadChannelWireId(threadId) === selector.channelWireId;
+    if (threadId !== null) {
+      if (!chat) return false;
+      return chat.threadChannelWireId(threadId) === selector.channelWireId;
+    }
+    // A non-thread-shaped topic is channel-level co-presence: exactly the bare
+    // granted channel wire id, nothing else.
+    return topic === selector.channelWireId;
   }
   return pathVisibleThroughShare(selector, topic);
 }

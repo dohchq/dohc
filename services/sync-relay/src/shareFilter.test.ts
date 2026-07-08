@@ -423,6 +423,34 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
       presenceTopicAllowedForShare(pathShare, "chat:thread:thread-in", threadResolver),
     ).toBe(false);
   });
+
+  // Ordering-collision guard: a chat:thread:-shaped topic must ALWAYS resolve
+  // via the resolver — bare-wireId equality must never admit it, even when the
+  // grant's channelWireId is itself a chat:thread:<id> string. Otherwise a
+  // crafted grant could smuggle presence for a foreign thread through the bare
+  // branch.
+  it("routes a thread-shaped topic through the resolver even when channelWireId equals it (no bare-equality bypass)", () => {
+    const forged: ChatChannelShareSelector = {
+      kind: "chat-channel",
+      channelWireId: "chat:thread:thread-foreign",
+      access: "read-write",
+    };
+    const topic = "chat:thread:thread-foreign";
+    // Bare equality (topic === channelWireId) would have admitted this thread
+    // topic with NO binding check. It must go through the resolver instead —
+    // and an unbound thread is denied.
+    expect(presenceTopicAllowedForShare(forged, topic, threadResolver)).toBe(false);
+    // No resolver => a thread-shaped topic can never be authorized (fail
+    // closed), even against a chat:thread:<id> channelWireId.
+    expect(presenceTopicAllowedForShare(forged, topic)).toBe(false);
+    // Only a GENUINE earliest binding to this selector's channelWireId admits
+    // it — proving the resolver, not bare equality, is the sole authority.
+    const boundResolver: ChatShareThreadResolver = {
+      threadChannelWireId: (tid) =>
+        tid === "thread-foreign" ? "chat:thread:thread-foreign" : null,
+    };
+    expect(presenceTopicAllowedForShare(forged, topic, boundResolver)).toBe(true);
+  });
 });
 
 describe("parseChatThreadTopic", () => {
