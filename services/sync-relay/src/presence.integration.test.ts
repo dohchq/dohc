@@ -139,6 +139,56 @@ async function poll(
   return (await r.json()) as { version: number; peers: Peer[] };
 }
 
+// Grant a chat-channel share addressed to a recipient user id, returning the
+// shareId. The selector's channelWireId is what the presence gate keys on.
+async function createChatShare(
+  baseUrl: string,
+  granter: string,
+  workspaceId: string,
+  recipientUserId: string,
+  channelWireId: string,
+): Promise<string> {
+  const r = await fetch(`${baseUrl}/sync/${workspaceId}/shares`, {
+    method: "POST",
+    headers: { ...bearer(granter), "content-type": "application/json" },
+    body: JSON.stringify({ channelWireId, access: "read-write", recipientUserId }),
+  });
+  expect(r.status).toBe(200);
+  return ((await r.json()) as { shareId: string }).shareId;
+}
+
+// Presence via the SHARE route (a participant's path). The relay resolves the
+// share to the GRANTER's workspace, so this lands in the owner's scope.
+async function sharePresenceRaw(
+  baseUrl: string,
+  userId: string,
+  shareId: string,
+  topic: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: string }> {
+  const r = await fetch(
+    `${baseUrl}/sync/shares/${shareId}/presence?topic=${encodeURIComponent(topic)}`,
+    {
+      method: "POST",
+      headers: { ...bearer(userId), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return { status: r.status, body: await r.text() };
+}
+
+async function sharePublish(
+  baseUrl: string,
+  userId: string,
+  shareId: string,
+  topic: string,
+  body: Record<string, unknown>,
+): Promise<Peer[]> {
+  const r = await sharePresenceRaw(baseUrl, userId, shareId, topic, body);
+  expect(r.status).toBe(200);
+  return (JSON.parse(r.body) as { peers: Peer[] }).peers;
+}
+
 describe("two-client presence over a real relay child", () => {
   it("A sees B come online, type, and clear on leave", async () => {
     const relayRoot = await tempDir();
@@ -176,6 +226,56 @@ describe("two-client presence over a real relay child", () => {
     });
     const afterLeave = await poll(baseUrl, "owner", ws, "general", 0, 0);
     expect(afterLeave.peers.map((p) => p.clientId)).toEqual(["A"]);
+  }, 30_000);
+
+  it("converges an OWNER (workspace scope) and a PARTICIPANT (share scope) on ONE shared-channel presence scope via the wireId topic", async () => {
+    const relayRoot = await tempDir();
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
+
+    // The shared channel lives in the OWNER's workspace; its cross-machine wire
+    // id IS the presence topic both sides key on (the relay's chat-share gate
+    // admits exactly the granted channelWireId as the topic).
+    const ownerWs = "workspace-shared";
+    const wireId = "wire-general";
+    await claimWorkspace(baseUrl, "owner", ownerWs);
+    // Owner grants the channel to a participant (chat-channel share).
+    const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", wireId);
+
+    // OWNER publishes presence via the WORKSPACE route on the wireId topic.
+    const ownerView = await publish(baseUrl, "owner", ownerWs, wireId, {
+      clientId: "owner-1",
+      state: { displayName: "Owner", typing: false },
+    });
+    expect(ownerView.map((p) => p.clientId)).toEqual(["owner-1"]);
+
+    // PARTICIPANT publishes via the SHARE route on the SAME wireId topic. The
+    // relay maps the share to the granter's workspace, so this lands in the
+    // owner's scope — the participant's own response ALREADY shows both peers.
+    const memberView = await sharePublish(baseUrl, "member", shareId, wireId, {
+      clientId: "member-1",
+      state: { displayName: "Member", typing: true },
+    });
+    expect(memberView.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+
+    // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT —
+    // proving workspace-scope and share-scope resolved to the one relay scope.
+    const ownerRead = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
+    const member = ownerRead.peers.find((p) => p.clientId === "member-1");
+    expect(member?.userId).toBe("member");
+    expect(member?.state).toMatchObject({ displayName: "Member", typing: true });
+
+    // STRANGER denial: a fully-authenticated non-participant is refused share
+    // presence byte-identically to a share that never existed (no oracle).
+    const absent = await sharePresenceRaw(baseUrl, "stranger", "never-existed", wireId, {
+      clientId: "x",
+    });
+    const denied = await sharePresenceRaw(baseUrl, "stranger", shareId, wireId, { clientId: "x" });
+    expect(absent.status).toBe(404);
+    expect([denied.status, denied.body]).toEqual([absent.status, absent.body]);
+    // The stranger's rejected probe left the shared scope untouched: still just
+    // the owner + the member.
+    const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
+    expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
   }, 30_000);
 
   it("a non-owner cannot read another workspace's presence (isolation)", async () => {
