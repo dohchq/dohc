@@ -108,6 +108,15 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
+    // MU-C4 revoke-race gate: runs INSIDE the append's BEGIN IMMEDIATE
+    // transaction, i.e. under the SQLite write lock that serializes revokes,
+    // before anything is inserted. A throwing guard rolls the whole batch
+    // back. This is how the member-append route re-verifies the share
+    // (recipient-owned, unrevoked, granter in standing) with NO window left
+    // between the check and the insert — a route-level re-check alone leaves
+    // a gap where a concurrent revoke commits after the check but before the
+    // transaction opens.
+    guard?: () => void;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;
@@ -663,9 +672,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
+    guard?: () => void;
   }): AppendLogBatchResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Authorization re-verification under the write lock (see the interface
+      // comment): BEGIN IMMEDIATE serializes writers, so a revoke committed
+      // by another writer is either already visible here (guard throws, batch
+      // rolls back) or must wait for this COMMIT — there is no in-between.
+      input.guard?.();
       let inserted = 0;
       let skipped = 0;
       let addedLogBytes = 0;

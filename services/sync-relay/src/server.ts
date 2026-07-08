@@ -365,17 +365,26 @@ export function createSyncRelayHandler({
             }
           }
         }
-        // Shrink the revoke race: re-load the share immediately before the
-        // append (SQLite serializes writers, so a revoke committed after this
-        // check but before the append is the unavoidable minimal window; the
-        // NEXT fetch/append fails closed either way).
-        shareForRecipient(route.shareId, actor.userId);
         const result = storage.appendLogBatch({
           workspaceId: share.workspaceId,
           // Namespaced per share (= per member): member origins live in their
           // own corner of the owner bucket's origin space.
           originId: `share:${share.shareId}:${originId}`,
           ops,
+          // Close the revoke race COMPLETELY: the share is re-verified inside
+          // the append's own BEGIN IMMEDIATE transaction (the same write lock
+          // revokeShare takes), so a revoke committed after the entry check
+          // above can never slip a write in — the guard sees it and the whole
+          // batch rolls back as the same generic 404. The guard re-runs the
+          // full appendability gauntlet: recipient-owned, unrevoked, granter
+          // in standing, still a read-write chat-channel grant on the same
+          // workspace bucket.
+          guard: () => {
+            const fresh = shareForRecipient(route.shareId, actor.userId);
+            if (fresh.workspaceId !== share.workspaceId) throw notFound();
+            if (!isChatChannelSelector(fresh.selector)) throw shareNotAppendable();
+            if (fresh.selector.access !== "read-write") throw shareNotAppendable();
+          },
         });
         return jsonResponse({
           ok: true,

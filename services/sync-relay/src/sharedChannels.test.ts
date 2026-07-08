@@ -610,6 +610,62 @@ describe("shared channels (MU-C4)", () => {
     expect(JSON.stringify(ownerLog)).not.toContain("raced append");
   });
 
+  it("rejects a member append when the revoke lands after every route-level check, inside the write transaction (TOCTOU)", async () => {
+    const storage = await testStorage();
+    // The revoke commits at the LAST possible instant: after the route's
+    // final shareForRecipient re-check, immediately before the transactional
+    // insert. Only the in-transaction guard (running under appendLogBatch's
+    // BEGIN IMMEDIATE write lock) can still stop the write.
+    const raced = new Proxy(storage, {
+      get(target, prop, receiver) {
+        if (prop === "appendLogBatch") {
+          return (input: Parameters<SyncRelayStorage["appendLogBatch"]>[0]) => {
+            target.revokeShare("share-0", 6000);
+            return target.appendLogBatch(input);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(raced);
+    await seedOwnerWorkspace(h);
+    const shareId = await createChannelShare(h, MEMBER_A);
+    expect(shareId).toBe("share-0");
+
+    const response = await h(
+      request(
+        MEMBER_A,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "origin-member-a",
+          ops: [messageAppend("msg-toctou", "thread-shared-1", "toctou append", MEMBER_A)],
+        }),
+      ),
+    );
+    expect(response.status).toBe(404);
+    // NOTHING landed in the owner's bucket — the transaction rolled back.
+    const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
+    expect(JSON.stringify(ownerLog)).not.toContain("toctou append");
+
+    // The guard is not a one-way trip: an honest member on an UNREVOKED share
+    // still appends end-to-end through the same transactional path.
+    const otherShare = await createChannelShare(h, MEMBER_B);
+    const honest = await h(
+      request(
+        MEMBER_B,
+        `/sync/shares/${otherShare}/log`,
+        jsonBody({
+          originId: "origin-member-b",
+          ops: [{ ...messageAppend("msg-honest", "thread-shared-1", "honest append", MEMBER_B), originSeq: 0 }],
+        }),
+      ),
+    );
+    expect(honest.status).toBe(200);
+    const afterLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
+    expect(JSON.stringify(afterLog)).toContain("honest append");
+  });
+
   it("keeps member origins namespaced so a member can never extend or collide with an owner origin", async () => {
     const storage = await testStorage();
     const h = handler(storage);
