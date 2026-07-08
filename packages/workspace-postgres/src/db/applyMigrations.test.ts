@@ -14,7 +14,7 @@ const POSTGRES_URL =
 // reachable the whole suite skips rather than failing, so unit CI without a
 // database stays green.
 async function postgresReachable(): Promise<boolean> {
-  const probe = new pg.Client({ connectionString: POSTGRES_URL });
+  const probe = new pg.Client({ connectionString: POSTGRES_URL, connectionTimeoutMillis: 2000 });
   try {
     await probe.connect();
     await probe.end();
@@ -59,14 +59,19 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
 
     // The Better Auth tables the auth server and sync-relay query now exist,
     // alongside the 0001 workspace core.
-    const tables = await client.query<{ rel: string | null }>(
+    const tables = await client.query<{
+      user_tbl: string | null;
+      session_tbl: string | null;
+      device_tbl: string | null;
+      workspaces_tbl: string | null;
+    }>(
       `select
          to_regclass('"${schema}"."user"') as user_tbl,
          to_regclass('"${schema}"."session"') as session_tbl,
          to_regclass('"${schema}"."deviceCode"') as device_tbl,
          to_regclass('"${schema}".workspaces') as workspaces_tbl`,
     );
-    const row = tables.rows[0] as unknown as Record<string, string | null>;
+    const row = tables.rows[0];
     expect(row.user_tbl).not.toBeNull();
     expect(row.session_tbl).not.toBeNull();
     expect(row.device_tbl).not.toBeNull();
