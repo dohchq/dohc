@@ -71,15 +71,17 @@ export function mergeJoinedChannel(
 }
 
 // MU-C4 write gate (CodeRabbit security; product invariant "agent writes must
-// respect sharing boundaries"): a READ-ONLY shared-channel grant must reject
-// chat writes BEFORE any durable local mutation. The renderer disabling its
-// composers is honesty, not authorization — main is the boundary; without
+// respect sharing boundaries"): a READ-ONLY or ENDED shared-channel grant must
+// reject chat writes BEFORE any durable local mutation. The renderer disabling
+// its composers is honesty, not authorization — main is the boundary; without
 // this gate a crafted IPC call would mint durable local messages/reactions
-// that sync forever refuses to deliver. Resolution is by the channel's WIRE
-// identity (thread → channel → wire) against the joined registry rows.
-// Targets that resolve OUTSIDE any read-only grant — plain local channels,
-// file-linked threads, unknown ids — pass through; the store's own write
-// path owns those errors.
+// that sync forever refuses to deliver. An ENDED grant (revoked / owner gone)
+// is a read-only local copy: it already stopped syncing, so a post-revocation
+// write would only ever live locally, violating "ended means read-only".
+// Resolution is by the channel's WIRE identity (thread → channel → wire)
+// against the joined registry rows. Targets that resolve OUTSIDE any
+// read-only/ended grant — plain local channels, file-linked threads, unknown
+// ids — pass through; the store's own write path owns those errors.
 export async function assertSharedChannelWritable(input: {
   workspaceId: string;
   sharedChannels: readonly JoinedSharedChannel[] | undefined;
@@ -92,18 +94,18 @@ export async function assertSharedChannelWritable(input: {
   };
   target: { channelId: string } | { threadId: string };
 }): Promise<void> {
-  const readOnlyWires = new Set(
+  const blockedWires = new Set(
     (input.sharedChannels ?? [])
-      .filter((channel) => channel.access === "read-only")
+      .filter((channel) => channel.access === "read-only" || channel.ended === true)
       .map((channel) => channel.channelWireId),
   );
-  if (readOnlyWires.size === 0) return;
+  if (blockedWires.size === 0) return;
   let channelId: string | null;
   if ("channelId" in input.target) {
     channelId = input.target.channelId;
   } else {
     // Point lookup, not a workspace-wide thread scan: every gated write pays
-    // this once a read-only share exists.
+    // this once a read-only/ended share exists.
     channelId = await input.store.findThreadChannelId({
       workspaceId: input.workspaceId,
       threadId: input.target.threadId,
@@ -114,9 +116,10 @@ export async function assertSharedChannelWritable(input: {
     workspaceId: input.workspaceId,
     channelId,
   });
-  if (wireId !== null && readOnlyWires.has(wireId)) {
-    // The engine's read-only refusal, reused verbatim so the IPC error copy
-    // matches what the relay-side downgrade path surfaces.
+  if (wireId !== null && blockedWires.has(wireId)) {
+    // The engine's read-only refusal, reused verbatim (an ended grant is a
+    // read-only local copy) so the IPC error copy matches what the relay-side
+    // downgrade path surfaces.
     throw new SharedChannelReadOnlyError();
   }
 }
