@@ -785,6 +785,11 @@ export const DmRecord = z.object({
   // is the owner's recipient list — often the participant's own address).
   peerLabel: z.string().min(1).max(320),
   role: z.enum(["owner", "participant"]),
+  // The chat-channel grant a PARTICIPANT joined this DM through — the presence
+  // SHARE scope both sides converge on (the relay maps it to the granter's
+  // workspace, where the owner publishes). Null for the OWNER (who publishes
+  // into their own workspace scope) and until a participant's grant registers.
+  shareId: z.string().min(1).max(200).nullable(),
   // The single running conversation (the anti-forum rule). Null only in the
   // brief window before the creator's first message replicates.
   threadId: CHAT_THREAD_ID.nullable(),

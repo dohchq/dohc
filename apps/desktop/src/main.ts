@@ -3435,6 +3435,7 @@ function registerIpcHandlers(): void {
       name: dm.name,
       peerLabel: dm.peerLabel,
       role: dm.role,
+      shareId: dm.shareId,
       threadId: dm.threadId,
       unreadCount: dm.unreadCount,
       connected: dm.connected,
