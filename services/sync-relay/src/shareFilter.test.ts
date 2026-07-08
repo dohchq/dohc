@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CHANNEL_WIRE_ID_CHARS,
   MAX_SHARE_PATHS,
   filterOpForShare,
+  parseAnyShareSelectorJson,
   parseShareSelectorJson,
+  validateChatChannelShareSelector,
   validateShareSelector,
+  type ChatChannelShareSelector,
+  type ChatShareThreadResolver,
   type ShareSelector,
 } from "./shareFilter";
 
@@ -293,5 +298,145 @@ describe("share op filter", () => {
       const op = momentPayload({ path, payloadAfterPath: path });
       expect(filterOpForShare(pathShare, "moment.append", op).allowed, path).toBe(false);
     }
+  });
+});
+
+// MU-C4 shared channels: the chat-channel selector + the chat branch of the
+// fail-closed filter.
+describe("chat-channel share selector", () => {
+  it("validates channelWireId + access and defaults to read-write", () => {
+    expect(validateChatChannelShareSelector({ channelWireId: "wire-1" })).toEqual({
+      ok: true,
+      selector: { kind: "chat-channel", channelWireId: "wire-1", access: "read-write" },
+    });
+    expect(
+      validateChatChannelShareSelector({ channelWireId: "wire-1", access: "read-only" }),
+    ).toMatchObject({ ok: true, selector: { access: "read-only" } });
+    for (const bad of [undefined, "", "  padded ", 42, "x".repeat(MAX_CHANNEL_WIRE_ID_CHARS + 1)]) {
+      expect(validateChatChannelShareSelector({ channelWireId: bad }).ok, String(bad)).toBe(false);
+    }
+    expect(
+      validateChatChannelShareSelector({ channelWireId: "wire-1", access: "write" }),
+    ).toMatchObject({ ok: false, code: "invalid_access" });
+  });
+
+  it("round-trips through selector JSON and fails closed on tampered rows", () => {
+    const validated = validateChatChannelShareSelector({ channelWireId: "wire-1" });
+    expect(validated.ok).toBe(true);
+    if (!validated.ok) return;
+    const json = JSON.stringify(validated.selector);
+    expect(parseAnyShareSelectorJson(json)).toEqual(validated.selector);
+    // A hand-edited row with a bad access or wire id parses to null (the
+    // routes answer null with the generic 404).
+    expect(parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":""}')).toBeNull();
+    expect(
+      parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w","access":"all"}'),
+    ).toBeNull();
+    // Legacy path selectors still parse through the union parser.
+    expect(parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null}')).toEqual({
+      paths: ["docs"],
+      versionId: null,
+    });
+  });
+});
+
+describe("chat-channel share op filter", () => {
+  const channelShare: ChatChannelShareSelector = {
+    kind: "chat-channel",
+    channelWireId: "wire-shared",
+    access: "read-write",
+  };
+  // The earliest-binding truth used by these tests: thread-in binds to the
+  // shared channel, thread-out binds to a DIFFERENT channel, anything else is
+  // unknown (fail-closed).
+  const resolver: ChatShareThreadResolver = {
+    threadChannelWireId: (threadId) =>
+      threadId === "thread-in" ? "wire-shared" : threadId === "thread-out" ? "wire-private" : null,
+  };
+
+  function decide(opKind: string, payload: Record<string, unknown>) {
+    return filterOpForShare(channelShare, opKind, JSON.stringify(payload), resolver);
+  }
+
+  it("allows exactly the granted channel's chat ops and nothing else", () => {
+    expect(
+      decide("chat.channel.create", { channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared" }).allowed,
+    ).toBe(true);
+    expect(
+      decide("chat.thread.create", { threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared" }).allowed,
+    ).toBe(true);
+    expect(
+      decide("chat.message.append", { messageId: "m1", threadId: "thread-in", authorKind: "human", authorDisplayName: "A", body: "hi", createdAtMs: 1 }).allowed,
+    ).toBe(true);
+    expect(
+      decide("chat.reaction.set", { reactionId: "r1", messageId: "m1", threadId: "thread-in", emoji: "👍", authorId: "u1", authorKind: "human", authorDisplayName: "A", state: "added", atMs: 1 }).allowed,
+    ).toBe(true);
+    // Chat ops are blob-free: no decision ever exposes a blob hash.
+    const message = decide("chat.message.append", { messageId: "m1", threadId: "thread-in", authorKind: "human", authorDisplayName: "A", body: "hi", createdAtMs: 1 });
+    if (message.allowed) expect(message.blobSha256s).toEqual([]);
+  });
+
+  it("excludes another channel's ops with sentinel content (fail-closed leak test)", () => {
+    expect(
+      decide("chat.channel.create", { channelId: "c2", name: "SENTINEL-private-channel", slug: "private", kind: "channel", createdAtMs: 1, wireId: "wire-private" }).allowed,
+    ).toBe(false);
+    expect(
+      decide("chat.thread.create", { threadId: "thread-out", title: "SENTINEL-private-title", createdAtMs: 1, channelSlug: "private", channelWireId: "wire-private" }).allowed,
+    ).toBe(false);
+    expect(
+      decide("chat.message.append", { messageId: "m2", threadId: "thread-out", authorKind: "human", authorDisplayName: "A", body: "SENTINEL-private-message", createdAtMs: 1 }).allowed,
+    ).toBe(false);
+    expect(
+      decide("chat.reaction.set", { reactionId: "r2", messageId: "m2", threadId: "thread-out", emoji: "👍", authorId: "u1", authorKind: "human", authorDisplayName: "A", state: "added", atMs: 1 }).allowed,
+    ).toBe(false);
+    // A message on a thread the log has NO binding for is excluded too.
+    expect(
+      decide("chat.message.append", { messageId: "m3", threadId: "thread-unknown", authorKind: "human", authorDisplayName: "A", body: "SENTINEL-unknown", createdAtMs: 1 }).allowed,
+    ).toBe(false);
+  });
+
+  it("excludes a forged thread.create that claims the granted channel for an existing foreign thread", () => {
+    // The op SAYS channelWireId=wire-shared, but the log's earliest binding
+    // for thread-out is wire-private — the re-bind is excluded.
+    expect(
+      decide("chat.thread.create", { threadId: "thread-out", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared" }).allowed,
+    ).toBe(false);
+    // A thread.create claiming BOTH a channel and a linked file is malformed.
+    expect(
+      decide("chat.thread.create", { threadId: "thread-new", title: "", createdAtMs: 1, channelWireId: "wire-shared", linkedObjectId: "obj-1" }).allowed,
+    ).toBe(false);
+  });
+
+  it("excludes every non-chat op kind from a chat-channel share (sentinels never leak)", () => {
+    for (const [opKind, payload] of [
+      ["workspace.init", {}],
+      ["moment.append", JSON.parse(momentPayload({ path: "docs/SENTINEL-file.md" })) as Record<string, unknown>],
+      ["secret.file.put", { versionId: "main", path: "notes/.env", ciphertextSha256: "b".repeat(64) }],
+      ["version.create", { versionId: "main", forkSnapshots: [] }],
+      ["ydoc.update", { path: "docs/a.md", updateBlobSha256: "c".repeat(64) }],
+      ["conflict.open", {}],
+      ["chat.thread.update", { threadId: "thread-in" }],
+      ["made.up.kind", { threadId: "thread-in" }],
+    ] as const) {
+      const decision = filterOpForShare(channelShare, opKind, JSON.stringify(payload), resolver);
+      expect(decision.allowed, opKind).toBe(false);
+    }
+  });
+
+  it("fails closed without a thread resolver and on garbage payloads", () => {
+    expect(
+      filterOpForShare(channelShare, "chat.channel.create", JSON.stringify({ wireId: "wire-shared" })).allowed,
+    ).toBe(false);
+    expect(filterOpForShare(channelShare, "chat.message.append", "not json", resolver).allowed).toBe(false);
+    expect(filterOpForShare(channelShare, "chat.message.append", '"str"', resolver).allowed).toBe(false);
+    expect(filterOpForShare(channelShare, "chat.message.append", "{}", resolver).allowed).toBe(false);
+  });
+
+  it("keeps chat ops excluded from path shares even when a resolver is wired", () => {
+    const message = JSON.stringify({ messageId: "m1", threadId: "thread-in", authorKind: "human", authorDisplayName: "A", body: "hi", createdAtMs: 1 });
+    expect(filterOpForShare(pathShare, "chat.message.append", message, resolver).allowed).toBe(false);
+    // And file ops stay excluded from chat shares in the other direction —
+    // the two selector kinds can never widen each other.
+    expect(filterOpForShare(channelShare, "moment.append", momentPayload(), resolver).allowed).toBe(false);
   });
 });

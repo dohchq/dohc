@@ -137,6 +137,14 @@ export interface SyncRelayStorage {
   // the actual decision). sha256 is validated hex upstream, so it cannot
   // carry LIKE wildcards.
   listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
+  // MU-C4 shared channels: the channelWireId bound by the EARLIEST
+  // chat.thread.create op for this threadId in the workspace's log (relay
+  // order), or null when the log holds no binding. Earliest-wins mirrors the
+  // engine's insert-if-absent thread apply, so a later forged re-create can
+  // never re-bind an existing thread across a share boundary. Returns null
+  // (fail-closed: the filter then excludes) rather than a fallback for a
+  // binding op that carries no channelWireId (a file-linked thread).
+  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null;
 }
 
 interface SqliteRunResult {
@@ -920,6 +928,43 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       )
       .all(workspaceId, `%${sha256}%`)
       .map(rowToLogRow);
+  }
+
+  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null {
+    if (!threadId) return null;
+    // LIKE pre-filter on the exact JSON fragment the canonical (sorted-key,
+    // JSON.stringify-escaped) payload stores, wildcards escaped so a hostile
+    // threadId cannot widen the match; the JSON.parse comparison below makes
+    // the real decision.
+    const needle = `"threadId":${JSON.stringify(threadId)}`
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
+           AND payload_json LIKE ? ESCAPE '\\'
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${needle}%`);
+    for (const row of rows) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row.payload_json));
+      } catch {
+        continue;
+      }
+      const record = asObject(payload);
+      if (!record || record.threadId !== threadId) continue;
+      // The EARLIEST matching op is authoritative, whatever it says: a string
+      // channelWireId is the binding; anything else (a file-linked thread, a
+      // pre-wire-id slug binding) is "no shareable binding" — fail closed.
+      return typeof record.channelWireId === "string" && record.channelWireId.length > 0
+        ? record.channelWireId
+        : null;
+    }
+    return null;
   }
 
   fetchLogPage(input: {
