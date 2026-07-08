@@ -97,11 +97,26 @@ function checkChatSurfaceSelfHostable() {
   // line-grepping the file: parsing the route-kind literals out of the union
   // survives reordering, added routes, and whitespace churn, and trips ONLY
   // when a served route is renamed or removed — exactly when it should.
-  const unionMatch = source.match(/type SyncRelayRoute =([\s\S]*?);\n/)
+  // Capture the union body brace-aware: from `type SyncRelayRoute =` to the
+  // statement-terminating `;` at brace depth 0. This survives a variant being
+  // reformatted onto multiple lines (each arm carries its own `;` inside `{…}`,
+  // which a naive `;\n` terminator would truncate on).
+  const unionStart = source.indexOf('type SyncRelayRoute =')
+  let unionBody = ''
+  if (unionStart !== -1) {
+    let depth = 0
+    for (let i = unionStart; i < source.length; i += 1) {
+      const ch = source[i]
+      if (ch === '{' || ch === '(' || ch === '[') depth += 1
+      else if (ch === '}' || ch === ')' || ch === ']') depth -= 1
+      else if (ch === ';' && depth === 0) {
+        unionBody = source.slice(unionStart, i)
+        break
+      }
+    }
+  }
   const routeKinds = new Set(
-    unionMatch
-      ? [...unionMatch[1].matchAll(/route:\s*"([^"]+)"/g)].map((match) => match[1])
-      : [],
+    [...unionBody.matchAll(/route:\s*"([^"]+)"/g)].map((match) => match[1]),
   )
   const REQUIRED_CHAT_ROUTES = [
     'presence', // /sync/:ws/presence — owner + shared-channel presence
@@ -127,7 +142,12 @@ function checkChatSurfaceSelfHostable() {
   // the self-host matrix: the in-repo workspace packages, plus better-auth + pg
   // (which ride the `postgres` + `workspace-api` auth core). Anything else would
   // be a new service the compose stack does not run.
-  const relayPkg = readPackageJson('services/sync-relay/package.json')
+  const relayPkgPath = 'services/sync-relay/package.json'
+  if (!existsSync(relayPkgPath)) {
+    record('chat surface: relay runtime deps stay within the self-host matrix', false, relayPkgPath)
+    return
+  }
+  const relayPkg = readPackageJson(relayPkgPath)
   const deps = Object.keys(relayPkg.dependencies ?? {})
   const ALLOWED_RUNTIME_DEPS = new Set([
     '@dohc/workspace-auth', // Better Auth session verification (workspace-api core)
@@ -154,9 +174,12 @@ function checkChatSurfaceSelfHostable() {
     'services/sync-relay/src/storage.ts',
     'services/sync-relay/src/main.ts',
   ]
-  const FORBIDDEN = /hocuspocus|convex/i
+  // Match only actual module references (import/export-from/require), not the
+  // token appearing in a comment like "no longer uses Convex".
+  const FORBIDDEN_IMPORT =
+    /^\s*(?:import\b[^;]*?from\s*|export\b[^;]*?from\s*|(?:const|let|var)\b[^=]*?=\s*require\s*\(\s*)['"][^'"]*(?:hocuspocus|convex)[^'"]*['"]/im
   const offenders = CHAT_SOURCES.filter(
-    (path) => existsSync(path) && FORBIDDEN.test(readFileSync(path, 'utf8')),
+    (path) => existsSync(path) && FORBIDDEN_IMPORT.test(readFileSync(path, 'utf8')),
   )
   record(
     'chat surface: no cloud-locked collaboration service referenced',
