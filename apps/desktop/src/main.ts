@@ -200,7 +200,12 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import type { JoinedSharedChannel } from "./workspaces/registryStore";
-import { syncJoinedSharedChannels } from "./workspaces/sharedChannels";
+import {
+  createKeyedSerializer,
+  mergeJoinedChannel,
+  relayFetchWithTimeout,
+  syncJoinedSharedChannels,
+} from "./workspaces/sharedChannels";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
@@ -931,7 +936,21 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 // stops syncing while the local copy stays readable. Runs from the Chats
 // IPC surface (fresh on open, prompt push after a send) and from the
 // workspace's relay sync engine cadence.
-async function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
+//
+// Concurrency (CodeRabbit Stability): those triggers can fire together for
+// the SAME workspace, and overlapping passes would race the per-share
+// cursor/peer state in engine.db — so passes are serialized per workspace
+// (queued, never dropped). Every relay request inside a pass is also bounded
+// by a timeout so a hung relay can't block the awaited listChatChannels path.
+const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
+const serializeSharedChannelSync = createKeyedSerializer();
+function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
+  return serializeSharedChannelSync(workspaceId, () =>
+    runSharedChannelSyncPass(workspaceId),
+  );
+}
+
+async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
   try {
     const entry = findWorkspace(workspaceId);
     const channels = (entry?.sharedChannels ?? []).filter((channel) => !channel.ended);
@@ -947,7 +966,11 @@ async function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
     const result = await syncJoinedSharedChannels({
       rootDir: entry.rootPath,
       workspaceId: entry.workspaceId,
-      relay: { baseUrl: normalizeServerUrl(relayUrl), token: cachedCredentials.token },
+      relay: {
+        baseUrl: normalizeServerUrl(relayUrl),
+        token: cachedCredentials.token,
+        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+      },
       channels: matching,
     });
     if (result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
@@ -2456,10 +2479,13 @@ function registerIpcHandlers(): void {
       granterEmail: info.granterEmail,
       relayUrl: cachedCredentials.relayUrl,
     };
-    setWorkspaceSharedChannels(input.workspaceId, [
-      ...(entry.sharedChannels ?? []).filter((channel) => channel.shareId !== joined.shareId),
-      joined,
-    ]);
+    // Dedup by shareId AND channelWireId (CodeRabbit Data Integrity): a
+    // re-join of the same channel under a NEW share id (revoked + re-granted)
+    // replaces the stale row instead of listing and syncing the channel twice.
+    setWorkspaceSharedChannels(
+      input.workspaceId,
+      mergeJoinedChannel(entry.sharedChannels ?? [], joined),
+    );
     return JoinSharedChannelResult.parse({ joined: { ...joined, ended: false } });
   });
 

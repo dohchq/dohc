@@ -3,7 +3,12 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-engine";
-import { syncJoinedSharedChannels } from "./sharedChannels";
+import {
+  createKeyedSerializer,
+  mergeJoinedChannel,
+  relayFetchWithTimeout,
+  syncJoinedSharedChannels,
+} from "./sharedChannels";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // MU-C4: the desktop's best-effort refresh pass over joined shared channels.
@@ -126,5 +131,96 @@ describe("syncJoinedSharedChannels", () => {
     expect(push).not.toHaveBeenCalled();
     expect(pull).not.toHaveBeenCalled();
     expect(result.changed).toBe(false);
+  });
+});
+
+describe("createKeyedSerializer", () => {
+  it("serializes runs for the SAME key (a second call waits for the first) and keeps keys independent", async () => {
+    const serialize = createKeyedSerializer();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = serialize("ws-a", async () => {
+      events.push("a1:start");
+      await firstGate;
+      events.push("a1:end");
+    });
+    const second = serialize("ws-a", async () => {
+      events.push("a2:start");
+      events.push("a2:end");
+    });
+    const other = serialize("ws-b", async () => {
+      events.push("b1:start");
+      events.push("b1:end");
+    });
+
+    // A DIFFERENT key is not blocked by ws-a's in-flight pass.
+    await other;
+    expect(events).toEqual(["a1:start", "b1:start", "b1:end"]);
+
+    releaseFirst();
+    await first;
+    await second;
+    // The second ws-a pass ran ONLY after the first finished — it queued (so
+    // ops journaled after the first pass started still get their own pass),
+    // never overlapped.
+    expect(events).toEqual(["a1:start", "b1:start", "b1:end", "a1:end", "a2:start", "a2:end"]);
+  });
+
+  it("keeps serving a key after a run rejects (a failed pass never wedges the queue)", async () => {
+    const serialize = createKeyedSerializer();
+    await expect(
+      serialize("ws-a", async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    await expect(serialize("ws-a", async () => "recovered")).resolves.toBe("recovered");
+  });
+});
+
+describe("relayFetchWithTimeout", () => {
+  it("aborts a hung relay fetch after the timeout instead of blocking the caller forever", async () => {
+    const hungFetch: typeof fetch = (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(init.signal?.reason ?? new Error("aborted")),
+        );
+      });
+    const fetchWithTimeout = relayFetchWithTimeout(25, hungFetch);
+    await expect(fetchWithTimeout("http://relay.test/sync/shares")).rejects.toThrow();
+  });
+
+  it("passes fast responses through untouched", async () => {
+    const fastFetch: typeof fetch = async () => Response.json({ ok: true });
+    const fetchWithTimeout = relayFetchWithTimeout(1000, fastFetch);
+    const response = await fetchWithTimeout("http://relay.test/sync/shares");
+    expect(((await response.json()) as { ok: boolean }).ok).toBe(true);
+  });
+});
+
+describe("mergeJoinedChannel", () => {
+  it("replaces an existing row matching by shareId OR channelWireId — re-joining under a new share never duplicates the channel", async () => {
+    const existing = [
+      joined({ shareId: "share-old", channelWireId: "wire-1" }),
+      joined({ shareId: "share-other", channelWireId: "wire-other" }),
+    ];
+    // Same channel, NEW share id (revoked + re-granted): the stale row for
+    // the wire id is replaced, not duplicated.
+    const rejoined = mergeJoinedChannel(
+      existing,
+      joined({ shareId: "share-new", channelWireId: "wire-1" }),
+    );
+    expect(rejoined.map((row) => row.shareId)).toEqual(["share-other", "share-new"]);
+
+    // Same share id (plain idempotent re-join) still replaces in place.
+    const rejoinedSameShare = mergeJoinedChannel(
+      existing,
+      joined({ shareId: "share-old", channelWireId: "wire-1", access: "read-only" }),
+    );
+    expect(rejoinedSameShare.map((row) => row.shareId)).toEqual(["share-other", "share-old"]);
+    expect(rejoinedSameShare[1]!.access).toBe("read-only");
   });
 });
