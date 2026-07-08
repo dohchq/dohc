@@ -2462,6 +2462,10 @@ function registerIpcHandlers(): void {
     const relay = {
       baseUrl: normalizeServerUrl(joinedRelayUrl),
       token: cachedCredentials.token,
+      // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
+      // unresponsive relay must abort the join's fetch/pull instead of leaving
+      // the renderer's "Joining…" button stuck forever.
+      fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
     };
     let info;
     try {
@@ -3136,15 +3140,15 @@ function registerIpcHandlers(): void {
     await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
     const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
     // Wire identities let the renderer match channels against share grants.
-    const wireIds = new Map<string, string | null>();
-    for (const channel of channels) {
-      wireIds.set(
+    const wireIdEntries = await Promise.all(
+      channels.map(async (channel) => [
         channel.id,
         await store
           .getChannelWireId({ workspaceId: workspace.workspaceId, channelId: channel.id })
           .catch(() => null),
-      );
-    }
+      ] as const),
+    );
+    const wireIds = new Map(wireIdEntries);
     // The "Files" grouping: file-linked Chats with their CURRENT path (the
     // stable object id resolved through the active version), falling back to
     // the captured hint when the engine no longer owns the file.
