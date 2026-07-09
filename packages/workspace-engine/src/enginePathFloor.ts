@@ -1,4 +1,8 @@
-import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
+import {
+  hasIgnoredSegment,
+  stripWindowsAliasSuffix,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
 import type { EngineFilePathClassification } from "@dohc/workspace-contracts/engine";
 
 // THE shared engine path policy: one classifier decides which workspace paths
@@ -24,7 +28,13 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
   // `.env.production`. This deliberately over-classifies `.env.example`:
   // protecting a placeholder costs a lock icon; missing a real `.env.local`
   // would version plaintext secrets.
-  const segments = candidate.split("/");
+  // Strip Windows trailing-dot/space aliases per segment first: Windows opens
+  // `secret.env ` / `secret.env.` as the real `secret.env`, so they must
+  // classify as secret too. This keeps the floor consistent with the reserved
+  // and ignored-segment guards, which already alias-normalize the same way.
+  const segments = candidate
+    .split("/")
+    .map((segment) => stripWindowsAliasSuffix(segment));
   const basename = segments[segments.length - 1]?.toLowerCase() ?? "";
   if (segments.some((segment) => segment.toLowerCase() === ".env")) {
     return { kind: "secret" };

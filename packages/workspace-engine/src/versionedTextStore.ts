@@ -3090,13 +3090,13 @@ function syncConflictId(
 ): string {
   let branchPart = "";
   if (branchRoots) {
-    const local = branchRoots.local ?? " absent-local-root";
-    const incoming = branchRoots.incoming ?? " absent-incoming-root";
+    const local = branchRoots.local ?? "\u0000absent-local-root";
+    const incoming = branchRoots.incoming ?? "\u0000absent-incoming-root";
     const [low, high] = local <= incoming ? [local, incoming] : [incoming, local];
-    branchPart = ` ${low} ${high}`;
+    branchPart = `\u0000${low}\u0000${high}`;
   }
   return `conflict_sync_${sha256Text(
-    `${workspaceId} ${versionId} ${objectId} ${baseMomentId ?? " absent-base"}${branchPart}`,
+    `${workspaceId}\u0000${versionId}\u0000${objectId}\u0000${baseMomentId ?? "\u0000absent-base"}${branchPart}`,
   ).slice(0, 32)}`;
 }
 

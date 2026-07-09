@@ -328,8 +328,11 @@ test("owner + participant chat and co-presence converge in the real app", async 
     // The participant's reaction on the owner's message rendered too.
     await expect(page.getByText("🚀").first()).toBeVisible({ timeout: 15_000 });
   } finally {
+    // Stop the relay child BEFORE removing the temp tree: its sqlite db lives
+    // under temp.baseDir, and Windows refuses to unlink files a live process
+    // still holds open (EBUSY). POSIX tolerates the old order; Windows does not.
+    await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
     else await temp.cleanup();
-    await relay?.stop();
   }
 });

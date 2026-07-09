@@ -273,11 +273,23 @@ function protectedRowsExist(txDb: SqliteDb, workspaceId: WorkspaceId): boolean {
   );
 }
 
+// Reading secret state is a pure query: it must NEVER create the shared engine
+// store. An absent engine.db means no protected rows can exist, so the read
+// short-circuits before openDatabase (which would mkdir + create the file).
+// This upholds the opted-out invariant — a workspace that opted out of the
+// engine has no engine.db, and merely probing its secret/enrollment state (the
+// cloud-status IPC does this on every workspace open) must not grow one. The
+// guard is a plain existence check, identical on every platform.
+function engineStoreExists(rootDir: string): boolean {
+  return existsSync(join(resolve(rootDir), SECRET_FILE_STORE_RELATIVE_PATH));
+}
+
 export async function readWorkspaceDataKeyForEnrollment(
   rootDir: string,
   workspaceIdInput: string,
 ): Promise<Buffer | null> {
   const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+  if (!engineStoreExists(rootDir)) return null;
   const txDb = openDatabase(rootDir);
   try {
     if (!protectedRowsExist(txDb, workspaceId)) return null;
@@ -294,6 +306,7 @@ export async function readWorkspaceSecretState(
   workspaceIdInput: string,
 ): Promise<WorkspaceSecretState> {
   const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+  if (!engineStoreExists(rootDir)) return "none";
   const txDb = openDatabase(rootDir);
   try {
     if (!protectedRowsExist(txDb, workspaceId)) return "none";

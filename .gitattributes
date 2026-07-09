@@ -1,0 +1,40 @@
+# Repo-wide EOL policy. Without this, EOL handling depends on each developer's
+# local core.autocrlf; the Windows Git installer default (autocrlf=true) checks
+# every text file out as CRLF, which would break byte-exact / hash-of-source
+# assertions and reintroduce CRLF churn. Normalize all text to LF in the repo
+# and check it out as LF on every platform.
+* text=auto eol=lf
+
+# Shell scripts must stay LF regardless of platform.
+*.sh text eol=lf
+
+# Source files are always text and always diffed as text — `text` forces
+# textual treatment instead of relying on git's binary auto-detection, and
+# `diff` forces a text diff even if a blob accidentally contains a NUL byte.
+# Without this, git renders "Binary files differ" and hides the change from
+# review — the exact hazard the NUL-byte escaping addressed (a converted file
+# whose pre-image still held a NUL showed no reviewable hunk). EOL stays LF via
+# the blanket rule above.
+*.ts   text diff
+*.tsx  text diff
+*.mts  text diff
+*.cts  text diff
+*.js   text diff
+*.mjs  text diff
+*.cjs  text diff
+
+# Binary assets: never normalize or diff as text.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.node binary
+*.wasm binary

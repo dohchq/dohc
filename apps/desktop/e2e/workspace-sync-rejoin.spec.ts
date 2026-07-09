@@ -221,8 +221,10 @@ test("offline edits on two machines surface as a reviewable conflict and the res
       { timeout: 60_000 },
     );
   } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
+    // Stop the relay child before removing the temp tree it holds open, or
+    // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
     await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
   }
 });
 
@@ -398,8 +400,10 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       "quasar sync cadence",
     );
   } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
+    // Stop the relay child before removing the temp tree it holds open, or
+    // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
     await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
   }
 });
 
@@ -486,7 +490,9 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     // not the local-only absence).
     await expect(page.getByTestId("sync-status")).toBeVisible({ timeout: 30_000 });
   } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
+    // Stop the relay child before removing the temp tree it holds open, or
+    // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
     await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
   }
 });
