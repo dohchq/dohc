@@ -465,6 +465,12 @@ export const engineContractCompileCheck = (() => {
     };
     type ClaimDispatch = AgentDispatchStore["claimNextPending"];
     const claimDispatch: ClaimDispatch | null = null;
+    type RecordRunMessage = AgentDispatchStore["recordRunMessage"];
+    type ListRunMessages = AgentDispatchStore["listRunMessages"];
+    type RunIdForMessage = AgentDispatchStore["runIdForMessage"];
+    const recordRunMessage: RecordRunMessage | null = null;
+    const listRunMessages: ListRunMessages | null = null;
+    const runIdForMessage: RunIdForMessage | null = null;
 
     const surface: SearchSurface = "file";
     const visibility: SearchVisibility = { searchable: true, projectionFileAccess: access };
@@ -553,6 +559,9 @@ export const engineContractCompileCheck = (() => {
     void dispatchClaim;
     void pauseState;
     void claimDispatch;
+    void recordRunMessage;
+    void listRunMessages;
+    void runIdForMessage;
     void searchPolicy;
     void searchResult;
     void searchOptions;

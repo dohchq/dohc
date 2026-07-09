@@ -1,0 +1,928 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { delimiter, join, resolve } from "node:path";
+import {
+  LINKED_CHAT_STORE_RELATIVE_PATH,
+  createAgentDispatchStore,
+  createLinkedChatStore,
+  type AgentDispatchStore,
+  type LinkedChatStore,
+} from "@dohc/workspace-engine";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RunnerSettings } from "../settings/userSettings";
+import { nativeTmpdir } from "../workspaces/testTemp";
+import {
+  APP_QUIT_EXIT_CODE,
+  RUNNER_KILL_GRACE_MS,
+  RUNNER_SELF_TEST_TIMEOUT_MS,
+  createChatDispatchService,
+  tokenizeRunnerCommand,
+  type ChatDispatchIdentity,
+  type ChatDispatchPresenceInput,
+  type ChatDispatchService,
+  type ChatDispatchWorkspace,
+  type RunnerProcess,
+  type RunnerSpawnOptions,
+  type SpawnRunner,
+} from "./chatDispatchService";
+
+const WORKSPACE_ID = "workspace-chat-dispatch";
+const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
+
+const requireModule = createRequire(import.meta.url);
+type DispatchDb = Parameters<typeof createAgentDispatchStore>[0];
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => DispatchDb;
+};
+
+interface SpawnCall {
+  command: string;
+  args: string[];
+  options: RunnerSpawnOptions;
+  process: FakeRunnerProcess;
+}
+
+class FakeRunnerProcess implements RunnerProcess {
+  readonly rawChild = undefined;
+  private exited = false;
+  private readonly exitListeners: Array<(
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+  ) => void> = [];
+  private readonly errorListeners: Array<(error: Error) => void> = [];
+
+  constructor(readonly pid: number | undefined) {}
+
+  hasExited(): boolean {
+    return this.exited;
+  }
+
+  onExit(
+    listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void,
+  ): void {
+    this.exitListeners.push(listener);
+  }
+
+  onError(listener: (error: Error) => void): void {
+    this.errorListeners.push(listener);
+  }
+
+  emitExit(
+    exitCode: number | null,
+    signal: NodeJS.Signals | null = null,
+  ): void {
+    this.exited = true;
+    for (const listener of this.exitListeners) listener(exitCode, signal);
+  }
+
+  emitError(error: Error): void {
+    for (const listener of this.errorListeners) listener(error);
+  }
+}
+
+interface FixtureOptions {
+  runner?: Partial<RunnerSettings>;
+  identity?: ChatDispatchIdentity;
+}
+
+interface Fixture {
+  root: string;
+  stateRoot: string;
+  appRoot: string;
+  workspace: ChatDispatchWorkspace;
+  chat: LinkedChatStore;
+  dispatch: AgentDispatchStore;
+  dispatchDb: DispatchDb;
+  service: ChatDispatchService;
+  runner: RunnerSettings;
+  spawnCalls: SpawnCall[];
+  killCalls: Array<{ pid: number; signal: NodeJS.Signals }>;
+  postedWorkspaces: string[];
+  syncRequests: string[];
+  presence: ChatDispatchPresenceInput[];
+  attributions: Array<{
+    workspaceId: string;
+    run: { agentId: string; onBehalfOf: string; agentRunId: string } | null;
+  }>;
+  errors: unknown[];
+  requeues: Array<{
+    workspaceId: string;
+    triggerMessageId: string;
+    runId: string;
+  }>;
+  now: { value: number };
+  requeueRaw(input: {
+    workspaceId: string;
+    triggerMessageId: string;
+    runId: string;
+  }): boolean;
+}
+
+const fixtures: Fixture[] = [];
+
+async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
+  const root = await mkdtemp(join(nativeTmpdir(), "dohc-chat-dispatch-"));
+  const stateRoot = join(root, "state");
+  const appRoot = join(root, "app");
+  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root };
+  const chatIds = { channel: 0, message: 0, thread: 0 };
+  let chatNow = CHAT_START_MS;
+  const chat = createLinkedChatStore(root, {
+    nowMs: () => {
+      const value = chatNow;
+      chatNow += 1_000;
+      return value;
+    },
+    createId: (kind) => {
+      chatIds[kind] += 1;
+      return `${kind}_${chatIds[kind]}`;
+    },
+  });
+  await chat.listChannels({ workspaceId: WORKSPACE_ID });
+
+  const dispatchDb = new DatabaseSync(
+    join(root, LINKED_CHAT_STORE_RELATIVE_PATH),
+  );
+  const now = { value: 1_000_000 };
+  let nextRunId = 0;
+  const dispatch = createAgentDispatchStore(dispatchDb, {
+    nowMs: () => now.value,
+    createRunId: () => `run_${(nextRunId += 1)}`,
+  });
+  const runner: RunnerSettings = {
+    command: "claude -p",
+    enabled: true,
+    timeoutMinutes: 30,
+    ...options.runner,
+  };
+  const spawnCalls: SpawnCall[] = [];
+  let nextPid = 4_100;
+  const spawnRunner: SpawnRunner = (command, args, spawnOptions) => {
+    const process = new FakeRunnerProcess(nextPid);
+    nextPid += 1;
+    spawnCalls.push({
+      command,
+      args: [...args],
+      options: {
+        ...spawnOptions,
+        env: { ...spawnOptions.env },
+        stdio: [...spawnOptions.stdio],
+      },
+      process,
+    });
+    return process;
+  };
+  const killCalls: Fixture["killCalls"] = [];
+  const postedWorkspaces: string[] = [];
+  const syncRequests: string[] = [];
+  const presence: ChatDispatchPresenceInput[] = [];
+  const attributions: Fixture["attributions"] = [];
+  const errors: unknown[] = [];
+  const requeues: Fixture["requeues"] = [];
+
+  const requeueRaw = (input: Fixture["requeues"][number]): boolean => {
+    const updated = dispatchDb
+      .prepare(
+        `UPDATE chat_dispatch_ledger
+         SET state = 'pending', run_id = NULL, updated_at_ms = ?
+         WHERE workspace_id = ? AND trigger_message_id = ?
+           AND state = 'failed' AND run_id = ? AND attempt_count < 2`,
+      )
+      .run(
+        now.value,
+        input.workspaceId,
+        input.triggerMessageId,
+        input.runId,
+      );
+    return updated.changes === 1;
+  };
+
+  const service = createChatDispatchService({
+    workspaceFor: (workspaceId) =>
+      workspaceId === WORKSPACE_ID ? workspace : null,
+    listOpenWorkspaces: () => [],
+    listSyncWorkspaces: () => [],
+    chatStoreFor: () => chat,
+    dispatchStoreFor: () => dispatch,
+    readRunnerSettings: async () => ({ ...runner }),
+    identityFor: async () =>
+      options.identity ?? {
+        displayName: "Ice",
+        verifiedUserId: "user_local",
+      },
+    stateDir: () => stateRoot,
+    appRoot: () => appRoot,
+    isPackaged: () => false,
+    queueSync: (workspaceId) => syncRequests.push(workspaceId),
+    onMessagePosted: (workspaceId) => postedWorkspaces.push(workspaceId),
+    setRunAttribution: (workspaceId, run) => {
+      attributions.push({ workspaceId, run });
+    },
+    publishPresence: async (input) => {
+      presence.push(input);
+    },
+    requeueFailedTrigger: (input) => {
+      requeues.push(input);
+      return requeueRaw(input);
+    },
+    listAppQuitRecoveries: (workspaceId) =>
+      dispatchDb
+        .prepare(
+          `SELECT r.run_id, l.attempt_count
+           FROM agent_run_records r
+           JOIN chat_dispatch_ledger l
+             ON l.workspace_id = r.workspace_id
+            AND l.trigger_message_id = r.trigger_message_id
+            AND l.run_id = r.run_id
+           WHERE r.workspace_id = ?
+             AND r.exit_code = ?
+             AND r.failure_note_posted = 0
+             AND l.state = 'failed'`,
+        )
+        .all(workspaceId, APP_QUIT_EXIT_CODE)
+        .map((row) => {
+          const runId = row.run_id;
+          const attemptCount = row.attempt_count;
+          if (
+            typeof runId !== "string" ||
+            typeof attemptCount !== "number" ||
+            !Number.isSafeInteger(attemptCount)
+          ) {
+            throw new Error("Corrupt app-quit recovery fixture.");
+          }
+          const run = dispatch.getRunRecord(runId);
+          if (!run) throw new Error("Missing app-quit recovery run.");
+          return { run, attemptCount };
+        }),
+    spawnRunner,
+    killProcessGroup: (pid, signal) => {
+      killCalls.push({ pid, signal });
+    },
+    platform: "linux",
+    nowMs: () => now.value,
+    createId: () => "self_test_id",
+    onError: (error) => errors.push(error),
+  });
+
+  const fixture: Fixture = {
+    root,
+    stateRoot,
+    appRoot,
+    workspace,
+    chat,
+    dispatch,
+    dispatchDb,
+    service,
+    runner,
+    spawnCalls,
+    killCalls,
+    postedWorkspaces,
+    syncRequests,
+    presence,
+    attributions,
+    errors,
+    requeues,
+    now,
+    requeueRaw,
+  };
+  fixtures.push(fixture);
+  return fixture;
+}
+
+async function activate(fixture: Fixture): Promise<void> {
+  fixture.service.start();
+  await fixture.service.scanWorkspace(WORKSPACE_ID);
+}
+
+async function createAgentThread(
+  fixture: Fixture,
+  input: {
+    body: string;
+    title?: string;
+    actor?: "human" | "agent";
+    authorUserId?: string;
+    origin?: "cli";
+  },
+): Promise<{ threadId: string; messageId: string }> {
+  const channel = await fixture.chat.ensureAgentChannel({
+    workspaceId: WORKSPACE_ID,
+  });
+  const actor = input.actor ?? "human";
+  const started = await fixture.chat.startChannelThread({
+    workspaceId: WORKSPACE_ID,
+    channelId: channel.id,
+    ...(input.title === undefined ? {} : { title: input.title }),
+    author:
+      actor === "human"
+        ? { kind: "human", displayName: "Ice" }
+        : { kind: "agent", displayName: "Ice's agent" },
+    ...(input.authorUserId === undefined
+      ? {}
+      : { authorUserId: input.authorUserId }),
+    ...(input.origin === undefined ? {} : { origin: input.origin }),
+    body: input.body,
+  });
+  return { threadId: started.thread.id, messageId: started.message.id };
+}
+
+async function linkAgentReply(
+  fixture: Fixture,
+  threadId: string,
+  runId: string,
+  body = "Finished the work.",
+): Promise<string> {
+  const message = await fixture.chat.sendMessage({
+    workspaceId: WORKSPACE_ID,
+    threadId,
+    author: { kind: "agent", displayName: "Ice's agent" },
+    origin: "cli",
+    body,
+  });
+  fixture.dispatch.recordRunMessage({
+    workspaceId: WORKSPACE_ID,
+    messageId: message.id,
+    runId,
+  });
+  return message.id;
+}
+
+async function flushMicrotasks(iterations = 20): Promise<void> {
+  for (let index = 0; index < iterations; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+afterEach(async () => {
+  for (const fixture of fixtures.splice(0).reverse()) {
+    await fixture.service.stop();
+    fixture.dispatchDb.close();
+    await fixture.chat.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+  vi.useRealTimers();
+});
+
+describe("chatDispatchService", () => {
+  it("records only owner human UI triggers and deduplicates repeated scans", async () => {
+    const fixture = await createFixture({
+      runner: { enabled: false },
+      identity: { displayName: "Ice", verifiedUserId: "user_local" },
+    });
+    const agentHuman = await createAgentThread(fixture, {
+      body: "Please review the launch.",
+      authorUserId: "user_local",
+    });
+    await createAgentThread(fixture, {
+      body: "Agent-authored messages never dispatch.",
+      actor: "agent",
+    });
+    await createAgentThread(fixture, {
+      body: "CLI-origin human messages never dispatch.",
+      authorUserId: "user_local",
+      origin: "cli",
+    });
+    await createAgentThread(fixture, {
+      body: "Another signed-in user cannot dispatch this agent.",
+      authorUserId: "user_remote",
+    });
+    const localWithoutRelayIdentity = await createAgentThread(fixture, {
+      body: "A solo/local send is allowed without authorUserId.",
+    });
+    const general = await fixture.chat.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const mention = await fixture.chat.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Ice" },
+      authorUserId: "user_local",
+      body: "Could @agent audit this plan?",
+    });
+    await fixture.chat.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "agent", displayName: "Ice's agent" },
+      body: "@agent does not recursively dispatch itself.",
+    });
+
+    await activate(fixture);
+
+    expect(
+      fixture.dispatch
+        .listPending(WORKSPACE_ID)
+        .map((record) => record.triggerMessageId),
+    ).toEqual([
+      agentHuman.messageId,
+      localWithoutRelayIdentity.messageId,
+      mention.message.id,
+    ]);
+
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(
+      fixture.dispatch
+        .listPending(WORKSPACE_ID)
+        .map((record) => record.triggerMessageId),
+    ).toEqual([
+      agentHuman.messageId,
+      localWithoutRelayIdentity.messageId,
+      mention.message.id,
+    ]);
+    expect(fixture.spawnCalls).toHaveLength(0);
+  });
+
+  it("keeps workspace FIFO to one live run and builds the configured spawn contract", async () => {
+    const fixture = await createFixture({
+      runner: {
+        command: 'claude -p --allowedTools "Bash(dohc chat:*)"',
+      },
+    });
+    const first = await createAgentThread(fixture, {
+      title: "Launch review",
+      body: "Audit the rollback plan.",
+      authorUserId: "user_local",
+    });
+    const second = await createAgentThread(fixture, {
+      title: "Export review",
+      body: "Then audit exports.",
+      authorUserId: "user_local",
+    });
+
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.spawnCalls).toHaveLength(1);
+    const firstClaim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    expect(firstClaim?.run.threadId).toBe(first.threadId);
+    expect(firstClaim?.run.command).toBe(fixture.runner.command);
+    expect(
+      fixture.dispatch
+        .listPending(WORKSPACE_ID)
+        .map((record) => record.threadId),
+    ).toEqual([second.threadId]);
+
+    const firstSpawn = fixture.spawnCalls[0]!;
+    expect(firstSpawn.command).toBe("claude");
+    expect(firstSpawn.args.slice(0, -1)).toEqual([
+      "-p",
+      "--allowedTools",
+      "Bash(dohc chat:*)",
+    ]);
+    const prompt = firstSpawn.args.at(-1);
+    expect(prompt).toContain("# Launch review");
+    expect(prompt).toContain("Audit the rollback plan.");
+    expect(prompt).toContain(
+      `dohc chat reply ${first.threadId} --as-agent`,
+    );
+    expect(prompt).toContain("Your final text is not shown anywhere");
+    expect(firstSpawn.options).toMatchObject({
+      cwd: fixture.root,
+      detached: true,
+      windowsHide: true,
+    });
+    expect(firstSpawn.options.stdio[0]).toBe("ignore");
+    expect(typeof firstSpawn.options.stdio[1]).toBe("number");
+    expect(firstSpawn.options.stdio[2]).toBe(firstSpawn.options.stdio[1]);
+    expect(firstSpawn.options.env.DOHC_CHAT_THREAD).toBe(first.threadId);
+    expect(firstSpawn.options.env.DOHC_CHAT_ACTOR).toBe("agent");
+    expect(firstSpawn.options.env.DOHC_RUN_ID).toBe(firstClaim?.run.runId);
+    expect(firstSpawn.options.env.PATH?.split(delimiter)[0]).toBe(
+      resolve(fixture.appRoot, "node_modules", ".bin"),
+    );
+
+    if (!firstClaim) throw new Error("Expected the first run claim.");
+    await linkAgentReply(
+      fixture,
+      first.threadId,
+      firstClaim.run.runId,
+    );
+    firstSpawn.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.spawnCalls).toHaveLength(2);
+    expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(
+      second.threadId,
+    );
+    expect(fixture.dispatch.getRunRecord(firstClaim.run.runId)).toMatchObject({
+      exitCode: 0,
+      failureNotePosted: false,
+    });
+    const firstMessages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: first.threadId,
+    });
+    expect(firstMessages.some((message) => message.body.startsWith("⚠"))).toBe(
+      false,
+    );
+  });
+
+  it("pauses a thread at the rolling dispatch budget and posts one note", async () => {
+    const fixture = await createFixture();
+    const pending = await createAgentThread(fixture, {
+      body: "This sixth dispatch should pause.",
+      authorUserId: "user_local",
+    });
+    for (let index = 0; index < 5; index += 1) {
+      const triggerMessageId = `seed_message_${index}`;
+      fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId,
+        threadId: pending.threadId,
+      });
+      const claim = fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+        command: "seed-runner",
+      });
+      if (!claim) throw new Error("Expected a seeded budget claim.");
+      fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
+    }
+
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.spawnCalls).toHaveLength(0);
+    expect(
+      fixture.dispatch.threadDispatchPaused(WORKSPACE_ID, pending.threadId),
+    ).toBe(true);
+    const pauseRow = fixture.dispatchDb
+      .prepare(
+        `SELECT reason FROM chat_dispatch_pause
+         WHERE workspace_id = ? AND thread_id = ?`,
+      )
+      .get(WORKSPACE_ID, pending.threadId);
+    expect(pauseRow?.reason).toBe("re-dispatch budget exceeded");
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: pending.threadId,
+    });
+    expect(
+      messages.filter((message) => message.body.startsWith("⏸ Agent dispatch")),
+    ).toHaveLength(1);
+    expect(fixture.postedWorkspaces).toEqual([WORKSPACE_ID]);
+
+    await fixture.service.resumeThreadDispatch(
+      WORKSPACE_ID,
+      pending.threadId,
+    );
+    expect(
+      fixture.dispatch.threadDispatchPaused(WORKSPACE_ID, pending.threadId),
+    ).toBe(false);
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("posts a nonzero-exit failure note exactly once", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Run a failing audit.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    const notes = messages.filter((message) =>
+      message.body.startsWith("⚠ Agent run failed (exit 7). Log:"),
+    );
+    expect(notes).toHaveLength(1);
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      exitCode: 7,
+      failureNotePosted: true,
+    });
+    expect(fixture.dispatch.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([
+      notes[0]!.id,
+    ]);
+  });
+
+  it("posts a failure note when an exit-zero run produces no linked reply", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Run silently.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(
+      messages.filter((message) =>
+        message.body.startsWith("⚠ Agent run produced no reply. Log:"),
+      ),
+    ).toHaveLength(1);
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      exitCode: 0,
+      failureNotePosted: true,
+    });
+  });
+
+  it("fails an interrupted startup run and re-dispatches its trigger once", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Resume this after restart.",
+      authorUserId: "user_local",
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: trigger.messageId,
+      threadId: trigger.threadId,
+    });
+    const interrupted = fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+      logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+
+    await activate(fixture);
+
+    expect(fixture.requeues).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: trigger.messageId,
+        runId: interrupted.run.runId,
+      },
+    ]);
+    expect(fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
+      failureNotePosted: true,
+    });
+    const retried = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    expect(retried?.dispatch).toMatchObject({
+      triggerMessageId: trigger.messageId,
+      attemptCount: 2,
+    });
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("does not requeue a startup run that is already the second attempt", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Do not retry this a third time.",
+      authorUserId: "user_local",
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: trigger.messageId,
+      threadId: trigger.threadId,
+    });
+    const first = fixture.dispatch.claimNextPending(WORKSPACE_ID);
+    if (!first) throw new Error("Expected the first attempt.");
+    fixture.dispatch.failRun({ runId: first.run.runId, reason: "seed restart" });
+    expect(
+      fixture.requeueRaw({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: trigger.messageId,
+        runId: first.run.runId,
+      }),
+    ).toBe(true);
+    const second = fixture.dispatch.claimNextPending(WORKSPACE_ID);
+    if (!second) throw new Error("Expected the second attempt.");
+    expect(second.dispatch.attemptCount).toBe(2);
+
+    await activate(fixture);
+
+    expect(fixture.requeues).toHaveLength(0);
+    expect(fixture.spawnCalls).toHaveLength(0);
+    expect(fixture.dispatch.openRuns(WORKSPACE_ID)).toHaveLength(0);
+  });
+
+  it("posts and requeues a flushed app-quit run on the next startup", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Recover this clean-shutdown interruption.",
+      authorUserId: "user_local",
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: trigger.messageId,
+      threadId: trigger.threadId,
+    });
+    const interrupted = fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+      logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an app-quit run.");
+    fixture.dispatch.failRun({
+      runId: interrupted.run.runId,
+      exitCode: APP_QUIT_EXIT_CODE,
+      reason: "app-quit",
+    });
+
+    await activate(fixture);
+
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(
+      messages.filter((message) =>
+        message.body.startsWith("⚠ Agent run failed (app quit during run)."),
+      ),
+    ).toHaveLength(1);
+    expect(fixture.requeues).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: trigger.messageId,
+        runId: interrupted.run.runId,
+      },
+    ]);
+    expect(fixture.dispatch.openRuns(WORKSPACE_ID)[0]?.dispatch).toMatchObject({
+      triggerMessageId: trigger.messageId,
+      attemptCount: 2,
+    });
+  });
+
+  it("flushes a live run for next-boot recovery without posting during quit", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Quit while this is running.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+
+    await fixture.service.stop();
+
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      exitCode: APP_QUIT_EXIT_CODE,
+      failureNotePosted: false,
+    });
+    expect(fixture.killCalls).toContainEqual({
+      pid: -fixture.spawnCalls[0]!.process.pid!,
+      signal: "SIGTERM",
+    });
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(
+      messages.some((message) => message.body.includes("app quit during run")),
+    ).toBe(false);
+  });
+
+  it("times out a run, posts the timeout note, and escalates its process group", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({
+      runner: { timeoutMinutes: 1 },
+    });
+    const trigger = await createAgentThread(fixture, {
+      body: "This harness will hang.",
+      authorUserId: "user_local",
+    });
+    const queued = await createAgentThread(fixture, {
+      body: "This must wait for the timed-out process to exit.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+    expect(fixture.killCalls).toEqual([
+      { pid: -fixture.spawnCalls[0]!.process.pid!, signal: "SIGTERM" },
+    ]);
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      exitCode: 124,
+      failureNotePosted: true,
+    });
+    const messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(
+      messages.some((message) =>
+        message.body.includes("timed out after 1m"),
+      ),
+    ).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
+    expect(fixture.killCalls.at(-1)).toEqual({
+      pid: -fixture.spawnCalls[0]!.process.pid!,
+      signal: "SIGKILL",
+    });
+
+    fixture.spawnCalls[0]!.process.emitExit(null, "SIGKILL");
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.spawnCalls).toHaveLength(2);
+    expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(
+      queued.threadId,
+    );
+  });
+
+  it("stops only the owned live process group and escalates after the grace period", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture();
+    await createAgentThread(fixture, {
+      body: "Stop this run.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const process = fixture.spawnCalls[0]!.process;
+
+    await expect(fixture.service.stopAgentRun(WORKSPACE_ID)).resolves.toBe(true);
+    expect(fixture.killCalls).toEqual([
+      { pid: -process.pid!, signal: "SIGTERM" },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
+    expect(fixture.killCalls).toEqual([
+      { pid: -process.pid!, signal: "SIGTERM" },
+      { pid: -process.pid!, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("passes the real spawn contract in a successful runner self-test", async () => {
+    const fixture = await createFixture({
+      runner: { command: "claude -p" },
+    });
+
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
+    await flushMicrotasks();
+    expect(fixture.spawnCalls).toHaveLength(1);
+    const call = fixture.spawnCalls[0]!;
+    const threadId = call.options.env.DOHC_CHAT_THREAD;
+    const runId = call.options.env.DOHC_RUN_ID;
+    if (!threadId || !runId) throw new Error("Expected self-test attribution.");
+    expect(call.args.at(-1)).toContain(
+      `dohc chat reply ${threadId} --as-agent "self-test ok"`,
+    );
+    expect(runId).toBe("run_self_test_self_test_id");
+
+    await fixture.chat.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId,
+      author: { kind: "agent", displayName: "Ice's agent" },
+      origin: "cli",
+      body: "self-test ok",
+    });
+    call.process.emitExit(0);
+
+    await expect(resultPromise).resolves.toEqual({
+      ok: true,
+      detail: "Runner self-test passed. The harness reported through dohc chat.",
+    });
+    expect(fixture.attributions.at(-1)).toEqual({
+      workspaceId: WORKSPACE_ID,
+      run: null,
+    });
+  });
+
+  it("times out a runner self-test and escalates the same spawned group", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture();
+
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
+    await flushMicrotasks();
+    const process = fixture.spawnCalls[0]!.process;
+
+    await vi.advanceTimersByTimeAsync(RUNNER_SELF_TEST_TIMEOUT_MS);
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      detail: expect.stringContaining("timed out after 120 seconds"),
+    });
+    expect(fixture.killCalls).toEqual([
+      { pid: -process.pid!, signal: "SIGTERM" },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
+    expect(fixture.killCalls.at(-1)).toEqual({
+      pid: -process.pid!,
+      signal: "SIGKILL",
+    });
+  });
+
+  it("tokenizes quoted runner arguments and rejects an unterminated command", () => {
+    expect(
+      tokenizeRunnerCommand(
+        'claude -p --allowedTools "Bash(dohc chat:*)" --label "two words"',
+      ),
+    ).toEqual([
+      "claude",
+      "-p",
+      "--allowedTools",
+      "Bash(dohc chat:*)",
+      "--label",
+      "two words",
+    ]);
+    expect(() => tokenizeRunnerCommand('claude -p "unterminated')).toThrow(
+      "Runner command has an unterminated double quote.",
+    );
+  });
+});

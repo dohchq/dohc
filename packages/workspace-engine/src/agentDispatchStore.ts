@@ -527,6 +527,60 @@ export function createAgentDispatchStore(
       return count;
     },
 
+    recordRunMessage(input) {
+      const workspaceId = normalizeWorkspaceId(input.workspaceId);
+      const messageId = normalizeRequiredId(input.messageId, "Message id");
+      const runId = normalizeRequiredId(input.runId, "Run id");
+      const run = requireRunById(db, runId);
+      if (run.workspaceId !== workspaceId) {
+        throw new AgentDispatchStoreError(
+          "run-not-found",
+          `Agent run ${runId} was not found in workspace ${workspaceId}.`,
+        );
+      }
+      const result = db
+        .prepare(
+          `INSERT OR IGNORE INTO run_message_links (
+             workspace_id, message_id, run_id
+           ) VALUES (?, ?, ?)`,
+        )
+        .run(workspaceId, messageId, runId);
+      if (result.changes === 1) return true;
+      const existing = db
+        .prepare(
+          `SELECT run_id FROM run_message_links
+           WHERE workspace_id = ? AND message_id = ?`,
+        )
+        .get(workspaceId, messageId);
+      if (!existing || stringValue(existing.run_id) !== runId) throw corruptStore();
+      return false;
+    },
+
+    listRunMessages(workspaceIdInput, runIdInput) {
+      const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+      const runId = normalizeRequiredId(runIdInput, "Run id");
+      return db
+        .prepare(
+          `SELECT message_id FROM run_message_links
+           WHERE workspace_id = ? AND run_id = ?
+           ORDER BY message_id`,
+        )
+        .all(workspaceId, runId)
+        .map((row) => stringValue(row.message_id));
+    },
+
+    runIdForMessage(workspaceIdInput, messageIdInput) {
+      const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+      const messageId = normalizeRequiredId(messageIdInput, "Message id");
+      const row = db
+        .prepare(
+          `SELECT run_id FROM run_message_links
+           WHERE workspace_id = ? AND message_id = ?`,
+        )
+        .get(workspaceId, messageId);
+      return row ? stringValue(row.run_id) : null;
+    },
+
     getRunRecord(runIdInput) {
       const runId = normalizeRequiredId(runIdInput, "Run id");
       const rows = runRowsById(db, runId);

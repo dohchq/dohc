@@ -7,6 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createConnection } from "node:net";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import {
   CLI_PROTOCOL_VERSION,
@@ -18,7 +19,10 @@ import {
   type CliVerb,
 } from "@dohc/cli/protocol";
 import {
+  LINKED_CHAT_STORE_RELATIVE_PATH,
+  createAgentDispatchStore,
   createLinkedChatStore,
+  type AgentDispatchStore,
   type LinkedChatStore,
 } from "@dohc/workspace-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -41,6 +45,11 @@ import {
 
 const WORKSPACE_ID = "workspace-cli-server";
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
+const requireModule = createRequire(import.meta.url);
+type DispatchDb = Parameters<typeof createAgentDispatchStore>[0];
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => DispatchDb;
+};
 
 type ArgsFor<Verb extends CliVerb> = Extract<CliRequest, { verb: Verb }>["args"];
 
@@ -101,6 +110,8 @@ describe("CLI socket server", () => {
   let workspaceRoot: string;
   let stateDir: string;
   let store: LinkedChatStore | null;
+  let dispatchDb: DispatchDb | null;
+  let dispatchStore: AgentDispatchStore;
   let server: CliServerHandle | null;
   let token: string;
   let calls: CallCounts;
@@ -141,10 +152,12 @@ describe("CLI socket server", () => {
     body: string;
     attachments?: string[];
     needsDecision?: boolean;
+    runId?: string;
   }): Promise<CliResultByVerb["post"]> {
     return invoke("post", {
       cwd: workspaceRoot,
       actor: input.actor,
+      ...(input.runId ? { runId: input.runId } : {}),
       channel: input.channel ?? "general",
       title: input.title,
       attachments: input.attachments ?? [],
@@ -180,6 +193,9 @@ describe("CLI socket server", () => {
         return `${kind}_${idCounters[kind]}`;
       },
     });
+    await store.listChannels({ workspaceId: WORKSPACE_ID });
+    dispatchDb = new DatabaseSync(join(workspaceRoot, LINKED_CHAT_STORE_RELATIVE_PATH));
+    dispatchStore = createAgentDispatchStore(dispatchDb);
     registryWorkspace = { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot };
     calls = {
       listWorkspaces: 0,
@@ -193,6 +209,7 @@ describe("CLI socket server", () => {
     context = {
       ...registryWorkspace,
       store,
+      dispatchStore,
       readOnly: false,
       async fileObjectIdForPath(path) {
         return path === "tracked.md" ? "object_tracked" : null;
@@ -254,6 +271,8 @@ describe("CLI socket server", () => {
   afterEach(async () => {
     await server?.close();
     server = null;
+    dispatchDb?.close();
+    dispatchDb = null;
     await store?.close();
     store = null;
     await rm(tempRoot, { recursive: true, force: true });
@@ -494,6 +513,79 @@ describe("CLI socket server", () => {
     ]);
     expect(calls.identity).toBe(2);
     expect(calls.writable).toBe(2);
+    expect(errors).toEqual([]);
+  });
+
+  it("links only agent-authored messages carrying a valid local run id", async () => {
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_dispatch_trigger",
+      threadId: "thread_dispatch",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for CLI linkage.");
+
+    const opened = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Runner report",
+      body: "Opening report",
+    });
+    const replied = await invoke("reply", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      runId: claim.run.runId,
+      thread: opened.threadId,
+      attachments: [],
+      needsDecision: false,
+      body: "Final report",
+    });
+    const human = await post({
+      actor: "human",
+      runId: claim.run.runId,
+      title: "Human terminal write",
+      body: "Must not be linked",
+    });
+    const unknown = await post({
+      actor: "agent",
+      runId: "run_unknown",
+      title: "Unknown run",
+      body: "Still posts",
+    });
+    const invalid = await post({
+      actor: "agent",
+      runId: " ",
+      title: "Invalid run",
+      body: "Also still posts",
+    });
+    await invoke("react", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      runId: claim.run.runId,
+      message: opened.messageId,
+      emoji: "👍",
+    });
+
+    const engineMessageId = (id: string) =>
+      id.startsWith("msg_") ? `message_${id.slice("msg_".length)}` : id;
+    expect(dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([
+      engineMessageId(opened.messageId),
+      engineMessageId(replied.messageId),
+    ]);
+    expect(dispatchStore.runIdForMessage(
+      WORKSPACE_ID,
+      engineMessageId(human.messageId),
+    )).toBeNull();
+    expect(dispatchStore.runIdForMessage(
+      WORKSPACE_ID,
+      engineMessageId(unknown.messageId),
+    )).toBeNull();
+    expect(dispatchStore.runIdForMessage(
+      WORKSPACE_ID,
+      engineMessageId(invalid.messageId),
+    )).toBeNull();
     expect(errors).toEqual([]);
   });
 
@@ -903,6 +995,11 @@ describe("CLI socket server", () => {
       rootPath: lateRoot,
     };
     const lateStore = createLinkedChatStore(lateRoot);
+    await lateStore.listChannels({ workspaceId: lateWorkspace.workspaceId });
+    const lateDispatchDb = new DatabaseSync(
+      join(lateRoot, LINKED_CHAT_STORE_RELATIVE_PATH),
+    );
+    const lateDispatchStore = createAgentDispatchStore(lateDispatchDb);
     const originalOpenWorkspace = serverOptions.openWorkspace;
     serverOptions.listWorkspaces = () => [registryWorkspace, lateWorkspace];
     serverOptions.openWorkspace = async (workspace) => {
@@ -912,6 +1009,7 @@ describe("CLI socket server", () => {
       return {
         ...lateWorkspace,
         store: lateStore,
+        dispatchStore: lateDispatchStore,
         readOnly: false,
         async fileObjectIdForPath() {
           return null;
@@ -928,6 +1026,7 @@ describe("CLI socket server", () => {
       expect(agents).toContain(AGENTS_CHAT_BEGIN_MARKER);
       expect(agents).toContain("`dohc chat inbox`");
     } finally {
+      lateDispatchDb.close();
       await lateStore.close();
     }
   });

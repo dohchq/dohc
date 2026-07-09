@@ -20,7 +20,7 @@ import {
   runReactionToggle,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
-import { findMentions, type MentionCandidate } from "./mentions";
+import type { MentionCandidate } from "./mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import type { PresenceScope, PresenceTransport } from "../collab/presenceChannel";
@@ -202,9 +202,6 @@ export function ChatsView(props: {
   // @-mention roster for this workspace (the user + available agents). When
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
-  // Called after a message that @-mentions an agent is sent, so the shell can
-  // pull that agent into the thread (the existing agent-chat reply path).
-  onAgentMentioned?: (input: { threadId: string; mentioned: MentionCandidate[]; body: string }) => void;
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
   onOpenAddressed?: (notification: AgentNotification) => void;
@@ -214,7 +211,6 @@ export function ChatsView(props: {
   const { workspaceId } = props;
   const collaboration = props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
-  const agentCandidates = mentionCandidates.filter((candidate) => candidate.kind === "agent");
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<Nav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
@@ -419,24 +415,6 @@ export function ChatsView(props: {
     [props, workspaceId],
   );
 
-  // After a human message is sent, pull any @-mentioned agent into the thread
-  // through the shell (which wires the existing agent-chat reply path). Deduped
-  // by candidate id so "@agent @agent" invokes once.
-  const notifyAgentMention = useCallback(
-    (threadId: string, body: string) => {
-      if (!props.onAgentMentioned || agentCandidates.length === 0) return;
-      // Invoke path is code-aware: an @agent typed inside inline code or a
-      // fenced block (e.g. `npm install @agent/pkg`) must NOT invoke the agent.
-      const mentioned = findMentions(body, agentCandidates, { ignoreCode: true }).map(
-        (match) => match.candidate,
-      );
-      if (mentioned.length === 0) return;
-      const unique = Array.from(new Map(mentioned.map((c) => [c.id, c])).values());
-      props.onAgentMentioned({ threadId, mentioned: unique, body });
-    },
-    [agentCandidates, props],
-  );
-
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
   const startThread = useCallback(async () => {
@@ -458,7 +436,6 @@ export function ChatsView(props: {
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
       setChannelThreads((current) => [result.thread, ...current]);
-      notifyAgentMention(result.thread.id, body);
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that chat."));
@@ -466,7 +443,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, notifyAgentMention, props, startingThread, workspaceId]);
+  }, [nav, newThreadBody, props, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -485,7 +462,6 @@ export function ChatsView(props: {
       setMessages((current) => [...current, result.message]);
       setComposer("");
       messagesEndRef.current?.scrollIntoView({ block: "end" });
-      notifyAgentMention(nav.thread.id, body);
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
@@ -496,7 +472,7 @@ export function ChatsView(props: {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [composer, nav, notifyAgentMention, props, sending, workspaceId]);
+  }, [composer, nav, props, sending, workspaceId]);
 
   // Reactions (WS-MU-C2): optimistic add/remove of the viewer's own reaction,
   // then reconcile to the server's canonical list (which carries the real

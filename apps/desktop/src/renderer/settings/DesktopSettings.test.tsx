@@ -48,6 +48,7 @@ const bridge = {
   endAgentRun: vi.fn(async () => {
     mcpEnabled = false;
   }),
+  runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -244,6 +245,102 @@ describe("DesktopSettings", () => {
     expect(snippet.textContent).toContain("/home/ice/dohc/personal");
     // Usage examples are present.
     expect(screen.getByText(/Create a finance app/i)).toBeTruthy();
+  });
+
+  it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    const command = await screen.findByTestId("runner-command-input");
+    expect(command.getAttribute("placeholder")).toContain("Bash(dohc chat:*)");
+    expect(screen.getByText(/unsandboxed runner can read anything/i)).toBeTruthy();
+    await user.type(command, "codex exec --sandbox workspace-write");
+    await user.click(screen.getByRole("switch", { name: "Enable chat runner" }));
+
+    const timeout = screen.getByTestId("runner-timeout-input");
+    await user.clear(timeout);
+    await user.type(timeout, "45");
+    await user.tab();
+
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
+        settings: expect.objectContaining({
+          runner: {
+            command: "codex exec --sandbox workspace-write",
+            enabled: true,
+            timeoutMinutes: 45,
+          },
+        }),
+      }),
+    );
+    expect(
+      screen.getByTestId("runner-configuration-status").getAttribute("data-state"),
+    ).toBe("active");
+  });
+
+  it("saves the runner draft before self-test and reports success", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.type(
+      await screen.findByTestId("runner-command-input"),
+      "claude -p",
+    );
+    await user.click(screen.getByTestId("runner-self-test-button"));
+
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        settings: expect.objectContaining({
+          runner: expect.objectContaining({ command: "claude -p" }),
+        }),
+      }),
+    );
+    expect(bridge.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect((await screen.findByTestId("runner-self-test-result")).textContent).toBe(
+      "self-test ok",
+    );
+    expect(
+      screen.getByTestId("runner-self-test-result").getAttribute("data-state"),
+    ).toBe("success");
+  });
+
+  it("surfaces a failed runner self-test without enabling dispatch", async () => {
+    bridge.runnerSelfTest.mockResolvedValueOnce({
+      ok: false,
+      detail: "Runner did not report within 120 seconds.",
+    });
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
+    await user.click(screen.getByTestId("runner-self-test-button"));
+
+    const result = await screen.findByRole("alert");
+    expect(result.textContent).toContain("did not report within 120 seconds");
+    expect(screen.getByRole("switch", { name: "Enable chat runner" }).getAttribute(
+      "aria-checked",
+    )).toBe("false");
   });
 
   it("copies the config snippet to the clipboard", async () => {

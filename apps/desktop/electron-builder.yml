@@ -24,6 +24,13 @@ files:
   - dist/**
 asar: true
 extraResources:
+  - from: build/icon.png
+    to: tray-icon.png
+  - from: resources/cli-bin
+    to: cli-bin
+    filter:
+      - "dohc"
+      - "dohc.cmd"
   # Native sidecars must stay outside app.asar. This directory is always
   # created by scripts/build-workspace-kernel.mjs; when cargo is unavailable it
   # is empty and packaging still succeeds. macOS/Windows binaries are produced

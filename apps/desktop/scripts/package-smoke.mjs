@@ -19,6 +19,10 @@ function check(ok, label) {
 for (const output of ["dist/main/main.js", "dist/preload/preload.cjs", "dist/renderer/index.html"]) {
   check(existsSync(join(desktopDir, output)), `build output exists: ${output}`);
 }
+check(
+  existsSync(join(desktopDir, "resources/cli-bin/dohc")),
+  "bundled dohc chat CLI exists",
+);
 
 // --- package metadata ------------------------------------------------------
 const pkg = JSON.parse(readFileSync(join(desktopDir, "package.json"), "utf8"));
@@ -53,6 +57,13 @@ if (config) {
         entry?.to === "workspace-kernel",
     ),
     "workspace kernel ships as an unpacked extraResource",
+  );
+  check(
+    extraResources.some(
+      (entry) =>
+        entry?.from === "resources/cli-bin" && entry?.to === "cli-bin",
+    ),
+    "dohc chat CLI ships as an unpacked extraResource",
   );
 
   // Fuse hardening intent: electron-builder >=24.12 flips these itself via

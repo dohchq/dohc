@@ -46,7 +46,7 @@ describe("executeCli", () => {
     const result = await executeCli({
       argv: ["chat", "reply", "th_8f", "--as-agent", "-"],
       cwd: "/workspace/project",
-      env: {},
+      env: { DOHC_RUN_ID: "run_ambient" },
       readStdin: async () => "A detailed report\n",
       request: async (request) => {
         requests.push(request);
@@ -60,6 +60,7 @@ describe("executeCli", () => {
         args: {
           cwd: "/workspace/project",
           actor: "agent",
+          runId: "run_ambient",
           thread: "th_8f",
           attachments: [],
           needsDecision: false,
@@ -68,6 +69,73 @@ describe("executeCli", () => {
       },
     ]);
     expect(result.stdout).toBe("replied th_8f2k1c msg_new\n");
+  });
+
+  it("passes the ambient run id through every chat write request only", async () => {
+    const requests: CliRequestWithoutToken[] = [];
+    const request = async (value: CliRequestWithoutToken): Promise<unknown> => {
+      requests.push(value);
+      if (value.verb === "post") {
+        return { channel, threadId: "th_new", messageId: "msg_post", title: "Run report" };
+      }
+      if (value.verb === "react") {
+        return {
+          threadId: "th_new",
+          messageId: "msg_post",
+          emoji: "+1",
+          state: "added" as const,
+        };
+      }
+      return { channels: [channel] };
+    };
+    const common = {
+      cwd: "/workspace",
+      env: { DOHC_RUN_ID: "run_env" },
+      request,
+    };
+
+    await executeCli({
+      ...common,
+      argv: ["chat", "post", "general", "--title", "Run report", "done"],
+    });
+    await executeCli({
+      ...common,
+      argv: ["chat", "react", "msg_post", "+1", "--as-agent"],
+    });
+    await executeCli({
+      ...common,
+      argv: ["chat", "channels"],
+    });
+
+    expect(requests.map((value) => ({ verb: value.verb, args: value.args }))).toEqual([
+      {
+        verb: "post",
+        args: {
+          cwd: "/workspace",
+          actor: "human",
+          runId: "run_env",
+          channel: "general",
+          title: "Run report",
+          attachments: [],
+          needsDecision: false,
+          body: "done",
+        },
+      },
+      {
+        verb: "react",
+        args: {
+          cwd: "/workspace",
+          actor: "agent",
+          runId: "run_env",
+          message: "msg_post",
+          emoji: "+1",
+        },
+      },
+      {
+        verb: "channels",
+        args: { cwd: "/workspace", actor: "human" },
+      },
+    ]);
   });
 
   it("sends show --peek without consuming read state", async () => {

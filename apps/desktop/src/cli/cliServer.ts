@@ -14,8 +14,10 @@ import {
 } from "@dohc/cli/protocol";
 import { renderShowMarkdown } from "@dohc/cli/render";
 import {
+  AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
   queryChatMessagesGranular,
+  type AgentDispatchStore,
   type ChannelThreadSummary,
   type ChatChannelSummary,
   type ChatMessage,
@@ -101,6 +103,7 @@ export interface CliRegistryWorkspace {
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
+  dispatchStore: AgentDispatchStore;
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
@@ -748,6 +751,33 @@ async function notifyWrite(
   }
 }
 
+function linkRunMessage(
+  context: CliWorkspaceContext,
+  input: { actor: CliActor; runId?: string; messageId: string },
+  options: CliServerOptions,
+): void {
+  if (input.actor !== "agent" || !input.runId) return;
+  try {
+    const run = context.dispatchStore.getRunRecord(input.runId);
+    if (!run || run.workspaceId !== context.workspaceId) return;
+    context.dispatchStore.recordRunMessage({
+      workspaceId: context.workspaceId,
+      messageId: input.messageId,
+      runId: input.runId,
+    });
+  } catch (error) {
+    if (
+      error instanceof AgentDispatchStoreError &&
+      (error.code === "invalid-input" || error.code === "run-not-found")
+    ) {
+      return;
+    }
+    try {
+      options.onError?.(error);
+    } catch {}
+  }
+}
+
 async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -951,6 +981,11 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
+      linkRunMessage(context, {
+        actor: request.args.actor,
+        ...(request.args.runId ? { runId: request.args.runId } : {}),
+        messageId: started.message.id,
+      }, options);
       await notifyWrite(options, context);
       return {
         channel: channel.cli,
@@ -1002,6 +1037,11 @@ async function dispatch(
         needsDecision: request.args.needsDecision,
         attachments,
       });
+      linkRunMessage(context, {
+        actor: request.args.actor,
+        ...(request.args.runId ? { runId: request.args.runId } : {}),
+        messageId: message.id,
+      }, options);
       let resolvedByReply = false;
       let resolutionFailure: string | null = null;
       if (decisionMessage) {

@@ -608,7 +608,7 @@ export const ChatChannelRecord = z.object({
   id: CHAT_CHANNEL_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  kind: z.enum(["channel", "dm"]),
+  kind: z.enum(["channel", "dm", "agent"]),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
   threadCount: z.number().int().min(0),
@@ -1682,6 +1682,30 @@ export const AgentPermissionResponsePayload = z.object({
 });
 export type AgentPermissionResponsePayload = z.infer<typeof AgentPermissionResponsePayload>;
 
+export const RunnerSelfTestPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
+
+export const StopAgentRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type StopAgentRunPayload = z.infer<typeof StopAgentRunPayload>;
+
+export const ResumeThreadDispatchPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+}).strict();
+export type ResumeThreadDispatchPayload = z.infer<
+  typeof ResumeThreadDispatchPayload
+>;
+
+export const RunnerSelfTestResult = z.object({
+  ok: z.boolean(),
+  detail: z.string().min(1).max(2_000),
+}).strict();
+export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
+
 export const DesktopUserSettings = DesktopUserSettingsSchema;
 export const DesktopUserSettingsResult = DesktopUserSettingsResultSchema;
 export type DesktopUserSettings = DesktopUserSettingsType;
@@ -2096,6 +2120,9 @@ export interface DohcDesktopBridge {
   answerAgentPermission(
     payload: AgentPermissionResponsePayload,
   ): Promise<AgentPanelSnapshotResult>;
+  stopAgentRun(payload: StopAgentRunPayload): Promise<void>;
+  resumeThreadDispatch(payload: ResumeThreadDispatchPayload): Promise<void>;
+  runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
   resetUserSettings(): Promise<DesktopUserSettingsResult>;

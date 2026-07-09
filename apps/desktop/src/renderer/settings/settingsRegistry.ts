@@ -45,8 +45,8 @@ export const SETTINGS_SECTIONS = [
   {
     id: "agents",
     label: "Agents & MCP",
-    scope: "Workspace",
-    keywords: ["agent", "mcp", "claude", "codex", "server"],
+    scope: "Mixed",
+    keywords: ["agent", "mcp", "claude", "codex", "server", "runner", "dispatch", "timeout"],
     Icon: Bot,
   },
   {

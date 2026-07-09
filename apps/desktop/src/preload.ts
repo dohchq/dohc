@@ -203,6 +203,12 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.stopAgentSession, payload),
   answerAgentPermission: (payload) =>
     ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
+  stopAgentRun: (payload) =>
+    ipcRenderer.invoke(CHANNELS.stopAgentRun, payload),
+  resumeThreadDispatch: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resumeThreadDispatch, payload),
+  runnerSelfTest: (payload) =>
+    ipcRenderer.invoke(CHANNELS.runnerSelfTest, payload),
   getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
   setUserSettings: (payload: SetUserSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),

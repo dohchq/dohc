@@ -3,7 +3,10 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createAgentDispatchStore } from "./agentDispatchStore";
+import {
+  AgentDispatchStoreError,
+  createAgentDispatchStore,
+} from "./agentDispatchStore";
 import { createEngineSchema, type EngineSqliteDb } from "./engineDbSchema";
 
 const requireModule = createRequire(import.meta.url);
@@ -256,6 +259,71 @@ describe("agent dispatch store", () => {
         sinceMs: 2500,
       }),
     ).toBe(1);
+  });
+
+  it("links report messages to a known run locally and idempotently", () => {
+    const db = database();
+    let nextRun = 0;
+    const store = createAgentDispatchStore(db, {
+      createRunId: () => `run-${(nextRun += 1)}`,
+    });
+    store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-trigger-1",
+      threadId: "thread-1",
+    });
+    const first = store.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+    if (!first) throw new Error("Expected a run to link messages to.");
+
+    expect(store.recordRunMessage({
+      workspaceId: WORKSPACE_ID,
+      messageId: "message-report-b",
+      runId: first.run.runId,
+    })).toBe(true);
+    expect(store.recordRunMessage({
+      workspaceId: WORKSPACE_ID,
+      messageId: "message-report-a",
+      runId: first.run.runId,
+    })).toBe(true);
+    expect(store.recordRunMessage({
+      workspaceId: WORKSPACE_ID,
+      messageId: "message-report-a",
+      runId: first.run.runId,
+    })).toBe(false);
+    expect(store.listRunMessages(WORKSPACE_ID, first.run.runId)).toEqual([
+      "message-report-a",
+      "message-report-b",
+    ]);
+    expect(store.runIdForMessage(WORKSPACE_ID, "message-report-a")).toBe(first.run.runId);
+    expect(store.runIdForMessage(WORKSPACE_ID, "message-unlinked")).toBeNull();
+
+    expect(db.prepare("SELECT op_kind FROM replication_log").all()).toEqual([]);
+
+    expect(() => store.recordRunMessage({
+      workspaceId: WORKSPACE_ID,
+      messageId: "message-unknown-run",
+      runId: "run-missing",
+    })).toThrowError(AgentDispatchStoreError);
+
+    store.completeRun({ runId: first.run.runId, exitCode: 0 });
+    store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-trigger-2",
+      threadId: "thread-1",
+    });
+    const second = store.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+    if (!second) throw new Error("Expected a second run.");
+    let conflict: unknown;
+    try {
+      store.recordRunMessage({
+        workspaceId: WORKSPACE_ID,
+        messageId: "message-report-a",
+        runId: second.run.runId,
+      });
+    } catch (error) {
+      conflict = error;
+    }
+    expect(conflict).toMatchObject({ code: "state-corrupt" });
   });
 
   it("persists pause state and never claims work from a paused thread", () => {

@@ -50,6 +50,7 @@ export function buildCliRequest(
   command: ParsedCliCommand,
   cwdInput: string,
   stdinBody?: string,
+  runId?: string,
 ): CliRequestWithoutToken {
   const common = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -88,6 +89,7 @@ export function buildCliRequest(
         args: {
           cwd: common.cwd,
           actor: common.actor,
+          ...(runId ? { runId } : {}),
           channel: command.channel,
           ...(command.title ? { title: command.title } : {}),
           attachments: command.attachments,
@@ -102,6 +104,7 @@ export function buildCliRequest(
         args: {
           cwd: common.cwd,
           actor: common.actor,
+          ...(runId ? { runId } : {}),
           thread: command.thread,
           ...(command.to ? { to: command.to } : {}),
           attachments: command.attachments,
@@ -117,6 +120,7 @@ export function buildCliRequest(
         args: {
           cwd: common.cwd,
           actor: common.actor,
+          ...(runId ? { runId } : {}),
           message: command.message,
           emoji: command.emoji,
         },
@@ -163,7 +167,12 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     const stdinBody = await bodyForCommand(command, options.readStdin ?? processStdin);
-    const request = buildCliRequest(command, options.cwd ?? process.cwd(), stdinBody);
+    const request = buildCliRequest(
+      command,
+      options.cwd ?? process.cwd(),
+      stdinBody,
+      env.DOHC_RUN_ID,
+    );
     const send =
       options.request ??
       ((value: CliRequestWithoutToken) => sendCliRequest(value, { ...options.client, env }));

@@ -10,7 +10,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_RUNNER_SETTINGS,
   DEFAULT_USER_SETTINGS,
+  DesktopUserSettings,
   effectiveThemeMode,
   mergeDesktopUserSettings,
   parseDesktopUserSettings,
@@ -61,6 +63,46 @@ describe("desktop user settings model", () => {
     expect(userSettingsModified(DEFAULT_USER_SETTINGS)).toBe(false);
   });
 
+  it("adds runner defaults to settings written before runner support", () => {
+    const legacySettings = {
+      version: DEFAULT_USER_SETTINGS.version,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+      general: DEFAULT_USER_SETTINGS.general,
+      editor: DEFAULT_USER_SETTINGS.editor,
+      notifications: DEFAULT_USER_SETTINGS.notifications,
+    };
+
+    expect(parseDesktopUserSettings(legacySettings)).toEqual({
+      ...legacySettings,
+      runner: DEFAULT_RUNNER_SETTINGS,
+    });
+  });
+
+  it("merges runner fields independently and validates timeout bounds", () => {
+    const next = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+      runner: { command: "codex exec", enabled: true },
+    });
+
+    expect(next.runner).toEqual({
+      command: "codex exec",
+      enabled: true,
+      timeoutMinutes: 30,
+    });
+    expect(next.appearance).toEqual(DEFAULT_USER_SETTINGS.appearance);
+    expect(
+      DesktopUserSettings.safeParse({
+        ...next,
+        runner: { ...next.runner, timeoutMinutes: 0 },
+      }).success,
+    ).toBe(false);
+    expect(
+      DesktopUserSettings.safeParse({
+        ...next,
+        runner: { ...next.runner, timeoutMinutes: 1441 },
+      }).success,
+    ).toBe(false);
+  });
+
   it("resolves system theme from the OS preference", () => {
     expect(effectiveThemeMode("system", true)).toBe("dark");
     expect(effectiveThemeMode("system", false)).toBe("light");
@@ -88,6 +130,35 @@ describe("desktop user settings store", () => {
     expect(await readUserSettingsFile(await tempRoot())).toEqual({
       settings: DEFAULT_USER_SETTINGS,
       source: "default",
+    });
+  });
+
+  it("hydrates runner defaults when reading a legacy version-one file", async () => {
+    const root = await tempRoot();
+    await writeFile(
+      join(root, USER_SETTINGS_FILE),
+      JSON.stringify({
+        version: 1,
+        appearance: {
+          ...DEFAULT_USER_SETTINGS.appearance,
+          themeMode: "dark",
+        },
+        general: DEFAULT_USER_SETTINGS.general,
+        editor: DEFAULT_USER_SETTINGS.editor,
+        notifications: DEFAULT_USER_SETTINGS.notifications,
+      }),
+    );
+
+    expect(await readUserSettingsFile(root)).toEqual({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: {
+          ...DEFAULT_USER_SETTINGS.appearance,
+          themeMode: "dark",
+        },
+        runner: DEFAULT_RUNNER_SETTINGS,
+      },
+      source: "stored",
     });
   });
 

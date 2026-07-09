@@ -4,7 +4,9 @@ import type {
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
+import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
+import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
 
 export function configSnippet(config: McpConfigResult): string {
@@ -28,9 +30,17 @@ const USAGE_EXAMPLES = [
 export function AgentsMcpSettings(props: {
   workspaceId: string;
   workspacePath: string;
+  runner: RunnerSettings;
+  onRunnerChange: (runner: RunnerSettings) => Promise<void>;
   onAgentActiveChange?: (active: boolean) => void;
 }) {
-  const { workspaceId, workspacePath, onAgentActiveChange } = props;
+  const {
+    workspaceId,
+    workspacePath,
+    runner,
+    onRunnerChange,
+    onAgentActiveChange,
+  } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -162,6 +172,12 @@ export function AgentsMcpSettings(props: {
 
   return (
     <div className="flex flex-col">
+      <RunnerSettingsCard
+        workspaceId={workspaceId}
+        runner={runner}
+        onRunnerChange={onRunnerChange}
+      />
+
       <SettingRow
         title="Workspace"
         description="The local folder exposed to this workspace-scoped MCP server."

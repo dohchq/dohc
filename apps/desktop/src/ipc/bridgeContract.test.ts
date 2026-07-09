@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ChatChannelRecord,
   ChatReactionRecord,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
@@ -11,6 +12,10 @@ import {
   PresencePublishPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
+  RunnerSelfTestPayload,
+  RunnerSelfTestResult,
+  StopAgentRunPayload,
+  ResumeThreadDispatchPayload,
   SendChatMessagePayload,
   SendChatMessageResult,
   SetChatReactionPayload,
@@ -102,6 +107,56 @@ describe("settings IPC contract", () => {
             defaultModel: "x".repeat(201),
           },
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts only a scoped runner self-test request and bounded result", () => {
+    expect(RunnerSelfTestPayload.parse({ workspaceId: "ws-settings" })).toEqual({
+      workspaceId: "ws-settings",
+    });
+    expect(
+      RunnerSelfTestPayload.safeParse({
+        workspaceId: "ws-settings",
+        command: "untrusted command",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerSelfTestResult.parse({ ok: true, detail: "self-test ok" }),
+    ).toEqual({ ok: true, detail: "self-test ok" });
+    expect(
+      RunnerSelfTestResult.safeParse({
+        ok: false,
+        detail: "Runner timed out.",
+        logPath: "/tmp/log",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerSelfTestResult.safeParse({ ok: false, detail: "" }).success,
+    ).toBe(false);
+  });
+
+  it("keeps chat-run stop and resume controls workspace scoped", () => {
+    expect(StopAgentRunPayload.parse({ workspaceId: "ws-settings" })).toEqual({
+      workspaceId: "ws-settings",
+    });
+    expect(
+      StopAgentRunPayload.safeParse({
+        workspaceId: "ws-settings",
+        pid: 42,
+      }).success,
+    ).toBe(false);
+    expect(
+      ResumeThreadDispatchPayload.parse({
+        workspaceId: "ws-settings",
+        threadId: "thread-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
+    expect(
+      ResumeThreadDispatchPayload.safeParse({
+        workspaceId: "ws-settings",
+        threadId: "thread-1",
+        paused: false,
       }).success,
     ).toBe(false);
   });
@@ -532,6 +587,22 @@ describe("try-in-version IPC contract (PR 0N-2)", () => {
 });
 
 describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
+  it("admits the auto-provisioned agent channel kind", () => {
+    expect(
+      ChatChannelRecord.parse({
+        id: "channel-agent",
+        name: "My agent",
+        slug: "my-agent",
+        kind: "agent",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        threadCount: 0,
+        unreadCount: 0,
+        wireId: "channel_wire_agent_v1",
+      }).kind,
+    ).toBe("agent");
+  });
+
   it("accepts well-formed moment pages, details, and restore results", () => {
     expect(
       ListEngineMomentsPayload.parse({

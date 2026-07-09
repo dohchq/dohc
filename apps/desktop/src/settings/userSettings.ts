@@ -6,6 +6,19 @@ export type ThemeMode = (typeof THEME_MODES)[number];
 export const DENSITY_MODES = ["comfortable", "compact"] as const;
 export type DensityMode = (typeof DENSITY_MODES)[number];
 
+export const RunnerSettings = z.object({
+  command: z.string().max(4096),
+  enabled: z.boolean(),
+  timeoutMinutes: z.number().int().min(1).max(1440),
+}).strict();
+export type RunnerSettings = z.infer<typeof RunnerSettings>;
+
+export const DEFAULT_RUNNER_SETTINGS: RunnerSettings = {
+  command: "",
+  enabled: false,
+  timeoutMinutes: 30,
+};
+
 export const DesktopUserSettings = z.object({
   version: z.literal(1),
   appearance: z.object({
@@ -26,6 +39,7 @@ export const DesktopUserSettings = z.object({
     updates: z.boolean(),
     agentRuns: z.boolean(),
   }).strict(),
+  runner: RunnerSettings.default(DEFAULT_RUNNER_SETTINGS),
 }).strict();
 export type DesktopUserSettings = z.infer<typeof DesktopUserSettings>;
 
@@ -48,6 +62,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
     updates: true,
     agentRuns: true,
   },
+  runner: DEFAULT_RUNNER_SETTINGS,
 };
 
 export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;
@@ -61,11 +76,12 @@ export const DesktopUserSettingsResult = z.object({
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
 
 export type DesktopUserSettingsPatch =
-  Partial<Omit<DesktopUserSettings, "appearance" | "general" | "editor" | "notifications">> & {
+  Partial<Omit<DesktopUserSettings, "appearance" | "general" | "editor" | "notifications" | "runner">> & {
     appearance?: Partial<DesktopUserSettings["appearance"]>;
     general?: Partial<DesktopUserSettings["general"]>;
     editor?: Partial<DesktopUserSettings["editor"]>;
     notifications?: Partial<DesktopUserSettings["notifications"]>;
+    runner?: Partial<DesktopUserSettings["runner"]>;
   };
 
 export function parseDesktopUserSettings(raw: unknown): DesktopUserSettings {
@@ -96,6 +112,7 @@ export function mergeDesktopUserSettings(
     general: { ...current.general, ...patch.general },
     editor: { ...current.editor, ...patch.editor },
     notifications: { ...current.notifications, ...patch.notifications },
+    runner: { ...current.runner, ...patch.runner },
   });
 }
 

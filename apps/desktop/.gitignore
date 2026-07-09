@@ -6,3 +6,4 @@ release/
 # machine/CI job, so it must never be committed. electron-builder ships it
 # from here as an unpacked extraResource when present.
 resources/workspace-kernel/
+resources/cli-bin/

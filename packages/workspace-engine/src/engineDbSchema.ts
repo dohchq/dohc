@@ -509,6 +509,17 @@ const AGENT_DISPATCH_DDL = `
     ON agent_run_records(workspace_id, thread_id, started_at_ms);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_records_run_id
     ON agent_run_records(run_id);
+  -- Local-only provenance from agent-authored chat reports to their private
+  -- runner trace. This table is deliberately absent from every replication,
+  -- projection, search, and export payload.
+  CREATE TABLE IF NOT EXISTS run_message_links (
+    workspace_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_run_message_links_run
+    ON run_message_links(workspace_id, run_id, message_id);
   CREATE TABLE IF NOT EXISTS chat_dispatch_pause (
     workspace_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,

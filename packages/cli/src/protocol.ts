@@ -27,6 +27,7 @@ export const showArgsSchema = z
 export const postArgsSchema = z
   .object({
     ...argsBase,
+    runId: z.string().min(1).optional(),
     channel: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -37,6 +38,7 @@ export const postArgsSchema = z
 export const replyArgsSchema = z
   .object({
     ...argsBase,
+    runId: z.string().min(1).optional(),
     thread: z.string().min(1),
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -48,6 +50,7 @@ export const replyArgsSchema = z
 export const reactArgsSchema = z
   .object({
     ...argsBase,
+    runId: z.string().min(1).optional(),
     message: z.string().min(1),
     emoji: z.string().min(1),
   })

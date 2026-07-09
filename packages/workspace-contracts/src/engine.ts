@@ -1449,6 +1449,13 @@ export interface AgentDispatchStore {
     threadId: ChatThreadId;
     sinceMs: number;
   }): number;
+  recordRunMessage(input: {
+    workspaceId: WorkspaceId;
+    messageId: ChatMessageId;
+    runId: string;
+  }): boolean;
+  listRunMessages(workspaceId: WorkspaceId, runId: string): ChatMessageId[];
+  runIdForMessage(workspaceId: WorkspaceId, messageId: ChatMessageId): string | null;
   getRunRecord(runId: string): AgentRunRecord | null;
   setThreadDispatchPaused(input: {
     workspaceId: WorkspaceId;
