@@ -676,6 +676,24 @@ describe("engine file path classifier (shared by search and capture)", () => {
     expect(classifyEngineFilePath("environments.md")).toEqual({ kind: "tracked" });
   });
 
+  it("classifies Windows trailing-dot/space .env aliases as secret", () => {
+    // Windows silently strips trailing dots and spaces, so a write to
+    // `secret.env ` or `secret.env.` lands in the real `secret.env`. Without
+    // alias normalization the floor classified these as tracked — versioning
+    // their plaintext, indexing them in search, and admitting them through the
+    // share selector. They must classify exactly like their canonical names.
+    expect(classifyEngineFilePath(".env ")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath(".env.")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath(".ENV ")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("secret.env ")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("secret.env.")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("config/.env ")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath("deploy/prod.env ")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePath(".env.local ")).toEqual({ kind: "secret" });
+    // A trailing-space ordinary file is still tracked (no false secrets).
+    expect(classifyEngineFilePath("notes/today.md ")).toEqual({ kind: "tracked" });
+  });
+
   it("classifies percent-encoded .env disguises on the decoded path", () => {
     // validateUserWritePath decodes %2e -> "." and %2f -> "/" (and the
     // double-encoded forms); the secret checks must see the decoded path or

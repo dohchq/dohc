@@ -463,7 +463,7 @@ describe("parseChatThreadTopic", () => {
 
   it("returns null for a non-thread or malformed topic", () => {
     // No prefix, empty tail, or a tail carrying the scope-key NUL separator.
-    for (const topic of ["wire-1", "docs/a.md", "chat:thread:", "chat:thread", "", "chat:thread:a b"]) {
+    for (const topic of ["wire-1", "docs/a.md", "chat:thread:", "chat:thread", "", "chat:thread:a\u0000b"]) {
       expect(parseChatThreadTopic(topic), topic).toBeNull();
     }
   });

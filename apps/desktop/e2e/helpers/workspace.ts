@@ -28,6 +28,26 @@ export interface WorkspaceSummary {
   mode: "local-first" | "cloud-first-local-copy" | "cloud-only";
 }
 
+// Windows refuses to unlink a file whose handle is still open (EBUSY/EPERM),
+// unlike POSIX. When a spec tears down, a just-closed sqlite handle (the app's
+// engine.db-shm/-wal, or a relay child's db) can linger for a beat before the OS
+// releases it. rm then leaks the whole temp tree. Retry with a short backoff so
+// cleanup wins that race without a hard sleep on the fast (non-Windows) path.
+async function removeTempTree(dir: string): Promise<void> {
+  const retriableCodes = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
+  const maxAttempts = process.platform === "win32" ? 8 : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      if (attempt === maxAttempts || !retriableCodes.has(code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+    }
+  }
+}
+
 export async function createTempWorkspace(): Promise<TempWorkspace> {
   const baseDir = await mkdtemp(join(tmpdir(), "dohc-desktop-e2e-"));
   const homeDir = join(baseDir, "home");
@@ -38,7 +58,7 @@ export async function createTempWorkspace(): Promise<TempWorkspace> {
     baseDir,
     homeDir,
     rootPath,
-    cleanup: () => rm(baseDir, { recursive: true, force: true }),
+    cleanup: () => removeTempTree(baseDir),
   };
 }
 

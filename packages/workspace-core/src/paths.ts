@@ -24,8 +24,11 @@ export function validateAttachedFolder(path: string): FolderValidation {
 
 // Windows silently strips trailing dots/spaces from path segments, so
 // ".dohc." and ".dohc " alias the reserved directory there. Strip them before
-// any segment comparison.
-function stripWindowsAliasSuffix(segment: string): string {
+// any segment comparison. Exported so the engine path floor (secret vs tracked
+// classification) applies the SAME alias normalization these reserved/ignored
+// guards do — otherwise `secret.env ` classifies as tracked on Windows while
+// naming the real `secret.env` secret on disk.
+export function stripWindowsAliasSuffix(segment: string): string {
   return segment.replace(/[. ]+$/, "");
 }
 

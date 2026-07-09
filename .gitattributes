@@ -1,0 +1,25 @@
+# Repo-wide EOL policy. Without this, EOL handling depends on each developer's
+# local core.autocrlf; the Windows Git installer default (autocrlf=true) checks
+# every text file out as CRLF, which would break byte-exact / hash-of-source
+# assertions and reintroduce CRLF churn. Normalize all text to LF in the repo
+# and check it out as LF on every platform.
+* text=auto eol=lf
+
+# Shell scripts must stay LF regardless of platform.
+*.sh text eol=lf
+
+# Binary assets: never normalize or diff as text.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.node binary
+*.wasm binary

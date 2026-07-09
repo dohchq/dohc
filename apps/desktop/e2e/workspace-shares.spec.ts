@@ -159,9 +159,11 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(revokedFetch.status).toBe(404);
     expect(revokedFetch.body).toBe(missingFetch.body);
   } finally {
+    // Stop the relay child before removing the temp tree it holds open, or
+    // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
+    await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
     else await temp.cleanup();
-    await relay?.stop();
   }
 });
 
@@ -391,8 +393,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
     await expect(page.getByText("The comet-tail draft, round two.")).toBeVisible();
   } finally {
+    // Stop the relay child before removing the temp tree it holds open, or
+    // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
+    await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
     else await temp.cleanup();
-    await relay?.stop();
   }
 });

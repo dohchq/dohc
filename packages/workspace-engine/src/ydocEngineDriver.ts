@@ -398,7 +398,7 @@ export function createYDocEngineDriver(
   const globalReservationKey = (
     workspaceId: WorkspaceId,
     objectId: WorkspaceObjectId,
-  ) => `${enginePath} ${workspaceId} ${objectId}`;
+  ) => `${enginePath}\u0000${workspaceId}\u0000${objectId}`;
   const nowMs = options.nowMs ?? (() => Date.now());
   const createMomentId =
     options.createMomentId ?? (() => randomUUID() as VersionedTextMomentId);
@@ -428,7 +428,7 @@ export function createYDocEngineDriver(
   // close the live session first (never two live Y.Docs for two versions).
   const liveSessions = new Map<string, YDocSession>();
   const liveKey = (workspaceId: WorkspaceId, objectId: WorkspaceObjectId) =>
-    `${workspaceId} ${objectId}`;
+    `${workspaceId}\u0000${objectId}`;
 
   function projectMarkdown(doc: Y.Doc, contentKind: YDocContentKind): string {
     // plainText docs already store their body as Y.Text; yDocToMarkdown reads

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -11,6 +12,8 @@ import {
   SECRET_KEY_RELATIVE_PATH,
   SecretFileStoreError,
   createSecretFileStore,
+  readWorkspaceDataKeyForEnrollment,
+  readWorkspaceSecretState,
 } from "./secretFileStore";
 import { VersionedTextStoreError, createVersionedTextStore } from "./versionedTextStore";
 import { createLinkedChatStore } from "./linkedChatStore";
@@ -1160,5 +1163,45 @@ describe("no plaintext accessor except materializeSecretFile", () => {
       }
       expect(JSON.stringify(outputs).includes(MARKER)).toBe(false);
     });
+  });
+});
+
+describe("secret-state reads never create the engine store", () => {
+  // Regression: the cloud-status IPC calls readWorkspaceSecretState /
+  // readWorkspaceDataKeyForEnrollment on every workspace open, INCLUDING
+  // workspaces that opted out of the engine. Those reads must not open a
+  // writable connection to the shared engine.db — doing so created a zero-row
+  // store for opted-out workspaces (the file existed only because the read
+  // touched it). An absent store means no protected rows can exist, so the
+  // read returns the empty answer without a filesystem side effect.
+  const enginePath = () => join(root, SECRET_FILE_STORE_RELATIVE_PATH);
+
+  it("readWorkspaceSecretState returns 'none' without creating engine.db", async () => {
+    expect(existsSync(enginePath())).toBe(false);
+    expect(await readWorkspaceSecretState(root, WORKSPACE_ID)).toBe("none");
+    expect(existsSync(enginePath())).toBe(false);
+  });
+
+  it("readWorkspaceDataKeyForEnrollment returns null without creating engine.db", async () => {
+    expect(existsSync(enginePath())).toBe(false);
+    expect(await readWorkspaceDataKeyForEnrollment(root, WORKSPACE_ID)).toBeNull();
+    expect(existsSync(enginePath())).toBe(false);
+  });
+
+  it("still reports existing secrets once the store has protected rows", async () => {
+    // A workspace with real secrets keeps working: the store exists, the read
+    // opens it and finds the protected rows.
+    await withStores(async ({ secrets }) => {
+      await secrets.writeSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        text: ENV_TEXT,
+        metadata: { origin: "local-file", summary: "Updated .env" },
+      });
+    });
+    expect(existsSync(enginePath())).toBe(true);
+    expect(await readWorkspaceSecretState(root, WORKSPACE_ID)).not.toBe("none");
+    expect(await readWorkspaceDataKeyForEnrollment(root, WORKSPACE_ID)).not.toBeNull();
   });
 });
