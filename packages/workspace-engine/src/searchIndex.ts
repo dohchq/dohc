@@ -40,6 +40,12 @@ export interface IndexedSearchCandidateChat {
 
 export type IndexedSearchCandidate = IndexedSearchCandidateFile | IndexedSearchCandidateChat;
 
+export interface GranularChatMessageSearchResult {
+  threadId: string;
+  messageId: string | null;
+  text: string;
+}
+
 function tableHasRows(db: EngineSqliteDb, sql: string, ...params: unknown[]): boolean {
   return Boolean(db.prepare(sql).get(...params));
 }
@@ -349,6 +355,36 @@ function ftsQueryForSubstring(query: string): string | null {
 
 function rowText(row: Record<string, unknown>, key: string): string {
   return String(row[key] ?? "");
+}
+
+export function queryChatMessagesGranular(
+  db: EngineSqliteDb,
+  input: {
+    workspaceId: WorkspaceId;
+    query: string;
+    limit: number;
+  },
+): GranularChatMessageSearchResult[] {
+  const match = ftsQueryForSubstring(input.query);
+  if (!match || !Number.isSafeInteger(input.limit) || input.limit <= 0) return [];
+  return db
+    .prepare(
+      `SELECT thread_id, message_id, text
+       FROM engine_search_chat_messages_fts
+       WHERE engine_search_chat_messages_fts MATCH ?
+         AND workspace_id = ?
+       ORDER BY rowid
+       LIMIT ?`,
+    )
+    .all(match, input.workspaceId, input.limit)
+    .map((row) => {
+      const messageId = rowText(row, "message_id");
+      return {
+        threadId: rowText(row, "thread_id"),
+        messageId: messageId === THREAD_HEADER_MESSAGE_ID ? null : messageId,
+        text: rowText(row, "text"),
+      };
+    });
 }
 
 export function querySearchIndex(input: {

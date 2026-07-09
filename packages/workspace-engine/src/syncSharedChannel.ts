@@ -69,6 +69,8 @@ const CHAT_OP_KINDS = new Set([
   "chat.channel.create",
   "chat.thread.create",
   "chat.message.append",
+  "chat.decision.set",
+  "chat.attachment.add",
   "chat.reaction.set",
 ]);
 
@@ -199,7 +201,12 @@ function opBelongsToChannel(
     channelThreadIds.add(payload.threadId);
     return true;
   }
-  if (opKind === "chat.message.append" || opKind === "chat.reaction.set") {
+  if (
+    opKind === "chat.message.append" ||
+    opKind === "chat.decision.set" ||
+    opKind === "chat.attachment.add" ||
+    opKind === "chat.reaction.set"
+  ) {
     if (typeof payload.threadId !== "string" || !channelThreadIds.has(payload.threadId)) {
       return false;
     }

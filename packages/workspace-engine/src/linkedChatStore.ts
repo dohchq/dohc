@@ -4,16 +4,21 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type {
   ChannelThreadSummary,
+  ChatAgentReadState,
   ChatActor,
+  ChatAttachment,
   ChatChannel,
   ChatChannelId,
   ChatChannelKind,
   ChatChannelSummary,
+  ChatDecisionRecord,
+  ChatDecisionState,
   ChatMessage,
   ChatMessageId,
   ChatReaction,
   ChatReactionAuthor,
   ChatReactionState,
+  ChatMentionRecord,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -42,6 +47,7 @@ import {
   upsertChatMessageSearchIndex,
   upsertThreadHeaderSearchIndex,
 } from "./searchIndex";
+import { parseMentionHandles } from "./chatMentions";
 import {
   THREAD_SNIPPET_TITLE_MAX_CHARS,
   UNTITLED_THREAD_FALLBACK_TITLE,
@@ -57,7 +63,9 @@ import {
   nextOriginSeq,
   readReplicationAckedSeq,
   skippedApplyResult,
+  type ChatAttachmentAddPayload,
   type ChatChannelCreatePayload,
+  type ChatDecisionSetPayload,
   type ChatMessageAppendPayload,
   type ChatReactionSetPayload,
   type ChatThreadCreatePayload,
@@ -68,16 +76,21 @@ export const LINKED_CHAT_PROJECTION_KIND = "thread";
 
 export type {
   ChannelThreadSummary,
+  ChatAgentReadState,
   ChatActor,
+  ChatAttachment,
   ChatChannel,
   ChatChannelId,
   ChatChannelKind,
   ChatChannelSummary,
+  ChatDecisionRecord,
+  ChatDecisionState,
   ChatMessage,
   ChatMessageId,
   ChatReaction,
   ChatReactionAuthor,
   ChatReactionState,
+  ChatMentionRecord,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -97,6 +110,8 @@ export const GENERAL_CHANNEL_NAME = "general";
 // lets those rows converge as ONE channel. Every other channel's wire id is
 // its creator's local channel id (globally unique uuid).
 export const GENERAL_CHANNEL_WIRE_ID = "channel_wire_general_v1";
+export const AGENT_CHANNEL_WIRE_ID = "channel_wire_agent_v1";
+export const AGENT_CHANNEL_NAME = "My agent";
 // Display-title derivation lives in chatThreadTitle.ts (a leaf shared with
 // the search index rebuild); re-exported here so store consumers keep one
 // import surface.
@@ -207,6 +222,12 @@ function normalizePathHint(path: string): string {
   return result.normalized;
 }
 
+function isNormalizedPathHint(path: unknown): path is string {
+  if (typeof path !== "string" || path.length === 0) return false;
+  const result = validateUserWritePath(path);
+  return result.ok && result.normalized === path;
+}
+
 function normalizeThreadTitle(title: string): string {
   const normalized = title.trim();
   if (!normalized || normalized.length > 200) {
@@ -249,7 +270,7 @@ export function channelSlugForName(name: string): string {
 
 function normalizeChannelKind(kind: ChatChannelKind | undefined): ChatChannelKind {
   if (kind === undefined) return "channel";
-  if (kind !== "channel" && kind !== "dm") {
+  if (kind !== "channel" && kind !== "dm" && kind !== "agent") {
     throw new LinkedChatStoreError("invalid-channel-kind", "Channel kind is invalid.");
   }
   return kind;
@@ -316,6 +337,54 @@ function normalizeBody(body: string): string {
   const normalized = body.replace(/\r\n?/g, "\n").trimEnd();
   if (!normalized || Buffer.byteLength(normalized, "utf8") > 64 * 1024) {
     throw new LinkedChatStoreError("invalid-message-body", "Message body is required.");
+  }
+  return normalized;
+}
+
+function normalizeParentMessageId(parentMessageId: string | undefined): string | undefined {
+  if (parentMessageId === undefined) return undefined;
+  if (typeof parentMessageId !== "string" || parentMessageId.length === 0) {
+    throw new LinkedChatStoreError("invalid-message-body", "Parent message id is invalid.");
+  }
+  return parentMessageId;
+}
+
+function normalizeAttachments(
+  attachments: Array<{ objectId: WorkspaceObjectId; pathHint?: string }> | undefined,
+): Array<{ objectId: WorkspaceObjectId; pathHint?: string }> {
+  if (attachments === undefined) return [];
+  if (!Array.isArray(attachments)) {
+    throw new LinkedChatStoreError("invalid-path", "Message attachments are invalid.");
+  }
+  const normalized: Array<{ objectId: WorkspaceObjectId; pathHint?: string }> = [];
+  const seenObjectIds = new Set<WorkspaceObjectId>();
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== "object") {
+      throw new LinkedChatStoreError("invalid-path", "Message attachment is invalid.");
+    }
+    if (
+      typeof attachment.objectId !== "string" ||
+      (attachment.pathHint !== undefined && typeof attachment.pathHint !== "string")
+    ) {
+      throw new LinkedChatStoreError("invalid-path", "Message attachment is invalid.");
+    }
+    const objectId = normalizeObjectId(attachment.objectId);
+    if (seenObjectIds.has(objectId)) continue;
+    seenObjectIds.add(objectId);
+    const pathHint =
+      attachment.pathHint === undefined ? undefined : normalizePathHint(attachment.pathHint);
+    normalized.push({ objectId, ...(pathHint !== undefined ? { pathHint } : {}) });
+  }
+  return normalized;
+}
+
+function normalizeMentionHandle(handle: string): string {
+  if (typeof handle !== "string") {
+    throw new LinkedChatStoreError("invalid-message-body", "Mention handle is invalid.");
+  }
+  const normalized = handle.toLowerCase();
+  if (!/^[a-z0-9-]+$/u.test(normalized)) {
+    throw new LinkedChatStoreError("invalid-message-body", "Mention handle is invalid.");
   }
   return normalized;
 }
@@ -428,7 +497,7 @@ function threadFromRow(row: Record<string, unknown>): ChatThread {
 function channelFromRow(row: Record<string, unknown>): ChatChannel {
   const kind = stringValue(row.kind);
   // Fail closed on a corrupt/hand-edited kind, like actorKindValue.
-  if (kind !== "channel" && kind !== "dm") throw corruptStore();
+  if (kind !== "channel" && kind !== "dm" && kind !== "agent") throw corruptStore();
   return {
     id: stringValue(row.channel_id),
     workspaceId: stringValue(row.workspace_id),
@@ -444,6 +513,8 @@ function messageFromRow(row: Record<string, unknown>): ChatMessage {
   // author_user_id (WS-MU-C0) is the OPAQUE relay identity, kept SEPARATE from
   // the display-only author. NULL/absent for solo/legacy messages.
   const authorUserId = optionalString(row.author_user_id);
+  const parentMessageId = optionalString(row.parent_message_id);
+  if (parentMessageId !== undefined && parentMessageId.length === 0) throw corruptStore();
   return {
     id: stringValue(row.message_id),
     workspaceId: stringValue(row.workspace_id),
@@ -453,8 +524,10 @@ function messageFromRow(row: Record<string, unknown>): ChatMessage {
       displayName: stringValue(row.author_display_name),
     },
     ...(authorUserId !== undefined ? { authorUserId } : {}),
+    ...(parentMessageId !== undefined ? { parentMessageId } : {}),
     body: stringValue(row.body),
     createdAtMs: numberValue(row.created_at_ms),
+    attachments: [],
   };
 }
 
@@ -549,6 +622,189 @@ function reactionFromRow(row: Record<string, unknown>): ChatReaction {
     state: reactionStateValue(row.state),
     atMs: numberValue(row.at_ms),
   };
+}
+
+function attachmentIdFor(messageId: ChatMessageId, objectId: WorkspaceObjectId): string {
+  return createHash("sha256").update(`${messageId}file${objectId}`, "utf8").digest("hex");
+}
+
+function attachmentFromRow(row: Record<string, unknown>): ChatAttachment {
+  if (stringValue(row.target_kind) !== "file") throw corruptStore();
+  const pathHint = optionalString(row.path_hint);
+  return {
+    attachmentId: stringValue(row.attachment_id),
+    threadId: stringValue(row.thread_id),
+    messageId: stringValue(row.message_id),
+    targetKind: "file",
+    objectId: stringValue(row.object_id),
+    ...(pathHint !== undefined ? { pathHint } : {}),
+    createdAtMs: numberValue(row.created_at_ms),
+  };
+}
+
+function decisionStateValue(value: unknown): ChatDecisionState {
+  const state = stringValue(value);
+  if (state !== "open" && state !== "resolved") throw corruptStore();
+  return state;
+}
+
+function decisionFromRow(row: Record<string, unknown>): ChatDecisionRecord {
+  const resolvedByMessageId = optionalString(row.resolved_by_message_id);
+  return {
+    workspaceId: stringValue(row.workspace_id),
+    threadId: stringValue(row.thread_id),
+    messageId: stringValue(row.message_id),
+    state: decisionStateValue(row.state),
+    ...(resolvedByMessageId !== undefined ? { resolvedByMessageId } : {}),
+    atMs: numberValue(row.at_ms),
+  };
+}
+
+interface DecisionOpOrigin {
+  originId: string;
+  originSeq: number;
+}
+
+function upsertDecisionLww(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatDecisionSetPayload,
+  origin: DecisionOpOrigin,
+): void {
+  db.prepare(
+    `INSERT INTO chat_decisions (
+       workspace_id, thread_id, message_id, state, resolved_by_message_id,
+       at_ms, origin_id, origin_seq
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(workspace_id, message_id) DO UPDATE SET
+       thread_id = excluded.thread_id,
+       state = excluded.state,
+       resolved_by_message_id = excluded.resolved_by_message_id,
+       at_ms = excluded.at_ms,
+       origin_id = excluded.origin_id,
+       origin_seq = excluded.origin_seq
+     WHERE excluded.at_ms > chat_decisions.at_ms
+        OR (excluded.at_ms = chat_decisions.at_ms
+            AND (CASE excluded.state WHEN 'resolved' THEN 1 ELSE 0 END) >
+                (CASE chat_decisions.state WHEN 'resolved' THEN 1 ELSE 0 END))
+        OR (excluded.at_ms = chat_decisions.at_ms
+            AND excluded.state = chat_decisions.state
+            AND (excluded.origin_id > chat_decisions.origin_id
+              OR (excluded.origin_id = chat_decisions.origin_id
+                  AND excluded.origin_seq > chat_decisions.origin_seq)))`,
+  ).run(
+    workspaceId,
+    payload.threadId,
+    payload.messageId,
+    payload.state,
+    payload.resolvedByMessageId ?? null,
+    payload.atMs,
+    origin.originId,
+    origin.originSeq,
+  );
+}
+
+function insertAttachment(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatAttachmentAddPayload,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO chat_attachments (
+       workspace_id, attachment_id, thread_id, message_id, target_kind,
+       object_id, path_hint, created_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    workspaceId,
+    payload.attachmentId,
+    payload.threadId,
+    payload.messageId,
+    payload.targetKind,
+    payload.objectId,
+    payload.pathHint ?? null,
+    payload.createdAtMs,
+  );
+}
+
+function indexMessageMentions(input: {
+  db: SqliteDb;
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  authorKind: ChatActor["kind"];
+  body: string;
+  createdAtMs: number;
+}): void {
+  const insert = input.db.prepare(
+    `INSERT OR IGNORE INTO chat_mentions (
+       workspace_id, thread_id, message_id, handle, author_kind, created_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  for (const handle of parseMentionHandles(input.body)) {
+    insert.run(
+      input.workspaceId,
+      input.threadId,
+      input.messageId,
+      handle,
+      input.authorKind,
+      input.createdAtMs,
+    );
+  }
+}
+
+function journalDecisionSet(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatDecisionSetPayload,
+): void {
+  const originId = ensureOriginId(db, workspaceId);
+  const originSeq = nextOriginSeq(db, workspaceId, originId);
+  upsertDecisionLww(db, workspaceId, payload, { originId, originSeq });
+  journalReplicationOp(db, {
+    workspaceId,
+    originId,
+    originSeq,
+    opKind: "chat.decision.set",
+    payload,
+    recordedAtMs: payload.atMs,
+  });
+}
+
+function addLocalAttachments(input: {
+  db: SqliteDb;
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  attachments: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
+  createdAtMs: number;
+}): ChatAttachment[] {
+  return input.attachments.map((attachment) => {
+    const payload: ChatAttachmentAddPayload = {
+      attachmentId: attachmentIdFor(input.messageId, attachment.objectId),
+      threadId: input.threadId,
+      messageId: input.messageId,
+      targetKind: "file",
+      objectId: attachment.objectId,
+      ...(attachment.pathHint !== undefined ? { pathHint: attachment.pathHint } : {}),
+      createdAtMs: input.createdAtMs,
+    };
+    insertAttachment(input.db, input.workspaceId, payload);
+    journalLocalReplicationOp(input.db, {
+      workspaceId: input.workspaceId,
+      opKind: "chat.attachment.add",
+      payload,
+      recordedAtMs: input.createdAtMs,
+    });
+    return {
+      attachmentId: payload.attachmentId,
+      threadId: payload.threadId,
+      messageId: payload.messageId,
+      targetKind: payload.targetKind,
+      objectId: payload.objectId,
+      ...(payload.pathHint !== undefined ? { pathHint: payload.pathHint } : {}),
+      createdAtMs: payload.createdAtMs,
+    };
+  });
 }
 
 // ⚠️ CLOCK SKEW — ACCEPTED ALPHA LIMITATION (determinism > the rare skew-pin).
@@ -778,6 +1034,66 @@ function messageCountForThread(
   return Number(row?.count ?? 0);
 }
 
+function attachmentsForThread(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+): ChatAttachment[] {
+  return db
+    .prepare(
+      `SELECT a.* FROM chat_attachments a
+       JOIN chat_messages m
+         ON m.workspace_id = a.workspace_id
+        AND m.thread_id = a.thread_id
+        AND m.message_id = a.message_id
+       WHERE a.workspace_id = ? AND a.thread_id = ?
+       ORDER BY a.created_at_ms, a.attachment_id`,
+    )
+    .all(workspaceId, threadId)
+    .map(attachmentFromRow);
+}
+
+function agentReadStateForThread(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+): ChatAgentReadState {
+  const row = db
+    .prepare(
+      `SELECT last_read_created_at_ms, last_read_message_id, revision, updated_at_ms
+       FROM chat_agent_read_state WHERE workspace_id = ? AND thread_id = ?`,
+    )
+    .get(workspaceId, threadId);
+  if (!row) {
+    return {
+      workspaceId,
+      threadId,
+      lastReadCreatedAtMs: 0,
+      lastReadMessageId: "",
+      revision: 0,
+      updatedAtMs: 0,
+    };
+  }
+  const revision = numberValue(row.revision);
+  if (!Number.isSafeInteger(revision) || revision < 0) throw corruptStore();
+  return {
+    workspaceId,
+    threadId,
+    lastReadCreatedAtMs: numberValue(row.last_read_created_at_ms),
+    lastReadMessageId: stringValue(row.last_read_message_id),
+    revision,
+    updatedAtMs: numberValue(row.updated_at_ms),
+  };
+}
+
+function messageCoordinateCompare(
+  left: { createdAtMs: number; messageId: string },
+  right: { createdAtMs: number; messageId: string },
+): number {
+  if (left.createdAtMs !== right.createdAtMs) return left.createdAtMs - right.createdAtMs;
+  return left.messageId < right.messageId ? -1 : left.messageId > right.messageId ? 1 : 0;
+}
+
 // Fail closed on a tampered persisted read cursor: negative, non-integer, or
 // beyond-safe-integer values must never feed unread math as if valid. An
 // OVER-COUNT cursor (> the thread's real message count) is handled separately
@@ -970,14 +1286,24 @@ export function createLinkedChatStore(
   }
 
   function listMessagesForThread(db: SqliteDb, workspaceId: WorkspaceId, threadId: ChatThreadId) {
-    return db
+    const messages = db
       .prepare(
         `SELECT * FROM chat_messages
          WHERE workspace_id = ? AND thread_id = ?
-         ORDER BY message_order`,
+         ORDER BY created_at_ms, message_id`,
       )
       .all(workspaceId, threadId)
       .map(messageFromRow);
+    const attachmentsByMessage = new Map<ChatMessageId, ChatAttachment[]>();
+    for (const attachment of attachmentsForThread(db, workspaceId, threadId)) {
+      const existing = attachmentsByMessage.get(attachment.messageId) ?? [];
+      existing.push(attachment);
+      attachmentsByMessage.set(attachment.messageId, existing);
+    }
+    return messages.map((message) => ({
+      ...message,
+      attachments: attachmentsByMessage.get(message.id) ?? [],
+    }));
   }
 
   function nextMessageOrder(db: SqliteDb, workspaceId: WorkspaceId, threadId: ChatThreadId): number {
@@ -1100,11 +1426,23 @@ export function createLinkedChatStore(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const name = normalizeChannelName(input.name);
         const kind = normalizeChannelKind(input.kind);
+        if (kind === "agent") {
+          throw new LinkedChatStoreError(
+            "invalid-channel-kind",
+            "Agent channels are provisioned automatically.",
+          );
+        }
         const slug = channelSlugForName(name);
         if (!slug) {
           throw new LinkedChatStoreError(
             "invalid-channel-name",
             "Channel name must contain at least one letter or number.",
+          );
+        }
+        if (slug === channelSlugForName(AGENT_CHANNEL_NAME)) {
+          throw new LinkedChatStoreError(
+            "channel-exists",
+            "The My agent channel name is reserved.",
           );
         }
         const existing = db
@@ -1205,6 +1543,77 @@ export function createLinkedChatStore(
       });
     },
 
+    ensureAgentChannel(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const mappedChannelId = channelIdForWireId(db, workspaceId, AGENT_CHANNEL_WIRE_ID);
+        if (mappedChannelId !== undefined) {
+          const mapped = requireWorkspaceChannel(db, workspaceId, mappedChannelId);
+          if (
+            mapped.kind !== "agent" ||
+            mapped.name !== AGENT_CHANNEL_NAME ||
+            mapped.slug !== channelSlugForName(AGENT_CHANNEL_NAME)
+          ) {
+            throw corruptStore();
+          }
+          return cloneJson(mapped);
+        }
+        const slug = channelSlugForName(AGENT_CHANNEL_NAME);
+        const existing = db
+          .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+          .get(workspaceId, slug);
+        if (existing) {
+          const channel = channelFromRow(existing);
+          if (channel.kind !== "agent" || channel.name !== AGENT_CHANNEL_NAME) {
+            throw new LinkedChatStoreError(
+              "channel-exists",
+              "The reserved My agent channel name is already in use.",
+            );
+          }
+          recordChannelWireId(db, workspaceId, AGENT_CHANNEL_WIRE_ID, channel.id);
+          return cloneJson(channel);
+        }
+        const recordedAtMs = nowMs();
+        const channel: ChatChannel = {
+          id: createId("channel"),
+          workspaceId,
+          name: AGENT_CHANNEL_NAME,
+          slug,
+          kind: "agent",
+          createdAtMs: recordedAtMs,
+          updatedAtMs: recordedAtMs,
+        };
+        db.prepare(
+          `INSERT INTO chat_channels (
+            workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          workspaceId,
+          channel.id,
+          channel.name,
+          channel.slug,
+          channel.kind,
+          recordedAtMs,
+          recordedAtMs,
+        );
+        recordChannelWireId(db, workspaceId, AGENT_CHANNEL_WIRE_ID, channel.id);
+        journalLocalReplicationOp(db, {
+          workspaceId,
+          opKind: "chat.channel.create",
+          payload: {
+            channelId: channel.id,
+            name: channel.name,
+            slug: channel.slug,
+            kind: channel.kind,
+            createdAtMs: recordedAtMs,
+            wireId: AGENT_CHANNEL_WIRE_ID,
+          } satisfies ChatChannelCreatePayload,
+          recordedAtMs,
+        });
+        return cloneJson(channel);
+      });
+    },
+
     listChannels(input) {
       return afterWrites(async () => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
@@ -1296,6 +1705,7 @@ export function createLinkedChatStore(
         const author = normalizeActor(input.author);
         const authorUserId = normalizeAuthorUserId(input.authorUserId);
         const body = normalizeBody(input.body);
+        const attachments = normalizeAttachments(input.attachments);
         const threadId = createId("thread");
         const recordedAtMs = nowMs();
         db.prepare(
@@ -1312,12 +1722,13 @@ export function createLinkedChatStore(
           ...(authorUserId !== undefined ? { authorUserId } : {}),
           body,
           createdAtMs: recordedAtMs,
+          attachments: [],
         };
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
-            author_display_name, author_user_id, body, created_at_ms
-          ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+            author_display_name, author_user_id, parent_message_id, body, created_at_ms
+          ) VALUES (?, ?, 0, ?, ?, ?, ?, NULL, ?, ?)`,
         ).run(
           workspaceId,
           threadId,
@@ -1328,6 +1739,15 @@ export function createLinkedChatStore(
           body,
           recordedAtMs,
         );
+        indexMessageMentions({
+          db,
+          workspaceId,
+          threadId,
+          messageId: message.id,
+          authorKind: author.kind,
+          body,
+          createdAtMs: recordedAtMs,
+        });
         if (author.kind === "human") {
           advanceReadCursor({
             db,
@@ -1381,6 +1801,22 @@ export function createLinkedChatStore(
           } satisfies ChatMessageAppendPayload,
           recordedAtMs,
         });
+        if (input.needsDecision === true) {
+          journalDecisionSet(db, workspaceId, {
+            threadId,
+            messageId: message.id,
+            state: "open",
+            atMs: recordedAtMs,
+          });
+        }
+        message.attachments = addLocalAttachments({
+          db,
+          workspaceId,
+          threadId,
+          messageId: message.id,
+          attachments,
+          createdAtMs: recordedAtMs,
+        });
         const thread: ChatThread = {
           id: threadId,
           workspaceId,
@@ -1406,7 +1842,15 @@ export function createLinkedChatStore(
                       AS message_count,
                     COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs
                               WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0)
-                      AS last_read_sequence
+                      AS last_read_sequence,
+                    (SELECT COUNT(*) FROM chat_decisions d
+                     JOIN chat_messages dm
+                       ON dm.workspace_id = d.workspace_id
+                      AND dm.thread_id = d.thread_id
+                      AND dm.message_id = d.message_id
+                     WHERE d.workspace_id = t.workspace_id
+                       AND d.thread_id = t.thread_id
+                       AND d.state = 'open') AS open_decision_count
                FROM chat_threads t
                WHERE t.workspace_id = ? AND t.channel_id = ?
                ORDER BY t.updated_at_ms DESC, t.thread_id DESC`,
@@ -1426,6 +1870,7 @@ export function createLinkedChatStore(
                 messageCount,
                 lastReadSequence,
                 unreadCount: Math.max(0, messageCount - lastReadSequence),
+                openDecisionCount: numberValue(row.open_decision_count),
               };
             })
             .map(cloneJson);
@@ -1492,21 +1937,25 @@ export function createLinkedChatStore(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const authorUserId = normalizeAuthorUserId(input.authorUserId);
+        const parentMessageId = normalizeParentMessageId(input.parentMessageId);
+        const attachments = normalizeAttachments(input.attachments);
         const message: ChatMessage = {
           id: createId("message"),
           workspaceId,
           threadId: thread.id,
           author: normalizeActor(input.author),
           ...(authorUserId !== undefined ? { authorUserId } : {}),
+          ...(parentMessageId !== undefined ? { parentMessageId } : {}),
           body: normalizeBody(input.body),
           createdAtMs: nowMs(),
+          attachments: [],
         };
         const count = messageCountForThread(db, workspaceId, thread.id);
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
-            author_display_name, author_user_id, body, created_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            author_display_name, author_user_id, parent_message_id, body, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           workspaceId,
           thread.id,
@@ -1515,9 +1964,19 @@ export function createLinkedChatStore(
           message.author.kind,
           message.author.displayName,
           authorUserId ?? null,
+          parentMessageId ?? null,
           message.body,
           message.createdAtMs,
         );
+        indexMessageMentions({
+          db,
+          workspaceId,
+          threadId: thread.id,
+          messageId: message.id,
+          authorKind: message.author.kind,
+          body: message.body,
+          createdAtMs: message.createdAtMs,
+        });
         db.prepare(
           "UPDATE chat_threads SET updated_at_ms = ? WHERE workspace_id = ? AND thread_id = ?",
         ).run(message.createdAtMs, workspaceId, thread.id);
@@ -1552,10 +2011,27 @@ export function createLinkedChatStore(
             // one (signed-in send). Omitting it keeps solo ops byte-identical to
             // the pre-MU-C0 shape and leaves the relay's optional check inert.
             ...(authorUserId !== undefined ? { authorUserId } : {}),
+            ...(parentMessageId !== undefined ? { parentMessageId } : {}),
             body: message.body,
             createdAtMs: message.createdAtMs,
           } satisfies ChatMessageAppendPayload,
           recordedAtMs: message.createdAtMs,
+        });
+        if (input.needsDecision === true) {
+          journalDecisionSet(db, workspaceId, {
+            threadId: thread.id,
+            messageId: message.id,
+            state: "open",
+            atMs: message.createdAtMs,
+          });
+        }
+        message.attachments = addLocalAttachments({
+          db,
+          workspaceId,
+          threadId: thread.id,
+          messageId: message.id,
+          attachments,
+          createdAtMs: message.createdAtMs,
         });
         return cloneJson(message);
       });
@@ -1567,6 +2043,234 @@ export function createLinkedChatStore(
         return withDb((db) => {
           const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
           return listMessagesForThread(db, workspaceId, thread.id).map(cloneJson);
+        });
+      });
+    },
+
+    resolveChatDecision(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+        const resolvedByMessageId = normalizeParentMessageId(input.resolvedByMessageId);
+        if (resolvedByMessageId === undefined) throw corruptStore();
+        const currentRow = db
+          .prepare(
+            `SELECT * FROM chat_decisions
+             WHERE workspace_id = ? AND thread_id = ? AND message_id = ?`,
+          )
+          .get(workspaceId, thread.id, input.messageId);
+        if (!currentRow) {
+          throw new LinkedChatStoreError(
+            "decision-not-found",
+            `Decision ${input.messageId} was not found in thread ${thread.id}.`,
+          );
+        }
+        const current = decisionFromRow(currentRow);
+        if (current.state === "resolved") return cloneJson(current);
+        const atMs = Math.max(nowMs(), current.atMs + 1);
+        journalDecisionSet(db, workspaceId, {
+          threadId: thread.id,
+          messageId: current.messageId,
+          state: "resolved",
+          resolvedByMessageId,
+          atMs,
+        });
+        const resolved = db
+          .prepare("SELECT * FROM chat_decisions WHERE workspace_id = ? AND message_id = ?")
+          .get(workspaceId, current.messageId);
+        if (!resolved) throw corruptStore();
+        return cloneJson(decisionFromRow(resolved));
+      });
+    },
+
+    listThreadDecisions(workspaceIdInput, threadId) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, threadId);
+          return db
+            .prepare(
+              `SELECT d.* FROM chat_decisions d
+               JOIN chat_messages m
+                 ON m.workspace_id = d.workspace_id
+                AND m.thread_id = d.thread_id
+                AND m.message_id = d.message_id
+               WHERE d.workspace_id = ? AND d.thread_id = ?
+               ORDER BY d.at_ms, d.message_id`,
+            )
+            .all(workspaceId, thread.id)
+            .map(decisionFromRow)
+            .map(cloneJson);
+        });
+      });
+    },
+
+    listThreadAttachments(workspaceIdInput, threadId) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, threadId);
+          return attachmentsForThread(db, workspaceId, thread.id).map(cloneJson);
+        });
+      });
+    },
+
+    markThreadReadByAgent(input) {
+      return serialize(async (db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
+        const expectedRevision = normalizeExpectedRevision(input.expectedRevision);
+        if (
+          typeof input.upTo.createdAtMs !== "number" ||
+          !Number.isFinite(input.upTo.createdAtMs) ||
+          typeof input.upTo.messageId !== "string" ||
+          input.upTo.messageId.length === 0
+        ) {
+          throw new LinkedChatStoreError("invalid-read-cursor", "Agent read cursor is invalid.");
+        }
+        const current = agentReadStateForThread(db, workspaceId, thread.id);
+        if (expectedRevision !== undefined && expectedRevision !== current.revision) {
+          throw new LinkedChatStoreError(
+            "read-state-revision-mismatch",
+            `Read-state revision ${expectedRevision} is stale (current ${current.revision}).`,
+          );
+        }
+        const latestRow = db
+          .prepare(
+            `SELECT created_at_ms, message_id FROM chat_messages
+             WHERE workspace_id = ? AND thread_id = ?
+             ORDER BY created_at_ms DESC, message_id DESC LIMIT 1`,
+          )
+          .get(workspaceId, thread.id);
+        if (!latestRow) return cloneJson(current);
+        const latest = {
+          createdAtMs: numberValue(latestRow.created_at_ms),
+          messageId: stringValue(latestRow.message_id),
+        };
+        const target = messageCoordinateCompare(input.upTo, latest) > 0 ? latest : input.upTo;
+        if (
+          messageCoordinateCompare(target, {
+            createdAtMs: current.lastReadCreatedAtMs,
+            messageId: current.lastReadMessageId,
+          }) <= 0
+        ) {
+          return cloneJson(current);
+        }
+        const next: ChatAgentReadState = {
+          workspaceId,
+          threadId: thread.id,
+          lastReadCreatedAtMs: target.createdAtMs,
+          lastReadMessageId: target.messageId,
+          revision: current.revision + 1,
+          updatedAtMs: nowMs(),
+        };
+        db.prepare(
+          `INSERT INTO chat_agent_read_state (
+             workspace_id, thread_id, last_read_created_at_ms,
+             last_read_message_id, revision, updated_at_ms
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(workspace_id, thread_id) DO UPDATE SET
+             last_read_created_at_ms = excluded.last_read_created_at_ms,
+             last_read_message_id = excluded.last_read_message_id,
+             revision = excluded.revision,
+             updated_at_ms = excluded.updated_at_ms`,
+        ).run(
+          workspaceId,
+          thread.id,
+          next.lastReadCreatedAtMs,
+          next.lastReadMessageId,
+          next.revision,
+          next.updatedAtMs,
+        );
+        return cloneJson(next);
+      });
+    },
+
+    agentReadState(workspaceIdInput, threadId) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+        return withDb((db) => {
+          const thread = requireWorkspaceThread(db, workspaceId, threadId);
+          return cloneJson(agentReadStateForThread(db, workspaceId, thread.id));
+        });
+      });
+    },
+
+    listAgentUnreadThreads(workspaceIdInput) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+        return withDb((db) =>
+          db
+            .prepare(
+              `SELECT ${THREAD_SELECT_COLUMNS}, latest.created_at_ms AS latest_created_at_ms,
+                      latest.message_id AS latest_message_id
+               FROM chat_threads t
+               JOIN chat_messages latest
+                 ON latest.workspace_id = t.workspace_id
+                AND latest.thread_id = t.thread_id
+                AND NOT EXISTS (
+                  SELECT 1 FROM chat_messages newer
+                  WHERE newer.workspace_id = latest.workspace_id
+                    AND newer.thread_id = latest.thread_id
+                    AND (newer.created_at_ms > latest.created_at_ms
+                      OR (newer.created_at_ms = latest.created_at_ms
+                          AND newer.message_id > latest.message_id))
+                )
+               LEFT JOIN chat_agent_read_state ars
+                 ON ars.workspace_id = t.workspace_id AND ars.thread_id = t.thread_id
+               WHERE t.workspace_id = ?
+                 AND latest.author_kind = 'human'
+                 AND (ars.thread_id IS NULL
+                   OR latest.created_at_ms > ars.last_read_created_at_ms
+                   OR (latest.created_at_ms = ars.last_read_created_at_ms
+                       AND latest.message_id > ars.last_read_message_id))
+               ORDER BY latest.created_at_ms DESC, latest.message_id DESC`,
+            )
+            .all(workspaceId)
+            .map(threadFromRow)
+            .map(cloneJson),
+        );
+      });
+    },
+
+    listMentionsForHandle(workspaceIdInput, handleInput, options = {}) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+        const handle = normalizeMentionHandle(handleInput);
+        return withDb((db) => {
+          const unreadClause = options.unreadByAgentOnly
+            ? `AND (ars.thread_id IS NULL
+                 OR cm.created_at_ms > ars.last_read_created_at_ms
+                 OR (cm.created_at_ms = ars.last_read_created_at_ms
+                     AND cm.message_id > ars.last_read_message_id))`
+            : "";
+          const rows = db
+            .prepare(
+              `SELECT cm.* FROM chat_mentions cm
+               JOIN chat_messages m
+                 ON m.workspace_id = cm.workspace_id
+                AND m.thread_id = cm.thread_id
+                AND m.message_id = cm.message_id
+               JOIN chat_threads t
+                 ON t.workspace_id = cm.workspace_id AND t.thread_id = cm.thread_id
+               LEFT JOIN chat_agent_read_state ars
+                 ON ars.workspace_id = cm.workspace_id AND ars.thread_id = cm.thread_id
+               WHERE cm.workspace_id = ? AND cm.handle = ? ${unreadClause}
+               ORDER BY cm.created_at_ms, cm.message_id`,
+            )
+            .all(workspaceId, handle);
+          for (const thread of new Set(rows.map((row) => stringValue(row.thread_id)))) {
+            requireWorkspaceThread(db, workspaceId, thread);
+          }
+          return rows
+            .map((row): ChatMentionRecord => ({
+              threadId: stringValue(row.thread_id),
+              messageId: stringValue(row.message_id),
+              handle: stringValue(row.handle),
+              authorKind: actorKindValue(row.author_kind),
+              createdAtMs: numberValue(row.created_at_ms),
+            }))
+            .map(cloneJson);
         });
       });
     },
@@ -1721,28 +2425,78 @@ export function createLinkedChatStore(
         }
         if (input.opKind === "chat.channel.create") {
           const payload = input.payload;
+          if (
+            typeof payload.channelId !== "string" ||
+            payload.channelId.length === 0 ||
+            typeof payload.name !== "string" ||
+            payload.name.length === 0 ||
+            typeof payload.slug !== "string" ||
+            payload.slug.length === 0 ||
+            (payload.kind !== "channel" && payload.kind !== "dm" && payload.kind !== "agent") ||
+            typeof payload.createdAtMs !== "number" ||
+            !Number.isFinite(payload.createdAtMs) ||
+            (payload.wireId !== undefined &&
+              (typeof payload.wireId !== "string" || payload.wireId.length === 0))
+          ) {
+            throw corruptStore();
+          }
+          const carriesAgentWire = payload.wireId === AGENT_CHANNEL_WIRE_ID;
+          const canonicalAgentSlug = channelSlugForName(AGENT_CHANNEL_NAME);
+          if (
+            (payload.kind === "agent") !== carriesAgentWire ||
+            (payload.slug === canonicalAgentSlug) !== carriesAgentWire ||
+            (payload.name === AGENT_CHANNEL_NAME) !== carriesAgentWire ||
+            (carriesAgentWire &&
+              (payload.name !== AGENT_CHANNEL_NAME || payload.slug !== canonicalAgentSlug))
+          ) {
+            throw corruptStore();
+          }
           // Wire id is the cross-machine channel identity; slug is only a
           // lookup alias. Same wire id = same channel (idempotent no-op);
           // same slug + different wire id = distinct channel whose LOCAL slug
           // gets a numbered variant. Pre-wire-id payloads fall back to slug
           // identity (the 0P-A initial wire truth).
           if (typeof payload.wireId === "string" && payload.wireId.length > 0) {
-            if (!channelIdForWireId(db, workspaceId, payload.wireId)) {
-              const channelId = createId("channel");
-              db.prepare(
-                `INSERT INTO chat_channels (
-                  workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              ).run(
-                workspaceId,
-                channelId,
-                payload.name,
-                nextFreeChannelSlug(db, workspaceId, payload.slug),
-                payload.kind,
-                payload.createdAtMs,
-                payload.createdAtMs,
-              );
-              recordChannelWireId(db, workspaceId, payload.wireId, channelId);
+            const mappedChannelId = channelIdForWireId(db, workspaceId, payload.wireId);
+            if (mappedChannelId !== undefined && carriesAgentWire) {
+              const mapped = requireWorkspaceChannel(db, workspaceId, mappedChannelId);
+              if (
+                mapped.kind !== "agent" ||
+                mapped.name !== AGENT_CHANNEL_NAME ||
+                mapped.slug !== canonicalAgentSlug
+              ) {
+                throw corruptStore();
+              }
+            }
+            if (mappedChannelId === undefined) {
+              const existingAgent = carriesAgentWire
+                ? db
+                    .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+                    .get(workspaceId, canonicalAgentSlug)
+                : undefined;
+              if (existingAgent) {
+                const channel = channelFromRow(existingAgent);
+                if (channel.kind !== "agent" || channel.name !== AGENT_CHANNEL_NAME) {
+                  throw corruptStore();
+                }
+                recordChannelWireId(db, workspaceId, payload.wireId, channel.id);
+              } else {
+                const channelId = createId("channel");
+                db.prepare(
+                  `INSERT INTO chat_channels (
+                    workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                ).run(
+                  workspaceId,
+                  channelId,
+                  payload.name,
+                  nextFreeChannelSlug(db, workspaceId, payload.slug),
+                  payload.kind,
+                  payload.createdAtMs,
+                  payload.createdAtMs,
+                );
+                recordChannelWireId(db, workspaceId, payload.wireId, channelId);
+              }
             }
           } else if (
             !db
@@ -1783,6 +2537,14 @@ export function createLinkedChatStore(
                 typeof payload.channelWireId === "string"
                   ? channelIdForWireId(db, workspaceId, payload.channelWireId)
                   : undefined;
+              const agentPlaceholder = payload.channelWireId === AGENT_CHANNEL_WIRE_ID;
+              if (
+                payload.channelSlug !== undefined &&
+                (payload.channelSlug === channelSlugForName(AGENT_CHANNEL_NAME)) !==
+                  agentPlaceholder
+              ) {
+                throw corruptStore();
+              }
               // The slug alias only resolves identity for pre-wire-id
               // payloads: a wire-id-carrying thread must never bind to a
               // same-slug channel with a DIFFERENT wire identity.
@@ -1795,6 +2557,16 @@ export function createLinkedChatStore(
                       .get(workspaceId, payload.channelSlug)
                   : undefined;
               if (mappedChannelId !== undefined) {
+                if (agentPlaceholder) {
+                  const mapped = requireWorkspaceChannel(db, workspaceId, mappedChannelId);
+                  if (
+                    mapped.kind !== "agent" ||
+                    mapped.name !== AGENT_CHANNEL_NAME ||
+                    mapped.slug !== channelSlugForName(AGENT_CHANNEL_NAME)
+                  ) {
+                    throw corruptStore();
+                  }
+                }
                 channelId = mappedChannelId;
               } else if (existingChannel) {
                 channelId = stringValue(existingChannel.channel_id);
@@ -1803,19 +2575,38 @@ export function createLinkedChatStore(
                   typeof payload.channelSlug === "string" && payload.channelSlug.length > 0
                     ? payload.channelSlug
                     : (payload.channelWireId as string);
-                channelId = createId("channel");
-                db.prepare(
-                  `INSERT INTO chat_channels (
-                    workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
-                  ) VALUES (?, ?, ?, ?, 'channel', ?, ?)`,
-                ).run(
-                  workspaceId,
-                  channelId,
-                  placeholderSlug,
-                  nextFreeChannelSlug(db, workspaceId, placeholderSlug),
-                  input.recordedAtMs,
-                  input.recordedAtMs,
-                );
+                const canonicalAgentSlug = channelSlugForName(AGENT_CHANNEL_NAME);
+                const agentSlugRow = agentPlaceholder
+                  ? db
+                      .prepare(
+                        "SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?",
+                      )
+                      .get(workspaceId, canonicalAgentSlug)
+                  : undefined;
+                if (agentSlugRow) {
+                  const agentChannel = channelFromRow(agentSlugRow);
+                  if (agentChannel.kind !== "agent" || agentChannel.name !== AGENT_CHANNEL_NAME) {
+                    throw corruptStore();
+                  }
+                  channelId = agentChannel.id;
+                } else {
+                  channelId = createId("channel");
+                  db.prepare(
+                    `INSERT INTO chat_channels (
+                      workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                  ).run(
+                    workspaceId,
+                    channelId,
+                    agentPlaceholder ? AGENT_CHANNEL_NAME : placeholderSlug,
+                    agentPlaceholder
+                      ? canonicalAgentSlug
+                      : nextFreeChannelSlug(db, workspaceId, placeholderSlug),
+                    agentPlaceholder ? "agent" : "channel",
+                    input.recordedAtMs,
+                    input.recordedAtMs,
+                  );
+                }
                 if (typeof payload.channelWireId === "string") {
                   recordChannelWireId(db, workspaceId, payload.channelWireId, channelId);
                 }
@@ -1846,6 +2637,26 @@ export function createLinkedChatStore(
           }
         } else if (input.opKind === "chat.message.append") {
           const payload = input.payload;
+          if (
+            typeof payload.messageId !== "string" ||
+            payload.messageId.length === 0 ||
+            typeof payload.threadId !== "string" ||
+            payload.threadId.length === 0 ||
+            (payload.authorKind !== "human" && payload.authorKind !== "agent") ||
+            typeof payload.authorDisplayName !== "string" ||
+            payload.authorDisplayName.length === 0 ||
+            (payload.authorUserId !== undefined &&
+              (typeof payload.authorUserId !== "string" || payload.authorUserId.length === 0)) ||
+            (payload.parentMessageId !== undefined &&
+              (typeof payload.parentMessageId !== "string" ||
+                payload.parentMessageId.length === 0)) ||
+            typeof payload.body !== "string" ||
+            payload.body.length === 0 ||
+            typeof payload.createdAtMs !== "number" ||
+            !Number.isFinite(payload.createdAtMs)
+          ) {
+            throw corruptStore();
+          }
           requireWorkspaceThread(db, workspaceId, payload.threadId);
           if (
             !db
@@ -1860,11 +2671,12 @@ export function createLinkedChatStore(
             // chat.reaction.set note below). Absent on solo/legacy ops (persisted
             // as NULL). Never derived from the display name.
             const authorUserId = optionalString(payload.authorUserId) ?? null;
+            const parentMessageId = optionalString(payload.parentMessageId) ?? null;
             db.prepare(
               `INSERT INTO chat_messages (
                 workspace_id, thread_id, message_order, message_id, author_kind,
-                author_display_name, author_user_id, body, created_at_ms
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                author_display_name, author_user_id, parent_message_id, body, created_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).run(
               workspaceId,
               payload.threadId,
@@ -1873,9 +2685,19 @@ export function createLinkedChatStore(
               payload.authorKind,
               payload.authorDisplayName,
               authorUserId,
+              parentMessageId,
               payload.body,
               payload.createdAtMs,
             );
+            indexMessageMentions({
+              db,
+              workspaceId,
+              threadId: payload.threadId,
+              messageId: payload.messageId,
+              authorKind: payload.authorKind,
+              body: payload.body,
+              createdAtMs: payload.createdAtMs,
+            });
             db.prepare(
               "UPDATE chat_threads SET updated_at_ms = ? WHERE workspace_id = ? AND thread_id = ?",
             ).run(payload.createdAtMs, workspaceId, payload.threadId);
@@ -1903,6 +2725,66 @@ export function createLinkedChatStore(
               body: payload.body,
             });
           }
+        } else if (input.opKind === "chat.decision.set") {
+          const payload = input.payload;
+          if (
+            typeof payload.threadId !== "string" ||
+            payload.threadId.length === 0 ||
+            typeof payload.messageId !== "string" ||
+            payload.messageId.length === 0 ||
+            (payload.state !== "open" && payload.state !== "resolved") ||
+            typeof payload.atMs !== "number" ||
+            !Number.isFinite(payload.atMs) ||
+            (payload.resolvedByMessageId !== undefined &&
+              (typeof payload.resolvedByMessageId !== "string" ||
+                payload.resolvedByMessageId.length === 0)) ||
+            (payload.state === "resolved") !== (payload.resolvedByMessageId !== undefined)
+          ) {
+            throw corruptStore();
+          }
+          upsertDecisionLww(
+            db,
+            workspaceId,
+            {
+              threadId: payload.threadId,
+              messageId: payload.messageId,
+              state: payload.state,
+              ...(payload.resolvedByMessageId !== undefined
+                ? { resolvedByMessageId: payload.resolvedByMessageId }
+                : {}),
+              atMs: payload.atMs,
+            },
+            { originId: input.originId, originSeq: input.originSeq },
+          );
+        } else if (input.opKind === "chat.attachment.add") {
+          const payload = input.payload;
+          if (
+            typeof payload.attachmentId !== "string" ||
+            payload.attachmentId.length === 0 ||
+            typeof payload.threadId !== "string" ||
+            payload.threadId.length === 0 ||
+            typeof payload.messageId !== "string" ||
+            payload.messageId.length === 0 ||
+            payload.targetKind !== "file" ||
+            typeof payload.objectId !== "string" ||
+            payload.objectId.length === 0 ||
+            payload.objectId.length > 200 ||
+            (payload.pathHint !== undefined && !isNormalizedPathHint(payload.pathHint)) ||
+            typeof payload.createdAtMs !== "number" ||
+            !Number.isFinite(payload.createdAtMs) ||
+            payload.attachmentId !== attachmentIdFor(payload.messageId, payload.objectId)
+          ) {
+            throw corruptStore();
+          }
+          insertAttachment(db, workspaceId, {
+            attachmentId: payload.attachmentId,
+            threadId: payload.threadId,
+            messageId: payload.messageId,
+            targetKind: "file",
+            objectId: payload.objectId,
+            ...(payload.pathHint !== undefined ? { pathHint: payload.pathHint } : {}),
+            createdAtMs: payload.createdAtMs,
+          });
         } else if (input.opKind === "chat.reaction.set") {
           const payload = input.payload;
           // A COMMUTATIVE, head-check-free apply — like ydoc.update, not

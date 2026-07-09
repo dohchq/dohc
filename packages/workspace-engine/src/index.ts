@@ -1,4 +1,21 @@
+export { parseMentionHandles } from "./chatMentions";
 export {
+  AgentDispatchStoreError,
+  createAgentDispatchStore,
+} from "./agentDispatchStore";
+export type {
+  AgentDispatchClaim,
+  AgentDispatchRecord,
+  AgentDispatchState,
+  AgentDispatchStore,
+  AgentDispatchStoreErrorCode,
+  AgentDispatchStoreOptions,
+  AgentRunRecord,
+  ThreadDispatchPauseState,
+} from "./agentDispatchStore";
+export {
+  AGENT_CHANNEL_NAME,
+  AGENT_CHANNEL_WIRE_ID,
   GENERAL_CHANNEL_NAME,
   GENERAL_CHANNEL_WIRE_ID,
   LINKED_CHAT_PROJECTION_KIND,
@@ -176,11 +193,16 @@ export type {
 } from "./versionedFileWorkspace";
 export type {
   ChannelThreadSummary,
+  ChatAgentReadState,
   ChatActor,
+  ChatAttachment,
   ChatChannel,
   ChatChannelId,
   ChatChannelKind,
   ChatChannelSummary,
+  ChatDecisionRecord,
+  ChatDecisionState,
+  ChatMentionRecord,
   ChatMessage,
   ChatMessageId,
   ChatReaction,
@@ -201,6 +223,8 @@ export {
   classifyEngineFilePath,
   searchWorkspaceEngine,
 } from "./workspaceSearch";
+export { queryChatMessagesGranular } from "./searchIndex";
+export type { GranularChatMessageSearchResult } from "./searchIndex";
 export {
   MAX_SECRET_FILE_BYTES,
   SECRET_FILE_STORE_RELATIVE_PATH,

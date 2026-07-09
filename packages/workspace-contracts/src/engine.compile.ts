@@ -1,14 +1,26 @@
 import type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  AgentDispatchClaim,
+  AgentDispatchRecord,
+  AgentDispatchState,
+  AgentDispatchStore,
+  AgentRunRecord,
   ChannelThreadSummary,
+  ChatAgentReadState,
   ChatActor,
+  ChatAttachment,
+  ChatAttachmentAddPayload,
   ChatChannel,
   ChatChannelId,
   ChatChannelKind,
   ChatChannelSummary,
+  ChatDecisionRecord,
+  ChatDecisionSetPayload,
+  ChatDecisionState,
   ChatMessage,
   ChatMessageId,
+  ChatMentionRecord,
   ChatThread,
   ChatThreadId,
   ChatThreadReadState,
@@ -24,7 +36,9 @@ import type {
   LinkedChatStoreOptions,
   SearchSurface,
   SearchVisibility,
+  SyncReplicationEnvelope,
   TextFileSnapshot,
+  ThreadDispatchPauseState,
   VersionFileChange,
   VersionFileChangeStatus,
   VersionId,
@@ -277,12 +291,46 @@ export const engineContractCompileCheck = (() => {
       updatedAtMs: 5,
       linkedFile: fileRef,
     };
+    const attachment: ChatAttachment = {
+      attachmentId: "attachment",
+      threadId,
+      messageId,
+      targetKind: "file",
+      objectId,
+      pathHint: snapshot.path,
+      createdAtMs: 6,
+    };
     const message: ChatMessage = {
       id: messageId,
       workspaceId,
       threadId,
       author: actor,
+      parentMessageId: "parent-message",
       body: "hello",
+      createdAtMs: 6,
+      attachments: [attachment],
+    };
+    const decisionState: ChatDecisionState = "open";
+    const decision: ChatDecisionRecord = {
+      workspaceId,
+      threadId,
+      messageId,
+      state: decisionState,
+      atMs: 6,
+    };
+    const agentReadState: ChatAgentReadState = {
+      workspaceId,
+      threadId,
+      lastReadCreatedAtMs: 6,
+      lastReadMessageId: messageId,
+      revision: 1,
+      updatedAtMs: 7,
+    };
+    const mention: ChatMentionRecord = {
+      threadId,
+      messageId,
+      handle: "agent",
+      authorKind: "human",
       createdAtMs: 6,
     };
     const access: LinkedChatProjectionFileAccess = { kind: "allowed", path: snapshot.path };
@@ -298,7 +346,7 @@ export const engineContractCompileCheck = (() => {
 
     // Channels + read cursors (PR 12, WS-E).
     const channelId: ChatChannelId = "channel";
-    const channelKind: ChatChannelKind = "dm";
+    const channelKind: ChatChannelKind = "agent";
     const channel: ChatChannel = {
       id: channelId,
       workspaceId,
@@ -333,11 +381,89 @@ export const engineContractCompileCheck = (() => {
       messageCount: 2,
       lastReadSequence: 1,
       unreadCount: 1,
+      openDecisionCount: 1,
     };
     type ChannelStart = LinkedChatStore["startChannelThread"];
     const channelStart: ChannelStart | null = null;
     type MarkRead = LinkedChatStore["markThreadRead"];
     const markRead: MarkRead | null = null;
+    type EnsureAgentChannel = LinkedChatStore["ensureAgentChannel"];
+    type ResolveDecision = LinkedChatStore["resolveChatDecision"];
+    type ListDecisions = LinkedChatStore["listThreadDecisions"];
+    type ListAttachments = LinkedChatStore["listThreadAttachments"];
+    type MarkAgentRead = LinkedChatStore["markThreadReadByAgent"];
+    type ListAgentUnread = LinkedChatStore["listAgentUnreadThreads"];
+    type ListMentions = LinkedChatStore["listMentionsForHandle"];
+    const ensureAgentChannel: EnsureAgentChannel | null = null;
+    const resolveDecision: ResolveDecision | null = null;
+    const listDecisions: ListDecisions | null = null;
+    const listAttachments: ListAttachments | null = null;
+    const markAgentRead: MarkAgentRead | null = null;
+    const listAgentUnread: ListAgentUnread | null = null;
+    const listMentions: ListMentions | null = null;
+
+    const decisionPayload: ChatDecisionSetPayload = {
+      threadId,
+      messageId,
+      state: "resolved",
+      resolvedByMessageId: "resolution",
+      atMs: 8,
+    };
+    const attachmentPayload: ChatAttachmentAddPayload = {
+      attachmentId: attachment.attachmentId,
+      threadId,
+      messageId,
+      targetKind: "file",
+      objectId,
+      pathHint: snapshot.path,
+      createdAtMs: 6,
+    };
+    const decisionEnvelope: SyncReplicationEnvelope = {
+      workspaceId,
+      originId: "origin",
+      originSeq: 1,
+      opKind: "chat.decision.set",
+      payload: decisionPayload,
+      recordedAtMs: 8,
+    };
+    const attachmentEnvelope: SyncReplicationEnvelope = {
+      workspaceId,
+      originId: "origin",
+      originSeq: 2,
+      opKind: "chat.attachment.add",
+      payload: attachmentPayload,
+      recordedAtMs: 8,
+    };
+
+    const dispatchState: AgentDispatchState = "running";
+    const dispatch: AgentDispatchRecord = {
+      workspaceId,
+      triggerMessageId: messageId,
+      threadId,
+      state: dispatchState,
+      runId: "run",
+      attemptCount: 1,
+      createdAtMs: 8,
+      updatedAtMs: 8,
+    };
+    const run: AgentRunRecord = {
+      workspaceId,
+      runId: "run",
+      threadId,
+      triggerMessageId: messageId,
+      command: "runner",
+      startedAtMs: 8,
+      failureNotePosted: false,
+    };
+    const dispatchClaim: AgentDispatchClaim = { dispatch, run };
+    const pauseState: ThreadDispatchPauseState = {
+      workspaceId,
+      threadId,
+      paused: false,
+      updatedAtMs: 8,
+    };
+    type ClaimDispatch = AgentDispatchStore["claimNextPending"];
+    const claimDispatch: ClaimDispatch | null = null;
 
     const surface: SearchSurface = "file";
     const visibility: SearchVisibility = { searchable: true, projectionFileAccess: access };
@@ -400,7 +526,11 @@ export const engineContractCompileCheck = (() => {
     void workspaceOptions;
     void chatErrorCode;
     void thread;
+    void attachment;
     void message;
+    void decision;
+    void agentReadState;
+    void mention;
     void projection;
     void chatSend;
     void chatOptions;
@@ -410,6 +540,18 @@ export const engineContractCompileCheck = (() => {
     void channelThreadSummary;
     void channelStart;
     void markRead;
+    void ensureAgentChannel;
+    void resolveDecision;
+    void listDecisions;
+    void listAttachments;
+    void markAgentRead;
+    void listAgentUnread;
+    void listMentions;
+    void decisionEnvelope;
+    void attachmentEnvelope;
+    void dispatchClaim;
+    void pauseState;
+    void claimDispatch;
     void searchPolicy;
     void searchResult;
     void searchOptions;

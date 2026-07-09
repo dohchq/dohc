@@ -225,6 +225,8 @@ export type SyncReplicationOpKind =
   // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
   | "chat.thread.update"
   | "chat.message.append"
+  | "chat.decision.set"
+  | "chat.attachment.add"
   // WS-MU-C2: an emoji reaction on a chat message. A set-membership CRDT keyed
   // by (messageId, emoji, authorId) — add/remove COMMUTE and re-apply is a
   // no-op. It rides the SAME 0P chat replication transport as the other chat
@@ -398,7 +400,26 @@ export interface ChatMessageAppendPayload {
   // never used for identity/authz) still renders. See the design's "Authenticated
   // authorship" section.
   authorUserId?: string;
+  parentMessageId?: ChatMessageId;
   body: string;
+  createdAtMs: number;
+}
+
+export interface ChatDecisionSetPayload {
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  state: ChatDecisionState;
+  resolvedByMessageId?: ChatMessageId;
+  atMs: number;
+}
+
+export interface ChatAttachmentAddPayload {
+  attachmentId: string;
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  targetKind: "file";
+  objectId: WorkspaceObjectId;
+  pathHint?: string;
   createdAtMs: number;
 }
 
@@ -515,6 +536,8 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"chat.thread.create", ChatThreadCreatePayload>
   | SyncReplicationEnvelopeOf<"chat.thread.update", unknown>
   | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>
+  | SyncReplicationEnvelopeOf<"chat.decision.set", ChatDecisionSetPayload>
+  | SyncReplicationEnvelopeOf<"chat.attachment.add", ChatAttachmentAddPayload>
   | SyncReplicationEnvelopeOf<"chat.reaction.set", ChatReactionSetPayload>
   | SyncReplicationEnvelopeOf<"ydoc.update", YDocUpdatePayload>;
 
@@ -1003,11 +1026,12 @@ export type ChatChannelId = string;
 
 // PR 12 (WS-E): a DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
-export type ChatChannelKind = "channel" | "dm";
+export type ChatChannelKind = "channel" | "dm" | "agent";
 
 export type LinkedChatStoreErrorCode =
   | "channel-exists"
   | "channel-not-found"
+  | "decision-not-found"
   | "invalid-channel-kind"
   | "invalid-channel-name"
   | "invalid-message-body"
@@ -1089,6 +1113,28 @@ export interface ChannelThreadSummary {
   lastReadSequence: number;
   // Derived: messageCount - lastReadSequence, clamped at zero. Never stored.
   unreadCount: number;
+  openDecisionCount: number;
+}
+
+export type ChatDecisionState = "open" | "resolved";
+
+export interface ChatDecisionRecord {
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  state: ChatDecisionState;
+  resolvedByMessageId?: ChatMessageId;
+  atMs: number;
+}
+
+export interface ChatAttachment {
+  attachmentId: string;
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  targetKind: "file";
+  objectId: WorkspaceObjectId;
+  pathHint?: string;
+  createdAtMs: number;
 }
 
 export interface ChatMessage {
@@ -1102,7 +1148,26 @@ export interface ChatMessage {
   // display-only convenience — identity/authz key on `authorUserId`, never the
   // display name.
   authorUserId?: string;
+  parentMessageId?: ChatMessageId;
   body: string;
+  createdAtMs: number;
+  attachments: ChatAttachment[];
+}
+
+export interface ChatAgentReadState {
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  lastReadCreatedAtMs: number;
+  lastReadMessageId: ChatMessageId;
+  revision: number;
+  updatedAtMs: number;
+}
+
+export interface ChatMentionRecord {
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  handle: string;
+  authorKind: ChatActor["kind"];
   createdAtMs: number;
 }
 
@@ -1165,6 +1230,7 @@ export interface LinkedChatStore {
   // Idempotent: creates the workspace's default "general" channel on first
   // chat use, returns the existing one afterwards.
   ensureGeneralChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
+  ensureAgentChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
   listChannels(input: { workspaceId: WorkspaceId }): Promise<ChatChannelSummary[]>;
   // Slug is a lookup ALIAS only; durable state keys on channelId.
   findChannelBySlug(input: {
@@ -1200,6 +1266,8 @@ export interface LinkedChatStore {
     // it for relay verification. Omit for solo (byte-identical to today).
     authorUserId?: string;
     body: string;
+    needsDecision?: boolean;
+    attachments?: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
   }): Promise<{ thread: ChatThread; message: ChatMessage }>;
   // Most-recent-activity first, with derived unread counts.
   listChannelThreads(input: {
@@ -1233,12 +1301,45 @@ export interface LinkedChatStore {
     // supplies it ONLY when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
     authorUserId?: string;
+    parentMessageId?: ChatMessageId;
     body: string;
+    needsDecision?: boolean;
+    attachments?: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
   }): Promise<ChatMessage>;
   listMessages(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  resolveChatDecision(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    messageId: ChatMessageId;
+    resolvedByMessageId: ChatMessageId;
+  }): Promise<ChatDecisionRecord>;
+  listThreadDecisions(
+    workspaceId: WorkspaceId,
+    threadId: ChatThreadId,
+  ): Promise<ChatDecisionRecord[]>;
+  listThreadAttachments(
+    workspaceId: WorkspaceId,
+    threadId: ChatThreadId,
+  ): Promise<ChatAttachment[]>;
+  markThreadReadByAgent(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    upTo: { createdAtMs: number; messageId: ChatMessageId };
+    expectedRevision?: number;
+  }): Promise<ChatAgentReadState>;
+  agentReadState(
+    workspaceId: WorkspaceId,
+    threadId: ChatThreadId,
+  ): Promise<ChatAgentReadState>;
+  listAgentUnreadThreads(workspaceId: WorkspaceId): Promise<ChatThread[]>;
+  listMentionsForHandle(
+    workspaceId: WorkspaceId,
+    handle: string,
+    options?: { unreadByAgentOnly?: boolean },
+  ): Promise<ChatMentionRecord[]>;
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
   // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
@@ -1281,6 +1382,75 @@ export interface LinkedChatStore {
 export interface LinkedChatStoreOptions {
   nowMs?: () => number;
   createId?: (kind: "channel" | "message" | "thread") => string;
+}
+
+export type AgentDispatchState = "pending" | "running" | "done" | "failed";
+
+export interface AgentDispatchRecord {
+  workspaceId: WorkspaceId;
+  triggerMessageId: ChatMessageId;
+  threadId: ChatThreadId;
+  state: AgentDispatchState;
+  runId?: string;
+  attemptCount: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface AgentRunRecord {
+  workspaceId: WorkspaceId;
+  runId: string;
+  threadId: ChatThreadId;
+  triggerMessageId: ChatMessageId;
+  command: string;
+  startedAtMs: number;
+  endedAtMs?: number;
+  exitCode?: number;
+  logPath?: string;
+  failureNotePosted: boolean;
+}
+
+export interface AgentDispatchClaim {
+  dispatch: AgentDispatchRecord;
+  run: AgentRunRecord;
+}
+
+export interface ThreadDispatchPauseState {
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  paused: boolean;
+  reason?: string;
+  updatedAtMs: number;
+}
+
+export interface AgentDispatchStore {
+  recordTrigger(input: {
+    workspaceId: WorkspaceId;
+    triggerMessageId: ChatMessageId;
+    threadId: ChatThreadId;
+  }): boolean;
+  claimNextPending(
+    workspaceId: WorkspaceId,
+    options?: { command?: string; logPath?: string },
+  ): AgentDispatchClaim | null;
+  completeRun(input: { runId: string; exitCode: number }): AgentRunRecord;
+  failRun(input: { runId: string; exitCode?: number; reason: string }): AgentRunRecord;
+  listPending(workspaceId: WorkspaceId): AgentDispatchRecord[];
+  openRuns(workspaceId: WorkspaceId): AgentDispatchClaim[];
+  markFailureNotePosted(runId: string): AgentRunRecord;
+  recentDispatchCount(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    sinceMs: number;
+  }): number;
+  getRunRecord(runId: string): AgentRunRecord | null;
+  setThreadDispatchPaused(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    paused: boolean;
+    reason?: string;
+  }): ThreadDispatchPauseState;
+  threadDispatchPaused(workspaceId: WorkspaceId, threadId: ChatThreadId): boolean;
 }
 
 export type SearchSurface = "chat" | "file";
