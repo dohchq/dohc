@@ -139,6 +139,14 @@ async function seedOwnerWorkspace(h: SyncRelayHandler): Promise<void> {
     channelCreate(PRIVATE_WIRE, "SENTINEL-private-channel"),
     threadCreate("thread-private-1", PRIVATE_WIRE, "sentinel-private-channel"),
     messageAppend("msg-private-1", "thread-private-1", "SENTINEL-private-message", OWNER),
+    chatOp("chat.thread.create", {
+      threadId: "thread-file-private",
+      title: "",
+      createdAtMs: 1,
+      linkedObjectId: "object-file-private",
+      linkedPathHint: "private/file.md",
+      linkedAtMs: 1,
+    }),
     {
       originSeq: ownerSeq++,
       opKind: "secret.file.put",
@@ -520,6 +528,69 @@ describe("shared channels (MU-C4)", () => {
       await json(await h(request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100`))),
     );
     expect(memberView).not.toContain("SENTINEL-private-message");
+  });
+
+  it("rejects a same-batch re-bind of a file-linked thread before derived ops can target it", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    const shareId = await createChannelShare(h, MEMBER_A);
+
+    const response = await h(
+      request(
+        MEMBER_A,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "origin-file-rebind",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.create",
+              payload: {
+                threadId: "thread-file-private",
+                title: "",
+                createdAtMs: 10,
+                channelSlug: "team",
+                channelWireId: SHARED_WIRE,
+              },
+              recordedAtMs: 10,
+            },
+            {
+              originSeq: 1,
+              opKind: "chat.decision.set",
+              payload: {
+                threadId: "thread-file-private",
+                messageId: "SENTINEL-FILE-MESSAGE",
+                state: "resolved",
+                resolvedByMessageId: "SENTINEL-FILE-RESOLUTION",
+                atMs: 11,
+              },
+              recordedAtMs: 11,
+            },
+            {
+              originSeq: 2,
+              opKind: "chat.attachment.add",
+              payload: {
+                attachmentId: "SENTINEL-FILE-ATTACHMENT",
+                threadId: "thread-file-private",
+                messageId: "SENTINEL-FILE-MESSAGE",
+                targetKind: "file",
+                objectId: "SENTINEL-FILE-OBJECT",
+                pathHint: "private/SENTINEL-FILE-PATH.md",
+                createdAtMs: 12,
+              },
+              recordedAtMs: 12,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(response.status).toBe(403);
+    expect((await json(response)).code).toBe("share_op_rejected");
+    const ownerLog = await json(
+      await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)),
+    );
+    expect(JSON.stringify(ownerLog)).not.toContain("SENTINEL-FILE-");
   });
 
   it("accepts a member re-pushing a legitimate chat.channel.create for the SAME granted wire id", async () => {

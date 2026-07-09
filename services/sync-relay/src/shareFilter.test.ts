@@ -239,6 +239,9 @@ describe("share op filter", () => {
       "chat.thread.create",
       "chat.thread.update",
       "chat.message.append",
+      "chat.decision.set",
+      "chat.attachment.add",
+      "chat.reaction.set",
       "conflict.open",
       "conflict.resolve",
       "version.rename",
@@ -350,6 +353,26 @@ describe("chat-channel share selector", () => {
       versionId: null,
     });
   });
+
+  it("rejects an agent wire id when trusted owner-log kind resolution is available", () => {
+    const kindResolver: Pick<ChatShareThreadResolver, "channelKind"> = {
+      channelKind: (wireId) => (wireId === "wire-agent" ? "agent" : undefined),
+    };
+    expect(
+      validateChatChannelShareSelector({ channelWireId: "wire-agent" }, kindResolver),
+    ).toMatchObject({ ok: false, code: "invalid_channel" });
+    // Unknown/pre-provisioned wires retain the existing grant-before-sync flow;
+    // the durable filter serves nothing until their human kind resolves.
+    expect(
+      validateChatChannelShareSelector({ channelWireId: "wire-pending" }, kindResolver),
+    ).toMatchObject({ ok: true });
+    expect(
+      validateChatChannelShareSelector(
+        { channelWireId: "wire-malformed" },
+        { channelKind: () => null },
+      ),
+    ).toMatchObject({ ok: false, code: "invalid_channel" });
+  });
 });
 
 describe("presence topic gate (MU-C1 x MU-C4)", () => {
@@ -359,16 +382,23 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     access: "read-write",
   };
   const pathShare: ShareSelector = { paths: ["docs"], versionId: null };
+  const threadResolver: ChatShareThreadResolver = {
+    channelKind: (wireId) =>
+      wireId === "wire-1" || wireId === "wire-2" ? "channel" : undefined,
+    threadChannelWireId: (threadId) =>
+      threadId === "thread-in" ? "wire-1" : threadId === "thread-out" ? "wire-2" : undefined,
+  };
 
   it("scopes a chat-channel member's presence to exactly the granted wire id", () => {
     // The one allowed topic is the granted channel's wire id: a member joins
     // co-presence for that channel and nothing else.
-    expect(presenceTopicAllowedForShare(channelShare, "wire-1")).toBe(true);
+    expect(presenceTopicAllowedForShare(channelShare, "wire-1", threadResolver)).toBe(true);
     // Another channel, a file path, or an empty topic are all refused — a
     // chat-channel grant exposes no path-based (doc) presence at all.
     for (const topic of ["wire-2", "docs/a.md", "docs", ""]) {
-      expect(presenceTopicAllowedForShare(channelShare, topic), topic).toBe(false);
+      expect(presenceTopicAllowedForShare(channelShare, topic, threadResolver), topic).toBe(false);
     }
+    expect(presenceTopicAllowedForShare(channelShare, "wire-1")).toBe(false);
   });
 
   it("keeps path shares gated to their visible paths and never to a wire id", () => {
@@ -380,11 +410,6 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
   // MU-C6 thread presence: a chat-channel grant also admits `chat:thread:<tid>`
   // — but ONLY for a thread that binds to the granted channel via the same
   // forge-resistant earliest-binding resolver the durable chat filter uses.
-  const threadResolver: ChatShareThreadResolver = {
-    threadChannelWireId: (threadId) =>
-      threadId === "thread-in" ? "wire-1" : threadId === "thread-out" ? "wire-2" : null,
-  };
-
   it("admits a thread topic bound to the granted channel", () => {
     expect(
       presenceTopicAllowedForShare(channelShare, "chat:thread:thread-in", threadResolver),
@@ -446,10 +471,46 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     // Only a GENUINE earliest binding to this selector's channelWireId admits
     // it — proving the resolver, not bare equality, is the sole authority.
     const boundResolver: ChatShareThreadResolver = {
+      channelKind: (wireId) =>
+        wireId === "chat:thread:thread-foreign" ? "channel" : undefined,
       threadChannelWireId: (tid) =>
-        tid === "thread-foreign" ? "chat:thread:thread-foreign" : null,
+        tid === "thread-foreign" ? "chat:thread:thread-foreign" : undefined,
     };
     expect(presenceTopicAllowedForShare(forged, topic, boundResolver)).toBe(true);
+  });
+
+  it("denies channel and thread presence for an agent channel despite a matching grant", () => {
+    const agentShare: ChatChannelShareSelector = {
+      kind: "chat-channel",
+      channelWireId: "wire-agent",
+      access: "read-write",
+    };
+    const agentResolver: ChatShareThreadResolver = {
+      channelKind: (wireId) => (wireId === "wire-agent" ? "agent" : undefined),
+      threadChannelWireId: (threadId) =>
+        threadId === "thread-agent" ? "wire-agent" : undefined,
+    };
+    expect(presenceTopicAllowedForShare(agentShare, "wire-agent", agentResolver)).toBe(false);
+    expect(
+      presenceTopicAllowedForShare(agentShare, "chat:thread:thread-agent", agentResolver),
+    ).toBe(false);
+    // Presence uses one workspace topic namespace. A path selector whose path
+    // collides byte-for-byte with an agent wire/thread must not bypass the chat
+    // kind gate.
+    expect(
+      presenceTopicAllowedForShare(
+        { paths: ["wire-agent"], versionId: null },
+        "wire-agent",
+        agentResolver,
+      ),
+    ).toBe(false);
+    expect(
+      presenceTopicAllowedForShare(
+        { paths: ["chat:thread:thread-agent"], versionId: null },
+        "chat:thread:thread-agent",
+        agentResolver,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -479,8 +540,14 @@ describe("chat-channel share op filter", () => {
   // shared channel, thread-out binds to a DIFFERENT channel, anything else is
   // unknown (fail-closed).
   const resolver: ChatShareThreadResolver = {
+    channelKind: (wireId) =>
+      wireId === "wire-shared" || wireId === "wire-private" ? "channel" : undefined,
     threadChannelWireId: (threadId) =>
-      threadId === "thread-in" ? "wire-shared" : threadId === "thread-out" ? "wire-private" : null,
+      threadId === "thread-in"
+        ? "wire-shared"
+        : threadId === "thread-out"
+          ? "wire-private"
+          : undefined,
   };
 
   function decide(opKind: string, payload: Record<string, unknown>) {
@@ -505,6 +572,112 @@ describe("chat-channel share op filter", () => {
     if (message.allowed) expect(message.blobSha256s).toEqual([]);
   });
 
+  it("serves parentMessageId on a granted-channel message", () => {
+    const decision = decide("chat.message.append", {
+      messageId: "m-child",
+      threadId: "thread-in",
+      authorKind: "human",
+      authorDisplayName: "A",
+      authorUserId: "u1",
+      parentMessageId: "m-parent",
+      body: "reply",
+      createdAtMs: 2,
+      internalMessageMeta: "SENTINEL-message-internal",
+    });
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect(decision.payload).toEqual({
+      messageId: "m-child",
+      threadId: "thread-in",
+      authorKind: "human",
+      authorDisplayName: "A",
+      authorUserId: "u1",
+      parentMessageId: "m-parent",
+      body: "reply",
+      createdAtMs: 2,
+    });
+    expect(decision.blobSha256s).toEqual([]);
+  });
+
+  it("serves a decision only for the granted thread with the exact blob-free shape", () => {
+    const decision = decide("chat.decision.set", {
+      threadId: "thread-in",
+      messageId: "m1",
+      state: "resolved",
+      resolvedByMessageId: "m2",
+      atMs: 3,
+      internalDecisionMeta: "SENTINEL-decision-internal",
+    });
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect(decision.payload).toEqual({
+      threadId: "thread-in",
+      messageId: "m1",
+      state: "resolved",
+      resolvedByMessageId: "m2",
+      atMs: 3,
+    });
+    expect(Object.keys(decision.payload as Record<string, unknown>)).toEqual([
+      "threadId",
+      "messageId",
+      "state",
+      "resolvedByMessageId",
+      "atMs",
+    ]);
+    expect(decision.blobSha256s).toEqual([]);
+    expect(
+      decide("chat.decision.set", {
+        threadId: "thread-out",
+        messageId: "m-private",
+        state: "resolved",
+        resolvedByMessageId: "SENTINEL-private-resolution",
+        atMs: 3,
+      }).allowed,
+    ).toBe(false);
+  });
+
+  it("serves an opaque attachment chip without objectId or pathHint", () => {
+    const decision = decide("chat.attachment.add", {
+      attachmentId: "attachment-1",
+      threadId: "thread-in",
+      messageId: "m1",
+      targetKind: "file",
+      objectId: "SENTINEL-private-object",
+      pathHint: "private/SENTINEL-path.md",
+      createdAtMs: 4,
+      internalAttachmentMeta: "SENTINEL-attachment-internal",
+    });
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect(decision.payload).toEqual({
+      attachmentId: "attachment-1",
+      threadId: "thread-in",
+      messageId: "m1",
+      targetKind: "file",
+      createdAtMs: 4,
+    });
+    expect(Object.keys(decision.payload as Record<string, unknown>)).toEqual([
+      "attachmentId",
+      "threadId",
+      "messageId",
+      "targetKind",
+      "createdAtMs",
+    ]);
+    expect(decision.blobSha256s).toEqual([]);
+    expect(JSON.stringify(decision.payload)).not.toContain("SENTINEL");
+    expect(
+      decide("chat.attachment.add", {
+        attachmentId: "attachment-private",
+        threadId: "thread-out",
+        messageId: "m-private",
+        targetKind: "file",
+        objectId: "SENTINEL-other-object",
+        pathHint: "private/SENTINEL-other-path.md",
+        createdAtMs: 4,
+      }).allowed,
+    ).toBe(false);
+  });
+
   it("excludes another channel's ops with sentinel content (fail-closed leak test)", () => {
     expect(
       decide("chat.channel.create", { channelId: "c2", name: "SENTINEL-private-channel", slug: "private", kind: "channel", createdAtMs: 1, wireId: "wire-private" }).allowed,
@@ -517,6 +690,12 @@ describe("chat-channel share op filter", () => {
     ).toBe(false);
     expect(
       decide("chat.reaction.set", { reactionId: "r2", messageId: "m2", threadId: "thread-out", emoji: "👍", authorId: "u1", authorKind: "human", authorDisplayName: "A", state: "added", atMs: 1 }).allowed,
+    ).toBe(false);
+    expect(
+      decide("chat.decision.set", { threadId: "thread-out", messageId: "m2", state: "open", atMs: 1 }).allowed,
+    ).toBe(false);
+    expect(
+      decide("chat.attachment.add", { attachmentId: "a2", threadId: "thread-out", messageId: "m2", targetKind: "file", objectId: "private", createdAtMs: 1 }).allowed,
     ).toBe(false);
     // A message on a thread the log has NO binding for is excluded too.
     expect(
@@ -534,6 +713,36 @@ describe("chat-channel share op filter", () => {
     expect(
       decide("chat.thread.create", { threadId: "thread-new", title: "", createdAtMs: 1, channelWireId: "wire-shared", linkedObjectId: "obj-1" }).allowed,
     ).toBe(false);
+  });
+
+  it("distinguishes an absent thread from an existing unshareable thread", () => {
+    const unshareableResolver: ChatShareThreadResolver = {
+      channelKind: (wireId) => (wireId === "wire-shared" ? "channel" : undefined),
+      threadChannelWireId: (threadId) =>
+        threadId === "thread-file-linked" ? null : undefined,
+    };
+    const payload = {
+      threadId: "thread-file-linked",
+      title: "",
+      createdAtMs: 1,
+      channelWireId: "wire-shared",
+    };
+    expect(
+      filterOpForShare(
+        channelShare,
+        "chat.thread.create",
+        JSON.stringify(payload),
+        unshareableResolver,
+      ).allowed,
+    ).toBe(false);
+    expect(
+      filterOpForShare(
+        channelShare,
+        "chat.thread.create",
+        JSON.stringify({ ...payload, threadId: "thread-new" }),
+        unshareableResolver,
+      ).allowed,
+    ).toBe(true);
   });
 
   it("excludes every non-chat op kind from a chat-channel share (sentinels never leak)", () => {
@@ -559,6 +768,33 @@ describe("chat-channel share op filter", () => {
     expect(filterOpForShare(channelShare, "chat.message.append", "not json", resolver).allowed).toBe(false);
     expect(filterOpForShare(channelShare, "chat.message.append", '"str"', resolver).allowed).toBe(false);
     expect(filterOpForShare(channelShare, "chat.message.append", "{}", resolver).allowed).toBe(false);
+  });
+
+  it("denies every chat op kind on an agent channel even with a matching grant", () => {
+    const agentShare: ChatChannelShareSelector = {
+      kind: "chat-channel",
+      channelWireId: "wire-agent",
+      access: "read-write",
+    };
+    const agentResolver: ChatShareThreadResolver = {
+      channelKind: (wireId) => (wireId === "wire-agent" ? "agent" : undefined),
+      threadChannelWireId: (threadId) =>
+        threadId === "thread-agent" ? "wire-agent" : undefined,
+    };
+    const ops: Array<readonly [string, Record<string, unknown>]> = [
+      ["chat.channel.create", { wireId: "wire-agent", kind: "agent" }],
+      ["chat.thread.create", { threadId: "thread-agent", channelWireId: "wire-agent" }],
+      ["chat.message.append", { messageId: "m-agent", threadId: "thread-agent" }],
+      ["chat.reaction.set", { reactionId: "r-agent", messageId: "m-agent", threadId: "thread-agent" }],
+      ["chat.decision.set", { messageId: "m-agent", threadId: "thread-agent", state: "open", atMs: 1 }],
+      ["chat.attachment.add", { attachmentId: "a-agent", messageId: "m-agent", threadId: "thread-agent", targetKind: "file", objectId: "private", createdAtMs: 1 }],
+    ];
+    for (const [opKind, payload] of ops) {
+      expect(
+        filterOpForShare(agentShare, opKind, JSON.stringify(payload), agentResolver).allowed,
+        opKind,
+      ).toBe(false);
+    }
   });
 
   it("keeps chat ops excluded from path shares even when a resolver is wired", () => {

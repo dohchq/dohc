@@ -55,6 +55,25 @@ export interface ChatChannelShareSelector {
 
 export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
 
+export type ChatShareChannelKind = "channel" | "dm" | "agent";
+
+// MU-C4: how the chat branch resolves channel and thread ownership from the
+// workspace owner's append-only log. Both lookups use the EARLIEST matching
+// create op, mirroring the engine's insert-if-absent apply semantics: a later
+// forged create can never change a channel's kind or re-bind a thread.
+export interface ChatShareThreadResolver {
+  // The kind claimed by the EARLIEST chat.channel.create op for this wire id,
+  // undefined when no create exists yet, or null when an authoritative create
+  // exists but is malformed/unshareable.
+  channelKind(channelWireId: string): ChatShareChannelKind | null | undefined;
+  // The channelWireId claimed by the EARLIEST chat.thread.create op for this
+  // threadId. undefined means no create exists yet; null means an authoritative
+  // create exists but has no shareable channel binding (for example, a
+  // file-linked thread). Keeping those states distinct prevents a later batch
+  // from treating a private thread as new and re-binding it into a share.
+  threadChannelWireId(threadId: string): string | null | undefined;
+}
+
 export function isChatChannelSelector(
   selector: AnyShareSelector,
 ): selector is ChatChannelShareSelector {
@@ -65,10 +84,13 @@ export type ChatChannelSelectorValidation =
   | { ok: true; selector: ChatChannelShareSelector }
   | { ok: false; code: "invalid_channel" | "invalid_access"; message: string };
 
-export function validateChatChannelShareSelector(input: {
-  channelWireId?: unknown;
-  access?: unknown;
-}): ChatChannelSelectorValidation {
+export function validateChatChannelShareSelector(
+  input: {
+    channelWireId?: unknown;
+    access?: unknown;
+  },
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+): ChatChannelSelectorValidation {
   const wireId = input.channelWireId;
   if (
     typeof wireId !== "string" ||
@@ -91,6 +113,25 @@ export function validateChatChannelShareSelector(input: {
       ok: false,
       code: "invalid_access",
       message: 'access must be "read-write" or "read-only"',
+    };
+  }
+  // The request carries only a wire id; channel kind is trusted exclusively
+  // from the owner's log. Unknown/pre-provisioned wires remain grantable for
+  // the existing create-before-sync flow, but a positively identified agent
+  // channel is never eligible for the per-recipient share lane.
+  const resolvedKind = chat?.channelKind(wireId);
+  if (resolvedKind === "agent") {
+    return {
+      ok: false,
+      code: "invalid_channel",
+      message: "agent channels cannot be shared",
+    };
+  }
+  if (resolvedKind === null) {
+    return {
+      ok: false,
+      code: "invalid_channel",
+      message: "channel is not shareable",
     };
   }
   return { ok: true, selector: { kind: "chat-channel", channelWireId: wireId, access } };
@@ -282,7 +323,32 @@ export function presenceTopicAllowedForShare(
   chat?: ChatShareThreadResolver,
 ): boolean {
   if (typeof topic !== "string" || topic.length === 0) return false;
+  // Presence topics share one workspace namespace across path and chat routes.
+  // Close cross-selector collisions: even a path share whose selected path is
+  // byte-equal to an agent wire/thread topic must never enter that owner-only
+  // presence scope. Server share routes always provide this owner-log resolver.
+  if (chat) {
+    const topicThreadId = parseChatThreadTopic(topic);
+    if (topicThreadId !== null) {
+      const topicChannelWireId = chat.threadChannelWireId(topicThreadId);
+      if (
+        typeof topicChannelWireId === "string" &&
+        chat.channelKind(topicChannelWireId) === "agent"
+      ) {
+        return false;
+      }
+    } else if (chat.channelKind(topic) === "agent") {
+      return false;
+    }
+  }
   if (isChatChannelSelector(selector)) {
+    // A chat presence scope is shareable only after the owner's log proves a
+    // human channel kind. This is the presence backstop for legacy or corrupt
+    // grants targeting an owner-only agent channel; no resolver/unknown kind
+    // also fails closed.
+    if (!chat) return false;
+    const channelKind = chat.channelKind(selector.channelWireId);
+    if (channelKind !== "channel" && channelKind !== "dm") return false;
     // Thread-shape is decided FIRST, before any bare-wireId equality. A
     // `chat:thread:<threadId>` topic is ALWAYS routed through the forge-resistant
     // resolver — never admitted by `topic === channelWireId`. Otherwise a crafted
@@ -293,7 +359,6 @@ export function presenceTopicAllowedForShare(
     // (fail closed).
     const threadId = parseChatThreadTopic(topic);
     if (threadId !== null) {
-      if (!chat) return false;
       return chat.threadChannelWireId(threadId) === selector.channelWireId;
     }
     // A non-thread-shaped topic is channel-level co-presence: exactly the bare
@@ -307,8 +372,8 @@ export type ShareOpDecision =
   | { allowed: false }
   | {
       allowed: true;
-      // The payload to serve — identical to the stored payload except for
-      // version.create, whose forkSnapshots are redacted to the selector.
+      // The explicit payload shape to serve. Chat and moment ops use strict
+      // allowlists; version.create redacts forkSnapshots to the selector.
       payload: unknown;
       // Every blob hash this op legitimately exposes to the recipient.
       blobSha256s: string[];
@@ -339,30 +404,19 @@ function pickServed(
   return served;
 }
 
-// MU-C4: how the chat branch resolves a message/reaction op's channel. The
-// ops themselves carry only a threadId; the thread→channel binding lives in
-// the owner's OWN log, in the chat.thread.create op for that thread. The
-// EARLIEST such op (relay order) is authoritative — it mirrors the engine's
-// insert-if-absent apply, so a later forged re-create of an existing thread
-// can never re-bind it into (or out of) a shared channel.
-export interface ChatShareThreadResolver {
-  // The channelWireId claimed by the EARLIEST chat.thread.create op for this
-  // threadId in the shared workspace's log, or null when the log holds no
-  // binding (unknown thread, or a file-linked thread with no channel).
-  threadChannelWireId(threadId: string): string | null;
-}
-
 // The chat branch of the fail-closed share filter (MU-C4). Strict allowlist,
 // scoped to EXACTLY the granted channel's wire id:
 //   - chat.channel.create for the granted wireId (the join bootstrap);
 //   - chat.thread.create carrying the granted channelWireId, provided the
 //     log's earliest binding for that threadId (if any) is ALSO the granted
 //     channel — a forged re-bind of a foreign thread is excluded;
-//   - chat.message.append / chat.reaction.set whose thread resolves (earliest
-//     binding) to the granted channel.
-// Everything else — another channel's ops, file moments, secret ops, DMs,
-// version ops, workspace.init, unknown kinds — falls through to the caller's
-// terminal deny. Chat ops are blob-free, so the branch never exposes a blob.
+//   - chat.message.append / chat.reaction.set / chat.decision.set /
+//     chat.attachment.add whose thread resolves (earliest binding) to the
+//     granted channel.
+// Everything else — another channel's ops, file moments, secret ops, agent
+// channels, version ops, workspace.init, unknown kinds — falls through to the
+// caller's terminal deny. Chat ops are blob-free, so the branch never exposes
+// a blob.
 function filterChatOpForChannelShare(
   selector: ChatChannelShareSelector,
   opKind: string,
@@ -373,9 +427,15 @@ function filterChatOpForChannelShare(
   if (!chat) return { allowed: false };
   const record = asRecord(payload);
   if (!record) return { allowed: false };
+  // Agent channels use the owner's own-device lane only. A syntactically valid
+  // or historical grant for one must expose no op. Requiring a positively
+  // recognized human kind also makes an absent/malformed kind fail closed.
+  const channelKind = chat.channelKind(selector.channelWireId);
+  if (channelKind !== "channel" && channelKind !== "dm") return { allowed: false };
 
   if (opKind === "chat.channel.create") {
     if (collectString(record.wireId) !== selector.channelWireId) return { allowed: false };
+    if (record.kind !== channelKind) return { allowed: false };
     return {
       allowed: true,
       payload: pickServed(record, ["channelId", "name", "slug", "kind", "createdAtMs", "wireId"]),
@@ -393,10 +453,10 @@ function filterChatOpForChannelShare(
     const threadId = collectString(record.threadId);
     if (!threadId) return { allowed: false };
     const bound = chat.threadChannelWireId(threadId);
-    // null = this op IS the first binding (member append path, not yet in the
-    // log). A non-null binding must be the granted channel — otherwise this
-    // op is a forged re-bind of an existing foreign thread.
-    if (bound !== null && bound !== selector.channelWireId) return { allowed: false };
+    // undefined = this op IS the first binding (member append path, not yet in
+    // the log). Any authoritative existing state — another channel OR a null
+    // file-linked binding — must equal the grant or the re-bind is rejected.
+    if (bound !== undefined && bound !== selector.channelWireId) return { allowed: false };
     // linkedObjectId/linkedPathHint/linkedAtMs are deliberately NOT served: a
     // channel thread never carries a linked-file owner (enforced above).
     return {
@@ -422,6 +482,7 @@ function filterChatOpForChannelShare(
               "authorKind",
               "authorDisplayName",
               "authorUserId",
+              "parentMessageId",
               "body",
               "createdAtMs",
             ])
@@ -435,6 +496,28 @@ function filterChatOpForChannelShare(
               "authorDisplayName",
               "state",
               "atMs",
+            ]),
+      blobSha256s: [],
+    };
+  }
+
+  if (opKind === "chat.decision.set" || opKind === "chat.attachment.add") {
+    const threadId = collectString(record.threadId);
+    if (!threadId) return { allowed: false };
+    if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
+      return { allowed: false };
+    }
+    return {
+      allowed: true,
+      payload:
+        opKind === "chat.decision.set"
+          ? pickServed(record, ["threadId", "messageId", "state", "resolvedByMessageId", "atMs"])
+          : pickServed(record, [
+              "attachmentId",
+              "threadId",
+              "messageId",
+              "targetKind",
+              "createdAtMs",
             ]),
       blobSha256s: [],
     };
