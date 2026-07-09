@@ -8,17 +8,20 @@
 # Shell scripts must stay LF regardless of platform.
 *.sh text eol=lf
 
-# Source files are always text: force a text diff even if a blob accidentally
-# contains a NUL byte. Otherwise git renders "Binary files differ" and hides the
-# change from review — the exact hazard the NUL-byte escaping addressed (a
-# converted file whose pre-image still held a NUL showed no reviewable hunk).
-*.ts   diff
-*.tsx  diff
-*.mts  diff
-*.cts  diff
-*.js   diff
-*.mjs  diff
-*.cjs  diff
+# Source files are always text and always diffed as text — `text` forces
+# textual treatment instead of relying on git's binary auto-detection, and
+# `diff` forces a text diff even if a blob accidentally contains a NUL byte.
+# Without this, git renders "Binary files differ" and hides the change from
+# review — the exact hazard the NUL-byte escaping addressed (a converted file
+# whose pre-image still held a NUL showed no reviewable hunk). EOL stays LF via
+# the blanket rule above.
+*.ts   text diff
+*.tsx  text diff
+*.mts  text diff
+*.cts  text diff
+*.js   text diff
+*.mjs  text diff
+*.cjs  text diff
 
 # Binary assets: never normalize or diff as text.
 *.png binary
