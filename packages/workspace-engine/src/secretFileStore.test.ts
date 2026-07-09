@@ -1201,7 +1201,7 @@ describe("secret-state reads never create the engine store", () => {
       });
     });
     expect(existsSync(enginePath())).toBe(true);
-    expect(await readWorkspaceSecretState(root, WORKSPACE_ID)).not.toBe("none");
+    expect(await readWorkspaceSecretState(root, WORKSPACE_ID)).toBe("protected-key-present");
     expect(await readWorkspaceDataKeyForEnrollment(root, WORKSPACE_ID)).not.toBeNull();
   });
 });

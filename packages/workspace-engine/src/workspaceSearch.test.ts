@@ -690,6 +690,10 @@ describe("engine file path classifier (shared by search and capture)", () => {
     expect(classifyEngineFilePath("config/.env ")).toEqual({ kind: "secret" });
     expect(classifyEngineFilePath("deploy/prod.env ")).toEqual({ kind: "secret" });
     expect(classifyEngineFilePath(".env.local ")).toEqual({ kind: "secret" });
+    // A directory segment literally named `.env` (aliased) also classifies
+    // secret — locks the `segments.some(segment === ".env")` branch, not just
+    // the basename branch.
+    expect(classifyEngineFilePath("apps/site/.env /local.md")).toEqual({ kind: "secret" });
     // A trailing-space ordinary file is still tracked (no false secrets).
     expect(classifyEngineFilePath("notes/today.md ")).toEqual({ kind: "tracked" });
   });
