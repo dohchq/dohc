@@ -349,6 +349,14 @@ function normalizeParentMessageId(parentMessageId: string | undefined): string |
   return parentMessageId;
 }
 
+function normalizeMessageOrigin(origin: "cli" | undefined): "cli" | undefined {
+  if (origin === undefined) return undefined;
+  if (origin !== "cli") {
+    throw new LinkedChatStoreError("invalid-message-body", "Message origin is invalid.");
+  }
+  return origin;
+}
+
 function normalizeAttachments(
   attachments: Array<{ objectId: WorkspaceObjectId; pathHint?: string }> | undefined,
 ): Array<{ objectId: WorkspaceObjectId; pathHint?: string }> {
@@ -514,7 +522,9 @@ function messageFromRow(row: Record<string, unknown>): ChatMessage {
   // the display-only author. NULL/absent for solo/legacy messages.
   const authorUserId = optionalString(row.author_user_id);
   const parentMessageId = optionalString(row.parent_message_id);
+  const origin = optionalString(row.origin);
   if (parentMessageId !== undefined && parentMessageId.length === 0) throw corruptStore();
+  if (origin !== undefined && origin !== "cli") throw corruptStore();
   return {
     id: stringValue(row.message_id),
     workspaceId: stringValue(row.workspace_id),
@@ -525,6 +535,7 @@ function messageFromRow(row: Record<string, unknown>): ChatMessage {
     },
     ...(authorUserId !== undefined ? { authorUserId } : {}),
     ...(parentMessageId !== undefined ? { parentMessageId } : {}),
+    ...(origin !== undefined ? { origin } : {}),
     body: stringValue(row.body),
     createdAtMs: numberValue(row.created_at_ms),
     attachments: [],
@@ -1704,6 +1715,7 @@ export function createLinkedChatStore(
         const title = normalizeOptionalThreadTitle(input.title);
         const author = normalizeActor(input.author);
         const authorUserId = normalizeAuthorUserId(input.authorUserId);
+        const origin = normalizeMessageOrigin(input.origin);
         const body = normalizeBody(input.body);
         const attachments = normalizeAttachments(input.attachments);
         const threadId = createId("thread");
@@ -1720,6 +1732,7 @@ export function createLinkedChatStore(
           threadId,
           author,
           ...(authorUserId !== undefined ? { authorUserId } : {}),
+          ...(origin !== undefined ? { origin } : {}),
           body,
           createdAtMs: recordedAtMs,
           attachments: [],
@@ -1727,8 +1740,8 @@ export function createLinkedChatStore(
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
-            author_display_name, author_user_id, parent_message_id, body, created_at_ms
-          ) VALUES (?, ?, 0, ?, ?, ?, ?, NULL, ?, ?)`,
+            author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms
+          ) VALUES (?, ?, 0, ?, ?, ?, ?, NULL, ?, ?, ?)`,
         ).run(
           workspaceId,
           threadId,
@@ -1736,6 +1749,7 @@ export function createLinkedChatStore(
           author.kind,
           author.displayName,
           authorUserId ?? null,
+          origin ?? null,
           body,
           recordedAtMs,
         );
@@ -1796,6 +1810,7 @@ export function createLinkedChatStore(
             // WS-MU-C0: carry the verified identity ONLY when signed in (see
             // sendMessage). Solo omits it — byte-identical to the pre-MU-C0 shape.
             ...(authorUserId !== undefined ? { authorUserId } : {}),
+            ...(origin !== undefined ? { origin } : {}),
             body,
             createdAtMs: recordedAtMs,
           } satisfies ChatMessageAppendPayload,
@@ -1938,6 +1953,7 @@ export function createLinkedChatStore(
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const authorUserId = normalizeAuthorUserId(input.authorUserId);
         const parentMessageId = normalizeParentMessageId(input.parentMessageId);
+        const origin = normalizeMessageOrigin(input.origin);
         const attachments = normalizeAttachments(input.attachments);
         const message: ChatMessage = {
           id: createId("message"),
@@ -1946,6 +1962,7 @@ export function createLinkedChatStore(
           author: normalizeActor(input.author),
           ...(authorUserId !== undefined ? { authorUserId } : {}),
           ...(parentMessageId !== undefined ? { parentMessageId } : {}),
+          ...(origin !== undefined ? { origin } : {}),
           body: normalizeBody(input.body),
           createdAtMs: nowMs(),
           attachments: [],
@@ -1954,8 +1971,8 @@ export function createLinkedChatStore(
         db.prepare(
           `INSERT INTO chat_messages (
             workspace_id, thread_id, message_order, message_id, author_kind,
-            author_display_name, author_user_id, parent_message_id, body, created_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           workspaceId,
           thread.id,
@@ -1965,6 +1982,7 @@ export function createLinkedChatStore(
           message.author.displayName,
           authorUserId ?? null,
           parentMessageId ?? null,
+          origin ?? null,
           message.body,
           message.createdAtMs,
         );
@@ -2012,6 +2030,7 @@ export function createLinkedChatStore(
             // the pre-MU-C0 shape and leaves the relay's optional check inert.
             ...(authorUserId !== undefined ? { authorUserId } : {}),
             ...(parentMessageId !== undefined ? { parentMessageId } : {}),
+            ...(origin !== undefined ? { origin } : {}),
             body: message.body,
             createdAtMs: message.createdAtMs,
           } satisfies ChatMessageAppendPayload,
@@ -2650,6 +2669,7 @@ export function createLinkedChatStore(
             (payload.parentMessageId !== undefined &&
               (typeof payload.parentMessageId !== "string" ||
                 payload.parentMessageId.length === 0)) ||
+            (payload.origin !== undefined && payload.origin !== "cli") ||
             typeof payload.body !== "string" ||
             payload.body.length === 0 ||
             typeof payload.createdAtMs !== "number" ||
@@ -2672,11 +2692,12 @@ export function createLinkedChatStore(
             // as NULL). Never derived from the display name.
             const authorUserId = optionalString(payload.authorUserId) ?? null;
             const parentMessageId = optionalString(payload.parentMessageId) ?? null;
+            const origin = payload.origin ?? null;
             db.prepare(
               `INSERT INTO chat_messages (
                 workspace_id, thread_id, message_order, message_id, author_kind,
-                author_display_name, author_user_id, parent_message_id, body, created_at_ms
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).run(
               workspaceId,
               payload.threadId,
@@ -2686,6 +2707,7 @@ export function createLinkedChatStore(
               payload.authorDisplayName,
               authorUserId,
               parentMessageId,
+              origin,
               payload.body,
               payload.createdAtMs,
             );

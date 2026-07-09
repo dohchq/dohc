@@ -401,6 +401,9 @@ export interface ChatMessageAppendPayload {
   // authorship" section.
   authorUserId?: string;
   parentMessageId?: ChatMessageId;
+  // Local CLI writes are replicated so every device can exclude them from
+  // agent dispatch. Absent preserves the pre-CLI wire shape.
+  origin?: "cli";
   body: string;
   createdAtMs: number;
 }
@@ -1149,6 +1152,7 @@ export interface ChatMessage {
   // display name.
   authorUserId?: string;
   parentMessageId?: ChatMessageId;
+  origin?: "cli";
   body: string;
   createdAtMs: number;
   attachments: ChatAttachment[];
@@ -1265,6 +1269,7 @@ export interface LinkedChatStore {
     // supplies it ONLY when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
     authorUserId?: string;
+    origin?: "cli";
     body: string;
     needsDecision?: boolean;
     attachments?: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
@@ -1302,6 +1307,7 @@ export interface LinkedChatStore {
     // it for relay verification. Omit for solo (byte-identical to today).
     authorUserId?: string;
     parentMessageId?: ChatMessageId;
+    origin?: "cli";
     body: string;
     needsDecision?: boolean;
     attachments?: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;

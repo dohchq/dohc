@@ -682,6 +682,7 @@ export function initializeOrValidateEngineSchema(
   // select named columns and ignore it; an older writer leaves it NULL.
   ensureNullableColumn(db, "chat_messages", "author_user_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_messages", "parent_message_id", "TEXT", corrupt);
+  ensureNullableColumn(db, "chat_messages", "origin", "TEXT", corrupt);
 }
 
 export function assertRequiredEngineTables(

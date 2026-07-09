@@ -41,6 +41,9 @@ importers:
       '@codemirror/view':
         specifier: ^6.43.1
         version: 6.43.1
+      '@dohc/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
       '@dohc/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
@@ -201,6 +204,25 @@ importers:
       react:
         specifier: ^19.2.5
         version: 19.2.6
+
+  packages/cli:
+    dependencies:
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
+      tsx:
+        specifier: ^4.22.3
+        version: 4.22.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
 
   packages/mcp:
     dependencies:

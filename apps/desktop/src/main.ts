@@ -17,7 +17,7 @@ import {
 } from "electron";
 import { existsSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -205,6 +205,7 @@ import {
 import {
   createWorkspaceFolder,
   resetFailedJoinFolder,
+  type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
   effectiveHome,
@@ -355,6 +356,13 @@ import {
 } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { rgPath } from "@vscode/ripgrep";
+import {
+  startCliServer,
+  type CliRegistryWorkspace,
+  type CliServerHandle,
+  type CliWorkspaceContext,
+} from "./cli/cliServer";
+import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -1354,6 +1362,95 @@ function relayAuthorUserId(): string | undefined {
   return cachedCredentials?.userId;
 }
 
+// Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
+// resolves the registry workspace and derives identity exactly like renderer
+// chat sends. The client can claim only the behavior-bearing human/agent kind;
+// it never supplies the user id or display identity.
+let cliServer: CliServerHandle | null = null;
+let cliServerStartup: Promise<CliServerHandle | null> | null = null;
+
+async function maintainWorkspaceChatDescription(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): Promise<void> {
+  if (sharedViewOf(workspace.workspaceId)) return;
+  try {
+    await ensureAgentsChatBlock(workspace.rootPath);
+  } catch (error) {
+    console.error("[desktop] AGENTS.md chat description:", error);
+  }
+}
+
+async function registerWorkspaceWithChatDescription(
+  workspace: CreatedWorkspace,
+): Promise<void> {
+  registerWorkspace(workspace);
+  await maintainWorkspaceChatDescription(workspace);
+}
+
+async function openCliWorkspace(
+  requested: CliRegistryWorkspace,
+): Promise<CliWorkspaceContext> {
+  const workspace = findWorkspace(requested.workspaceId);
+  if (!workspace || resolve(workspace.rootPath) !== resolve(requested.rootPath)) {
+    throw new Error("dohc: not inside a dohc workspace");
+  }
+  if (sharedViewOf(workspace.workspaceId)) {
+    throw new Error("dohc: chats are not available in a read-only shared view");
+  }
+  await activity.open(workspace);
+  const capture = activity.engineCaptureFor(workspace.workspaceId);
+  if (!capture) throw new Error("Chats are not enabled for this workspace.");
+  const store = linkedChatStoreFor(workspace);
+  return {
+    workspaceId: workspace.workspaceId,
+    rootPath: workspace.rootPath,
+    store,
+    readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+    fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+    assertWritable: async (target) => {
+      assertWritableWorkspace(workspace);
+      await assertSharedChannelWritable({
+        workspaceId: workspace.workspaceId,
+        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+        store,
+        target,
+      });
+    },
+  };
+}
+
+async function startDesktopCliServer(): Promise<CliServerHandle> {
+  return startCliServer({
+    stateDir: stateDir(),
+    listWorkspaces: () =>
+      listWorkspaces()
+        .map(({ workspaceId, rootPath }) => ({
+          workspaceId,
+          rootPath,
+          readOnly: Boolean(sharedViewOf(workspaceId)),
+        })),
+    openWorkspace: openCliWorkspace,
+    identity: async () => {
+      await warmCredentialCache();
+      const authorUserId = relayAuthorUserId();
+      return {
+        displayName: localUserDisplayName(),
+        ...(authorUserId ? { authorUserId } : {}),
+        reactionAuthorId: localUserId(),
+      };
+    },
+    onWrite: (workspace) => {
+      notifyRenderer();
+      activity.queueCloudSync(workspace.workspaceId);
+      void syncWorkspaceSharedChannels(workspace.workspaceId);
+    },
+    onError: (error) => {
+      console.error("[desktop] CLI server:", error);
+    },
+  });
+}
+
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
 // tracked by handle. A new search, an explicit cancel, the renderer's
 // webContents going away, and app quit each kill the SPECIFIC tracked child.
@@ -1432,12 +1529,16 @@ app.on("will-quit", (event) => {
   event.preventDefault();
   searchRegistry.killAll();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
+  const cliServerStop = (cliServerStartup ?? Promise.resolve(cliServer))
+    .then((server) => server?.close())
+    .catch(() => undefined);
   agentIntegration.stopAll();
   // Linked chat stores are lazy singletons with SQLite handles on the shared
   // engine.db; close them at quit so WAL locks never outlive the app.
-  const chatStoreStop = Promise.all(
-    [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
-  );
+  const chatStoreStop = cliServerStop.then(() =>
+    Promise.all(
+      [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
+    ));
   // Engine search stores hold the same kind of lazy SQLite handle; close them
   // with the chat stores so WAL locks never outlive the app.
   const searchStoreStop = Promise.all(
@@ -1449,6 +1550,7 @@ app.on("will-quit", (event) => {
   void Promise.race([
     Promise.all([
       agentSessionStop,
+      cliServerStop,
       engineYDocStop.then(() => activity.stopAll()),
       chatStoreStop,
       searchStoreStop,
@@ -1553,7 +1655,7 @@ async function ensureWorkspaceRegistered(rootPath: string): Promise<WorkspaceSum
     kind: "personal",
   });
   const summary = WorkspaceSummary.parse(created);
-  registerWorkspace(created);
+  await registerWorkspaceWithChatDescription(created);
   refreshNativeWorkspaceSurfaces();
   return summary;
 }
@@ -1565,6 +1667,7 @@ async function openWorkspacePath(
   const rootPath = workspaceRootForOpenPath(path);
   if (!rootPath) return null;
   const workspace = await ensureWorkspaceRegistered(rootPath);
+  await maintainWorkspaceChatDescription(workspace);
   sendWorkspaceActivated(window, workspace);
   refreshNativeWorkspaceSurfaces();
   return workspace;
@@ -1680,7 +1783,7 @@ function registerIpcHandlers(): void {
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
-    registerWorkspace(created);
+    await registerWorkspaceWithChatDescription(created);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
@@ -1698,7 +1801,7 @@ function registerIpcHandlers(): void {
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
     const summary = WorkspaceSummary.parse(attached);
-    registerWorkspace(attached);
+    await registerWorkspaceWithChatDescription(attached);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
@@ -2298,6 +2401,7 @@ function registerIpcHandlers(): void {
         remoteWorkspaceId: parsed.workspaceId,
       });
       await activity.enableCloud(created, { joinBootstrap: true });
+      await maintainWorkspaceChatDescription(created);
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
       // the ENTIRE join back — engine/watcher/capture, registry entry, and
@@ -2649,6 +2753,7 @@ function registerIpcHandlers(): void {
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
       }
+      await maintainWorkspaceChatDescription(created);
     } catch (error) {
       console.error(`[desktop] open-share rollback for ${rootPath}:`, error);
       try {
@@ -2697,6 +2802,7 @@ function registerIpcHandlers(): void {
       relay: { baseUrl: cachedCredentials.relayUrl, token: cachedCredentials.token },
       shareId: shareView.shareId,
     });
+    await maintainWorkspaceChatDescription(workspace);
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
@@ -2804,6 +2910,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    await maintainWorkspaceChatDescription(workspace);
     const previousWorkspaceId = preferredWorkspaceId;
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
       await stopSitePreviewsForWorkspace(previousWorkspaceId);
@@ -3320,6 +3427,7 @@ function registerIpcHandlers(): void {
         messageCount: 1,
         lastReadSequence: 1,
         unreadCount: 0,
+        openDecisionCount: 0,
       }),
       message: chatMessageForIpc(started.message),
     });
@@ -4380,6 +4488,19 @@ if (!app.requestSingleInstanceLock()) {
     launchMarks.appReady();
     desktopMarks.markOnce("app-ready");
     registerIpcHandlers();
+    cliServerStartup = startDesktopCliServer()
+      .then(async (server) => {
+        if (quitting) {
+          await server.close();
+          return null;
+        }
+        cliServer = server;
+        return server;
+      })
+      .catch((error: unknown) => {
+        console.error("[desktop] CLI server failed to start:", error);
+        return null;
+      });
 
     // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
     protocol.handle(DOHC_FILE_SCHEME, async (request) => {

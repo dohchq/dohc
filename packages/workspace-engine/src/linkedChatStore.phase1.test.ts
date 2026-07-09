@@ -99,6 +99,7 @@ function messageEnvelope(input: {
   body: string;
   createdAtMs: number;
   parentMessageId?: string;
+  origin?: "cli";
 }): SyncReplicationEnvelope {
   return {
     workspaceId: WORKSPACE_ID,
@@ -111,6 +112,7 @@ function messageEnvelope(input: {
       authorKind: "human",
       authorDisplayName: "Peer",
       ...(input.parentMessageId !== undefined ? { parentMessageId: input.parentMessageId } : {}),
+      ...(input.origin !== undefined ? { origin: input.origin } : {}),
       body: input.body,
       createdAtMs: input.createdAtMs,
     },
@@ -141,6 +143,134 @@ function decisionEnvelope(input: {
 }
 
 describe("phase-one linked chat model", () => {
+  it("round-trips CLI origin locally and omits it from ordinary message ops", async () => {
+    const engine = await makeEngine("cli-origin-local");
+    const channel = await engine.store.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const started = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      origin: "cli",
+      body: "CLI opening",
+    });
+    const cliReply = await engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      author: { kind: "agent", displayName: "Your agent" },
+      origin: "cli",
+      body: "CLI reply",
+    });
+    const ordinaryReply = await engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Ordinary reply",
+    });
+
+    expect(started.message.origin).toBe("cli");
+    expect(cliReply.origin).toBe("cli");
+    expect(ordinaryReply.origin).toBeUndefined();
+    expect(
+      (
+        await engine.store.listMessages({
+          workspaceId: WORKSPACE_ID,
+          threadId: started.thread.id,
+        })
+      ).map((message) => message.origin),
+    ).toEqual(["cli", "cli", undefined]);
+    expect(
+      rawDbFor(engine, (db) =>
+        db
+          .prepare(
+            "SELECT origin FROM chat_messages WHERE workspace_id = ? AND thread_id = ? ORDER BY message_order",
+          )
+          .all(WORKSPACE_ID, started.thread.id)
+          .map((row) => row.origin),
+      ),
+    ).toEqual(["cli", "cli", null]);
+
+    const messageOps = replicationOps(engine).filter(
+      (op) => op.opKind === "chat.message.append",
+    );
+    expect(messageOps.map((op) => op.payload.origin)).toEqual(["cli", "cli", undefined]);
+    expect(Object.prototype.hasOwnProperty.call(messageOps[2]?.payload, "origin")).toBe(false);
+  });
+
+  it("replicates CLI origin and preserves legacy messages without it", async () => {
+    const source = await makeEngine("cli-origin-source");
+    const receiver = await makeEngine("cli-origin-receiver");
+    const channel = await source.store.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const started = await source.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      origin: "cli",
+      body: "CLI opening",
+    });
+    const cliReply = await source.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+      author: { kind: "agent", displayName: "Your agent" },
+      origin: "cli",
+      body: "CLI reply",
+    });
+    for (const op of replicationOps(source)) await receiver.store.applyReplicationOp(op);
+
+    await receiver.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-legacy-message",
+        threadId: started.thread.id,
+        messageId: "legacy-message-without-origin",
+        body: "Legacy wire payload",
+        createdAtMs: cliReply.createdAtMs + 100,
+      }),
+    );
+    const messages = await receiver.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+    });
+    expect(messages.find((message) => message.id === started.message.id)?.origin).toBe("cli");
+    expect(messages.find((message) => message.id === cliReply.id)?.origin).toBe("cli");
+    expect(
+      messages.find((message) => message.id === "legacy-message-without-origin")?.origin,
+    ).toBeUndefined();
+  });
+
+  it("rejects replicated message origins other than cli", async () => {
+    const engine = await makeEngine("cli-origin-validation");
+    const channel = await engine.store.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const started = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Opening",
+    });
+    const validEnvelope = messageEnvelope({
+      originId: "origin-invalid-message",
+      threadId: started.thread.id,
+      messageId: "message-invalid-origin",
+      body: "Invalid origin",
+      createdAtMs: 5000,
+    });
+    if (validEnvelope.opKind !== "chat.message.append") {
+      throw new Error("Expected a chat message envelope.");
+    }
+    const invalidEnvelope = {
+      ...validEnvelope,
+      payload: { ...validEnvelope.payload, origin: "terminal" },
+    } as unknown as SyncReplicationEnvelope;
+
+    await expect(engine.store.applyReplicationOp(invalidEnvelope)).rejects.toMatchObject({
+      code: "state-corrupt",
+    });
+  });
+
   it("round-trips parent ids and accepts a replicated child before its parent", async () => {
     const engine = await makeEngine("parents");
     const channel = await engine.store.ensureGeneralChannel({

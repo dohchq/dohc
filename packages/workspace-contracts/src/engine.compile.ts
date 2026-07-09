@@ -306,6 +306,7 @@ export const engineContractCompileCheck = (() => {
       threadId,
       author: actor,
       parentMessageId: "parent-message",
+      origin: "cli",
       body: "hello",
       createdAtMs: 6,
       attachments: [attachment],
