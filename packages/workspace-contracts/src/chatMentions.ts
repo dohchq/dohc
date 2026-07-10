@@ -102,6 +102,8 @@ export function scanMentionTokens(
     const start = match.index + (lead?.length ?? 0);
     if (inCode(start)) continue;
     const parsedHandle = handle.replace(TERMINAL_HANDLE_PUNCTUATION_RE, "");
+    // "@..." / "@___" trims to nothing — a bare "@" is not a mention token.
+    if (parsedHandle.length === 0) continue;
     found.push({ start, end: start + 1 + parsedHandle.length, handle: parsedHandle });
   }
   return found;

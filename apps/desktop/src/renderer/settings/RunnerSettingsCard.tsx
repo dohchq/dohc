@@ -79,11 +79,13 @@ export function RunnerSettingsCard(props: {
         timeoutDraft,
         runner.timeoutMinutes,
       );
+      const command = commandDraft.trim();
       const next: RunnerSettings = {
-        command: commandDraft,
+        command,
         enabled,
         timeoutMinutes,
       };
+      setCommandDraft(command);
       setTimeoutDraft(String(timeoutMinutes));
       return runnerSettingsEqual(next, runner)
         ? saveQueueRef.current

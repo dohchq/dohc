@@ -7,18 +7,23 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const requireFromHere = createRequire(import.meta.url);
 
-function cliErrorLine(error) {
-  const message = error instanceof Error && error.message.trim()
-    ? error.message.replace(/[\r\n]+/g, " ").trim()
-    : "unexpected CLI failure";
-  return `${message.startsWith("dohc:") ? message : `dohc: ${message}`}\n`;
+// Launcher-local failure lines. The library's error formatting lives in
+// src/errors.ts (cliErrorLine); the launcher runs under plain node before the
+// tsx loader exists, so it cannot import that module — it writes its two
+// fixed launcher-specific messages directly instead of duplicating the
+// formatter.
+function launcherFailure(step, error) {
+  const detail = error instanceof Error && error.message.trim()
+    ? ` (${error.message.replace(/[\r\n]+/g, " ").trim()})`
+    : "";
+  return `dohc: ${step}${detail}\n`;
 }
 
 let tsxLoader;
 try {
   tsxLoader = requireFromHere.resolve("tsx");
 } catch (error) {
-  process.stderr.write(cliErrorLine(error));
+  process.stderr.write(launcherFailure("failed to locate the tsx loader", error));
   process.exit(1);
 }
 const cli = resolve(here, "../src/index.ts");
@@ -29,7 +34,7 @@ const child = spawn(
 );
 
 child.once("error", (error) => {
-  process.stderr.write(cliErrorLine(error));
+  process.stderr.write(launcherFailure("failed to start", error));
   process.exit(1);
 });
 

@@ -103,6 +103,16 @@ describe("shared mention scanning", () => {
       { type: "text", text: "." },
     ]);
   });
+
+  it("drops tokens whose handle trims to nothing", () => {
+    for (const body of ["@...", "@___", "wait @... what"]) {
+      expect(scanMentionTokens(body)).toEqual([]);
+      expect(findMentions(body, candidates)).toEqual([]);
+      expect(toMentionSegments(body, candidates)).toEqual([
+        { type: "text", text: body },
+      ]);
+    }
+  });
 });
 
 describe("shared mention composer helpers", () => {

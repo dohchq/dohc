@@ -160,8 +160,15 @@ export function createRegistryStore(registryFile: string) {
       const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       if (entry.joinBootstrapPending !== true) return;
-      delete entry.joinBootstrapPending;
-      write(registry);
+      // Copy-on-write: the durable join gate may only clear in the cache when
+      // the same change reached disk — a failed write() must not leave this
+      // process believing bootstrap completed while the file still gates it.
+      const updated = { ...entry };
+      delete updated.joinBootstrapPending;
+      write({
+        ...registry,
+        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      });
     },
 
     setShareView(workspaceId: string, shareView: ShareViewIdentity): void {

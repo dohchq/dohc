@@ -314,7 +314,9 @@ describe("DesktopSettings", () => {
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
         settings: expect.objectContaining({
           runner: {
-            command: "   codex exec",
+            // Persisted commands are trimmed; the draft's leading whitespace
+            // must not survive the save.
+            command: "codex exec",
             enabled: true,
             timeoutMinutes: 30,
           },

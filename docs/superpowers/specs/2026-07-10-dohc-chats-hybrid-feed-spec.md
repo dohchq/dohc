@@ -56,8 +56,12 @@ replication log + sync relay. That is not an open question — it is shipped
    `decisionId`. The thread renders needs-decision while any decision on it is
    open. The leave transition has explicit producers on both actor surfaces:
    the CLI's `--resolve <message>` on `reply` (the resolving reply is the
-   recorded leaving message) and a UI resolve gesture on the decision chip;
-   anyone who can post in the thread may resolve. The cross-channel queue of
+   recorded leaving message) and a UI resolve gesture on the decision chip.
+   The UI gesture is message-producing too: it puts the composer into
+   resolving mode and the sent reply is recorded as the resolving message (an
+   empty submit posts the literal body `Resolved ✓`) — resolution is never a
+   non-message event, so every resolved decision has a resolving message id.
+   Anyone who can post in the thread may resolve. The cross-channel queue of
    open decisions is the future inbox — the type exists from day one so it
    can be queried, even though the inbox surface comes later.
 8. **Posts attach to work** via source-context chips. v1 targets files
