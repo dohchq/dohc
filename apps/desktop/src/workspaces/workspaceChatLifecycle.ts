@@ -5,6 +5,7 @@ export interface WorkspaceChatLifecycleRecord {
 
 export function createWorkspaceChatLifecycle(options: {
   isReadOnly(workspaceId: string): boolean;
+  isReadyForMaintenance?(workspaceId: string): boolean;
   maintain(rootPath: string): Promise<void>;
   onError(error: unknown): void;
 }) {
@@ -14,6 +15,7 @@ export function createWorkspaceChatLifecycle(options: {
   function maintainOnce(workspace: WorkspaceChatLifecycleRecord): Promise<void> {
     if (
       options.isReadOnly(workspace.workspaceId) ||
+      options.isReadyForMaintenance?.(workspace.workspaceId) === false ||
       maintainedWorkspaceIds.has(workspace.workspaceId)
     ) {
       return Promise.resolve();

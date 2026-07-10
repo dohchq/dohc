@@ -1,7 +1,6 @@
 import { app } from "electron";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createRegistryStore,
   type JoinedSharedChannel,
@@ -43,7 +42,7 @@ export function listWorkspaces(): RegistryEntry[] {
   return store().list();
 }
 
-export function registerWorkspace(workspace: CreatedWorkspace): void {
+export function registerWorkspace(workspace: RegistryEntry): void {
   store().register(workspace);
 }
 
@@ -62,6 +61,10 @@ export function setWorkspaceRemote(
   remote: { serverUrl: string; remoteWorkspaceId: string },
 ): void {
   store().setRemote(workspaceId, remote);
+}
+
+export function completeWorkspaceJoinBootstrap(workspaceId: string): void {
+  store().completeJoinBootstrap(workspaceId);
 }
 
 export function setWorkspaceShareView(

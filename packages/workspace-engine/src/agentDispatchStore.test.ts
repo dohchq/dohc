@@ -193,6 +193,56 @@ describe("agent dispatch store", () => {
     ]);
   });
 
+  it("keeps covered triggers done when the primary trigger's run fails", () => {
+    const db = database();
+    const store = createAgentDispatchStore(db, {
+      nowMs: () => 1000,
+      createRunId: () => "run-failed-thread",
+    });
+    for (const triggerMessageId of [
+      "message-primary",
+      "message-secondary-a",
+      "message-secondary-b",
+    ]) {
+      store.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId,
+        threadId: "thread-1",
+      });
+    }
+
+    const claim = store.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected the thread dispatch claim.");
+    store.failRun({ runId: claim.run.runId, reason: "runner failed" });
+
+    expect(
+      db
+        .prepare(
+          `SELECT trigger_message_id, state, run_id
+           FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND thread_id = ?
+           ORDER BY trigger_message_id`,
+        )
+        .all(WORKSPACE_ID, "thread-1"),
+    ).toEqual([
+      {
+        trigger_message_id: "message-primary",
+        state: "failed",
+        run_id: "run-failed-thread",
+      },
+      {
+        trigger_message_id: "message-secondary-a",
+        state: "done",
+        run_id: "run-failed-thread",
+      },
+      {
+        trigger_message_id: "message-secondary-b",
+        state: "done",
+        run_id: "run-failed-thread",
+      },
+    ]);
+  });
+
   it("fails pending triggers without fabricating a run record", () => {
     const db = database();
     const store = createAgentDispatchStore(db, { nowMs: () => 1200 });
@@ -424,6 +474,60 @@ describe("agent dispatch store", () => {
       conflict = error;
     }
     expect(conflict).toMatchObject({ code: "state-corrupt" });
+  });
+
+  it("bounds thread history by newest runs without dropping their linked messages", () => {
+    const db = database();
+    let now = 1000;
+    let nextRun = 0;
+    const store = createAgentDispatchStore(db, {
+      nowMs: () => now,
+      createRunId: () => `run-${(nextRun += 1)}`,
+    });
+    store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-trigger-old",
+      threadId: "thread-1",
+    });
+    const oldRun = store.claimNextPending(WORKSPACE_ID);
+    if (!oldRun) throw new Error("Expected the old run.");
+    store.recordRunMessage({
+      workspaceId: WORKSPACE_ID,
+      messageId: "message-report-old",
+      runId: oldRun.run.runId,
+    });
+    store.completeRun({ runId: oldRun.run.runId, exitCode: 0 });
+
+    now = 2000;
+    store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-trigger-new",
+      threadId: "thread-1",
+    });
+    const newRun = store.claimNextPending(WORKSPACE_ID);
+    if (!newRun) throw new Error("Expected the new run.");
+    for (const messageId of ["message-report-new-a", "message-report-new-b"]) {
+      store.recordRunMessage({
+        workspaceId: WORKSPACE_ID,
+        messageId,
+        runId: newRun.run.runId,
+      });
+    }
+
+    const recent = store.runRecordsForThread(WORKSPACE_ID, "thread-1", {
+      limit: 1,
+    });
+    expect(Object.keys(recent)).toEqual([
+      "message-report-new-a",
+      "message-report-new-b",
+    ]);
+    expect(Object.values(recent).map((run) => run.runId)).toEqual([
+      newRun.run.runId,
+      newRun.run.runId,
+    ]);
+    expect(() =>
+      store.runRecordsForThread(WORKSPACE_ID, "thread-1", { limit: 0 }),
+    ).toThrowError(AgentDispatchStoreError);
   });
 
   it("persists pause state and never claims work from a paused thread", () => {

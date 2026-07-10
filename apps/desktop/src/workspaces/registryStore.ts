@@ -43,6 +43,9 @@ export interface JoinedSharedChannel {
 export interface RegistryEntry extends CreatedWorkspace {
   // Present only after the user explicitly enables cloud sync (Phase 9).
   remote?: RemoteIdentity;
+  // Durable join gate: true from registration until the first pull has
+  // materialized and committed. Boot-time local writers must skip the entry.
+  joinBootstrapPending?: true;
   shareView?: ShareViewIdentity;
   // MU-C4: shared channels joined INTO this workspace's chat store.
   sharedChannels?: JoinedSharedChannel[];
@@ -150,6 +153,22 @@ export function createRegistryStore(registryFile: string) {
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       entry.remote = remote;
       write(registry);
+    },
+
+    completeJoinBootstrap(workspaceId: string): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (entry.joinBootstrapPending !== true) return;
+      // Copy-on-write: the durable join gate may only clear in the cache when
+      // the same change reached disk — a failed write() must not leave this
+      // process believing bootstrap completed while the file still gates it.
+      const updated = { ...entry };
+      delete updated.joinBootstrapPending;
+      write({
+        ...registry,
+        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      });
     },
 
     setShareView(workspaceId: string, shareView: ShareViewIdentity): void {

@@ -429,6 +429,10 @@ const CHAT_CHANNEL_TABLES_DDL = `
     ON chat_reactions(workspace_id, thread_id, message_id);
 `;
 
+/**
+ * Decisions, attachments, and mentions deliberately omit FKs because replicated rows can
+ * arrive before parents. No deletion path exists yet; cleanup will ship with deletion.
+ */
 const CHAT_PHASE_ONE_DDL = `
   CREATE TABLE IF NOT EXISTS chat_decisions (
     workspace_id TEXT NOT NULL,

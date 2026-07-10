@@ -94,11 +94,15 @@ minimal and boring.
 7. **The CLI talks to the local engine host.** v1: the desktop app must be
    running; the CLI connects over a local IPC socket and fails with a clear
    one-line error when it can't (`dohc: desktop app not running`). A headless
-   engine mode is a later addition. The relay token and all sync machinery
-   stay in the main process, exactly as with presence (MU-C5). Writes
-   arriving over this socket never create dispatch triggers (runner spec
-   decision 5): CLI-origin means an agent's hands or a terminal, not the
-   remote flow.
+   engine mode is a later addition. The primary Unix-socket path carries the
+   same authentication as the hardened WSL fallback: a per-boot random token
+   stored mode `0600` in the per-user state directory (mode `0700`), with a
+   constant-time token comparison before any verb runs and a protocol-version
+   handshake. Identity is derived in the main process; CLI flags are never
+   authority. The relay token and all sync machinery stay in the main
+   process, exactly as with presence (MU-C5). Writes arriving over this socket
+   never create dispatch triggers (runner spec decision 5): CLI-origin means
+   an agent's hands or a terminal, not the remote flow.
 8. **Errors are one plain-text line on stderr + nonzero exit.** No stack
    traces at agents. Common failures (unknown id, no such channel, gate
    refused the write) each get a distinct, greppable message.

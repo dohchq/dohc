@@ -50,16 +50,20 @@ replication log + sync relay. That is not an open question — it is shipped
    never transcript streaming).
 7. **`needs decision` is a typed, per-message state, not a label.** A
    decision is a record on the triggering message (`open | resolved`, with
-   the resolving message id) — because one post, or one agent report, can
-   raise several independent decisions, and a thread-level scalar silently
-   loses all but the last. The thread renders needs-decision while any
-   decision on it is open. The leave transition has explicit producers on
-   both actor surfaces: the CLI's `--resolve <message>` on `reply` (the
-   resolving reply is the recorded leaving message) and a UI resolve gesture
-   on the decision chip; anyone who can post in the thread may resolve. The
-   cross-channel queue of open decisions is the future inbox — the type
-   exists from day one so it can be queried, even though the inbox surface
-   comes later.
+   the resolving message id), and a message carries at most one decision
+   record. A post or report that raises several independent decisions does so
+   by posting several `--needs-decision` messages, one per decision; v1 has no
+   `decisionId`. The thread renders needs-decision while any decision on it is
+   open. The leave transition has explicit producers on both actor surfaces:
+   the CLI's `--resolve <message>` on `reply` (the resolving reply is the
+   recorded leaving message) and a UI resolve gesture on the decision chip.
+   The UI gesture is message-producing too: it puts the composer into
+   resolving mode and the sent reply is recorded as the resolving message (an
+   empty submit posts the literal body `Resolved ✓`) — resolution is never a
+   non-message event, so every resolved decision has a resolving message id.
+   Anyone who can post in the thread may resolve. The cross-channel queue of
+   open decisions is the future inbox — the type exists from day one so it
+   can be queried, even though the inbox surface comes later.
 8. **Posts attach to work** via source-context chips. v1 targets files
    (extending the shipped `LinkedChatFileRef` pattern to per-message links);
    versions, agent runs, and decisions follow. Every attached object is
@@ -184,9 +188,11 @@ projection**, not a bulk mirror:
   file on revoke; and onward-sharing a projected file re-checks the source
   grant as a speed bump — copy-paste defeats it, so it is documented as
   courtesy, never as a security boundary.
-- **`dohc chat export` covers ownership**: everything, on demand, as plain
-  markdown. Curation solves signal-to-noise; export guarantees no data is
-  held hostage.
+- **`dohc chat export` covers authorized chat objects**, on demand, as plain
+  markdown with only re-authorized, redacted metadata. It explicitly excludes
+  owner-private run records, raw harness logs, and local-only traces. Curation
+  solves signal-to-noise; export guarantees authorized chat data is not held
+  hostage without turning private execution artifacts into chat exports.
 
 ## Surfaces
 

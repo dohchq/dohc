@@ -12,6 +12,8 @@ import {
 } from "./protocol";
 import { renderCliResult } from "./render";
 
+const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
+
 export interface CliExecutionResult {
   exitCode: 0 | 1;
   stdout: string;
@@ -175,7 +177,12 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     );
     const send =
       options.request ??
-      ((value: CliRequestWithoutToken) => sendCliRequest(value, { ...options.client, env }));
+      ((value: CliRequestWithoutToken) =>
+        sendCliRequest(value, {
+          ...options.client,
+          timeoutMs: options.client?.timeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS,
+          env,
+        }));
     const rawResult = await send(request);
     let result: CliResultByVerb[keyof CliResultByVerb];
     try {

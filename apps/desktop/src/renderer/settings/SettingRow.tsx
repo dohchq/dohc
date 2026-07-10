@@ -112,6 +112,7 @@ export function SegmentedControl<T extends string>(props: {
 export function SwitchControl(props: {
   label: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -120,8 +121,11 @@ export function SwitchControl(props: {
       role="switch"
       aria-label={props.label}
       aria-checked={props.checked}
-      onClick={() => props.onChange(!props.checked)}
-      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+      disabled={props.disabled}
+      onClick={() => {
+        if (!props.disabled) props.onChange(!props.checked);
+      }}
+      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${
         props.checked ? "border-ink bg-ink" : "border-line bg-panel-2"
       }`}
     >

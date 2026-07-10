@@ -34,6 +34,7 @@ export interface MentionScanOptions {
 // including JavaScript's case-fold equivalents for the a-z range.
 const HANDLE_BODY = "[a-z0-9][a-z0-9._-]*";
 const MENTION_RE = new RegExp(`(^|[\\s(\\[{])@(${HANDLE_BODY})`, "giu");
+const TERMINAL_HANDLE_PUNCTUATION_RE = /[._-]+$/u;
 
 function normalizeHandle(handle: string): string {
   return handle.normalize("NFC").toLowerCase();
@@ -100,7 +101,10 @@ export function scanMentionTokens(
     const [, lead, handle = ""] = match;
     const start = match.index + (lead?.length ?? 0);
     if (inCode(start)) continue;
-    found.push({ start, end: start + 1 + handle.length, handle });
+    const parsedHandle = handle.replace(TERMINAL_HANDLE_PUNCTUATION_RE, "");
+    // "@..." / "@___" trims to nothing — a bare "@" is not a mention token.
+    if (parsedHandle.length === 0) continue;
+    found.push({ start, end: start + 1 + parsedHandle.length, handle: parsedHandle });
   }
   return found;
 }

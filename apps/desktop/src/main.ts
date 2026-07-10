@@ -224,6 +224,7 @@ import {
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
+  completeWorkspaceJoinBootstrap,
   effectiveHome,
   findWorkspace,
   listWorkspaces,
@@ -1754,6 +1755,8 @@ function assertChatRunnerIdle(workspaceId: string): void {
 
 const workspaceChatLifecycle = createWorkspaceChatLifecycle({
   isReadOnly: (workspaceId) => Boolean(sharedViewOf(workspaceId)),
+  isReadyForMaintenance: (workspaceId) =>
+    findWorkspace(workspaceId)?.joinBootstrapPending !== true,
   maintain: async (rootPath) => {
     await ensureAgentsChatBlock(rootPath);
   },
@@ -2899,7 +2902,7 @@ function registerIpcHandlers(): void {
       bootstrap: "join",
     });
     const summary = WorkspaceSummary.parse(created);
-    registerWorkspace(created);
+    registerWorkspace({ ...created, joinBootstrapPending: true });
     refreshNativeWorkspaceSurfaces();
     try {
       // Open first (watcher + engine capture on an empty folder), THEN bind
@@ -2913,6 +2916,7 @@ function registerIpcHandlers(): void {
           remoteWorkspaceId: parsed.workspaceId,
         });
         await activity.enableCloud(created, { joinBootstrap: true });
+        completeWorkspaceJoinBootstrap(created.workspaceId);
       });
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
@@ -3880,6 +3884,7 @@ function registerIpcHandlers(): void {
     const found = dispatchStore.runRecordsForThread(
       workspace.workspaceId,
       input.threadId,
+      { limit: 200 },
     );
     const runs = Object.fromEntries(
       Object.entries(found).map(([messageId, run]) => [

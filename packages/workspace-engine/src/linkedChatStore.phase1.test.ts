@@ -940,7 +940,7 @@ describe("phase-one linked chat model", () => {
       parseMentionHandles(
         "Hi @Agent and @agent. email@ignored é@ignored @K @ſ `ignore @inline`\n```ts\nignore @fenced\n```\n`multi line\nignore @multiline`\n@other-team",
       ),
-    ).toEqual(["agent", "agent.", "k", "ſ", "other-team"]);
+    ).toEqual(["agent", "k", "ſ", "other-team"]);
 
     const parityCandidates: MentionCandidate[] = [
       { id: "agent", kind: "agent", handle: "agent", label: "Agent" },

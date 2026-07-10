@@ -110,6 +110,14 @@ function normalizeSinceMs(value: number): number {
   return value;
 }
 
+function normalizeOptionalRunLimit(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw invalidInput("Run record limit must be a positive integer.");
+  }
+  return value;
+}
+
 function normalizePaused(value: boolean): boolean {
   if (typeof value !== "boolean") throw invalidInput("Dispatch pause state must be boolean.");
   return value;
@@ -476,6 +484,7 @@ export function createAgentDispatchStore(
       return false;
     },
 
+    /** Covered triggers stay done if the primary run fails; a retry repacks the whole thread. */
     claimNextPending(workspaceIdInput, claimOptions = {}) {
       const workspaceId = normalizeWorkspaceId(workspaceIdInput);
       const command = normalizeCommand(claimOptions.command);
@@ -759,20 +768,31 @@ export function createAgentDispatchStore(
       return row ? stringValue(row.run_id) : null;
     },
 
-    runRecordsForThread(workspaceIdInput, threadIdInput) {
+    runRecordsForThread(workspaceIdInput, threadIdInput, options = {}) {
       const workspaceId = normalizeWorkspaceId(workspaceIdInput);
       const threadId = normalizeRequiredId(threadIdInput, "Thread id");
+      const limit = normalizeOptionalRunLimit(options.limit);
       const rows = db
         .prepare(
-          `SELECT links.message_id AS linked_message_id, runs.*
+          `${limit === undefined ? "" : `WITH recent_runs AS (
+             SELECT * FROM agent_run_records
+             WHERE workspace_id = ? AND thread_id = ?
+             ORDER BY started_at_ms DESC, run_id DESC
+             LIMIT ?
+           )`}
+           SELECT links.message_id AS linked_message_id, runs.*
            FROM run_message_links links
-           JOIN agent_run_records runs
+           JOIN ${limit === undefined ? "agent_run_records" : "recent_runs"} runs
              ON runs.workspace_id = links.workspace_id
             AND runs.run_id = links.run_id
            WHERE runs.workspace_id = ? AND runs.thread_id = ?
-           ORDER BY links.message_id`,
+           ORDER BY runs.started_at_ms DESC, runs.run_id DESC, links.message_id`,
         )
-        .all(workspaceId, threadId);
+        .all(
+          ...(limit === undefined
+            ? [workspaceId, threadId]
+            : [workspaceId, threadId, limit, workspaceId, threadId]),
+        );
       return Object.fromEntries(
         rows.map((row) => [stringValue(row.linked_message_id), runFromRow(row)]),
       );

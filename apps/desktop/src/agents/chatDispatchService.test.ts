@@ -152,6 +152,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const dispatchDb = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
   const now = { value: 1_000_000 };
   let nextRunId = 0;
+  let nextSelfTestId = 0;
   const dispatch = createAgentDispatchStore(dispatchDb, {
     nowMs: () => now.value,
     createRunId: () => `run_${(nextRunId += 1)}`,
@@ -284,7 +285,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     },
     platform: "linux",
     nowMs: () => now.value,
-    createId: () => "self_test_id",
+    createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
   });
 
@@ -928,6 +929,43 @@ describe("chatDispatchService", () => {
     expect(fixture.dispatch.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([notes[0]!.id]);
   });
 
+  it("finalizes a failed run and dispatches the next claim when its failure note throws", async () => {
+    const fixture = await createFixture();
+    const first = await createAgentThread(fixture, {
+      body: "Fail this run.",
+      authorUserId: "user_local",
+    });
+    const second = await createAgentThread(fixture, {
+      body: "Run after the failed note.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+    const noteError = new Error("failure note write failed");
+    vi.spyOn(fixture.chat, "listMessages").mockRejectedValueOnce(noteError);
+
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
+      endedAtMs: fixture.now.value,
+      exitCode: 7,
+      failureNotePosted: false,
+    });
+    expect(
+      fixture.dispatchDb
+        .prepare(
+          `SELECT state FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND trigger_message_id = ?`,
+        )
+        .get(WORKSPACE_ID, first.messageId)?.state,
+    ).toBe("done");
+    expect(fixture.errors).toContain(noteError);
+    expect(fixture.spawnCalls).toHaveLength(2);
+    expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(second.threadId);
+  });
+
   it("skips service notes when the shared-channel write gate rejects", async () => {
     const fixture = await createFixture({ serviceNotesWritable: false });
     const trigger = await createAgentThread(fixture, {
@@ -1261,15 +1299,27 @@ describe("chatDispatchService", () => {
     const threadId = call.options.env.DOHC_CHAT_THREAD;
     const runId = call.options.env.DOHC_RUN_ID;
     if (!threadId || !runId) throw new Error("Expected self-test attribution.");
-    expect(call.args.at(-1)).toContain(`dohc chat reply ${threadId} --as-agent "self-test ok"`);
-    expect(runId).toBe("run_self_test_self_test_id");
+    const marker = `dohc-runner-self-test:${runId}`;
+    expect(call.args.at(-1)).toContain(
+      `dohc chat reply ${threadId} --as-agent "${marker}"`,
+    );
+    expect(runId).toBe("run_self_test_self_test_id_1");
+
+    const openingMessages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId,
+    });
+    expect(openingMessages[0]).toMatchObject({
+      author: { kind: "agent" },
+      origin: "cli",
+    });
 
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId,
       author: { kind: "agent", displayName: "Ice" },
       origin: "cli",
-      body: "self-test ok",
+      body: marker,
     });
     call.process.emitExit(0);
 
@@ -1281,6 +1331,38 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       run: null,
     });
+
+    const retryPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    await flushMicrotasks();
+    const retryCall = fixture.spawnCalls[1];
+    if (!retryCall) throw new Error("Expected a self-test retry.");
+    expect(retryCall.options.env.DOHC_CHAT_THREAD).toBe(threadId);
+    const retryRunId = retryCall.options.env.DOHC_RUN_ID;
+    if (!retryRunId) throw new Error("Expected retry attribution.");
+    const retryMarker = `dohc-runner-self-test:${retryRunId}`;
+    expect(retryMarker).not.toBe(marker);
+    await fixture.chat.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId,
+      author: { kind: "agent", displayName: "Ice" },
+      origin: "cli",
+      body: retryMarker,
+    });
+    retryCall.process.emitExit(0);
+    await expect(retryPromise).resolves.toMatchObject({ ok: true });
+
+    const agentChannel = await fixture.chat.ensureAgentChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const scratchThreads = await fixture.chat.listChannelThreads({
+      workspaceId: WORKSPACE_ID,
+      channelId: agentChannel.id,
+    });
+    expect(
+      scratchThreads.filter(
+        (summary) => summary.thread.title === "dohc runner self-test",
+      ),
+    ).toHaveLength(1);
   });
 
   it("times out a runner self-test and escalates the same spawned group", async () => {

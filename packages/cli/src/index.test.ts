@@ -1,6 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CliRequestWithoutToken } from "./protocol";
 import { executeCli } from "./index";
+
+const TOKEN = "a".repeat(64);
+const cleanupDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(cleanupDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function tempStateDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-cli-index-test-"));
+  cleanupDirs.push(dir);
+  await writeFile(join(dir, "dohc-cli-token"), `${TOKEN}\n`, { mode: 0o600 });
+  return dir;
+}
 
 const channel = {
   id: "ch_general",
@@ -69,6 +86,56 @@ describe("executeCli", () => {
       },
     ]);
     expect(result.stdout).toBe("replied th_8f2k1c msg_new\n");
+  });
+
+  it.each([
+    ["post", ["chat", "post", "general", "-"]],
+    ["reply", ["chat", "reply", "th_8f", "-"]],
+  ] as const)("rejects empty stdin for %s", async (_verb, argv) => {
+    const request = vi.fn();
+    const result = await executeCli({
+      argv,
+      cwd: "/workspace",
+      env: {},
+      readStdin: async () => " \n\t ",
+      request,
+    });
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: stdin body is empty\n",
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined, 30_000],
+    [1_234, 1_234],
+  ] as const)("uses the configured response timeout %s", async (timeoutMs, expectedTimeoutMs) => {
+    const stateDir = await tempStateDir();
+    const transport = vi.fn(async () => ({
+      protocolVersion: 1,
+      ok: true,
+      result: { channels: [] },
+    }));
+    const result = await executeCli({
+      argv: ["chat", "channels"],
+      cwd: "/workspace",
+      env: {},
+      client: {
+        stateDir,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        transport,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(transport).toHaveBeenCalledWith(
+      join(stateDir, "dohc-cli.sock"),
+      expect.any(String),
+      expectedTimeoutMs,
+    );
   });
 
   it("passes the ambient run id through every chat write request only", async () => {
