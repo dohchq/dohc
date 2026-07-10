@@ -19,29 +19,39 @@ function launcherFailure(step, error) {
   return `dohc: ${step}${detail}\n`;
 }
 
+// Failure paths set process.exitCode instead of calling process.exit(): a
+// hard exit can truncate stderr when it is piped or redirected, and with no
+// child spawned there are no open handles, so the process ends on its own
+// with the failure code once the diagnostic has flushed.
 let tsxLoader;
 try {
   tsxLoader = requireFromHere.resolve("tsx");
 } catch (error) {
   process.stderr.write(launcherFailure("failed to locate the tsx loader", error));
-  process.exit(1);
+  process.exitCode = 1;
 }
-const cli = resolve(here, "../src/index.ts");
-const child = spawn(
-  process.execPath,
-  ["--import", pathToFileURL(tsxLoader).href, cli, ...process.argv.slice(2)],
-  { stdio: "inherit" },
-);
 
-child.once("error", (error) => {
-  process.stderr.write(launcherFailure("failed to start", error));
-  process.exit(1);
-});
+if (tsxLoader) {
+  const cli = resolve(here, "../src/index.ts");
+  const child = spawn(
+    process.execPath,
+    ["--import", pathToFileURL(tsxLoader).href, cli, ...process.argv.slice(2)],
+    { stdio: "inherit" },
+  );
 
-child.on("exit", (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
-});
+  child.once("error", (error) => {
+    process.stderr.write(launcherFailure("failed to start", error));
+    process.exitCode = 1;
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    // Propagating the child's code via process.exit here is safe: the
+    // child's stdio was inherited, so there is no buffered launcher output
+    // left to truncate.
+    process.exit(code ?? 1);
+  });
+}
