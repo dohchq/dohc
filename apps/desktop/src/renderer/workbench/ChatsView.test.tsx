@@ -91,12 +91,17 @@ const bridgeMock = {
   listChannelThreads: vi.fn(),
   startChannelThread: vi.fn(),
   listChatMessages: vi.fn(),
+  listChatThreadDecisions: vi.fn(),
+  resolveChatDecision: vi.fn(),
+  listChatThreadAttachments: vi.fn(),
+  chatRunRecordForMessage: vi.fn(),
   sendChatMessage: vi.fn(),
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
   syncDms: vi.fn(),
   startDm: vi.fn(),
+  writeClipboardText: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -114,6 +119,10 @@ beforeEach(() => {
   });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
+  bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
+  bridgeMock.chatRunRecordForMessage.mockResolvedValue({ run: null });
+  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({
     lastReadSequence: 1,
     revision: 1,
@@ -225,6 +234,121 @@ describe("ChatsView channels", () => {
   });
 });
 
+describe("ChatsView hybrid feed", () => {
+  it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
+    const user = userEvent.setup();
+    const humanThread = thread({ messageCount: 3, openDecisionCount: 1 });
+    const agentThread = thread({
+      id: "thread-agent",
+      title: "Pipeline review complete",
+      messageCount: 1,
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [humanThread, agentThread],
+    });
+    bridgeMock.listChatMessages.mockImplementation(
+      ({ threadId }: { threadId: string }) =>
+        Promise.resolve({
+          messages: [
+            threadId === "thread-agent"
+              ? message({
+                  id: "message-agent",
+                  threadId,
+                  authorKind: "agent",
+                  authorDisplayName: "You's agent",
+                  body: "The release pipeline is green across all checks.",
+                })
+              : message({
+                  threadId,
+                  body: "Should we ship on Friday? The launch checklist is ready.",
+                }),
+          ],
+        }),
+    );
+    bridgeMock.listChatReactions.mockImplementation(
+      ({ threadId }: { threadId: string }) =>
+        Promise.resolve({
+          reactions:
+            threadId === "thread-1"
+              ? [
+                  {
+                    reactionId: "reaction-1",
+                    messageId: "message-1",
+                    threadId,
+                    emoji: "👍",
+                    authorId: "you@example.com",
+                    authorKind: "human" as const,
+                    authorDisplayName: "You",
+                  },
+                ]
+              : [],
+          viewerAuthorId: "you@example.com",
+        }),
+    );
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    const cards = await screen.findAllByTestId("chats-post-card");
+    expect(cards).toHaveLength(2);
+    expect(screen.getByText("Should we ship on Friday? The launch checklist is ready.")).toBeTruthy();
+    expect(screen.getAllByTestId("chats-post-comment-count")[0]?.textContent).toBe(
+      "2 comments",
+    );
+    expect(screen.getByTestId("chats-post-decision-open").textContent).toBe(
+      "needs decision",
+    );
+    expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
+    expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
+    expect(cards[1]?.className).toContain("border-l-2");
+    expect(screen.getAllByTestId("chats-post-author")[1]?.textContent).toBe(
+      "You's agent",
+    );
+
+    await user.click(cards[0]!);
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+  });
+});
+
+describe("ChatsView My agent", () => {
+  it("stays absent when the workspace has no agent channel", async () => {
+    renderView();
+    await screen.findByTestId("chats-channel");
+    expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
+  });
+
+  it("renders above Channels, stays out of the channel list, and uses the agent placeholder", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel(),
+        channel({
+          id: "channel-agent",
+          name: "agent-internal",
+          slug: "agent",
+          kind: "agent",
+          unreadCount: 2,
+        }),
+      ],
+      fileThreads: [],
+    });
+    renderView();
+
+    const agentSection = await screen.findByTestId("chats-my-agent-section");
+    expect(agentSection.compareDocumentPosition(screen.getByTestId("chats-channels-heading")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId("chats-my-agent-unread").textContent).toBe("2");
+    expect(screen.getAllByTestId("chats-channel-name").map((node) => node.textContent)).toEqual([
+      "general",
+    ]);
+
+    await user.click(screen.getByTestId("chats-my-agent"));
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("My agent");
+    expect(
+      (screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).placeholder,
+    ).toBe("Message your agent…");
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+  });
+});
+
 describe("ChatsView composer-first threads (anti-forum)", () => {
   it("starts a thread from the channel composer with Enter and NO title prompt", async () => {
     const user = userEvent.setup();
@@ -297,6 +421,236 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     );
     const bodies = await screen.findAllByTestId("chats-message-body");
     expect(bodies[bodies.length - 1].textContent).toBe("Great, thanks!");
+  });
+});
+
+describe("ChatsView document thread", () => {
+  it("renders the post header and flat comments, tagging only non-adjacent parents", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const firstComment = message({
+      id: "comment-1",
+      parentMessageId: opening.id,
+      authorDisplayName: "Ana",
+      body: "First comment",
+    });
+    const adjacentReply = message({
+      id: "comment-2",
+      parentMessageId: firstComment.id,
+      authorDisplayName: "Ben",
+      body: "Immediately follows its parent",
+    });
+    const nonAdjacentReply = message({
+      id: "comment-3",
+      parentMessageId: opening.id,
+      authorKind: "agent",
+      authorDisplayName: "You's agent",
+      body: "Returning to the opening question",
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 4 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [opening, firstComment, adjacentReply, nonAdjacentReply],
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const title = await screen.findByTestId("chats-thread-post-title");
+    expect(title.textContent).toBe("Should we ship on Friday?");
+    expect(title.className).toContain("font-serif");
+    expect(screen.getByTestId("chats-thread-eyebrow").textContent).toBe(
+      "#general · thread",
+    );
+    expect(screen.getAllByTestId("chats-comment-bubble")).toHaveLength(3);
+    const contexts = screen.getAllByTestId("chats-reply-context");
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]?.textContent).toBe("↳ replying to You");
+    expect(screen.getByTestId("chats-comment-agent-badge").textContent).toBe("agent");
+    expect(screen.getAllByTestId("chats-comment-bubble")[2]?.className).toContain(
+      "border-l-2",
+    );
+
+    await user.click(contexts[0]!);
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
+
+  it("enters reply mode and sends the true parent message id", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const comment = message({
+      id: "comment-parent",
+      parentMessageId: opening.id,
+      authorDisplayName: "Ana",
+      body: "What about Monday?",
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 2 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, comment] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({
+        id: "comment-reply",
+        parentMessageId: comment.id,
+        body: "Monday works.",
+      }),
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-comment-reply"));
+    expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
+      "Replying to Ana",
+    );
+    await user.type(screen.getByTestId("chats-composer"), "Monday works.{Enter}");
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        parentMessageId: "comment-parent",
+        body: "Monday works.",
+      }),
+    );
+  });
+});
+
+describe("ChatsView decisions", () => {
+  it("resolves from composer mode and uses the literal fallback for an empty reply", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const openDecision = {
+      threadId: "thread-1",
+      messageId: opening.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openDecisionCount: 1 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({
+        id: "resolution-message",
+        parentMessageId: opening.id,
+        body: "Resolved ✓",
+      }),
+    });
+    bridgeMock.resolveChatDecision.mockResolvedValue({
+      decision: {
+        ...openDecision,
+        state: "resolved",
+        resolvedByMessageId: "resolution-message",
+        atMs: NOW + 1,
+      },
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect(await screen.findByTestId("chats-message-decision-open")).toBeTruthy();
+    await user.click(screen.getByTestId("chats-message-decision-resolve"));
+    expect(screen.getByTestId("chats-resolving-mode").textContent).toContain(
+      "Resolving decision — your reply records it",
+    );
+    expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
+      "Replying to You",
+    );
+    await user.click(screen.getByTestId("chats-send"));
+
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        parentMessageId: "message-1",
+        body: "Resolved ✓",
+      }),
+    );
+    await waitFor(() =>
+      expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        messageId: "message-1",
+        resolvedByMessageId: "resolution-message",
+      }),
+    );
+    expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+  });
+});
+
+describe("ChatsView work and run links", () => {
+  it("opens attachment paths and shows linked agent-run details", async () => {
+    const user = userEvent.setup();
+    const onOpenPath = vi.fn();
+    const opening = message();
+    const agentComment = message({
+      id: "agent-report",
+      parentMessageId: opening.id,
+      authorKind: "agent",
+      authorDisplayName: "You's agent",
+      body: "I finished the review.",
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 2 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, agentComment] });
+    bridgeMock.listChatThreadAttachments.mockResolvedValue({
+      attachments: [
+        {
+          attachmentId: "attachment-1",
+          threadId: "thread-1",
+          messageId: opening.id,
+          targetKind: "file",
+          objectId: "object-1",
+          pathHint: "projects/launch/brief.md",
+          createdAtMs: NOW,
+        },
+      ],
+    });
+    bridgeMock.chatRunRecordForMessage.mockImplementation(
+      ({ messageId }: { messageId: string }) =>
+        Promise.resolve({
+          run:
+            messageId === agentComment.id
+              ? {
+                  runId: "run-123456789",
+                  threadId: "thread-1",
+                  triggerMessageId: opening.id,
+                  command: "dohc agent run review",
+                  startedAtMs: NOW,
+                  exitCode: 0,
+                  logPath: "logs/run-123456789.log",
+                }
+              : null,
+        }),
+    );
+    renderView(vi.fn(), vi.fn(), { onOpenPath });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const attachment = await screen.findByTestId("chats-attachment-chip");
+    expect(attachment.textContent).toContain("brief.md");
+    expect(attachment.getAttribute("title")).toBe("projects/launch/brief.md");
+    await user.click(attachment);
+    expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md");
+
+    const runChip = screen.getByTestId("chats-run-chip");
+    expect(runChip.textContent).toBe("run run-123");
+    await user.click(runChip);
+    expect(screen.getByTestId("chats-run-command").textContent).toBe(
+      "dohc agent run review",
+    );
+    expect(screen.getByTestId("chats-run-exit-code").textContent).toBe("0");
+    expect(screen.getByTestId("chats-run-log-path").textContent).toBe(
+      "logs/run-123456789.log",
+    );
+    await user.click(screen.getByTestId("chats-run-copy-log"));
+    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({
+      text: "logs/run-123456789.log",
+    });
   });
 });
 

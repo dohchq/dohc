@@ -2109,6 +2109,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazyChatsView
                     workspaceId={workspaceId}
                     onOpenFileChat={openFileChatInRail}
+                    onOpenPath={openFile}
                     onError={(message) => setShellError(message)}
                     mentionCandidates={mentionCandidates}
                     addressedToMe={addressedToMe}

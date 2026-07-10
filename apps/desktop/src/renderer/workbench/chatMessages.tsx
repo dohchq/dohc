@@ -25,9 +25,13 @@ import { toMentionSegments, type MentionCandidate } from "./mentions";
 export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
 ): string {
-  return author.authorKind === "agent"
-    ? `${author.authorDisplayName}'s agent`
-    : author.authorDisplayName;
+  if (author.authorKind !== "agent") return author.authorDisplayName;
+  // Phase-3 CLI/runner messages already persist the display form. Older and
+  // hand-authored records still carry the owning user's name, so keep the
+  // historical suffixing rule without producing "Ice's agent's agent".
+  return /['’]s agent$/i.test(author.authorDisplayName)
+    ? author.authorDisplayName
+    : `${author.authorDisplayName}'s agent`;
 }
 
 export function ipcErrorMessage(error: unknown, fallback: string): string {
@@ -205,11 +209,12 @@ function reactionerNames(records: readonly ChatReactionRecord[]): string {
 // One message's reaction row: existing pills (grouped by emoji) plus an
 // add-reaction affordance. Kept obvious — pills show emoji + count, yours are
 // highlighted, and the picker is a short quick-pick.
-function MessageReactions(props: {
+export function MessageReactions(props: {
   testIdPrefix: string;
   messageId: string;
   records: readonly ChatReactionRecord[];
   controls: ChatReactionControls;
+  flush?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -271,7 +276,11 @@ function MessageReactions(props: {
     <div
       ref={containerRef}
       data-testid={`${props.testIdPrefix}-message-reactions`}
-      className="relative mt-1 flex flex-wrap items-center gap-1"
+      data-chat-escape-local="true"
+      // Channel feed cards are themselves clickable. Keep reaction gestures
+      // local so a pill or quick-pick never also opens the post underneath it.
+      onClick={(event) => event.stopPropagation()}
+      className={`relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`}
     >
       {byEmoji.map((group) => (
         <button

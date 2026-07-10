@@ -42,6 +42,10 @@ const bridgeMock = {
   listChatChannels: vi.fn(),
   listChannelThreads: vi.fn(),
   listChatMessages: vi.fn(),
+  listChatThreadDecisions: vi.fn(),
+  resolveChatDecision: vi.fn(),
+  listChatThreadAttachments: vi.fn(),
+  chatRunRecordForMessage: vi.fn(),
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   sendChatMessage: vi.fn(),
@@ -57,6 +61,7 @@ const bridgeMock = {
   setChatReaction: vi.fn(),
   // DM presence (MU-C3 x MU-C1): the DM surface loads through syncDms.
   syncDms: vi.fn(),
+  writeClipboardText: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -95,6 +100,10 @@ beforeEach(() => {
   bridgeMock.listChatChannels.mockResolvedValue({ channels: [channelRecord], fileThreads: [] });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [threadRecord] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
+  bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
+  bridgeMock.chatRunRecordForMessage.mockResolvedValue({ run: null });
+  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });
   bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "you" });
   // Solo/dormant default: no grants, nothing received, nothing joined — the

@@ -109,6 +109,14 @@ import {
   ListChatMessagesResult,
   SendChatMessagePayload,
   SendChatMessageResult,
+  ListChatThreadDecisionsPayload,
+  ListChatThreadDecisionsResult,
+  ResolveChatDecisionPayload,
+  ResolveChatDecisionResult,
+  ListChatThreadAttachmentsPayload,
+  ListChatThreadAttachmentsResult,
+  ChatRunRecordForMessagePayload,
+  ChatRunRecordForMessageResult,
   ListChatChannelsPayload,
   ListChatChannelsResult,
   CreateChatChannelPayload,
@@ -3441,8 +3449,21 @@ function registerIpcHandlers(): void {
       threadId: message.threadId,
       authorKind: message.author.kind,
       authorDisplayName: message.author.displayName,
+      ...(message.parentMessageId
+        ? { parentMessageId: message.parentMessageId }
+        : {}),
+      ...(message.origin ? { origin: message.origin } : {}),
       body: message.body,
       createdAtMs: message.createdAtMs,
+      attachments: message.attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        threadId: attachment.threadId,
+        messageId: attachment.messageId,
+        targetKind: attachment.targetKind,
+        objectId: attachment.objectId,
+        ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
+        createdAtMs: attachment.createdAtMs,
+      })),
     };
   }
 
@@ -3585,6 +3606,9 @@ function registerIpcHandlers(): void {
       // checks it === actor.userId); omit it solo. Identity is main-derived,
       // never renderer-supplied.
       authorUserId: relayAuthorUserId(),
+      ...(input.parentMessageId
+        ? { parentMessageId: input.parentMessageId }
+        : {}),
       body: input.body,
     });
     // MU-C4: if this thread lives in a joined shared channel, push it out
@@ -3595,6 +3619,112 @@ function registerIpcHandlers(): void {
       console.error("[desktop] local chat dispatch scan:", error);
     });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
+  });
+
+  ipcMain.handle(CHANNELS.listChatThreadDecisions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatThreadDecisionsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const decisions = await linkedChatStoreFor(workspace).listThreadDecisions(
+      workspace.workspaceId,
+      input.threadId,
+    );
+    return ListChatThreadDecisionsResult.parse({
+      decisions: decisions.map((decision) => ({
+        threadId: decision.threadId,
+        messageId: decision.messageId,
+        state: decision.state,
+        ...(decision.resolvedByMessageId
+          ? { resolvedByMessageId: decision.resolvedByMessageId }
+          : {}),
+        atMs: decision.atMs,
+      })),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.resolveChatDecision, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ResolveChatDecisionPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const store = linkedChatStoreFor(workspace);
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store,
+      target: { threadId: input.threadId },
+    });
+    const decision = await store.resolveChatDecision({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      resolvedByMessageId: input.resolvedByMessageId,
+    });
+    void syncWorkspaceSharedChannels(workspace.workspaceId);
+    activity.queueCloudSync(workspace.workspaceId);
+    return ResolveChatDecisionResult.parse({
+      decision: {
+        threadId: decision.threadId,
+        messageId: decision.messageId,
+        state: decision.state,
+        ...(decision.resolvedByMessageId
+          ? { resolvedByMessageId: decision.resolvedByMessageId }
+          : {}),
+        atMs: decision.atMs,
+      },
+    });
+  });
+
+  ipcMain.handle(CHANNELS.listChatThreadAttachments, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatThreadAttachmentsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const attachments = await linkedChatStoreFor(workspace).listThreadAttachments(
+      workspace.workspaceId,
+      input.threadId,
+    );
+    return ListChatThreadAttachmentsResult.parse({ attachments });
+  });
+
+  ipcMain.handle(CHANNELS.chatRunRecordForMessage, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ChatRunRecordForMessagePayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    // Opening the linked-chat store ensures the phase-1 dispatch tables have
+    // been migrated before the read-only dispatch adapter validates them.
+    linkedChatStoreFor(workspace);
+    const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
+    const runId = dispatchStore.runIdForMessage(
+      workspace.workspaceId,
+      input.messageId,
+    );
+    const found = runId ? dispatchStore.getRunRecord(runId) : null;
+    const run = found?.workspaceId === workspace.workspaceId
+      ? {
+          runId: found.runId,
+          threadId: found.threadId,
+          triggerMessageId: found.triggerMessageId,
+          command: found.command,
+          startedAtMs: found.startedAtMs,
+          ...(found.endedAtMs !== undefined
+            ? { endedAtMs: found.endedAtMs }
+            : {}),
+          ...(found.exitCode !== undefined ? { exitCode: found.exitCode } : {}),
+          ...(found.logPath ? { logPath: found.logPath } : {}),
+        }
+      : null;
+    return ChatRunRecordForMessageResult.parse({ run });
   });
 
   // --- Chats channels (PR 12/13, WS-E) -------------------------------------
@@ -3622,6 +3752,7 @@ function registerIpcHandlers(): void {
       messageCount: summary.messageCount,
       lastReadSequence: summary.lastReadSequence,
       unreadCount: summary.unreadCount,
+      openDecisionCount: summary.openDecisionCount,
     };
   }
 

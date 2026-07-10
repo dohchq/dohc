@@ -1,11 +1,24 @@
-import { ArrowLeft, AtSign, Bot, FileText, Hash, MessagesSquare, Plus, Users } from "lucide-react";
+import {
+  ArrowLeft,
+  AtSign,
+  Bot,
+  Copy,
+  FileText,
+  Hash,
+  MessagesSquare,
+  Plus,
+  Users,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
+  ChatAttachmentRecord,
   ChatChannelRecord,
   ChatChannelShareGrantRow,
+  ChatDecisionRecord,
   ChatMessageRecord,
   ChatReactionRecord,
+  ChatRunRecord,
   DmRecord,
   FileChatThreadRecord,
   JoinedSharedChannelRow,
@@ -15,9 +28,13 @@ import { bridge } from "../bridge";
 import type { AgentNotification } from "./agentNotifications";
 import {
   ChatMessageList,
+  MessageReactions,
+  MentionText,
+  chatAuthorLabel,
   formatChatTime,
   ipcErrorMessage,
   runReactionToggle,
+  type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import type { MentionCandidate } from "./mentions";
@@ -78,6 +95,315 @@ type Nav =
   // anti-forum rule), plus a one-step "new message" composer.
   | { level: "dm"; dm: DmRecord }
   | { level: "dm-new" };
+
+interface FeedPostData {
+  openingMessage: ChatMessageRecord | null;
+  reactions: ChatReactionRecord[];
+  viewerAuthorId: string;
+}
+
+interface ComposerReplyTarget {
+  messageId: string;
+  authorLabel: string;
+}
+
+function pathBasename(pathHint: string | undefined): string {
+  if (!pathHint) return "attachment";
+  return pathHint.split(/[\\/]/).filter(Boolean).at(-1) ?? "attachment";
+}
+
+function AgentBadge(props: { testIdPrefix: string }) {
+  return (
+    <span
+      data-testid={`${props.testIdPrefix}-agent-badge`}
+      className="rounded border border-agent/40 px-1 font-mono text-[8.5px] text-agent"
+    >
+      agent
+    </span>
+  );
+}
+
+function DecisionStatus(props: {
+  decision: ChatDecisionRecord;
+  onResolve?: () => void;
+  testIdPrefix: string;
+}) {
+  if (props.decision.state === "resolved") {
+    return (
+      <span
+        data-testid={`${props.testIdPrefix}-decision-resolved`}
+        className="rounded-md border border-success/40 bg-success/10 px-1.5 py-0.5 font-mono text-[10px] text-success"
+      >
+        resolved
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <span
+        data-testid={`${props.testIdPrefix}-decision-open`}
+        className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
+      >
+        needs decision
+      </span>
+      {props.onResolve ? (
+        <button
+          type="button"
+          data-testid={`${props.testIdPrefix}-decision-resolve`}
+          onClick={props.onResolve}
+          className="rounded px-1 py-0.5 font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Resolve
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+function AttachmentChip(props: {
+  attachment: ChatAttachmentRecord;
+  onOpenPath?: (path: string) => void;
+}) {
+  const label = pathBasename(props.attachment.pathHint);
+  const className =
+    "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
+  const content = (
+    <>
+      <FileText size={11} aria-hidden className="shrink-0" />
+      <span className="max-w-56 truncate">{label}</span>
+    </>
+  );
+  if (props.attachment.pathHint && props.onOpenPath) {
+    return (
+      <button
+        type="button"
+        data-testid="chats-attachment-chip"
+        title={props.attachment.pathHint}
+        onClick={() => props.onOpenPath?.(props.attachment.pathHint ?? "")}
+        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <span
+      data-testid="chats-attachment-chip"
+      title={props.attachment.pathHint}
+      className={className}
+    >
+      {content}
+    </span>
+  );
+}
+
+function RunChip(props: { run: ChatRunRecord }) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLSpanElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const started = formatChatTime(props.run.startedAtMs);
+  return (
+    <span
+      ref={containerRef}
+      data-chat-escape-local="true"
+      className="relative inline-flex"
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        data-testid="chats-run-chip"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        onClick={() => setOpen((current) => !current)}
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+      >
+        run {props.run.runId.slice(0, 7)}
+      </button>
+      {open ? (
+        <span
+          role="dialog"
+          aria-label={`Run ${props.run.runId}`}
+          data-testid="chats-run-popover"
+          className="absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left shadow-md"
+        >
+          <span className="grid gap-0.5">
+            <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Command</span>
+            <code data-testid="chats-run-command" className="break-words text-[11px] text-ink">
+              {props.run.command}
+            </code>
+          </span>
+          <span className="grid grid-cols-2 gap-2">
+            <span className="grid gap-0.5">
+              <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Started</span>
+              <time
+                data-testid="chats-run-started"
+                dateTime={started.iso}
+                className="font-mono text-[10px] text-muted"
+              >
+                {started.label}
+              </time>
+            </span>
+            <span className="grid gap-0.5">
+              <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Exit code</span>
+              <span data-testid="chats-run-exit-code" className="font-mono text-[10px] text-muted">
+                {props.run.exitCode ?? "—"}
+              </span>
+            </span>
+          </span>
+          <span className="grid gap-0.5">
+            <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Log</span>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[10px] text-muted">
+                {props.run.logPath ?? "No log path"}
+              </code>
+              {props.run.logPath ? (
+                <button
+                  type="button"
+                  data-testid="chats-run-copy-log"
+                  aria-label="Copy log path"
+                  title="Copy log path"
+                  onClick={() => {
+                    void bridge()
+                      .writeClipboardText({ text: props.run.logPath ?? "" })
+                      .catch(() => undefined);
+                  }}
+                  className="grid size-6 shrink-0 place-items-center rounded border border-line text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                >
+                  <Copy size={11} aria-hidden />
+                </button>
+              ) : null}
+            </span>
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function PostCard(props: {
+  thread: ChannelThreadRecord;
+  data: FeedPostData;
+  reactionControls: ChatReactionControls;
+  onOpen: () => void;
+}) {
+  const message = props.data.openingMessage;
+  const isAgent = message?.authorKind === "agent";
+  const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
+  const commentCount = Math.max(0, props.thread.messageCount - 1);
+  return (
+    <li
+      data-testid="chats-post-card"
+      data-thread-id={props.thread.id}
+      data-author-kind={message?.authorKind ?? "unknown"}
+      role="button"
+      tabIndex={0}
+      onClick={props.onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          props.onOpen();
+        }
+      }}
+      style={
+        isAgent
+          ? { borderLeftColor: "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))" }
+          : undefined
+      }
+      className={`group cursor-pointer rounded-xl border border-line bg-panel px-4 py-3 text-left transition-[border-color,transform] hover:-translate-y-px hover:border-muted/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
+        isAgent ? "border-l-2" : ""
+      }`}
+    >
+      {/* Compatibility target retained for existing navigation/e2e drivers;
+          the card itself is the new semantic button. */}
+      <div data-testid="chats-thread" data-thread-id={props.thread.id}>
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <span
+            data-testid="chats-post-author"
+            className={`text-[12.5px] font-medium ${isAgent ? "text-agent" : "text-ink"}`}
+          >
+            {message ? chatAuthorLabel(message) : "Unknown author"}
+          </span>
+          {isAgent ? <AgentBadge testIdPrefix="chats-post" /> : null}
+          <time
+            data-testid="chats-post-time"
+            dateTime={time.iso}
+            title={time.iso}
+            className="font-mono text-[10px] text-subtle"
+          >
+            {time.label}
+          </time>
+          <span className="ml-auto">
+            <UnreadPill count={props.thread.unreadCount} testId="chats-thread-unread" />
+          </span>
+        </span>
+        <span
+          data-testid="chats-post-title"
+          className="mt-1.5 block text-balance font-serif text-[17px] font-semibold leading-snug text-ink"
+        >
+          {props.thread.title}
+        </span>
+        {message ? (
+          <span
+            data-testid="chats-post-excerpt"
+            className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-[13px] text-muted"
+          >
+            {message.body}
+          </span>
+        ) : null}
+      </div>
+      <div
+        data-testid="chats-post-footer"
+        className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line pt-2.5"
+      >
+        {message ? (
+          <MessageReactions
+            testIdPrefix="chats-post"
+            messageId={message.id}
+            records={props.data.reactions.filter((reaction) => reaction.messageId === message.id)}
+            controls={props.reactionControls}
+            flush
+          />
+        ) : null}
+        {(props.thread.openDecisionCount ?? 0) > 0 ? (
+          <span
+            data-testid="chats-post-decision-open"
+            className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
+          >
+            needs decision
+          </span>
+        ) : null}
+        <span className="min-w-2 flex-1" />
+        <span
+          data-testid="chats-post-comment-count"
+          className="font-mono text-[10.5px] text-subtle"
+        >
+          {commentCount} {commentCount === 1 ? "comment" : "comments"}
+        </span>
+      </div>
+    </li>
+  );
+}
 
 function UnreadPill(props: { count: number; testId: string }) {
   if (props.count <= 0) return null;
@@ -198,6 +524,9 @@ export function ChatsView(props: {
   workspaceId: string;
   // Jump a file-linked Chat to where it lives: the file's side rail.
   onOpenFileChat: (thread: FileChatThreadRecord) => void;
+  // The shell's normal file navigation path. Attachment chips use it when
+  // present; tests/embedded surfaces may omit it and receive a titled chip.
+  onOpenPath?: (path: string) => void;
   onError: (message: string) => void;
   // @-mention roster for this workspace (the user + available agents). When
   // provided, the composer offers autocomplete and messages render chips.
@@ -214,12 +543,19 @@ export function ChatsView(props: {
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<Nav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
+  const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [reactions, setReactions] = useState<ChatReactionRecord[]>([]);
+  const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
+  const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
   const [viewerAuthorId, setViewerAuthorId] = useState("");
   const [composer, setComposer] = useState("");
+  const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
+  const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
+  const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
@@ -261,6 +597,7 @@ export function ChatsView(props: {
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messageNodes = useRef(new Map<string, HTMLElement>());
 
   const refreshOverview = useCallback(async () => {
     const token = ++liveToken.current;
@@ -314,8 +651,17 @@ export function ChatsView(props: {
     liveToken.current += 1;
     setNav({ level: "channels" });
     setChannelThreads([]);
+    setFeedPosts({});
     setMessages([]);
+    setReactions([]);
+    setDecisions([]);
+    setAttachments([]);
+    setRunRecords({});
     setComposer("");
+    setReplyTarget(null);
+    setResolveTargetMessageId(null);
+    setFlashMessageId(null);
+    messageNodes.current.clear();
     setNewThreadBody("");
     setCreatingChannel(null);
     setChannelShares(null);
@@ -353,6 +699,7 @@ export function ChatsView(props: {
       setNav({ level: "channel", channel });
       setSharePanelOpen(false);
       setChannelThreads([]);
+      setFeedPosts({});
       setThreadsLoading(true);
       try {
         const result = await bridge().listChannelThreads({
@@ -360,7 +707,35 @@ export function ChatsView(props: {
           channelId: channel.id,
         });
         if (token !== liveToken.current) return;
+        const previews = await Promise.all(
+          result.threads.map(async (thread) => {
+            try {
+              const [messageResult, reactionResult] = await Promise.all([
+                bridge().listChatMessages({ workspaceId, threadId: thread.id }),
+                bridge().listChatReactions({ workspaceId, threadId: thread.id }),
+              ]);
+              return [
+                thread.id,
+                {
+                  openingMessage: messageResult.messages[0] ?? null,
+                  reactions: reactionResult.reactions,
+                  viewerAuthorId: reactionResult.viewerAuthorId,
+                },
+              ] as const;
+            } catch {
+              // The summary remains useful if one preview is unavailable. No
+              // partial async result touches state until the channel token is
+              // checked below.
+              return [
+                thread.id,
+                { openingMessage: null, reactions: [], viewerAuthorId: "" },
+              ] as const;
+            }
+          }),
+        );
+        if (token !== liveToken.current) return;
         setChannelThreads(result.threads);
+        setFeedPosts(Object.fromEntries(previews));
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this channel."));
@@ -377,19 +752,60 @@ export function ChatsView(props: {
       setNav({ level: "thread", channel, thread });
       setMessages([]);
       setReactions([]);
+      setDecisions([]);
+      setAttachments([]);
+      setRunRecords({});
+      setReplyTarget(null);
+      setResolveTargetMessageId(null);
+      setFlashMessageId(null);
+      messageNodes.current.clear();
       setMessagesLoading(true);
       try {
-        const [result, reactionResult] = await Promise.all([
-          bridge().listChatMessages({ workspaceId, threadId: thread.id }),
-          bridge().listChatReactions({ workspaceId, threadId: thread.id }),
-        ]);
+        const messagesPromise = bridge().listChatMessages({
+          workspaceId,
+          threadId: thread.id,
+        });
+        const runRecordsPromise = messagesPromise.then(async (result) =>
+          Promise.all(
+            result.messages
+              .filter((message) => message.authorKind === "agent")
+              .map(async (message) => {
+                try {
+                  const runResult = await bridge().chatRunRecordForMessage({
+                    workspaceId,
+                    messageId: message.id,
+                  });
+                  return [message.id, runResult.run] as const;
+                } catch {
+                  return [message.id, null] as const;
+                }
+              }),
+          ),
+        );
+        const [result, reactionResult, decisionResult, attachmentResult, runEntries] =
+          await Promise.all([
+            messagesPromise,
+            bridge().listChatReactions({ workspaceId, threadId: thread.id }),
+            bridge().listChatThreadDecisions({ workspaceId, threadId: thread.id }),
+            bridge().listChatThreadAttachments({
+              workspaceId,
+              threadId: thread.id,
+            }),
+            runRecordsPromise,
+          ]);
         if (token !== liveToken.current) return;
         setMessages(result.messages);
         setReactions(reactionResult.reactions);
-        setViewerAuthorId(reactionResult.viewerAuthorId);
-        requestAnimationFrame(() =>
-          messagesEndRef.current?.scrollIntoView({ block: "end" }),
+        setDecisions(decisionResult.decisions);
+        setAttachments(attachmentResult.attachments);
+        setRunRecords(
+          Object.fromEntries(
+            runEntries.filter(
+              (entry): entry is readonly [string, ChatRunRecord] => entry[1] !== null,
+            ),
+          ),
         );
+        setViewerAuthorId(reactionResult.viewerAuthorId);
         // Everything on screen is read: advance the monotonic cursor and
         // clear this thread's badge locally so back-navigation is honest
         // without a refetch round trip.
@@ -435,6 +851,13 @@ export function ChatsView(props: {
       setNewThreadBody("");
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
+      setReactions([]);
+      setDecisions([]);
+      setAttachments(result.message.attachments ?? []);
+      setRunRecords({});
+      setReplyTarget(null);
+      setResolveTargetMessageId(null);
+      messageNodes.current.clear();
       setChannelThreads((current) => [result.thread, ...current]);
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -447,24 +870,85 @@ export function ChatsView(props: {
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
-    const body = composer.trim();
+    const trimmedBody = composer.trim();
+    const resolvingMessageId = resolveTargetMessageId;
+    const body =
+      trimmedBody.length > 0
+        ? trimmedBody
+        : resolvingMessageId !== null
+          ? "Resolved ✓"
+          : "";
     if (body.length === 0 || sending || sendingRef.current) return;
+    const parentMessageId = replyTarget?.messageId;
     const token = liveToken.current;
     sendingRef.current = true;
     setSending(true);
+    let sentMessage: ChatMessageRecord | null = null;
     try {
       const result = await bridge().sendChatMessage({
         workspaceId,
         threadId: nav.thread.id,
+        ...(parentMessageId ? { parentMessageId } : {}),
         body,
       });
       if (token !== liveToken.current) return;
+      sentMessage = result.message;
+      let resolvedDecision: ChatDecisionRecord | null = null;
+      if (resolvingMessageId) {
+        const resolution = await bridge().resolveChatDecision({
+          workspaceId,
+          threadId: nav.thread.id,
+          messageId: resolvingMessageId,
+          resolvedByMessageId: result.message.id,
+        });
+        if (token !== liveToken.current) return;
+        resolvedDecision = resolution.decision;
+      }
       setMessages((current) => [...current, result.message]);
+      if (resolvedDecision) {
+        setDecisions((current) =>
+          current.map((decision) =>
+            decision.messageId === resolvedDecision.messageId
+              ? resolvedDecision
+              : decision,
+          ),
+        );
+        setChannelThreads((current) =>
+          current.map((thread) =>
+            thread.id === nav.thread.id
+              ? {
+                  ...thread,
+                  openDecisionCount: Math.max(0, (thread.openDecisionCount ?? 0) - 1),
+                }
+              : thread,
+          ),
+        );
+      }
       setComposer("");
+      setReplyTarget(null);
+      setResolveTargetMessageId(null);
       messagesEndRef.current?.scrollIntoView({ block: "end" });
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."));
+      if (sentMessage && resolvingMessageId) {
+        // The two durable writes are intentionally separate. If the reply
+        // landed but resolution failed, show the real posted message and exit
+        // the mode so retrying cannot silently duplicate the reply.
+        const posted = sentMessage;
+        setMessages((current) =>
+          current.some((message) => message.id === posted.id)
+            ? current
+            : [...current, posted],
+        );
+        setComposer("");
+        setReplyTarget(null);
+        setResolveTargetMessageId(null);
+        props.onError(
+          ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
+        );
+      } else {
+        props.onError(ipcErrorMessage(error, "Could not send that message."));
+      }
     } finally {
       // Unconditional reset (LinkedChats precedent): navigation bumps the
       // token without resetting `sending`, and the token guard on the READ
@@ -472,7 +956,7 @@ export function ChatsView(props: {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [composer, nav, props, sending, workspaceId]);
+  }, [composer, nav, props, replyTarget, resolveTargetMessageId, sending, workspaceId]);
 
   // Reactions (WS-MU-C2): optimistic add/remove of the viewer's own reaction,
   // then reconcile to the server's canonical list (which carries the real
@@ -496,6 +980,51 @@ export function ChatsView(props: {
       );
     },
     [nav, props, viewerAuthorId, workspaceId],
+  );
+
+  const toggleFeedReaction = useCallback(
+    (
+      threadId: string,
+      input: { messageId: string; emoji: string; nextState: "added" | "removed" },
+    ) => {
+      if (nav.level !== "channel") return;
+      const post = feedPosts[threadId];
+      if (!post) return;
+      runReactionToggle(
+        {
+          workspaceId,
+          threadId,
+          viewerAuthorId: post.viewerAuthorId,
+          liveToken,
+          reactionSeq,
+          setReactions: (next) =>
+            setFeedPosts((current) => {
+              const entry = current[threadId];
+              if (!entry) return current;
+              const nextReactions =
+                typeof next === "function" ? next(entry.reactions) : next;
+              return {
+                ...current,
+                [threadId]: { ...entry, reactions: nextReactions },
+              };
+            }),
+          setViewerAuthorId: (next) =>
+            setFeedPosts((current) => {
+              const entry = current[threadId];
+              if (!entry) return current;
+              const nextViewerAuthorId =
+                typeof next === "function" ? next(entry.viewerAuthorId) : next;
+              return {
+                ...current,
+                [threadId]: { ...entry, viewerAuthorId: nextViewerAuthorId },
+              };
+            }),
+          onError: props.onError,
+        },
+        input,
+      );
+    },
+    [feedPosts, nav.level, props.onError, workspaceId],
   );
 
   // --- Direct messages (WS-MU-C3) -----------------------------------------
@@ -530,6 +1059,11 @@ export function ChatsView(props: {
       setNav({ level: "dm", dm });
       setMessages([]);
       setReactions([]);
+      setDecisions([]);
+      setAttachments([]);
+      setRunRecords({});
+      setReplyTarget(null);
+      setResolveTargetMessageId(null);
       setMessagesLoading(true);
       try {
         await loadDmConversation(dm, token);
@@ -539,9 +1073,11 @@ export function ChatsView(props: {
             entry.channelId === dm.channelId ? { ...entry, unreadCount: 0 } : entry,
           ),
         );
-        requestAnimationFrame(() =>
-          messagesEndRef.current?.scrollIntoView({ block: "end" }),
-        );
+        requestAnimationFrame(() => {
+          if (token === liveToken.current) {
+            messagesEndRef.current?.scrollIntoView({ block: "end" });
+          }
+        });
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this conversation."));
@@ -848,6 +1384,7 @@ export function ChatsView(props: {
     } else if (nav.level === "channel") {
       setNav({ level: "channels" });
       setChannelThreads([]);
+      setFeedPosts({});
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
       setNav({ level: "channels" });
@@ -861,12 +1398,87 @@ export function ChatsView(props: {
     }
   }, [nav, openChannel, refreshDms, refreshOverview]);
 
+  const reactionsByMessage = useMemo(() => {
+    const result = new Map<string, ChatReactionRecord[]>();
+    for (const reaction of reactions) {
+      const current = result.get(reaction.messageId);
+      if (current) current.push(reaction);
+      else result.set(reaction.messageId, [reaction]);
+    }
+    return result;
+  }, [reactions]);
+
+  const decisionsByMessage = useMemo(
+    () => new Map(decisions.map((decision) => [decision.messageId, decision])),
+    [decisions],
+  );
+
+  const attachmentsByMessage = useMemo(() => {
+    const result = new Map<string, ChatAttachmentRecord[]>();
+    const seen = new Set<string>();
+    const add = (attachment: ChatAttachmentRecord) => {
+      if (seen.has(attachment.attachmentId)) return;
+      seen.add(attachment.attachmentId);
+      const current = result.get(attachment.messageId);
+      if (current) current.push(attachment);
+      else result.set(attachment.messageId, [attachment]);
+    };
+    for (const attachment of attachments) add(attachment);
+    for (const message of messages) {
+      for (const attachment of message.attachments ?? []) add(attachment);
+    }
+    return result;
+  }, [attachments, messages]);
+
+  const messagesById = useMemo(
+    () => new Map(messages.map((message) => [message.id, message])),
+    [messages],
+  );
+
+  const scrollToMessage = useCallback((messageId: string) => {
+    const node = messageNodes.current.get(messageId);
+    if (!node) return;
+    node.scrollIntoView({ block: "center" });
+    setFlashMessageId(messageId);
+    const token = liveToken.current;
+    window.setTimeout(() => {
+      if (token === liveToken.current) {
+        setFlashMessageId((current) => (current === messageId ? null : current));
+      }
+    }, 1_200);
+  }, []);
+
+  const beginReply = useCallback((message: ChatMessageRecord) => {
+    setReplyTarget({
+      messageId: message.id,
+      authorLabel: chatAuthorLabel(message),
+    });
+  }, []);
+
+  const beginResolve = useCallback((message: ChatMessageRecord) => {
+    setResolveTargetMessageId(message.id);
+    // A resolving message is also an explicit reply to the decision-bearing
+    // message, preserving both pieces of causal structure in one send.
+    setReplyTarget({
+      messageId: message.id,
+      authorLabel: chatAuthorLabel(message),
+    });
+  }, []);
+
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
   const onKeyDownCapture = useCallback(
     (event: React.KeyboardEvent) => {
       if (event.key !== "Escape") return;
       const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-chat-escape-local='true']")) return;
+      if (
+        target instanceof HTMLTextAreaElement &&
+        nav.level === "thread" &&
+        (replyTarget !== null || resolveTargetMessageId !== null)
+      ) {
+        return;
+      }
       if (
         (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) &&
         target.value.trim().length > 0
@@ -877,7 +1489,7 @@ export function ChatsView(props: {
       event.stopPropagation();
       goBack();
     },
-    [goBack, nav.level],
+    [goBack, nav.level, replyTarget, resolveTargetMessageId],
   );
 
   if (overview.status === "loading") {
@@ -1020,7 +1632,16 @@ export function ChatsView(props: {
 
   if (nav.level === "thread") {
     const threadJoined = joinedFor(nav.channel);
-    const threadLocked = threadJoined !== null && (threadJoined.access === "read-only" || threadJoined.ended);
+    const threadLocked =
+      threadJoined !== null &&
+      (threadJoined.access === "read-only" || threadJoined.ended);
+    const openingMessage = messages[0] ?? null;
+    const comments = messages.slice(1);
+    const reactionControls: ChatReactionControls = {
+      reactions,
+      viewerAuthorId,
+      onToggle: toggleReaction,
+    };
     return (
       <div
         data-testid="chats-thread-view"
@@ -1033,20 +1654,278 @@ export function ChatsView(props: {
           onBack={goBack}
           trailing={<PresenceFaces others={presence.others} />}
         />
-        <ChatMessageList
-          testIdPrefix="chats"
-          messages={messages}
-          loading={messagesLoading}
-          emptyLabel="No messages yet."
-          endRef={messagesEndRef}
-          mentionCandidates={mentionCandidates}
-          reactionControls={{
-            reactions,
-            viewerAuthorId,
-            onToggle: toggleReaction,
-          }}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div
+            data-testid="chats-thread-column"
+            className="mx-auto w-full max-w-[640px] px-3 pb-16 sm:px-4"
+          >
+            {messagesLoading ? (
+              <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
+            ) : openingMessage === null ? (
+              <p className="m-0 pt-4 text-center text-[11px] text-subtle">
+                No messages yet.
+              </p>
+            ) : (
+              <>
+                <article
+                  ref={(node) => {
+                    if (node) messageNodes.current.set(openingMessage.id, node);
+                    else messageNodes.current.delete(openingMessage.id);
+                  }}
+                  data-testid="chats-message"
+                  data-message-id={openingMessage.id}
+                  data-author-kind={openingMessage.authorKind}
+                  className={`group pt-5 transition-shadow ${
+                    flashMessageId === openingMessage.id
+                      ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+                      : ""
+                  }`}
+                >
+                  <p
+                    data-testid="chats-thread-eyebrow"
+                    className="m-0 font-mono text-[10px] uppercase tracking-wide text-subtle"
+                  >
+                    {nav.channel.kind === "agent"
+                      ? "My agent · thread"
+                      : `#${nav.channel.name} · thread`}
+                  </p>
+                  <h1
+                    data-testid="chats-thread-post-title"
+                    className="mb-0 mt-2 text-balance font-serif text-[22px] font-semibold leading-tight text-ink"
+                  >
+                    {nav.thread.title}
+                  </h1>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span
+                      data-testid="chats-message-author"
+                      data-author-kind={openingMessage.authorKind}
+                      className={`text-[12.5px] font-medium ${
+                        openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
+                      }`}
+                    >
+                      {chatAuthorLabel(openingMessage)}
+                    </span>
+                    {openingMessage.authorKind === "agent" ? (
+                      <AgentBadge testIdPrefix="chats-message" />
+                    ) : null}
+                    <time
+                      data-testid="chats-message-time"
+                      dateTime={formatChatTime(openingMessage.createdAtMs).iso}
+                      title={formatChatTime(openingMessage.createdAtMs).iso}
+                      className="font-mono text-[10px] text-subtle"
+                    >
+                      {formatChatTime(openingMessage.createdAtMs).label}
+                    </time>
+                  </div>
+                  <p
+                    data-testid="chats-message-body"
+                    className="mb-0 mt-3 whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
+                  >
+                    {mentionCandidates.length > 0 ? (
+                      <MentionText
+                        body={openingMessage.body}
+                        candidates={mentionCandidates}
+                        testId="chats-message-body"
+                      />
+                    ) : (
+                      openingMessage.body
+                    )}
+                  </p>
+                  {(attachmentsByMessage.get(openingMessage.id) ?? []).length > 0 ? (
+                    <div
+                      data-testid="chats-message-attachments"
+                      className="mt-3 flex flex-wrap items-center gap-1.5"
+                    >
+                      {(attachmentsByMessage.get(openingMessage.id) ?? []).map(
+                        (attachment) => (
+                          <AttachmentChip
+                            key={attachment.attachmentId}
+                            attachment={attachment}
+                            onOpenPath={props.onOpenPath}
+                          />
+                        ),
+                      )}
+                    </div>
+                  ) : null}
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <MessageReactions
+                      testIdPrefix="chats"
+                      messageId={openingMessage.id}
+                      records={reactionsByMessage.get(openingMessage.id) ?? []}
+                      controls={reactionControls}
+                      flush
+                    />
+                    {decisionsByMessage.get(openingMessage.id) ? (
+                      <DecisionStatus
+                        decision={decisionsByMessage.get(openingMessage.id)!}
+                        onResolve={
+                          decisionsByMessage.get(openingMessage.id)?.state === "open"
+                            ? () => beginResolve(openingMessage)
+                            : undefined
+                        }
+                        testIdPrefix="chats-message"
+                      />
+                    ) : null}
+                    {runRecords[openingMessage.id] ? (
+                      <RunChip run={runRecords[openingMessage.id]} />
+                    ) : null}
+                  </div>
+                </article>
+
+                <div
+                  data-testid="chats-comments-divider"
+                  className="mb-1 mt-5 flex items-center gap-2"
+                >
+                  <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">
+                    Comments
+                  </span>
+                  <span aria-hidden className="h-px flex-1 bg-line" />
+                </div>
+
+                <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
+                  {comments.map((comment, index) => {
+                    const previousMessage = messages[index];
+                    const parent = comment.parentMessageId
+                      ? messagesById.get(comment.parentMessageId)
+                      : undefined;
+                    const showReplyContext =
+                      comment.parentMessageId !== undefined &&
+                      comment.parentMessageId !== previousMessage?.id;
+                    const commentTime = formatChatTime(comment.createdAtMs);
+                    const commentDecision = decisionsByMessage.get(comment.id);
+                    const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
+                    const isAgent = comment.authorKind === "agent";
+                    return (
+                      <li
+                        key={comment.id}
+                        ref={(node) => {
+                          if (node) messageNodes.current.set(comment.id, node);
+                          else messageNodes.current.delete(comment.id);
+                        }}
+                        data-testid="chats-message"
+                        data-message-id={comment.id}
+                        data-author-kind={comment.authorKind}
+                        className={`group flex flex-col transition-shadow ${
+                          flashMessageId === comment.id
+                            ? "rounded-2xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+                            : ""
+                        }`}
+                      >
+                        {showReplyContext ? (
+                          <button
+                            type="button"
+                            data-testid="chats-reply-context"
+                            onClick={() => scrollToMessage(comment.parentMessageId ?? "")}
+                            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                          >
+                            ↳ replying to {parent ? chatAuthorLabel(parent) : "message"}
+                          </button>
+                        ) : null}
+                        <div
+                          data-testid="chats-comment-bubble"
+                          style={
+                            isAgent
+                              ? {
+                                  borderLeftColor:
+                                    "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
+                                }
+                              : undefined
+                          }
+                          className={`w-fit max-w-[92%] rounded-2xl border border-line bg-panel-2 px-3.5 py-2 ${
+                            isAgent ? "border-l-2" : ""
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span
+                              data-testid="chats-message-author"
+                              data-author-kind={comment.authorKind}
+                              className={`text-[12.5px] font-bold ${
+                                isAgent ? "text-agent" : "text-ink"
+                              }`}
+                            >
+                              {chatAuthorLabel(comment)}
+                            </span>
+                            {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+                          </div>
+                          <p
+                            data-testid="chats-message-body"
+                            className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[13.5px] leading-normal text-ink"
+                          >
+                            {mentionCandidates.length > 0 ? (
+                              <MentionText
+                                body={comment.body}
+                                candidates={mentionCandidates}
+                                testId="chats-message-body"
+                              />
+                            ) : (
+                              comment.body
+                            )}
+                          </p>
+                          {commentAttachments.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              {commentAttachments.map((attachment) => (
+                                <AttachmentChip
+                                  key={attachment.attachmentId}
+                                  attachment={attachment}
+                                  onOpenPath={props.onOpenPath}
+                                />
+                              ))}
+                            </div>
+                          ) : null}
+                          {commentDecision ? (
+                            <div className="mt-2">
+                              <DecisionStatus
+                                decision={commentDecision}
+                                onResolve={
+                                  commentDecision.state === "open"
+                                    ? () => beginResolve(comment)
+                                    : undefined
+                                }
+                                testIdPrefix="chats-comment"
+                              />
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[10.5px] text-subtle">
+                          <MessageReactions
+                            testIdPrefix="chats"
+                            messageId={comment.id}
+                            records={reactionsByMessage.get(comment.id) ?? []}
+                            controls={reactionControls}
+                            flush
+                          />
+                          <button
+                            type="button"
+                            data-testid="chats-comment-reply"
+                            onClick={() => beginReply(comment)}
+                            className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                          >
+                            Reply
+                          </button>
+                          {runRecords[comment.id] ? (
+                            <RunChip run={runRecords[comment.id]} />
+                          ) : null}
+                          <time
+                            data-testid="chats-message-time"
+                            dateTime={commentTime.iso}
+                            title={commentTime.iso}
+                          >
+                            {commentTime.label}
+                          </time>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+                <div ref={messagesEndRef} />
+              </>
+            )}
+          </div>
+        </div>
+        <TypingIndicator
+          names={presence.typingNames}
+          className="mx-auto w-full max-w-[640px] px-3 sm:px-4"
         />
-        <TypingIndicator names={presence.typingNames} className="px-2" />
         {threadLocked ? (
           <ComposerNotice testId="chats-readonly-note">
             {threadJoined.ended
@@ -1054,23 +1933,78 @@ export function ChatsView(props: {
               : "This channel is read-only for you."}
           </ComposerNotice>
         ) : (
-          <MentionComposer
-            testIdPrefix="chats"
-            composerId="chats-composer"
-            value={composer}
-            sending={sending}
-            placeholder="Write a message…  @ to mention"
-            sendLabel="Send message"
-            candidates={mentionCandidates}
-            onChange={(value) => {
-              setComposer(value);
-              presence.setTyping(value.trim().length > 0);
-            }}
-            onSend={() => {
-              presence.setTyping(false);
-              void sendMessage();
-            }}
-          />
+          <div className="mx-auto w-full max-w-[640px] px-3 sm:px-4">
+            {resolveTargetMessageId ? (
+              <div
+                data-testid="chats-resolving-mode"
+                className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
+              >
+                <span className="min-w-0 flex-1">
+                  Resolving decision — your reply records it ·
+                </span>
+                <button
+                  type="button"
+                  data-testid="chats-resolving-cancel"
+                  aria-label="Cancel resolving decision"
+                  onClick={() => {
+                    if (replyTarget?.messageId === resolveTargetMessageId) {
+                      setReplyTarget(null);
+                    }
+                    setResolveTargetMessageId(null);
+                  }}
+                  className="rounded px-1 text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            {replyTarget ? (
+              <div
+                data-testid="chats-replying-mode"
+                className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
+              >
+                <span className="min-w-0 flex-1">
+                  Replying to {replyTarget.authorLabel} ·
+                </span>
+                <button
+                  type="button"
+                  data-testid="chats-replying-cancel"
+                  aria-label="Cancel reply"
+                  onClick={() => {
+                    if (resolveTargetMessageId === replyTarget.messageId) {
+                      setResolveTargetMessageId(null);
+                    }
+                    setReplyTarget(null);
+                  }}
+                  className="rounded px-1 text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            <MentionComposer
+              testIdPrefix="chats"
+              composerId="chats-composer"
+              value={composer}
+              sending={sending}
+              allowEmptySend={resolveTargetMessageId !== null}
+              placeholder="Write a comment…  @ to mention"
+              sendLabel="Send message"
+              candidates={mentionCandidates}
+              onChange={(value) => {
+                setComposer(value);
+                presence.setTyping(value.trim().length > 0);
+              }}
+              onEscape={() => {
+                setReplyTarget(null);
+                setResolveTargetMessageId(null);
+              }}
+              onSend={() => {
+                presence.setTyping(false);
+                void sendMessage();
+              }}
+            />
+          </div>
         )}
       </div>
     );
@@ -1085,7 +2019,11 @@ export function ChatsView(props: {
       : [];
     // Sharing an OWNED channel needs the sharing surface up; a joined channel
     // is never re-shareable from here (only its owner manages members).
-    const canShare = channelShares !== null && channelJoined === null && !!nav.channel.wireId;
+    const canShare =
+      nav.channel.kind !== "agent" &&
+      channelShares !== null &&
+      channelJoined === null &&
+      !!nav.channel.wireId;
     return (
       <div
         data-testid="chats-channel-view"
@@ -1093,10 +2031,18 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <BackHeader
-          label={nav.channel.name}
+          label={nav.channel.kind === "agent" ? "My agent" : nav.channel.name}
           testId="chats-channel"
           onBack={goBack}
-          icon={<Hash size={12} aria-hidden className="shrink-0 text-subtle" />}
+          icon={
+            nav.channel.kind === "agent" ? (
+              <span aria-hidden className="shrink-0 font-mono text-[12px] text-agent">
+                ◈
+              </span>
+            ) : (
+              <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
+            )
+          }
           trailing={<PresenceFaces others={presence.others} />}
           action={
             canShare ? (
@@ -1208,47 +2154,68 @@ export function ChatsView(props: {
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {threadsLoading ? (
-            <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
-          ) : channelThreads.length === 0 ? (
-            <div
-              data-testid="chats-channel-empty"
-              className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center"
-            >
-              <MessagesSquare size={16} aria-hidden className="text-subtle" />
-              <span className="text-xs text-muted">Nothing here yet.</span>
-              <span className="text-[11px] text-subtle">
-                Type below to start a chat.
-              </span>
-            </div>
-          ) : (
-            <ul className="m-0 list-none p-0">
-              {channelThreads.map((thread) => (
-                <li key={thread.id} className="border-b border-line">
-                  <button
-                    type="button"
-                    data-testid="chats-thread"
-                    data-thread-id={thread.id}
-                    onClick={() => void openThread(nav.channel, thread)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span
-                        data-testid="chats-thread-name"
-                        className="block truncate text-[12px] font-medium text-ink"
-                      >
-                        {thread.title}
-                      </span>
-                      <span className="block text-[10px] text-subtle">
-                        {formatChatTime(thread.updatedAtMs).label}
-                      </span>
-                    </span>
-                    <UnreadPill count={thread.unreadCount} testId="chats-thread-unread" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div
+            data-testid="chats-feed-column"
+            className="mx-auto w-full max-w-[640px] px-3 pb-16 sm:px-4"
+          >
+            {!channelLocked ? (
+              <div className="mb-4 mt-4">
+                <MentionComposer
+                  testIdPrefix="chats-new-thread"
+                  composerId="chats-new-thread-composer"
+                  value={newThreadBody}
+                  sending={startingThread}
+                  surface="post"
+                  placeholder={
+                    nav.channel.kind === "agent"
+                      ? "Message your agent…"
+                      : `Start a post in #${nav.channel.name}…`
+                  }
+                  sendLabel="Start post"
+                  candidates={mentionCandidates}
+                  onChange={setNewThreadBody}
+                  onSend={() => void startThread()}
+                />
+              </div>
+            ) : null}
+            {threadsLoading ? (
+              <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
+            ) : channelThreads.length === 0 ? (
+              <div
+                data-testid="chats-channel-empty"
+                className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
+              >
+                <MessagesSquare size={16} aria-hidden className="text-subtle" />
+                <span className="text-xs text-muted">Nothing here yet.</span>
+                <span className="text-[11px] text-subtle">
+                  {channelLocked ? "There are no posts to read." : "Start a post above."}
+                </span>
+              </div>
+            ) : (
+              <ul className="m-0 flex list-none flex-col gap-3 p-0">
+                {channelThreads.map((thread) => {
+                  const post = feedPosts[thread.id] ?? {
+                    openingMessage: null,
+                    reactions: [],
+                    viewerAuthorId: "",
+                  };
+                  return (
+                    <PostCard
+                      key={thread.id}
+                      thread={thread}
+                      data={post}
+                      reactionControls={{
+                        reactions: post.reactions,
+                        viewerAuthorId: post.viewerAuthorId,
+                        onToggle: (input) => toggleFeedReaction(thread.id, input),
+                      }}
+                      onOpen={() => void openThread(nav.channel, thread)}
+                    />
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         </div>
         {channelLocked ? (
           <ComposerNotice testId="chats-readonly-note">
@@ -1256,22 +2223,12 @@ export function ChatsView(props: {
               ? "This channel is no longer shared with you. You can still read it."
               : "This channel is read-only for you."}
           </ComposerNotice>
-        ) : (
-          <MentionComposer
-            testIdPrefix="chats-new-thread"
-            composerId="chats-new-thread-composer"
-            value={newThreadBody}
-            sending={startingThread}
-            placeholder={`Message #${nav.channel.name}…  @ to mention`}
-            sendLabel="Start a new chat"
-            candidates={mentionCandidates}
-            onChange={setNewThreadBody}
-            onSend={() => void startThread()}
-          />
-        )}
+        ) : null}
       </div>
     );
   }
+
+  const agentChannel = overview.channels.find((channel) => channel.kind === "agent") ?? null;
 
   return (
     <div
@@ -1284,9 +2241,44 @@ export function ChatsView(props: {
           notifications={props.addressedToMe ?? []}
           onOpen={props.onOpenAddressed}
         />
+        {agentChannel ? (
+          <section data-testid="chats-my-agent-section" aria-label="My agent">
+            <p className="mb-0 mt-3 px-3 font-mono text-[10px] uppercase tracking-wide text-subtle">
+              My agent
+            </p>
+            <button
+              type="button"
+              data-testid="chats-my-agent"
+              data-channel-id={agentChannel.id}
+              onClick={() => void openChannel(agentChannel)}
+              className="flex w-full cursor-pointer items-center gap-1.5 border-b border-line px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+            >
+              <span
+                data-testid="chats-my-agent-glyph"
+                aria-hidden
+                className="shrink-0 font-mono text-[13px] text-agent"
+              >
+                ◈
+              </span>
+              <span
+                data-testid="chats-my-agent-name"
+                className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
+              >
+                My agent
+              </span>
+              <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
+            </button>
+          </section>
+        ) : null}
+        <p
+          data-testid="chats-channels-heading"
+          className="mb-0 mt-3 px-3 font-mono text-[10px] uppercase tracking-wide text-subtle"
+        >
+          Channels
+        </p>
         <ul className="m-0 list-none p-0">
           {overview.channels
-            .filter((channel) => channel.kind !== "dm")
+            .filter((channel) => channel.kind === "channel")
             .map((channel) => {
             const joined = joinedFor(channel);
             const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];

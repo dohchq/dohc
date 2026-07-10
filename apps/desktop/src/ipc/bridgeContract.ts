@@ -529,6 +529,7 @@ export type RestoreEngineMomentFileResult = z.infer<
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
 const CHAT_THREAD_ID = z.string().min(1).max(200);
+const CHAT_MESSAGE_ID = z.string().min(1).max(200);
 const CHAT_BODY = z.string().min(1).max(65_536);
 
 export const ChatThreadRecord = z.object({
@@ -539,13 +540,29 @@ export const ChatThreadRecord = z.object({
 });
 export type ChatThreadRecord = z.infer<typeof ChatThreadRecord>;
 
+export const ChatAttachmentRecord = z.object({
+  attachmentId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  messageId: CHAT_MESSAGE_ID,
+  targetKind: z.literal("file"),
+  objectId: z.string().min(1).max(200),
+  pathHint: PATH_STRING.optional(),
+  createdAtMs: z.number(),
+});
+export type ChatAttachmentRecord = z.infer<typeof ChatAttachmentRecord>;
+
 export const ChatMessageRecord = z.object({
-  id: z.string().min(1).max(200),
+  id: CHAT_MESSAGE_ID,
   threadId: CHAT_THREAD_ID,
   authorKind: z.enum(["human", "agent"]),
   authorDisplayName: z.string().min(1).max(200),
+  parentMessageId: CHAT_MESSAGE_ID.optional(),
+  origin: z.literal("cli").optional(),
   body: CHAT_BODY,
   createdAtMs: z.number(),
+  // Optional on the wire so pre-phase-4 fixture objects and stored messages
+  // remain compatible. Main includes the engine's authoritative array.
+  attachments: z.array(ChatAttachmentRecord).optional(),
 });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
@@ -589,6 +606,7 @@ export type ListChatMessagesResult = z.infer<typeof ListChatMessagesResult>;
 export const SendChatMessagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: CHAT_THREAD_ID,
+  parentMessageId: CHAT_MESSAGE_ID.optional(),
   body: CHAT_BODY,
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
@@ -597,6 +615,89 @@ export const SendChatMessageResult = z.object({
   message: ChatMessageRecord,
 });
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
+
+export const ChatDecisionRecord = z.object({
+  threadId: CHAT_THREAD_ID,
+  messageId: CHAT_MESSAGE_ID,
+  state: z.enum(["open", "resolved"]),
+  resolvedByMessageId: CHAT_MESSAGE_ID.optional(),
+  atMs: z.number(),
+});
+export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
+
+export const ListChatThreadDecisionsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ListChatThreadDecisionsPayload = z.infer<
+  typeof ListChatThreadDecisionsPayload
+>;
+
+export const ListChatThreadDecisionsResult = z.object({
+  decisions: z.array(ChatDecisionRecord),
+});
+export type ListChatThreadDecisionsResult = z.infer<
+  typeof ListChatThreadDecisionsResult
+>;
+
+export const ResolveChatDecisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+  messageId: CHAT_MESSAGE_ID,
+  resolvedByMessageId: CHAT_MESSAGE_ID,
+});
+export type ResolveChatDecisionPayload = z.infer<
+  typeof ResolveChatDecisionPayload
+>;
+
+export const ResolveChatDecisionResult = z.object({
+  decision: ChatDecisionRecord,
+});
+export type ResolveChatDecisionResult = z.infer<
+  typeof ResolveChatDecisionResult
+>;
+
+export const ListChatThreadAttachmentsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ListChatThreadAttachmentsPayload = z.infer<
+  typeof ListChatThreadAttachmentsPayload
+>;
+
+export const ListChatThreadAttachmentsResult = z.object({
+  attachments: z.array(ChatAttachmentRecord),
+});
+export type ListChatThreadAttachmentsResult = z.infer<
+  typeof ListChatThreadAttachmentsResult
+>;
+
+export const ChatRunRecord = z.object({
+  runId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  triggerMessageId: CHAT_MESSAGE_ID,
+  command: z.string().min(1),
+  startedAtMs: z.number(),
+  endedAtMs: z.number().optional(),
+  exitCode: z.number().int().optional(),
+  logPath: PATH_STRING.optional(),
+});
+export type ChatRunRecord = z.infer<typeof ChatRunRecord>;
+
+export const ChatRunRecordForMessagePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  messageId: CHAT_MESSAGE_ID,
+});
+export type ChatRunRecordForMessagePayload = z.infer<
+  typeof ChatRunRecordForMessagePayload
+>;
+
+export const ChatRunRecordForMessageResult = z.object({
+  run: ChatRunRecord.nullable(),
+});
+export type ChatRunRecordForMessageResult = z.infer<
+  typeof ChatRunRecordForMessageResult
+>;
 
 // Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
 // channels, plus per-thread monotonic read cursors. Same gate as the file
@@ -624,6 +725,9 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   messageCount: z.number().int().min(0),
   lastReadSequence: z.number().int().min(0),
   unreadCount: z.number().int().min(0),
+  // Main always supplies the engine-derived count. Optionality keeps older
+  // renderer fixtures and pre-phase-4 bridge consumers source-compatible.
+  openDecisionCount: z.number().int().min(0).optional(),
 });
 export type ChannelThreadRecord = z.infer<typeof ChannelThreadRecord>;
 
@@ -2074,6 +2178,18 @@ export interface DohcDesktopBridge {
     payload: ListChatMessagesPayload,
   ): Promise<ListChatMessagesResult>;
   sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
+  listChatThreadDecisions(
+    payload: ListChatThreadDecisionsPayload,
+  ): Promise<ListChatThreadDecisionsResult>;
+  resolveChatDecision(
+    payload: ResolveChatDecisionPayload,
+  ): Promise<ResolveChatDecisionResult>;
+  listChatThreadAttachments(
+    payload: ListChatThreadAttachmentsPayload,
+  ): Promise<ListChatThreadAttachmentsResult>;
+  chatRunRecordForMessage(
+    payload: ChatRunRecordForMessagePayload,
+  ): Promise<ChatRunRecordForMessageResult>;
   // Chats channels (PR 12/13, WS-E) — same flag gate as the file rail.
   listChatChannels(
     payload: ListChatChannelsPayload,
