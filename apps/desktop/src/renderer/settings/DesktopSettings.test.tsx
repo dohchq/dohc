@@ -261,6 +261,9 @@ describe("DesktopSettings", () => {
     const command = await screen.findByTestId("runner-command-input");
     expect(command.getAttribute("placeholder")).toContain("Bash(dohc chat:*)");
     expect(screen.getByText(/unsandboxed runner can read anything/i)).toBeTruthy();
+    expect(screen.getByTestId("runner-multi-device-note").textContent).toContain(
+      "Enable the runner on one device per workspace",
+    );
     await user.type(command, "codex exec --sandbox workspace-write");
     await user.click(screen.getByRole("switch", { name: "Enable chat runner" }));
 

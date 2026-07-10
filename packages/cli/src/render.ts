@@ -12,6 +12,7 @@ import type {
   showResultSchema,
   threadsResultSchema,
 } from "./protocol";
+import { renderThreadMarkdown } from "./threadMarkdown";
 
 export type ChannelsResult = z.infer<typeof channelsResultSchema>;
 export type ThreadsResult = z.infer<typeof threadsResultSchema>;
@@ -43,30 +44,7 @@ function decisionCount(count: number): string {
 }
 
 export function renderShowMarkdown(result: ShowResult): string {
-  const { thread, messages } = result;
-  const lines = [
-    `# ${thread.title}`,
-    `thread: ${thread.id} · #${thread.channel.slug} · ${thread.commentCount} comments · open decisions: ${decisionCount(thread.openDecisionCount)}`,
-  ];
-  for (const message of messages) {
-    const metadata = [
-      `**${message.author.displayName}**`,
-      dateTime(message.createdAtMs),
-      message.id,
-    ];
-    if (message.parentMessageId) metadata.push(`replying to ${message.parentMessageId}`);
-    if (message.decisionState) metadata.push(`needs-decision(${message.decisionState})`);
-    if (message.runId) metadata.push(`run ${message.runId}`);
-    lines.push("", metadata.join(" · "), message.body);
-    if (message.attachments.length > 0) {
-      lines.push(
-        message.attachments
-          .map((attachment) => `[attach: ${attachment.pathHint ?? attachment.objectId}]`)
-          .join(" "),
-      );
-    }
-  }
-  return `${lines.join("\n").trimEnd()}\n`;
+  return renderThreadMarkdown(result);
 }
 
 export function renderChannels(result: ChannelsResult): string {

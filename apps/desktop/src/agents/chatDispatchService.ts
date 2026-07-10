@@ -16,19 +16,23 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-engine";
 import type { RunnerSettings } from "../settings/userSettings";
-import { renderThreadMarkdown } from "../chat/threadMarkdown";
 import {
   killChildTreeWin32,
   resolveSpawnCommand,
 } from "../process/windowsSpawn";
+import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
 export const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
-export const CHAT_DISPATCH_BUDGET_MAX = 5;
+export const CHAT_DISPATCH_BUDGET_MAX = 10;
 export const RUNNER_SELF_TEST_TIMEOUT_MS = 120_000;
 export const RUNNER_KILL_GRACE_MS = 10_000;
+export const APP_QUIT_KILL_GRACE_MS = 1_500;
 export const RUN_ID_LOG_TOKEN = "{runId}";
 export const APP_QUIT_EXIT_CODE = 143;
+
+export const NO_RUNNER_NOTE =
+  "No agent runner is configured — set one up in Settings → Agents & MCP to dispatch this.";
 
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const SELF_TEST_POLL_MS = 250;
@@ -95,7 +99,14 @@ export interface ChatDispatchServiceOptions {
   appRoot(): string;
   isPackaged(): boolean;
   resourcesPath?: () => string | undefined;
-  queueSync(workspaceId: string): void;
+  queueSync(workspaceId: string): void | boolean | Promise<void | boolean>;
+  prepareRunWorkspace?(
+    workspace: ChatDispatchWorkspace,
+  ): Promise<void | (() => Promise<void>)>;
+  authorizeServiceNote(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+  ): Promise<boolean>;
   onMessagePosted(workspaceId: string): void;
   onRunUpdated?(workspaceId: string): void;
   setRunAttribution(
@@ -118,6 +129,13 @@ export interface ChatDispatchServiceOptions {
   onError?: (error: unknown) => void;
 }
 
+export interface ChatDispatchThreadState {
+  liveRun: boolean;
+  pendingCount: number;
+  paused: boolean;
+  pausedReason?: string;
+}
+
 interface LiveRun {
   workspace: ChatDispatchWorkspace;
   claim: AgentDispatchClaim;
@@ -127,6 +145,7 @@ interface LiveRun {
   timeout: ReturnType<typeof setTimeout>;
   presenceHeartbeat: ReturnType<typeof setInterval> | null;
   killEscalation: ReturnType<typeof setTimeout> | null;
+  releaseWorkspace: (() => Promise<void>) | null;
   finalized: boolean;
 }
 
@@ -279,6 +298,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const workspaceChains = new Map<string, Promise<void>>();
   const sweptWorkspaces = new Set<string>();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
+  let pumpInFlight: Promise<void> | null = null;
   let started = false;
   let stopped = true;
   let shuttingDown = false;
@@ -463,7 +483,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
     body: string,
     runId?: string,
-  ): Promise<string> {
+  ): Promise<string | null> {
+    if (!(await options.authorizeServiceNote(workspace, threadId))) {
+      reportError(
+        new Error(
+          `Skipped an agent service note in read-only thread ${threadId}.`,
+        ),
+      );
+      return null;
+    }
     const identity = await options.identityFor(workspace.workspaceId);
     const message = await options.chatStoreFor(workspace).sendMessage({
       workspaceId: workspace.workspaceId,
@@ -489,7 +517,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return message.id;
   }
 
-  async function failureNoteAlreadyExists(
+  async function agentNoteAlreadyExists(
     workspace: ChatDispatchWorkspace,
     threadId: string,
     body: string,
@@ -511,7 +539,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const dispatch = options.dispatchStoreFor(workspace);
     const current = dispatch.getRunRecord(run.runId);
     if (current?.failureNotePosted) return;
-    if (!(await failureNoteAlreadyExists(workspace, run.threadId, body))) {
+    if (!(await agentNoteAlreadyExists(workspace, run.threadId, body))) {
       await sendAgentMessage(
         workspace,
         run.threadId,
@@ -520,6 +548,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       );
     }
     dispatch.markFailureNotePosted(run.runId);
+  }
+
+  async function mostRecentAgentNoteIs(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+    body: string,
+  ): Promise<boolean> {
+    const messages = await options.chatStoreFor(workspace).listMessages({
+      workspaceId: workspace.workspaceId,
+      threadId,
+    });
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (message.author.kind === "agent") return message.body === body;
+    }
+    return false;
   }
 
   function signalOwnedProcess(
@@ -556,6 +600,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }, RUNNER_KILL_GRACE_MS);
   }
 
+  function terminateForAppQuit(processHandle: RunnerProcess): Promise<void> {
+    if (processHandle.hasExited()) return Promise.resolve();
+    signalOwnedProcess(processHandle, "SIGTERM");
+    return new Promise<void>((resolveTermination) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(escalation);
+        resolveTermination();
+      };
+      const escalation = setTimeout(() => {
+        if (!processHandle.hasExited()) {
+          signalOwnedProcess(processHandle, "SIGKILL");
+        }
+        finish();
+      }, APP_QUIT_KILL_GRACE_MS);
+      processHandle.onExit(() => finish());
+    });
+  }
+
   function clearLiveAttribution(live: LiveRun): void {
     try {
       options.setRunAttribution(live.workspace.workspaceId, null);
@@ -563,6 +628,23 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       reportError(error);
     }
     finishPresence(live);
+  }
+
+  async function releaseWorkspaceLease(
+    release: (() => Promise<void>) | null,
+  ): Promise<void> {
+    if (!release) return;
+    try {
+      await release();
+    } catch (error) {
+      reportError(error);
+    }
+  }
+
+  async function releaseLiveWorkspace(live: LiveRun): Promise<void> {
+    const release = live.releaseWorkspace;
+    live.releaseWorkspace = null;
+    await releaseWorkspaceLease(release);
   }
 
   async function finishLiveRun(
@@ -577,6 +659,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         live.killEscalation = null;
         clearLiveAttribution(live);
         liveRuns.delete(live.workspace.workspaceId);
+        await releaseLiveWorkspace(live);
         await scanAndDrain(live.workspace);
       }
       return;
@@ -596,13 +679,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await postFailureNote(
           live.workspace,
           live.claim.run,
-          `⚠ Agent run failed (exit ${code}). Log: ${live.logPath}`,
+          `⚠ Agent run failed (exit ${code}). Open the run chip for details.`,
         );
       } else if (linkedMessages.length === 0) {
         await postFailureNote(
           live.workspace,
           live.claim.run,
-          `⚠ Agent run produced no reply. Log: ${live.logPath}`,
+          "⚠ Agent run produced no reply. Open the run chip for details.",
         );
       }
       dispatch.completeRun({ runId: live.claim.run.runId, exitCode: code });
@@ -610,10 +693,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       liveRuns.delete(live.workspace.workspaceId);
       clearLiveAttribution(live);
+      await releaseLiveWorkspace(live);
       throw error;
     }
     liveRuns.delete(live.workspace.workspaceId);
     clearLiveAttribution(live);
+    await releaseLiveWorkspace(live);
     await scanAndDrain(live.workspace);
   }
 
@@ -628,7 +713,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await postFailureNote(
       live.workspace,
       live.claim.run,
-      `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Log: ${live.logPath}`,
+      `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     );
     dispatch.failRun({
       runId: live.claim.run.runId,
@@ -641,7 +726,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function failClaimBeforeRun(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    logPath: string,
     cause: unknown,
   ): Promise<void> {
     try {
@@ -651,7 +735,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await postFailureNote(
       workspace,
       claim.run,
-      `⚠ Agent run failed to start. Log: ${logPath}`,
+      "⚠ Agent run failed to start. Open the run chip for details.",
     );
     options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
@@ -664,6 +748,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
     runner: RunnerSettings,
+    releaseWorkspace: (() => Promise<void>) | null,
   ): Promise<void> {
     const dispatch = options.dispatchStoreFor(workspace);
     const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
@@ -675,7 +760,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         onBehalfOf: "local",
         agentRunId: claim.run.runId,
       });
-      const markdown = await renderThreadMarkdown({
+      const markdown = await buildRunnerThreadContext({
         store: options.chatStoreFor(workspace),
         workspaceId: workspace.workspaceId,
         threadId: claim.run.threadId,
@@ -703,6 +788,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         timeout,
         presenceHeartbeat: null,
         killEscalation: null,
+        releaseWorkspace,
         finalized: false,
       };
       liveRuns.set(workspace.workspaceId, live);
@@ -718,6 +804,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           finishLiveRun(live, 1, null),
         );
       });
+      notifyRunUpdated(workspace.workspaceId);
       const publishWorking = () =>
         presence(
           workingPresenceInput(
@@ -733,7 +820,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       runReservations.delete(workspace.workspaceId);
       reportError(error);
-      await failClaimBeforeRun(workspace, claim, logPath, error);
+      try {
+        await failClaimBeforeRun(workspace, claim, error);
+      } finally {
+        await releaseWorkspaceLease(releaseWorkspace);
+      }
       if (dispatch.openRuns(workspace.workspaceId).length === 0) {
         await scanAndDrain(workspace);
       }
@@ -750,11 +841,37 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     const runner = await options.readRunnerSettings();
     const command = runner.command.trim();
-    if (!runner.enabled || !command) return;
+    const dispatch = options.dispatchStoreFor(workspace);
+    if (!runner.enabled || !command) {
+      const threadIds = new Set(
+        dispatch
+          .listPending(workspace.workspaceId)
+          .map((pending) => pending.threadId),
+      );
+      for (const threadId of threadIds) {
+        const failedCount = dispatch.failPendingForThread({
+          workspaceId: workspace.workspaceId,
+          threadId,
+          reason: "no-runner",
+        });
+        if (failedCount > 0) notifyRunUpdated(workspace.workspaceId);
+        if (
+          failedCount === 0 ||
+          (await mostRecentAgentNoteIs(workspace, threadId, NO_RUNNER_NOTE))
+        ) {
+          continue;
+        }
+        try {
+          await sendAgentMessage(workspace, threadId, NO_RUNNER_NOTE);
+        } catch (error) {
+          reportError(error);
+        }
+      }
+      return;
+    }
     if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
       return;
     }
-    const dispatch = options.dispatchStoreFor(workspace);
     const pending = dispatch.listPending(workspace.workspaceId);
     for (const candidate of pending) {
       if (dispatch.threadDispatchPaused(workspace.workspaceId, candidate.threadId)) {
@@ -776,11 +893,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           paused: true,
           reason: "re-dispatch budget exceeded",
         });
+        notifyRunUpdated(workspace.workspaceId);
         try {
           await sendAgentMessage(
             workspace,
             candidate.threadId,
-            "⏸ Agent dispatch paused for this thread (budget exceeded). Resume from the thread menu.",
+            "⏸ Agent dispatch paused for this thread (budget exceeded). Use Resume in this thread to continue.",
           );
         } catch (error) {
           dispatch.setThreadDispatchPaused({
@@ -792,12 +910,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         continue;
       }
-      const claim = dispatch.claimNextPending(workspace.workspaceId, {
-        command,
-        logPath: logPathTemplate(),
-      });
-      if (!claim) return;
-      await startClaim(workspace, claim, runner);
+      const releaseWorkspace =
+        (await options.prepareRunWorkspace?.(workspace)) ?? null;
+      if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
+        await releaseWorkspaceLease(releaseWorkspace);
+        return;
+      }
+      let claim: AgentDispatchClaim | null;
+      try {
+        claim = dispatch.claimNextPending(workspace.workspaceId, {
+          command,
+          logPath: logPathTemplate(),
+        });
+      } catch (error) {
+        await releaseWorkspaceLease(releaseWorkspace);
+        throw error;
+      }
+      if (!claim) {
+        await releaseWorkspaceLease(releaseWorkspace);
+        return;
+      }
+      await startClaim(workspace, claim, runner, releaseWorkspace);
       return;
     }
   }
@@ -847,13 +980,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id),
       );
     const dispatch = options.dispatchStoreFor(workspace);
+    let recordedTrigger = false;
     for (const message of messages) {
-      dispatch.recordTrigger({
-        workspaceId: workspace.workspaceId,
-        triggerMessageId: message.id,
-        threadId: message.threadId,
-      });
+      recordedTrigger =
+        dispatch.recordTrigger({
+          workspaceId: workspace.workspaceId,
+          triggerMessageId: message.id,
+          threadId: message.threadId,
+        }) || recordedTrigger;
     }
+    if (recordedTrigger) notifyRunUpdated(workspace.workspaceId);
   }
 
   async function startupSweep(workspace: ChatDispatchWorkspace): Promise<void> {
@@ -866,11 +1002,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         claim.run.runId,
       );
       if (linked.length === 0 && !claim.run.failureNotePosted) {
-        const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
         await postFailureNote(
           workspace,
           claim.run,
-          `⚠ Agent run failed (app restarted during run). Log: ${logPath}`,
+          "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
         );
       }
       dispatch.failRun({
@@ -900,14 +1035,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         continue;
       }
       if (!recovery.run.failureNotePosted) {
-        const logPath = actualLogPath(
-          recovery.run.runId,
-          recovery.run.logPath,
-        );
         await postFailureNote(
           workspace,
           recovery.run,
-          `⚠ Agent run failed (app quit during run). Log: ${logPath}`,
+          "⚠ Agent run failed (app quit during run). Open the run chip for details.",
         );
       }
       if (recovery.attemptCount < 2) {
@@ -938,9 +1069,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function pump(): Promise<void> {
     const workspaces = options.listSyncWorkspaces();
     for (const workspace of workspaces) {
-      options.queueSync(workspace.workspaceId);
+      try {
+        const ready = await options.queueSync(workspace.workspaceId);
+        if (ready === false) continue;
+      } catch (error) {
+        // A transient pull failure must not prevent scans of locally-cached
+        // triggers or starve the remaining registered workspaces.
+        reportError(error);
+      }
       await scanWorkspace(workspace.workspaceId).catch(reportError);
     }
+  }
+
+  function schedulePump(): void {
+    if (pumpInFlight) return;
+    const running = pump().catch(reportError);
+    pumpInFlight = running;
+    void running.finally(() => {
+      if (pumpInFlight === running) pumpInFlight = null;
+    });
   }
 
   function start(): void {
@@ -952,7 +1099,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       void scanWorkspace(workspace.workspaceId).catch(reportError);
     }
     pumpTimer = setInterval(() => {
-      void pump().catch(reportError);
+      schedulePump();
     }, CHAT_DISPATCH_PUMP_MS);
   }
 
@@ -966,14 +1113,38 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function stopAgentRun(workspaceId: string): Promise<boolean> {
-    return enqueue(workspaceId, async () => {
+    let stoppedRun = false;
+    await enqueue(workspaceId, async () => {
       const live = liveRuns.get(workspaceId);
       if (!live || live.finalized) return;
+      stoppedRun = true;
+      live.finalized = true;
+      clearTimeout(live.timeout);
       live.killEscalation = terminateWithEscalation(
         live.child,
         live.killEscalation,
       );
-    }).then(() => liveRuns.has(workspaceId));
+      const dispatch = options.dispatchStoreFor(live.workspace);
+      dispatch.failRun({
+        runId: live.claim.run.runId,
+        exitCode: APP_QUIT_EXIT_CODE,
+        reason: "user-stop",
+      });
+      try {
+        await postFailureNote(
+          live.workspace,
+          live.claim.run,
+          "⏹ Agent run stopped.",
+        );
+      } catch (error) {
+        reportError(error);
+        // A stopped run is terminal even when its cosmetic note cannot be
+        // stored. Mark it handled so app-quit recovery never retries it.
+        dispatch.markFailureNotePosted(live.claim.run.runId);
+      }
+      notifyRunUpdated(workspaceId);
+    });
+    return stoppedRun;
   }
 
   async function resumeThreadDispatch(
@@ -988,9 +1159,35 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         threadId,
         paused: false,
       });
+      notifyRunUpdated(workspaceId);
       budgetBypassThreads.add(threadKey(workspaceId, threadId));
       await scanAndDrain(workspace);
     });
+  }
+
+  function dispatchStateForThread(
+    workspaceId: string,
+    threadId: string,
+  ): ChatDispatchThreadState {
+    const workspace = options.workspaceFor(workspaceId);
+    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    const dispatch = options.dispatchStoreFor(workspace);
+    const pauseState = dispatch.getThreadDispatchPauseState(
+      workspaceId,
+      threadId,
+    );
+    const live = liveRuns.get(workspaceId);
+    return {
+      liveRun:
+        live?.claim.run.threadId === threadId && live.finalized === false,
+      pendingCount: dispatch
+        .listPending(workspaceId)
+        .filter((pending) => pending.threadId === threadId).length,
+      paused: pauseState?.paused ?? false,
+      ...(pauseState?.paused && pauseState.reason
+        ? { pausedReason: pauseState.reason }
+        : {}),
+    };
   }
 
   async function runnerSelfTest(
@@ -1185,11 +1382,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     stopped = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
+    const pumpAtStop = pumpInFlight;
     const appQuitRuns: LiveRun[] = [];
+    const quitProcesses: RunnerProcess[] = [];
     for (const test of selfTests.values()) {
-      signalOwnedProcess(test.child, "SIGTERM");
+      if (test.killEscalation) clearTimeout(test.killEscalation);
+      test.killEscalation = null;
+      quitProcesses.push(test.child);
     }
     for (const live of liveRuns.values()) {
+      if (live.killEscalation) clearTimeout(live.killEscalation);
+      live.killEscalation = null;
       if (!live.finalized) {
         live.finalized = true;
         clearTimeout(live.timeout);
@@ -1201,19 +1404,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
         appQuitRuns.push(live);
       }
-      signalOwnedProcess(live.child, "SIGTERM");
+      quitProcesses.push(live.child);
     }
-    await Promise.all(
-      [...workspaceChains.values()].map((chain) =>
+    const quitTerminations = quitProcesses.map(terminateForAppQuit);
+    await Promise.all([
+      ...[...workspaceChains.values()].map((chain) =>
         chain.catch(() => undefined),
       ),
-    );
+      pumpAtStop?.catch(() => undefined) ?? Promise.resolve(),
+    ]);
     for (const test of selfTests.values()) {
       test.settled = true;
       if (test.poll) clearTimeout(test.poll);
       clearTimeout(test.timeout);
       if (test.killEscalation) clearTimeout(test.killEscalation);
-      signalOwnedProcess(test.child, "SIGTERM");
       try {
         options.setRunAttribution(test.workspaceId, null);
       } catch {}
@@ -1232,8 +1436,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     for (const live of liveRuns.values()) {
       if (!appQuitRuns.includes(live)) clearLiveAttribution(live);
     }
+    const runWorkspacesToRelease = [...liveRuns.values()];
     liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
+    await Promise.all(quitTerminations);
+    await Promise.all(
+      runWorkspacesToRelease.map((live) => releaseLiveWorkspace(live)),
+    );
   }
 
   return {
@@ -1242,6 +1451,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     scanWorkspace,
     stopAgentRun,
     resumeThreadDispatch,
+    dispatchStateForThread,
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,

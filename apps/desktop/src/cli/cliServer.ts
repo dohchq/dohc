@@ -13,6 +13,7 @@ import {
   type CliShowMessage,
 } from "@dohc/cli/protocol";
 import { renderShowMarkdown } from "@dohc/cli/render";
+import { formatMessageHandle } from "@dohc/cli/thread-markdown";
 import {
   AgentDispatchStoreError,
   LINKED_CHAT_STORE_RELATIVE_PATH,
@@ -210,7 +211,7 @@ export function cliThreadId(id: string): string {
 }
 
 export function cliMessageId(id: string): string {
-  return shortenedEngineId(id, "message_", "msg_");
+  return formatMessageHandle(id);
 }
 
 function channelForCli(channel: ChatChannelSummary): CliChannel {
@@ -486,7 +487,7 @@ async function buildShowResult(
       ? { decisionState: decisionByMessage.get(message.id)! }
       : {}),
     attachments: message.attachments.map((attachment) => ({
-      objectId: attachment.objectId,
+      ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
     })),
   }));
@@ -598,7 +599,7 @@ function substringTextMatcher(input: {
   pattern: string;
   ignoreCase: boolean;
 }): (text: string) => boolean {
-  const caseSensitive = !input.ignoreCase && /[A-Z]/u.test(input.pattern);
+  const caseSensitive = !input.ignoreCase && /\p{Lu}/u.test(input.pattern);
   const needle = caseSensitive ? input.pattern : input.pattern.toLocaleLowerCase();
   return (text) => {
     const haystack = caseSensitive ? text : text.toLocaleLowerCase();
@@ -965,6 +966,11 @@ async function dispatch(
 
     case "post": {
       const channel = resolveChannel(request.args.channel, channels);
+      if (channel.engine.kind === "dm") {
+        throw new CliCommandError(
+          "DMs are streams — use 'dohc chat reply <thread>'",
+        );
+      }
       await context.assertWritable({ channelId: channel.engine.id });
       const [identity, attachments] = await Promise.all([
         options.identity(),
@@ -1181,12 +1187,13 @@ async function dispatch(
         const messages = messagesByThread.get(thread.thread.id) ?? [];
         for (let index = 0; index < messages.length; index += 1) {
           const message = messages[index]!;
-          if (threshold !== null && message.createdAtMs < threshold) continue;
-          if (!messageMatchesFrom(message, request.args.from)) continue;
           const bodyCandidate = !fts || fts.messageIds.has(message.id);
           const titleCandidate = index === 0 &&
             (!fts || fts.threadIds.has(thread.thread.id));
-          const bodyMatches = bodyCandidate && matchesText(message.body);
+          const bodyInScope =
+            (threshold === null || message.createdAtMs >= threshold) &&
+            messageMatchesFrom(message, request.args.from);
+          const bodyMatches = bodyInScope && bodyCandidate && matchesText(message.body);
           const titleMatches = titleCandidate && matchesText(thread.thread.title);
           if (!bodyMatches && !titleMatches) continue;
           const start = Math.max(0, index - request.args.context);

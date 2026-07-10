@@ -421,7 +421,9 @@ export interface ChatAttachmentAddPayload {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   targetKind: "file";
-  objectId: WorkspaceObjectId;
+  // Shared-channel relays omit local file identity and paths. Local producers
+  // still require objectId through sendMessage/startChannelThread inputs.
+  objectId?: WorkspaceObjectId;
   pathHint?: string;
   createdAtMs: number;
 }
@@ -1135,7 +1137,8 @@ export interface ChatAttachment {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   targetKind: "file";
-  objectId: WorkspaceObjectId;
+  // Absent for an opaque attachment received through a shared channel.
+  objectId?: WorkspaceObjectId;
   pathHint?: string;
   createdAtMs: number;
 }
@@ -1398,6 +1401,7 @@ export interface AgentDispatchRecord {
   threadId: ChatThreadId;
   state: AgentDispatchState;
   runId?: string;
+  failureReason?: string;
   attemptCount: number;
   createdAtMs: number;
   updatedAtMs: number;
@@ -1412,6 +1416,7 @@ export interface AgentRunRecord {
   startedAtMs: number;
   endedAtMs?: number;
   exitCode?: number;
+  failureReason?: string;
   logPath?: string;
   failureNotePosted: boolean;
 }
@@ -1439,6 +1444,11 @@ export interface AgentDispatchStore {
     workspaceId: WorkspaceId,
     options?: { command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
+  failPendingForThread(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    reason: string;
+  }): number;
   completeRun(input: { runId: string; exitCode: number }): AgentRunRecord;
   failRun(input: { runId: string; exitCode?: number; reason: string }): AgentRunRecord;
   listPending(workspaceId: WorkspaceId): AgentDispatchRecord[];
@@ -1464,6 +1474,10 @@ export interface AgentDispatchStore {
     reason?: string;
   }): ThreadDispatchPauseState;
   threadDispatchPaused(workspaceId: WorkspaceId, threadId: ChatThreadId): boolean;
+  getThreadDispatchPauseState(
+    workspaceId: WorkspaceId,
+    threadId: ChatThreadId,
+  ): ThreadDispatchPauseState | null;
 }
 
 export type SearchSurface = "chat" | "file";

@@ -463,7 +463,7 @@ export function linkedChatProjectionPath(input: {
 const THREAD_SELECT_COLUMNS = `t.*,
          (SELECT m.body FROM chat_messages m
           WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id
-          ORDER BY m.message_order LIMIT 1) AS first_body,
+          ORDER BY m.created_at_ms, m.message_id LIMIT 1) AS first_body,
          EXISTS(SELECT 1 FROM chat_channels c
           WHERE c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id)
            AS channel_owner_exists`;
@@ -641,13 +641,14 @@ function attachmentIdFor(messageId: ChatMessageId, objectId: WorkspaceObjectId):
 
 function attachmentFromRow(row: Record<string, unknown>): ChatAttachment {
   if (stringValue(row.target_kind) !== "file") throw corruptStore();
+  const objectId = optionalString(row.object_id);
   const pathHint = optionalString(row.path_hint);
   return {
     attachmentId: stringValue(row.attachment_id),
     threadId: stringValue(row.thread_id),
     messageId: stringValue(row.message_id),
     targetKind: "file",
-    objectId: stringValue(row.object_id),
+    ...(objectId !== undefined ? { objectId } : {}),
     ...(pathHint !== undefined ? { pathHint } : {}),
     createdAtMs: numberValue(row.created_at_ms),
   };
@@ -731,7 +732,7 @@ function insertAttachment(
     payload.threadId,
     payload.messageId,
     payload.targetKind,
-    payload.objectId,
+    payload.objectId ?? null,
     payload.pathHint ?? null,
     payload.createdAtMs,
   );
@@ -811,7 +812,7 @@ function addLocalAttachments(input: {
       threadId: payload.threadId,
       messageId: payload.messageId,
       targetKind: payload.targetKind,
-      objectId: payload.objectId,
+      objectId: attachment.objectId,
       ...(payload.pathHint !== undefined ? { pathHint: payload.pathHint } : {}),
       createdAtMs: payload.createdAtMs,
     };
@@ -2730,7 +2731,17 @@ export function createLinkedChatStore(
             const storedTitle = db
               .prepare("SELECT title FROM chat_threads WHERE workspace_id = ? AND thread_id = ?")
               .get(workspaceId, payload.threadId);
-            if (messageOrder === 0 && stringValue(storedTitle?.title ?? "") === "") {
+            const firstMessage = db
+              .prepare(
+                `SELECT message_id FROM chat_messages
+                 WHERE workspace_id = ? AND thread_id = ?
+                 ORDER BY created_at_ms, message_id LIMIT 1`,
+              )
+              .get(workspaceId, payload.threadId);
+            if (
+              stringValue(storedTitle?.title ?? "") === "" &&
+              stringValue(firstMessage?.message_id) === payload.messageId
+            ) {
               upsertThreadHeaderSearchIndex({
                 db,
                 workspaceId,
@@ -2788,13 +2799,14 @@ export function createLinkedChatStore(
             typeof payload.messageId !== "string" ||
             payload.messageId.length === 0 ||
             payload.targetKind !== "file" ||
-            typeof payload.objectId !== "string" ||
-            payload.objectId.length === 0 ||
-            payload.objectId.length > 200 ||
+            (payload.objectId !== undefined &&
+              (typeof payload.objectId !== "string" ||
+                payload.objectId.length === 0 ||
+                payload.objectId.length > 200 ||
+                payload.attachmentId !== attachmentIdFor(payload.messageId, payload.objectId))) ||
             (payload.pathHint !== undefined && !isNormalizedPathHint(payload.pathHint)) ||
             typeof payload.createdAtMs !== "number" ||
-            !Number.isFinite(payload.createdAtMs) ||
-            payload.attachmentId !== attachmentIdFor(payload.messageId, payload.objectId)
+            !Number.isFinite(payload.createdAtMs)
           ) {
             throw corruptStore();
           }
@@ -2803,7 +2815,7 @@ export function createLinkedChatStore(
             threadId: payload.threadId,
             messageId: payload.messageId,
             targetKind: "file",
-            objectId: payload.objectId,
+            ...(payload.objectId !== undefined ? { objectId: payload.objectId } : {}),
             ...(payload.pathHint !== undefined ? { pathHint: payload.pathHint } : {}),
             createdAtMs: payload.createdAtMs,
           });

@@ -101,6 +101,9 @@ const bridgeMock = {
   setChatReaction: vi.fn(),
   syncDms: vi.fn(),
   startDm: vi.fn(),
+  chatDispatchStateForThread: vi.fn(),
+  stopAgentRun: vi.fn(),
+  resumeThreadDispatch: vi.fn(),
   writeClipboardText: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };
@@ -134,6 +137,13 @@ beforeEach(() => {
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordForMessage.mockResolvedValue({ run: null });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
+  bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+    liveRun: false,
+    pendingCount: 0,
+    paused: false,
+  });
+  bridgeMock.stopAgentRun.mockResolvedValue(undefined);
+  bridgeMock.resumeThreadDispatch.mockResolvedValue(undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({
     lastReadSequence: 1,
     revision: 1,
@@ -529,6 +539,42 @@ describe("ChatsView document thread", () => {
 });
 
 describe("ChatsView live activity refresh", () => {
+  it("re-lists threads when workspace activity changes the open channel feed", async () => {
+    const user = userEvent.setup();
+    let refreshed = false;
+    bridgeMock.listChannelThreads.mockImplementation(() =>
+      Promise.resolve({
+        threads: refreshed
+          ? [thread(), thread({ id: "thread-2", title: "Posted from the CLI" })]
+          : [thread()],
+      }),
+    );
+    bridgeMock.listChatMessages.mockImplementation(
+      ({ threadId }: { threadId: string }) =>
+        Promise.resolve({
+          messages: [
+            message({
+              id: `message-${threadId}`,
+              threadId,
+              body: threadId === "thread-2" ? "Posted from the CLI" : message().body,
+            }),
+          ],
+        }),
+    );
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByText(thread().title);
+    expect(screen.queryByText("Posted from the CLI")).toBeNull();
+    expect(workspaceActivityCallback).not.toBeNull();
+
+    refreshed = true;
+    act(() => workspaceActivityCallback?.());
+
+    expect(await screen.findByText("Posted from the CLI")).toBeTruthy();
+    expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(2);
+  });
+
   it("reloads an open thread's messages, decisions, and run records in place", async () => {
     const user = userEvent.setup();
     const opening = message();
@@ -674,6 +720,33 @@ describe("ChatsView decisions", () => {
 });
 
 describe("ChatsView work and run links", () => {
+  it("renders a redacted shared attachment as an opaque attachment chip", async () => {
+    const user = userEvent.setup();
+    const onOpenPath = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.listChatThreadAttachments.mockResolvedValue({
+      attachments: [
+        {
+          attachmentId: "attachment-redacted",
+          threadId: "thread-1",
+          messageId: "message-1",
+          targetKind: "file",
+          createdAtMs: NOW,
+        },
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { onOpenPath });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const chip = await screen.findByTestId("chats-attachment-chip");
+    expect(chip.textContent).toBe("attachment");
+    expect(chip.tagName).toBe("SPAN");
+    expect(chip.getAttribute("title")).toBeNull();
+    expect(onOpenPath).not.toHaveBeenCalled();
+  });
+
   it("opens attachment paths and shows linked agent-run details", async () => {
     const user = userEvent.setup();
     const onOpenPath = vi.fn();
@@ -743,6 +816,62 @@ describe("ChatsView work and run links", () => {
     expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({
       text: "logs/run-123456789.log",
     });
+  });
+});
+
+describe("ChatsView dispatch state", () => {
+  it("shows working and queued state for this thread and stops its live run", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread
+      .mockResolvedValueOnce({ liveRun: true, pendingCount: 2, paused: false })
+      .mockResolvedValue({ liveRun: false, pendingCount: 0, paused: false });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+
+    expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
+      "agent working · 2 queued",
+    );
+    await user.click(screen.getByTestId("chats-stop-agent-run"));
+    expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
+    );
+  });
+
+  it("shows a paused status and resumes the open thread in place", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread
+      .mockResolvedValueOnce({
+        liveRun: false,
+        pendingCount: 3,
+        paused: true,
+        pausedReason: "budget",
+      })
+      .mockResolvedValue({ liveRun: false, pendingCount: 3, paused: false });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+
+    const status = await screen.findByTestId("chats-dispatch-status");
+    expect(status.textContent).toBe("dispatch paused — Resume");
+    expect(status.getAttribute("title")).toBe("budget");
+    await user.click(screen.getByTestId("chats-resume-dispatch"));
+    expect(bridgeMock.resumeThreadDispatch).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+    });
+    expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
+      "3 queued",
+    );
   });
 });
 

@@ -419,6 +419,20 @@ export const engineContractCompileCheck = (() => {
       pathHint: snapshot.path,
       createdAtMs: 6,
     };
+    const redactedAttachment: ChatAttachment = {
+      attachmentId: "redacted-attachment",
+      threadId,
+      messageId,
+      targetKind: "file",
+      createdAtMs: 7,
+    };
+    const redactedAttachmentPayload: ChatAttachmentAddPayload = {
+      attachmentId: redactedAttachment.attachmentId,
+      threadId,
+      messageId,
+      targetKind: "file",
+      createdAtMs: 7,
+    };
     const decisionEnvelope: SyncReplicationEnvelope = {
       workspaceId,
       originId: "origin",
@@ -556,6 +570,7 @@ export const engineContractCompileCheck = (() => {
     void listMentions;
     void decisionEnvelope;
     void attachmentEnvelope;
+    void redactedAttachmentPayload;
     void dispatchClaim;
     void pauseState;
     void claimDispatch;

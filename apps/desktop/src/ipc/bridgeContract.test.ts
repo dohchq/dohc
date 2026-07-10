@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ChatChannelRecord,
+  ChatAttachmentRecord,
+  ChatDispatchStateForThreadPayload,
+  ChatDispatchStateForThreadResult,
   ChatReactionRecord,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
@@ -39,6 +42,26 @@ import {
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+
+describe("chat IPC contract", () => {
+  it("accepts an opaque shared attachment without local object metadata", () => {
+    expect(
+      ChatAttachmentRecord.parse({
+        attachmentId: "attachment-redacted",
+        threadId: "thread-1",
+        messageId: "message-1",
+        targetKind: "file",
+        createdAtMs: 1,
+      }),
+    ).toEqual({
+      attachmentId: "attachment-redacted",
+      threadId: "thread-1",
+      messageId: "message-1",
+      targetKind: "file",
+      createdAtMs: 1,
+    });
+  });
+});
 
 describe("settings IPC contract", () => {
   it("accepts bounded user and workspace settings payloads", () => {
@@ -157,6 +180,26 @@ describe("settings IPC contract", () => {
         workspaceId: "ws-settings",
         threadId: "thread-1",
         paused: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      ChatDispatchStateForThreadPayload.parse({
+        workspaceId: "ws-settings",
+        threadId: "thread-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
+    expect(
+      ChatDispatchStateForThreadResult.parse({
+        liveRun: true,
+        pendingCount: 2,
+        paused: false,
+      }),
+    ).toEqual({ liveRun: true, pendingCount: 2, paused: false });
+    expect(
+      ChatDispatchStateForThreadResult.safeParse({
+        liveRun: false,
+        pendingCount: -1,
+        paused: true,
       }).success,
     ).toBe(false);
   });

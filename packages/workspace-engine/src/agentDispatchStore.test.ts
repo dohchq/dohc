@@ -3,10 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  AgentDispatchStoreError,
-  createAgentDispatchStore,
-} from "./agentDispatchStore";
+import { AgentDispatchStoreError, createAgentDispatchStore } from "./agentDispatchStore";
 import { createEngineSchema, type EngineSqliteDb } from "./engineDbSchema";
 
 const requireModule = createRequire(import.meta.url);
@@ -150,6 +147,86 @@ describe("agent dispatch store", () => {
     expect(second.markFailureNotePosted("run-1").failureNotePosted).toBe(true);
   });
 
+  it("atomically covers every currently-pending trigger in the claimed thread", () => {
+    const db = database();
+    let now = 1000;
+    const store = createAgentDispatchStore(db, {
+      nowMs: () => now,
+      createRunId: () => "run-thread",
+    });
+    for (const triggerMessageId of ["message-1", "message-2", "message-3"]) {
+      store.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId,
+        threadId: "thread-1",
+      });
+    }
+    store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-other",
+      threadId: "thread-2",
+    });
+
+    now = 1100;
+    const claim = store.claimNextPending(WORKSPACE_ID);
+    expect(claim?.dispatch.triggerMessageId).toBe("message-1");
+    expect(store.listPending(WORKSPACE_ID).map((row) => row.triggerMessageId)).toEqual([
+      "message-other",
+    ]);
+    expect(
+      db
+        .prepare(
+          `SELECT trigger_message_id, state, run_id
+           FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND thread_id = ?
+           ORDER BY trigger_message_id`,
+        )
+        .all(WORKSPACE_ID, "thread-1"),
+    ).toEqual([
+      {
+        trigger_message_id: "message-1",
+        state: "running",
+        run_id: "run-thread",
+      },
+      { trigger_message_id: "message-2", state: "done", run_id: "run-thread" },
+      { trigger_message_id: "message-3", state: "done", run_id: "run-thread" },
+    ]);
+  });
+
+  it("fails pending triggers without fabricating a run record", () => {
+    const db = database();
+    const store = createAgentDispatchStore(db, { nowMs: () => 1200 });
+    for (const triggerMessageId of ["message-1", "message-2"]) {
+      store.recordTrigger({
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId,
+        threadId: "thread-no-runner",
+      });
+    }
+
+    expect(
+      store.failPendingForThread({
+        workspaceId: WORKSPACE_ID,
+        threadId: "thread-no-runner",
+        reason: "no-runner",
+      }),
+    ).toBe(2);
+    expect(store.listPending(WORKSPACE_ID)).toEqual([]);
+    expect(
+      db
+        .prepare(
+          `SELECT state, run_id, failure_reason FROM chat_dispatch_ledger
+           WHERE workspace_id = ? AND thread_id = ?
+           ORDER BY trigger_message_id`,
+        )
+        .all(WORKSPACE_ID, "thread-no-runner"),
+    ).toEqual([
+      { state: "failed", run_id: null, failure_reason: "no-runner" },
+      { state: "failed", run_id: null, failure_reason: "no-runner" },
+    ]);
+    expect(db.prepare("SELECT * FROM agent_run_records").all()).toEqual([]);
+  });
+
   it("completes and fails runs with matching ledger transitions", () => {
     const db = database();
     let now = 1000;
@@ -192,12 +269,18 @@ describe("agent dispatch store", () => {
         exitCode: 9,
         reason: "runner exited before reporting",
       }),
-    ).toEqual({ ...failedClaim.run, endedAtMs: 1400, exitCode: 9 });
+    ).toEqual({
+      ...failedClaim.run,
+      endedAtMs: 1400,
+      exitCode: 9,
+      failureReason: "runner exited before reporting",
+    });
     expect(ledgerState(db, "message-fail")).toBe("failed");
     expect(store.getRunRecord(failedClaim.run.runId)).toEqual({
       ...failedClaim.run,
       endedAtMs: 1400,
       exitCode: 9,
+      failureReason: "runner exited before reporting",
     });
   });
 
@@ -272,24 +355,32 @@ describe("agent dispatch store", () => {
       triggerMessageId: "message-trigger-1",
       threadId: "thread-1",
     });
-    const first = store.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+    const first = store.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
     if (!first) throw new Error("Expected a run to link messages to.");
 
-    expect(store.recordRunMessage({
-      workspaceId: WORKSPACE_ID,
-      messageId: "message-report-b",
-      runId: first.run.runId,
-    })).toBe(true);
-    expect(store.recordRunMessage({
-      workspaceId: WORKSPACE_ID,
-      messageId: "message-report-a",
-      runId: first.run.runId,
-    })).toBe(true);
-    expect(store.recordRunMessage({
-      workspaceId: WORKSPACE_ID,
-      messageId: "message-report-a",
-      runId: first.run.runId,
-    })).toBe(false);
+    expect(
+      store.recordRunMessage({
+        workspaceId: WORKSPACE_ID,
+        messageId: "message-report-b",
+        runId: first.run.runId,
+      }),
+    ).toBe(true);
+    expect(
+      store.recordRunMessage({
+        workspaceId: WORKSPACE_ID,
+        messageId: "message-report-a",
+        runId: first.run.runId,
+      }),
+    ).toBe(true);
+    expect(
+      store.recordRunMessage({
+        workspaceId: WORKSPACE_ID,
+        messageId: "message-report-a",
+        runId: first.run.runId,
+      }),
+    ).toBe(false);
     expect(store.listRunMessages(WORKSPACE_ID, first.run.runId)).toEqual([
       "message-report-a",
       "message-report-b",
@@ -299,11 +390,13 @@ describe("agent dispatch store", () => {
 
     expect(db.prepare("SELECT op_kind FROM replication_log").all()).toEqual([]);
 
-    expect(() => store.recordRunMessage({
-      workspaceId: WORKSPACE_ID,
-      messageId: "message-unknown-run",
-      runId: "run-missing",
-    })).toThrowError(AgentDispatchStoreError);
+    expect(() =>
+      store.recordRunMessage({
+        workspaceId: WORKSPACE_ID,
+        messageId: "message-unknown-run",
+        runId: "run-missing",
+      }),
+    ).toThrowError(AgentDispatchStoreError);
 
     store.completeRun({ runId: first.run.runId, exitCode: 0 });
     store.recordTrigger({
@@ -311,7 +404,9 @@ describe("agent dispatch store", () => {
       triggerMessageId: "message-trigger-2",
       threadId: "thread-1",
     });
-    const second = store.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+    const second = store.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
     if (!second) throw new Error("Expected a second run.");
     let conflict: unknown;
     try {
@@ -335,6 +430,7 @@ describe("agent dispatch store", () => {
       createRunId: () => `run-${(nextRun += 1)}`,
     });
     expect(store.threadDispatchPaused(WORKSPACE_ID, "thread-paused")).toBe(false);
+    expect(store.getThreadDispatchPauseState(WORKSPACE_ID, "thread-paused")).toBeNull();
     expect(
       store.setThreadDispatchPaused({
         workspaceId: WORKSPACE_ID,
@@ -380,6 +476,12 @@ describe("agent dispatch store", () => {
       updatedAtMs: 1500,
     });
     expect(store.threadDispatchPaused(WORKSPACE_ID, "thread-paused")).toBe(false);
+    expect(store.getThreadDispatchPauseState(WORKSPACE_ID, "thread-paused")).toEqual({
+      workspaceId: WORKSPACE_ID,
+      threadId: "thread-paused",
+      paused: false,
+      updatedAtMs: 1500,
+    });
     expect(store.claimNextPending(WORKSPACE_ID)?.dispatch.triggerMessageId).toBe("message-paused");
   });
 });

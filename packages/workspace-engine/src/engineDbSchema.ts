@@ -449,7 +449,7 @@ const CHAT_PHASE_ONE_DDL = `
     thread_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     target_kind TEXT NOT NULL CHECK (target_kind = 'file'),
-    object_id TEXT NOT NULL,
+    object_id TEXT,
     path_hint TEXT,
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, attachment_id)
@@ -485,6 +485,7 @@ const AGENT_DISPATCH_DDL = `
     thread_id TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
     run_id TEXT,
+    failure_reason TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -501,6 +502,7 @@ const AGENT_DISPATCH_DDL = `
     started_at_ms INTEGER NOT NULL,
     ended_at_ms INTEGER,
     exit_code INTEGER,
+    failure_reason TEXT,
     log_path TEXT,
     failure_note_posted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, run_id)
@@ -675,6 +677,8 @@ export function initializeOrValidateEngineSchema(
   db.exec(CHAT_CHANNEL_TABLES_DDL);
   db.exec(CHAT_PHASE_ONE_DDL);
   db.exec(AGENT_DISPATCH_DDL);
+  ensureNullableColumn(db, "chat_dispatch_ledger", "failure_reason", "TEXT", corrupt);
+  ensureNullableColumn(db, "agent_run_records", "failure_reason", "TEXT", corrupt);
   ensureMomentsAuthorColumn(db, corrupt);
   ensureMomentsSyncRecordOnlyColumn(db, corrupt);
   // versions.sync_materialized (lazy additive, 0P-A gate fix): 1 marks a

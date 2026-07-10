@@ -545,7 +545,7 @@ export const ChatAttachmentRecord = z.object({
   threadId: CHAT_THREAD_ID,
   messageId: CHAT_MESSAGE_ID,
   targetKind: z.literal("file"),
-  objectId: z.string().min(1).max(200),
+  objectId: z.string().min(1).max(200).optional(),
   pathHint: PATH_STRING.optional(),
   createdAtMs: z.number(),
 });
@@ -1804,6 +1804,24 @@ export type ResumeThreadDispatchPayload = z.infer<
   typeof ResumeThreadDispatchPayload
 >;
 
+export const ChatDispatchStateForThreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+}).strict();
+export type ChatDispatchStateForThreadPayload = z.infer<
+  typeof ChatDispatchStateForThreadPayload
+>;
+
+export const ChatDispatchStateForThreadResult = z.object({
+  liveRun: z.boolean(),
+  pendingCount: z.number().int().nonnegative(),
+  paused: z.boolean(),
+  pausedReason: z.string().min(1).max(500).optional(),
+}).strict();
+export type ChatDispatchStateForThreadResult = z.infer<
+  typeof ChatDispatchStateForThreadResult
+>;
+
 export const RunnerSelfTestResult = z.object({
   ok: z.boolean(),
   detail: z.string().min(1).max(2_000),
@@ -2238,6 +2256,9 @@ export interface DohcDesktopBridge {
   ): Promise<AgentPanelSnapshotResult>;
   stopAgentRun(payload: StopAgentRunPayload): Promise<void>;
   resumeThreadDispatch(payload: ResumeThreadDispatchPayload): Promise<void>;
+  chatDispatchStateForThread(
+    payload: ChatDispatchStateForThreadPayload,
+  ): Promise<ChatDispatchStateForThreadResult>;
   runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;

@@ -404,6 +404,11 @@ export function createSyncRelayHandler({
         for (const op of ops) {
           const decision = filterOpForShare(share.selector, op.opKind, op.payloadJson, resolver);
           if (!decision.allowed) throw shareOpRejected();
+          // Persist the filter's (possibly redacted) copy, never the pusher's
+          // original bytes: the owner bucket is read back over the UNfiltered
+          // owner lane, so any field the filter withholds (e.g. a member
+          // attachment's objectId/pathHint) must not survive the append.
+          op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
             const threadId = (JSON.parse(op.payloadJson) as { threadId?: unknown }).threadId;
             if (typeof threadId === "string" && threadId.length > 0) {

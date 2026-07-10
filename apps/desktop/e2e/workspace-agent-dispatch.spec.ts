@@ -151,10 +151,13 @@ test("My agent posts a durable failure note when the runner exits silently", asy
 
     const failureNote = page
       .getByTestId("chats-message")
-      .filter({ hasText: "⚠ Agent run failed (exit 3). Log:" });
+      .filter({
+        hasText:
+          "⚠ Agent run failed (exit 3). Open the run chip for details.",
+      });
     await expect(failureNote).toHaveCount(1);
-    await expect(failureNote.getByTestId("chats-message-body")).toContainText(
-      `Log: ${join(temp.homeDir, "run-logs")}`,
+    await expect(failureNote.getByTestId("chats-message-body")).toHaveText(
+      "⚠ Agent run failed (exit 3). Open the run chip for details.",
     );
     await expect(failureNote.getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",

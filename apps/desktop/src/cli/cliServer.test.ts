@@ -516,6 +516,39 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
+  it("rejects post for DM streams while allowing agent-channel task posts", async () => {
+    if (!store) throw new Error("Store is not available");
+    const dm = await store.createChannel({
+      workspaceId: WORKSPACE_ID,
+      name: "Alice",
+      kind: "dm",
+    });
+    const writableBefore = calls.writable;
+
+    await expect(post({
+      actor: "human",
+      channel: dm.slug,
+      title: "Must not become a DM thread",
+      body: "DMs need replies.",
+    })).rejects.toThrow(
+      "dohc: DMs are streams — use 'dohc chat reply <thread>'",
+    );
+    expect(calls.writable).toBe(writableBefore);
+    expect(await store.listChannelThreads({
+      workspaceId: WORKSPACE_ID,
+      channelId: dm.id,
+    })).toEqual([]);
+
+    const agentPost = await post({
+      actor: "human",
+      channel: "my-agent",
+      title: "Agent task",
+      body: "Agent channels still create task threads.",
+    });
+    expect(agentPost.channel.kind).toBe("agent");
+    expect(agentPost.title).toBe("Agent task");
+  });
+
   it("links only agent-authored messages carrying a valid local run id", async () => {
     dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -882,6 +915,76 @@ describe("CLI socket server", () => {
     expect(markdown).toContain("The stable blockId is our unique Needle");
   });
 
+  it("matches thread titles independently of message author and time filters", async () => {
+    const opened = await post({
+      actor: "human",
+      title: "Release readiness review",
+      body: "This root message is deliberately outside both filters.",
+    });
+
+    const grep = await invoke("grep", {
+      cwd: workspaceRoot,
+      actor: "human",
+      pattern: "Release readiness",
+      from: "agent",
+      since: "2030-01-01T00:00:00.000Z",
+      ignoreCase: false,
+      filesWithMatches: false,
+      context: 0,
+      limit: 20,
+      regex: false,
+    });
+
+    if (!("matches" in grep)) throw new Error("Expected message grep results");
+    expect(grep.matches).toHaveLength(1);
+    expect(grep.matches[0]).toMatchObject({
+      threadId: opened.threadId,
+      messageId: opened.messageId,
+      text: "Release readiness review",
+    });
+  });
+
+  it("uses Unicode uppercase letters for grep smart-case", async () => {
+    const uppercase = await post({
+      actor: "human",
+      title: "Δ roadmap",
+      body: "Uppercase title fixture.",
+    });
+    await post({
+      actor: "human",
+      title: "δ backlog",
+      body: "Lowercase title fixture.",
+    });
+
+    const smartCase = await invoke("grep", {
+      cwd: workspaceRoot,
+      actor: "human",
+      pattern: "Δ",
+      ignoreCase: false,
+      filesWithMatches: false,
+      context: 0,
+      limit: 20,
+      regex: false,
+    });
+    if (!("matches" in smartCase)) throw new Error("Expected message grep results");
+    expect(smartCase.matches.map((match) => match.threadId)).toEqual([
+      uppercase.threadId,
+    ]);
+
+    const ignoredCase = await invoke("grep", {
+      cwd: workspaceRoot,
+      actor: "human",
+      pattern: "Δ",
+      ignoreCase: true,
+      filesWithMatches: false,
+      context: 0,
+      limit: 20,
+      regex: false,
+    });
+    if (!("matches" in ignoredCase)) throw new Error("Expected message grep results");
+    expect(ignoredCase.matches).toHaveLength(2);
+  });
+
   it("times out pathological regex scans without blocking later requests", async () => {
     await post({
       actor: "human",
@@ -976,8 +1079,8 @@ describe("CLI socket server", () => {
     expect(agents).toContain("Keep this user-owned line.");
     expect(agents).toContain(AGENTS_CHAT_BEGIN_MARKER);
     expect(agents).toContain(AGENTS_CHAT_END_MARKER);
-    expect(agents).toContain("`dohc chat inbox`");
-    expect(agents).toContain("Always pass `--as-agent` on every chat write");
+    expect(agents).toContain("`dohc chat inbox --as-agent`");
+    expect(agents).toContain("Always pass `--as-agent` on every chat command");
     if (server) {
       expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
       expect((await stat(server.tokenPath)).mode & 0o777).toBe(0o600);
@@ -1024,7 +1127,7 @@ describe("CLI socket server", () => {
       await invoke("channels", { cwd: lateRoot, actor: "human" });
       const agents = await readFile(join(lateRoot, "AGENTS.md"), "utf8");
       expect(agents).toContain(AGENTS_CHAT_BEGIN_MARKER);
-      expect(agents).toContain("`dohc chat inbox`");
+      expect(agents).toContain("`dohc chat inbox --as-agent`");
     } finally {
       lateDispatchDb.close();
       await lateStore.close();

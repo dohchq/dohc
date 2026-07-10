@@ -391,6 +391,74 @@ describe("phase-one linked chat model", () => {
     expect(storedOrders).toEqual(["message-z", "message-b", "message-a"]);
   });
 
+  it("derives an untitled thread from the visibly-first out-of-order message", async () => {
+    const engine = await makeEngine("title-ordering");
+    const channel = await engine.store.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const channelWireId = await engine.store.getChannelWireId({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+    });
+    if (!channelWireId) throw new Error("Expected a general channel wire id.");
+    const threadId = "thread-title-ordering";
+    await engine.store.applyReplicationOp({
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-title-thread",
+      originSeq: 0,
+      opKind: "chat.thread.create",
+      payload: {
+        threadId,
+        title: "",
+        createdAtMs: 3000,
+        channelSlug: channel.slug,
+        channelWireId,
+      },
+      recordedAtMs: 3000,
+    });
+    await engine.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-title-later",
+        threadId,
+        messageId: "message-title-later",
+        body: "Arrived first but appears second",
+        createdAtMs: 5000,
+      }),
+    );
+    await engine.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-title-earlier",
+        threadId,
+        messageId: "message-title-earlier",
+        body: "Visible first message",
+        createdAtMs: 4000,
+      }),
+    );
+
+    const messages = await engine.store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+    expect(messages.map((message) => message.body)).toEqual([
+      "Visible first message",
+      "Arrived first but appears second",
+    ]);
+    const summaries = await engine.store.listChannelThreads({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+    });
+    expect(summaries.find((summary) => summary.thread.id === threadId)?.thread.title).toBe(
+      "Visible first message",
+    );
+    expect(
+      rawDbFor(engine, (db) =>
+        db
+          .prepare(
+            `SELECT text FROM engine_search_chat_messages_fts
+             WHERE workspace_id = ? AND thread_id = ? AND message_id = '__thread__'`,
+          )
+          .get(WORKSPACE_ID, threadId)?.text,
+      ),
+    ).toBe("Visible first message");
+  });
+
   it("opens, resolves, and summarizes per-message decisions", async () => {
     const engine = await makeEngine("decisions");
     const channel = await engine.store.ensureGeneralChannel({
@@ -569,6 +637,90 @@ describe("phase-one linked chat model", () => {
     await expect(receiver.store.applyReplicationOp(invalid)).rejects.toMatchObject({
       code: "state-corrupt",
     });
+  });
+
+  it("applies redacted attachment ops idempotently without file metadata", async () => {
+    const source = await makeEngine("redacted-attachment-source");
+    const receiver = await makeEngine("redacted-attachment-receiver");
+    const channel = await source.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const started = await source.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Shared file",
+      attachments: [{ objectId: "object-private", pathHint: "private/plan.md" }],
+    });
+    const attachmentOp = replicationOps(source).find(
+      (op) => op.opKind === "chat.attachment.add",
+    );
+    if (!attachmentOp || attachmentOp.opKind !== "chat.attachment.add") {
+      throw new Error("Expected an attachment op.");
+    }
+    for (const op of replicationOps(source)) {
+      if (op.opKind !== "chat.attachment.add") await receiver.store.applyReplicationOp(op);
+    }
+    const redactedOp: SyncReplicationEnvelope = {
+      ...attachmentOp,
+      payload: {
+        attachmentId: attachmentOp.payload.attachmentId,
+        threadId: attachmentOp.payload.threadId,
+        messageId: attachmentOp.payload.messageId,
+        targetKind: "file",
+        createdAtMs: attachmentOp.payload.createdAtMs,
+      },
+    };
+
+    await expect(receiver.store.applyReplicationOp(redactedOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(receiver.store.applyReplicationOp(redactedOp)).resolves.toMatchObject({
+      status: "skipped",
+    });
+    await expect(
+      receiver.store.applyReplicationOp({
+        ...redactedOp,
+        originId: "origin-redacted-replay",
+        originSeq: 0,
+      }),
+    ).resolves.toMatchObject({ status: "applied" });
+
+    const messages = await receiver.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.thread.id,
+    });
+    expect(messages[0]?.attachments).toEqual([
+      {
+        attachmentId: attachmentOp.payload.attachmentId,
+        threadId: started.thread.id,
+        messageId: started.message.id,
+        targetKind: "file",
+        createdAtMs: attachmentOp.payload.createdAtMs,
+      },
+    ]);
+    expect(
+      rawDbFor(receiver, (db) =>
+        db
+          .prepare("SELECT object_id, path_hint FROM chat_attachments WHERE workspace_id = ?")
+          .get(WORKSPACE_ID),
+      ),
+    ).toEqual({ object_id: null, path_hint: null });
+    expect(
+      rawDbFor(receiver, (db) =>
+        db
+          .prepare("PRAGMA table_info(chat_attachments)")
+          .all()
+          .find((row) => row.name === "object_id")?.notnull,
+      ),
+    ).toBe(0);
+
+    await expect(
+      receiver.store.applyReplicationOp({
+        ...redactedOp,
+        originId: "origin-mismatched-attachment",
+        originSeq: 0,
+        payload: { ...redactedOp.payload, objectId: "object-does-not-match-id" },
+      }),
+    ).rejects.toMatchObject({ code: "state-corrupt" });
   });
 
   it("provisions one convergent agent channel and rejects user-created agent channels", async () => {

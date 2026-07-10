@@ -62,6 +62,22 @@ function requireDispatchSchema(db: SqliteDb): void {
   }
 }
 
+function ensureFailureReasonColumn(db: SqliteDb, table: string): void {
+  const hasColumn = () =>
+    db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all()
+      .some((row) => row.name === "failure_reason");
+  if (hasColumn()) return;
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN failure_reason TEXT`);
+  } catch (error) {
+    // Two desktop opens can race the additive migration. The loser accepts
+    // the winner's column; every other ALTER failure remains fatal.
+    if (!hasColumn()) throw error;
+  }
+}
+
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`Agent dispatch ${label} is corrupt.`);
@@ -86,6 +102,8 @@ export function createDesktopAgentDispatchStore(
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA journal_mode = WAL");
   requireDispatchSchema(db);
+  ensureFailureReasonColumn(db, "chat_dispatch_ledger");
+  ensureFailureReasonColumn(db, "agent_run_records");
 
   let preparedRunId: string | null = null;
   const base = createAgentDispatchStore(db, {
@@ -137,7 +155,8 @@ export function createDesktopAgentDispatchStore(
         const updated = db
           .prepare(
             `UPDATE chat_dispatch_ledger
-             SET state = 'pending', run_id = NULL, updated_at_ms = ?
+             SET state = 'pending', run_id = NULL, failure_reason = NULL,
+                 updated_at_ms = ?
              WHERE workspace_id = ? AND trigger_message_id = ?
                AND state = 'failed' AND run_id = ? AND attempt_count < 2`,
           )
@@ -172,6 +191,7 @@ export function createDesktopAgentDispatchStore(
            WHERE r.workspace_id = ?
              AND r.ended_at_ms IS NOT NULL
              AND r.exit_code = ?
+             AND r.failure_reason = 'app-quit'
              AND r.failure_note_posted = 0
              AND l.state = 'failed'
            ORDER BY r.started_at_ms, r.run_id`,

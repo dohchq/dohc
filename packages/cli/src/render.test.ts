@@ -6,6 +6,10 @@ import {
   renderThreads,
   type ShowResult,
 } from "./render";
+import {
+  formatMessageHandle,
+  renderThreadMarkdown,
+} from "./threadMarkdown";
 
 const engineering = {
   id: "ch_123",
@@ -57,6 +61,45 @@ describe("markdown renderers", () => {
       Risk: block forks need a stable blockId.
       "
     `);
+  });
+
+  it("keeps engine-backed runner context byte-identical to CLI show output", () => {
+    const runnerInput: ShowResult = {
+      ...showResult,
+      thread: { ...showResult.thread, id: "thread_8f2k1c" },
+      messages: showResult.messages.map((message) => ({
+        ...message,
+        id: message.id.replace(/^msg_/u, "message_"),
+        ...(message.parentMessageId
+          ? { parentMessageId: message.parentMessageId.replace(/^msg_/u, "message_") }
+          : {}),
+      })),
+    };
+
+    expect(renderThreadMarkdown(runnerInput)).toBe(renderShowMarkdown(showResult));
+    expect(formatMessageHandle("message_123")).toBe("msg_123");
+    expect(formatMessageHandle("msg_123")).toBe("msg_123");
+  });
+
+  it("renders a redacted attachment with an opaque label", () => {
+    const redacted: ShowResult = {
+      ...showResult,
+      messages: [{
+        ...showResult.messages[0]!,
+        attachments: [{}],
+      }],
+    };
+
+    expect(renderThreadMarkdown(redacted)).toContain("[attach: attachment]");
+  });
+
+  it("preserves the canonical no-open-decisions label", () => {
+    expect(
+      renderShowMarkdown({
+        ...showResult,
+        thread: { ...showResult.thread, openDecisionCount: 0 },
+      }),
+    ).toContain("open decisions: none");
   });
 
   it("uses my-agent for the agent channel and keeps every channel id", () => {

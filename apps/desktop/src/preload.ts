@@ -215,6 +215,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.stopAgentRun, payload),
   resumeThreadDispatch: (payload) =>
     ipcRenderer.invoke(CHANNELS.resumeThreadDispatch, payload),
+  chatDispatchStateForThread: (payload) =>
+    ipcRenderer.invoke(CHANNELS.chatDispatchStateForThread, payload),
   runnerSelfTest: (payload) =>
     ipcRenderer.invoke(CHANNELS.runnerSelfTest, payload),
   getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),

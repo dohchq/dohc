@@ -24,7 +24,11 @@ export interface AgentDispatchStoreOptions {
   createRunId?: () => string;
 }
 
-export type AgentDispatchStoreErrorCode = "invalid-input" | "run-not-found" | "run-state-mismatch" | "state-corrupt";
+export type AgentDispatchStoreErrorCode =
+  | "invalid-input"
+  | "run-not-found"
+  | "run-state-mismatch"
+  | "state-corrupt";
 
 export class AgentDispatchStoreError extends Error {
   readonly code: AgentDispatchStoreErrorCode;
@@ -164,16 +168,27 @@ function dispatchStateValue(value: unknown): AgentDispatchState {
 function dispatchFromRow(row: Record<string, unknown>): AgentDispatchRecord {
   const state = dispatchStateValue(row.state);
   const runId = optionalString(row.run_id);
+  const failureReason = optionalString(row.failure_reason);
   const attemptCount = integerValue(row.attempt_count);
   if (attemptCount < 0) throw corruptStore();
   if (state === "pending" && runId !== undefined) throw corruptStore();
-  if (state !== "pending" && (runId === undefined || attemptCount === 0)) throw corruptStore();
+  if ((state === "running" || state === "done") && (runId === undefined || attemptCount === 0)) {
+    throw corruptStore();
+  }
+  // A pending trigger can fail before a process exists (for example, when no
+  // runner is configured). Those terminal rows deliberately have no run id.
+  if (state === "failed" && runId !== undefined && attemptCount === 0) {
+    throw corruptStore();
+  }
+  if (state !== "failed" && failureReason !== undefined) throw corruptStore();
+  if (failureReason !== undefined && !failureReason.trim()) throw corruptStore();
   return {
     workspaceId: stringValue(row.workspace_id),
     triggerMessageId: stringValue(row.trigger_message_id),
     threadId: stringValue(row.thread_id),
     state,
     ...(runId !== undefined ? { runId } : {}),
+    ...(failureReason !== undefined ? { failureReason } : {}),
     attemptCount,
     createdAtMs: timestampValue(row.created_at_ms),
     updatedAtMs: timestampValue(row.updated_at_ms),
@@ -183,8 +198,11 @@ function dispatchFromRow(row: Record<string, unknown>): AgentDispatchRecord {
 function runFromRow(row: Record<string, unknown>): AgentRunRecord {
   const endedAtMs = optionalTimestamp(row.ended_at_ms);
   const exitCode = optionalInteger(row.exit_code);
+  const failureReason = optionalString(row.failure_reason);
   const logPath = optionalString(row.log_path);
   if (endedAtMs === undefined && exitCode !== undefined) throw corruptStore();
+  if (endedAtMs === undefined && failureReason !== undefined) throw corruptStore();
+  if (failureReason !== undefined && !failureReason.trim()) throw corruptStore();
   return {
     workspaceId: stringValue(row.workspace_id),
     runId: stringValue(row.run_id),
@@ -194,6 +212,7 @@ function runFromRow(row: Record<string, unknown>): AgentRunRecord {
     startedAtMs: timestampValue(row.started_at_ms),
     ...(endedAtMs !== undefined ? { endedAtMs } : {}),
     ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(failureReason !== undefined ? { failureReason } : {}),
     ...(logPath !== undefined ? { logPath } : {}),
     failureNotePosted: booleanValue(row.failure_note_posted),
   };
@@ -239,7 +258,10 @@ function ledgerForRun(db: EngineSqliteDb, run: AgentRunRecord): AgentDispatchRec
   return dispatch;
 }
 
-function claimFromRows(dispatchRow: Record<string, unknown>, runRow: Record<string, unknown>): AgentDispatchClaim {
+function claimFromRows(
+  dispatchRow: Record<string, unknown>,
+  runRow: Record<string, unknown>,
+): AgentDispatchClaim {
   const dispatch = dispatchFromRow(dispatchRow);
   const run = runFromRow(runRow);
   if (
@@ -390,12 +412,31 @@ export function createAgentDispatchStore(
           )
           .run(runId, startedAtMs, workspaceId, pending.triggerMessageId);
         if (updated.changes !== 1) throw corruptStore();
+        // The runner prompt contains the complete thread. Cover every trigger
+        // that was pending in this thread when the claim was made so one
+        // process handles the whole visible request. A later message is not
+        // part of this transaction and remains pending for a follow-up run.
+        db.prepare(
+          `UPDATE chat_dispatch_ledger
+           SET state = 'done', run_id = ?, attempt_count = attempt_count + 1,
+               updated_at_ms = ?
+           WHERE workspace_id = ? AND thread_id = ? AND state = 'pending'`,
+        ).run(runId, startedAtMs, workspaceId, pending.threadId);
         db.prepare(
           `INSERT INTO agent_run_records (
              workspace_id, run_id, thread_id, trigger_message_id, command,
-             started_at_ms, ended_at_ms, exit_code, log_path, failure_note_posted
-           ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0)`,
-        ).run(workspaceId, runId, pending.threadId, pending.triggerMessageId, command, startedAtMs, logPath ?? null);
+             started_at_ms, ended_at_ms, exit_code, failure_reason, log_path,
+             failure_note_posted
+           ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, 0)`,
+        ).run(
+          workspaceId,
+          runId,
+          pending.threadId,
+          pending.triggerMessageId,
+          command,
+          startedAtMs,
+          logPath ?? null,
+        );
         const claimedDispatch = db
           .prepare(
             `SELECT * FROM chat_dispatch_ledger
@@ -413,6 +454,25 @@ export function createAgentDispatchStore(
       });
     },
 
+    failPendingForThread(input) {
+      const workspaceId = normalizeWorkspaceId(input.workspaceId);
+      const threadId = normalizeRequiredId(input.threadId, "Thread id");
+      // Failure text belongs in the caller's durable service note, matching
+      // failRun. The ledger records the terminal fact without fabricating an
+      // agent_run_records row for a process that never existed.
+      const failureReason = normalizeFailureReason(input.reason);
+      return withImmediateTransaction(
+        () =>
+          db
+            .prepare(
+              `UPDATE chat_dispatch_ledger
+             SET state = 'failed', failure_reason = ?, updated_at_ms = ?
+             WHERE workspace_id = ? AND thread_id = ? AND state = 'pending'`,
+            )
+            .run(failureReason, timestamp(), workspaceId, threadId).changes,
+      );
+    },
+
     completeRun(input) {
       const runId = normalizeRequiredId(input.runId, "Run id");
       const exitCode = normalizeExitCode(input.exitCode);
@@ -421,7 +481,10 @@ export function createAgentDispatchStore(
         const dispatch = ledgerForRun(db, current);
         if (current.endedAtMs !== undefined) {
           if (dispatch.state === "done") return current;
-          throw new AgentDispatchStoreError("run-state-mismatch", `Agent run ${runId} is already ${dispatch.state}.`);
+          throw new AgentDispatchStoreError(
+            "run-state-mismatch",
+            `Agent run ${runId} is already ${dispatch.state}.`,
+          );
         }
         if (dispatch.state !== "running") throw corruptStore();
         const endedAtMs = timestamp();
@@ -450,31 +513,46 @@ export function createAgentDispatchStore(
       const exitCode = normalizeOptionalExitCode(input.exitCode);
       // Failure text belongs in the caller's durable chat note; the private
       // run table stores terminal metadata and a log path, never raw output.
-      normalizeFailureReason(input.reason);
+      const failureReason = normalizeFailureReason(input.reason);
       return withImmediateTransaction(() => {
         const current = requireRunById(db, runId);
         const dispatch = ledgerForRun(db, current);
         if (current.endedAtMs !== undefined) {
           if (dispatch.state === "failed") return current;
-          throw new AgentDispatchStoreError("run-state-mismatch", `Agent run ${runId} is already ${dispatch.state}.`);
+          throw new AgentDispatchStoreError(
+            "run-state-mismatch",
+            `Agent run ${runId} is already ${dispatch.state}.`,
+          );
         }
         if (dispatch.state !== "running") throw corruptStore();
         const endedAtMs = timestamp();
         const runUpdate = db
           .prepare(
             `UPDATE agent_run_records
-             SET ended_at_ms = ?, exit_code = ?
+             SET ended_at_ms = ?, exit_code = ?, failure_reason = ?
              WHERE workspace_id = ? AND run_id = ? AND ended_at_ms IS NULL`,
           )
-          .run(endedAtMs, exitCode ?? null, current.workspaceId, runId);
+          .run(
+            endedAtMs,
+            exitCode ?? null,
+            failureReason,
+            current.workspaceId,
+            runId,
+          );
         const ledgerUpdate = db
           .prepare(
             `UPDATE chat_dispatch_ledger
-             SET state = 'failed', updated_at_ms = ?
+             SET state = 'failed', failure_reason = ?, updated_at_ms = ?
              WHERE workspace_id = ? AND trigger_message_id = ?
                AND state = 'running' AND run_id = ?`,
           )
-          .run(endedAtMs, current.workspaceId, current.triggerMessageId, runId);
+          .run(
+            failureReason,
+            endedAtMs,
+            current.workspaceId,
+            current.triggerMessageId,
+            runId,
+          );
         if (runUpdate.changes !== 1 || ledgerUpdate.changes !== 1) throw corruptStore();
         return requireRunById(db, runId);
       });
@@ -628,6 +706,18 @@ export function createAgentDispatchStore(
         )
         .get(workspaceId, threadId);
       return row ? pauseStateFromRow(row).paused : false;
+    },
+
+    getThreadDispatchPauseState(workspaceIdInput, threadIdInput) {
+      const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+      const threadId = normalizeRequiredId(threadIdInput, "Thread id");
+      const row = db
+        .prepare(
+          `SELECT * FROM chat_dispatch_pause
+           WHERE workspace_id = ? AND thread_id = ?`,
+        )
+        .get(workspaceId, threadId);
+      return row ? pauseStateFromRow(row) : null;
     },
   };
 }

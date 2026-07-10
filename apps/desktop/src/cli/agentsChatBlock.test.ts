@@ -1,16 +1,20 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
+  readdir,
   rm,
   stat,
   symlink,
   utimes,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENTS_CHAT_BEGIN_MARKER,
   AGENTS_CHAT_END_MARKER,
@@ -36,11 +40,13 @@ describe("ensureAgentsChatBlock", () => {
 
     const content = await readFile(agentsPath, "utf8");
     expect(content).toBe(`${AGENTS_CHAT_MANAGED_BLOCK}\n`);
-    expect(content).toContain("`dohc chat inbox`");
-    expect(content).toContain("`dohc chat grep <pattern>`");
-    expect(content).toContain("`dohc chat show <thread|message>`");
-    expect(content).toContain("`dohc chat reply <thread>`");
-    expect(content).toContain("Always pass `--as-agent` on every chat write");
+    expect(content).toContain("`dohc chat inbox --as-agent`");
+    expect(content).toContain("`dohc chat grep <pattern> --as-agent`");
+    expect(content).toContain("`dohc chat show <thread|message> --as-agent`");
+    expect(content).toContain("`dohc chat reply <thread> --as-agent`");
+    expect(content).toContain(
+      "Always pass `--as-agent` on every chat command, including reads and writes",
+    );
     expect(content).toContain("environment variables do not persist");
   });
 
@@ -81,6 +87,47 @@ describe("ensureAgentsChatBlock", () => {
     expect(await readFile(agentsPath, "utf8")).toBe(
       `${existing}\n\n${AGENTS_CHAT_MANAGED_BLOCK}\n`,
     );
+  });
+
+  it("atomically replaces AGENTS.md while preserving its mode", async () => {
+    const existing = "# Existing instructions\n";
+    await writeFile(agentsPath, existing, "utf8");
+    if (process.platform !== "win32") await chmod(agentsPath, 0o640);
+
+    await expect(ensureAgentsChatBlock(root)).resolves.toBe(true);
+
+    expect(await readFile(agentsPath, "utf8")).toBe(
+      `${existing}\n${AGENTS_CHAT_MANAGED_BLOCK}\n`,
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(agentsPath)).mode & 0o777).toBe(0o640);
+    }
+    expect((await readdir(root)).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  it("leaves the original intact when writing the replacement fails", async () => {
+    const original = "# Existing instructions\n\nKeep this intact.\n";
+    await writeFile(agentsPath, original, "utf8");
+    const probe = await open(agentsPath, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as Pick<
+      FileHandle,
+      "write"
+    >;
+    await probe.close();
+    const write = vi
+      .spyOn(fileHandlePrototype, "write")
+      .mockRejectedValueOnce(new Error("simulated write failure"));
+
+    try {
+      await expect(ensureAgentsChatBlock(root)).rejects.toThrow(
+        "simulated write failure",
+      );
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(await readFile(agentsPath, "utf8")).toBe(original);
+    expect((await readdir(root)).filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 
   it("leaves an unmatched marker outside the managed block untouched", async () => {

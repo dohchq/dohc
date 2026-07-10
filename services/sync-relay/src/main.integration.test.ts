@@ -1225,6 +1225,8 @@ describe("sync relay main process", () => {
     const ownerChats = createLinkedChatStore(ownerRoot);
     let wireId: string;
     let teamThreadId: string;
+    let ownerAttachmentMessageId: string;
+    let ownerAttachmentId: string;
     try {
       const team = await ownerChats.createChannel({ workspaceId: wsOwner, name: "team" });
       wireId = team.id; // a locally created channel's wire identity is its own id
@@ -1234,8 +1236,15 @@ describe("sync relay main process", () => {
         author: human("Owner"),
         authorUserId: owner,
         body: "welcome to the shared channel",
+        attachments: [
+          { objectId: "object-owner-private", pathHint: "private/owner-plan.md" },
+        ],
       });
       teamThreadId = started.thread.id;
+      ownerAttachmentMessageId = started.message.id;
+      const ownerAttachment = started.message.attachments[0];
+      if (!ownerAttachment) throw new Error("Expected the owner's attachment.");
+      ownerAttachmentId = ownerAttachment.attachmentId;
       const leadership = await ownerChats.createChannel({ workspaceId: wsOwner, name: "leadership" });
       await ownerChats.startChannelThread({
         workspaceId: wsOwner,
@@ -1306,6 +1315,20 @@ describe("sync relay main process", () => {
         await chats.close();
       }
     };
+    const messageAttachments = async (
+      root: string,
+      workspaceId: string,
+      threadId: string,
+      messageId: string,
+    ) => {
+      const chats = createLinkedChatStore(root);
+      try {
+        const messages = await chats.listMessages({ workspaceId, threadId });
+        return messages.find((message) => message.id === messageId)?.attachments ?? [];
+      } finally {
+        await chats.close();
+      }
+    };
 
     expect(await channelMessages(memberARoot, wsA)).toEqual([
       `${teamThreadId}|Owner|welcome to the shared channel|${owner}`,
@@ -1313,17 +1336,36 @@ describe("sync relay main process", () => {
     // ISOLATION: the owner's other channel never reached member A.
     expect(await channelSlugs(memberARoot, wsA)).toEqual(["team"]);
     expect(JSON.stringify(await channelMessages(memberARoot, wsA))).not.toContain("SENTINEL");
+    const ownerAttachmentOnMember = await messageAttachments(
+      memberARoot,
+      wsA,
+      teamThreadId,
+      ownerAttachmentMessageId,
+    );
+    expect(ownerAttachmentOnMember).toHaveLength(1);
+    expect(ownerAttachmentOnMember[0]?.attachmentId).toBe(ownerAttachmentId);
+    expect(ownerAttachmentOnMember[0]?.objectId).toBeUndefined();
+    expect(ownerAttachmentOnMember[0]?.pathHint).toBeUndefined();
 
     // Member A replies in the owner's thread and starts a thread of their own.
     const chatsA = createLinkedChatStore(memberARoot);
+    let memberAttachmentMessageId: string;
+    let memberAttachmentId: string;
     try {
-      await chatsA.sendMessage({
+      const memberReply = await chatsA.sendMessage({
         workspaceId: wsA,
         threadId: teamThreadId,
         author: human("Member A"),
         authorUserId: memberA,
         body: "hello from member A",
+        attachments: [
+          { objectId: "object-member-private", pathHint: "private/member-plan.md" },
+        ],
       });
+      memberAttachmentMessageId = memberReply.id;
+      const memberAttachment = memberReply.attachments[0];
+      if (!memberAttachment) throw new Error("Expected the member's attachment.");
+      memberAttachmentId = memberAttachment.attachmentId;
       const teamA = (await chatsA.listChannels({ workspaceId: wsA })).find(
         (channel) => channel.slug === "team",
       )!;
@@ -1344,7 +1386,7 @@ describe("sync relay main process", () => {
       shareId: shareA,
       channelWireId: wireId,
     });
-    expect(pushedA.pushed).toBe(3); // message + thread.create + first message
+    expect(pushedA.pushed).toBe(4); // message + attachment + thread.create + first message
 
     // Member B joins fresh and sees the owner's AND member A's messages.
     const memberBRoot = await tempRoot("shared-member-b");
@@ -1379,6 +1421,16 @@ describe("sync relay main process", () => {
     // The OWNER converges through their normal own-bucket pull (member ops
     // landed there under share-namespaced origins)...
     await pullAndCommit({ rootDir: ownerRoot, workspaceId: wsOwner, relay: relayFor(owner) });
+    const memberAttachmentOnOwner = await messageAttachments(
+      ownerRoot,
+      wsOwner,
+      teamThreadId,
+      memberAttachmentMessageId,
+    );
+    expect(memberAttachmentOnOwner).toHaveLength(1);
+    expect(memberAttachmentOnOwner[0]?.attachmentId).toBe(memberAttachmentId);
+    expect(memberAttachmentOnOwner[0]?.objectId).toBeUndefined();
+    expect(memberAttachmentOnOwner[0]?.pathHint).toBeUndefined();
     // ...and each member converges through another share pull (their own
     // echoes skip; the other member's ops replay).
     await pullSharedChannel({ rootDir: memberARoot, workspaceId: wsA, relay: relayFor(memberA), shareId: shareA, channelWireId: wireId });

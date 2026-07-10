@@ -150,7 +150,7 @@ export const cliInboxMentionSchema = z
 
 export const cliAttachmentSchema = z
   .object({
-    objectId: z.string().min(1),
+    objectId: z.string().min(1).optional(),
     pathHint: z.string().min(1).optional(),
   })
   .strict();

@@ -1,7 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   lstat,
   open,
+  rename,
+  rm,
   type FileHandle,
 } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -12,9 +15,9 @@ export const AGENTS_CHAT_END_MARKER = "<!-- dohc:chat:end -->";
 export const AGENTS_CHAT_MANAGED_BLOCK = `${AGENTS_CHAT_BEGIN_MARKER}
 ## dohc chats
 
-This workspace has chats. Run \`dohc chat inbox\` to see what needs you, \`dohc chat grep <pattern>\` to search, \`dohc chat show <thread|message>\` to read context, and \`dohc chat reply <thread>\` to respond.
+This workspace has chats. Run \`dohc chat inbox --as-agent\` to see what needs you, \`dohc chat grep <pattern> --as-agent\` to search, \`dohc chat show <thread|message> --as-agent\` to read context, and \`dohc chat reply <thread> --as-agent\` to respond.
 
-Always pass \`--as-agent\` on every chat write. Pass it on each invocation because environment variables do not persist between agent harness tool calls.
+Always pass \`--as-agent\` on every chat command, including reads and writes. Pass it on each invocation because environment variables do not persist between agent harness tool calls.
 ${AGENTS_CHAT_END_MARKER}`;
 
 function hasErrorCode(error: unknown, code: string): boolean {
@@ -50,7 +53,7 @@ async function openAgentsFile(path: string): Promise<FileHandle> {
       try {
         return await checkedHandle(
           path,
-          await open(path, fsConstants.O_RDWR | noFollow),
+          await open(path, fsConstants.O_RDONLY | noFollow),
         );
       } catch (error: unknown) {
         if (hasErrorCode(error, "ENOENT")) continue;
@@ -83,12 +86,41 @@ async function openAgentsFile(path: string): Promise<FileHandle> {
 
 async function writeHandle(handle: FileHandle, text: string): Promise<void> {
   const bytes = Buffer.from(text, "utf8");
-  await handle.truncate(0);
   let offset = 0;
   while (offset < bytes.length) {
     const result = await handle.write(bytes, offset, bytes.length - offset, offset);
     if (result.bytesWritten <= 0) throw new Error("Failed to update AGENTS.md.");
     offset += result.bytesWritten;
+  }
+}
+
+async function replaceAgentsFile(input: {
+  path: string;
+  mode: number;
+  text: string;
+}): Promise<void> {
+  const tempPath = `${input.path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  let handle: FileHandle | undefined;
+  let renamed = false;
+  try {
+    handle = await open(
+      tempPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+      fsConstants.O_NOFOLLOW,
+      input.mode,
+    );
+    await writeHandle(handle, input.text);
+    await handle.chmod(input.mode);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(tempPath, input.path);
+    renamed = true;
+  } finally {
+    await handle?.close().catch(() => undefined);
+    if (!renamed) await rm(tempPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -145,10 +177,16 @@ export async function ensureAgentsChatBlock(workspaceRoot: string): Promise<bool
       const current = await handle.readFile("utf8");
       const next = updateAgentsChatBlock(current);
       if (next === current) return false;
-      await writeHandle(handle, next);
+      const info = await handle.stat();
+      await handle.close();
+      await replaceAgentsFile({
+        path: agentsPath,
+        mode: info.mode & 0o7777,
+        text: next,
+      });
       return true;
     } finally {
-      await handle.close();
+      await handle.close().catch(() => undefined);
     }
   });
 }

@@ -302,7 +302,7 @@ export function ensureSearchIndexForVersion(input: {
       `SELECT t.thread_id, t.title, t.linked_object_id, t.channel_id,
               (SELECT m.body FROM chat_messages m
                WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id
-               ORDER BY m.message_order LIMIT 1) AS first_body,
+               ORDER BY m.created_at_ms, m.message_id LIMIT 1) AS first_body,
               EXISTS(SELECT 1 FROM chat_channels c
                WHERE c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id)
                 AS channel_owner_exists

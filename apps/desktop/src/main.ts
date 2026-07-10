@@ -154,6 +154,8 @@ import {
   StartAgentSessionPayload,
   StopAgentRunPayload,
   ResumeThreadDispatchPayload,
+  ChatDispatchStateForThreadPayload,
+  ChatDispatchStateForThreadResult,
   RunnerSelfTestPayload,
   RunnerSelfTestResult,
   DesktopUserSettingsResult,
@@ -280,6 +282,7 @@ import {
   searchWorkspaceEngine,
   SecretKeyEnvelopeError,
   ShareUnavailableError,
+  SharedChannelReadOnlyError,
   GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
   fetchSharedChannelInfo,
@@ -1463,11 +1466,7 @@ function relayAuthorUserId(): string | undefined {
 
 function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null {
   const workspace = findWorkspace(workspaceId);
-  if (
-    !workspace ||
-    sharedViewOf(workspaceId) ||
-    !activity.engineCaptureFor(workspaceId)
-  ) {
+  if (!workspace || sharedViewOf(workspaceId)) {
     return null;
   }
   return {
@@ -1476,9 +1475,145 @@ function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null
   };
 }
 
+function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
+  if (!cachedCredentials) return [];
+  return listWorkspaces()
+    .filter(
+      (workspace) =>
+        workspace.remote !== undefined &&
+        credentialMatchesRemote(workspace.remote.serverUrl),
+    )
+    .map((workspace) => workspaceForDispatch(workspace.workspaceId))
+    .filter(
+      (workspace): workspace is ChatDispatchWorkspace => workspace !== null,
+    );
+}
+
+// Tray-only scans use a scoped capture instead of retaining a file watcher.
+// Actual runs acquire activity temporarily so their writes are captured and
+// attributed. Normal renderer/CLI opens retain activity for the app session.
+const dispatchScopedSyncs = new Map<string, Promise<boolean>>();
+const retainedWorkspaceActivities = new Set<string>();
+const workspaceActivityOpenPromises = new Map<
+  string,
+  Promise<SyncStatusResult>
+>();
+const workspaceActivityClosePromises = new Map<string, Promise<void>>();
+
+async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
+  const closing = workspaceActivityClosePromises.get(workspaceId);
+  if (closing) await closing.catch(() => undefined);
+  if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+    activity.queueCloudSync(workspaceId);
+    return activity.engineCaptureFor(workspaceId) !== null;
+  }
+  const existing = dispatchScopedSyncs.get(workspaceId);
+  if (existing) return existing;
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace || sharedViewOf(workspaceId)) return false;
+  const scoped = (async () => {
+    const capture = await captureForFlaggedWorkspace(workspace, {
+      activeAgentRun: () => null,
+      onCaptureOutcome: () => undefined,
+    });
+    if (!capture) return false;
+    try {
+      // A normal open may have started while the scoped capture was built.
+      // Yield ownership rather than opening a second relay sync engine.
+      if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+        activity.queueCloudSync(workspaceId);
+        return activity.engineCaptureFor(workspaceId) !== null;
+      }
+      const engine = engineForWorkspace(workspace, capture);
+      if (!engine) return false;
+      try {
+        await engine.start();
+        return true;
+      } finally {
+        await engine.stop().catch(() => undefined);
+      }
+    } finally {
+      await capture.stop().catch(() => undefined);
+    }
+  })();
+  dispatchScopedSyncs.set(workspaceId, scoped);
+  try {
+    return await scoped;
+  } finally {
+    if (dispatchScopedSyncs.get(workspaceId) === scoped) {
+      dispatchScopedSyncs.delete(workspaceId);
+    }
+  }
+}
+
+async function ensureWorkspaceActivityOpen(
+  workspace: CreatedWorkspace,
+): Promise<SyncStatusResult> {
+  for (;;) {
+    const scoped = dispatchScopedSyncs.get(workspace.workspaceId);
+    if (scoped) {
+      await scoped.catch(() => undefined);
+      continue;
+    }
+    const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
+    if (closing) {
+      await closing.catch(() => undefined);
+      continue;
+    }
+    const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
+    if (existing) return existing;
+    // activity.open registers the workspace synchronously before its first
+    // await. With no yield after the checks above, a scoped scan can only
+    // start before us (and be observed on the next loop) or after us (and
+    // yield to the registered activity owner).
+    const opening = activity.open(workspace);
+    workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
+    try {
+      return await opening;
+    } finally {
+      if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
+        workspaceActivityOpenPromises.delete(workspace.workspaceId);
+      }
+    }
+  }
+}
+
+async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
+  const existing = workspaceActivityClosePromises.get(workspaceId);
+  if (existing) return existing;
+  const closing = activity.close(workspaceId);
+  workspaceActivityClosePromises.set(workspaceId, closing);
+  try {
+    await closing;
+  } finally {
+    if (workspaceActivityClosePromises.get(workspaceId) === closing) {
+      workspaceActivityClosePromises.delete(workspaceId);
+    }
+  }
+}
+
+async function acquireDispatchRunActivity(
+  workspace: CreatedWorkspace,
+): Promise<() => Promise<void>> {
+  const alreadyOpen = activity
+    .listOpenWorkspaceIds()
+    .includes(workspace.workspaceId);
+  await ensureWorkspaceActivityOpen(workspace);
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
+      return;
+    }
+    await closeDispatchRunActivity(workspace.workspaceId);
+  };
+}
+
 function openDispatchWorkspaces(): ChatDispatchWorkspace[] {
   return activity
     .listOpenWorkspaceIds()
+    .filter((workspaceId) => activity.engineCaptureFor(workspaceId) !== null)
     .map(workspaceForDispatch)
     .filter((workspace): workspace is ChatDispatchWorkspace => workspace !== null);
 }
@@ -1515,15 +1650,7 @@ async function publishAgentPresence(
 const chatDispatchService = createChatDispatchService({
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,
-  listSyncWorkspaces: () =>
-    openDispatchWorkspaces().filter((workspace) => {
-      const remote = findWorkspace(workspace.workspaceId)?.remote;
-      return Boolean(
-        remote &&
-          cachedCredentials &&
-          credentialMatchesRemote(remote.serverUrl),
-      );
-    }),
+  listSyncWorkspaces: syncDispatchWorkspaces,
   chatStoreFor: linkedChatStoreFor,
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
@@ -1546,7 +1673,33 @@ const chatDispatchService = createChatDispatchService({
   isPackaged: () => app.isPackaged,
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
-  queueSync: (workspaceId) => activity.queueCloudSync(workspaceId),
+  queueSync: syncWorkspaceForDispatch,
+  prepareRunWorkspace: async (workspace) => {
+    const registered = findWorkspace(workspace.workspaceId);
+    if (!registered) {
+      throw new Error(`Unknown workspace: ${workspace.workspaceId}`);
+    }
+    const release = await acquireDispatchRunActivity(registered);
+    if (!activity.engineCaptureFor(workspace.workspaceId)) {
+      await release();
+      throw new Error("Chats are not enabled for this workspace.");
+    }
+    return release;
+  },
+  authorizeServiceNote: async (workspace, threadId) => {
+    try {
+      await assertSharedChannelWritable({
+        workspaceId: workspace.workspaceId,
+        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+        store: linkedChatStoreFor(workspace),
+        target: { threadId },
+      });
+      return true;
+    } catch (error) {
+      if (!(error instanceof SharedChannelReadOnlyError)) throw error;
+      return false;
+    }
+  },
   onMessagePosted: (workspaceId) => {
     notifyRenderer();
     activity.queueCloudSync(workspaceId);
@@ -1598,7 +1751,8 @@ function assertChatRunnerIdle(workspaceId: string): void {
 async function openWorkspaceActivity(
   workspace: CreatedWorkspace,
 ): Promise<SyncStatusResult> {
-  const result = await activity.open(workspace);
+  retainedWorkspaceActivities.add(workspace.workspaceId);
+  const result = await ensureWorkspaceActivityOpen(workspace);
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
@@ -3471,7 +3625,7 @@ function registerIpcHandlers(): void {
         threadId: attachment.threadId,
         messageId: attachment.messageId,
         targetKind: attachment.targetKind,
-        objectId: attachment.objectId,
+        ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
         ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
         createdAtMs: attachment.createdAtMs,
       })),
@@ -4537,6 +4691,18 @@ function registerIpcHandlers(): void {
     const input = StopAgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     await chatDispatchService.stopAgentRun(input.workspaceId);
+  });
+
+  ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ChatDispatchStateForThreadPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    return ChatDispatchStateForThreadResult.parse(
+      chatDispatchService.dispatchStateForThread(
+        input.workspaceId,
+        input.threadId,
+      ),
+    );
   });
 
   ipcMain.handle(CHANNELS.resumeThreadDispatch, async (event, payload) => {

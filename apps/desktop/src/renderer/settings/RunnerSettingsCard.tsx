@@ -235,10 +235,19 @@ export function RunnerSettingsCard(props: {
       </div>
 
       <div className="flex items-center gap-3 px-4 py-3 max-[720px]:items-start max-[720px]:flex-col">
-        <p className="m-0 flex-1 text-[10px] leading-relaxed text-muted">
-          Use a sandboxed runner command. An unsandboxed runner can read anything on
-          this machine.
-        </p>
+        <div className="min-w-0 flex-1">
+          <p className="m-0 text-[10px] leading-relaxed text-muted">
+            Use a sandboxed runner command. An unsandboxed runner can read anything on
+            this machine.
+          </p>
+          <p
+            data-testid="runner-multi-device-note"
+            className="m-0 mt-1 text-[10px] leading-relaxed text-subtle"
+          >
+            Enable the runner on one device per workspace — multiple enabled devices
+            will each run tasks independently.
+          </p>
+        </div>
         <button
           type="button"
           data-testid="runner-self-test-button"

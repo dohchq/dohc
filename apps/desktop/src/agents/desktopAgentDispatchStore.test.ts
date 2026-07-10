@@ -209,4 +209,30 @@ describe("desktop agent dispatch store", () => {
     store.markFailureNotePosted(claim.run.runId);
     expect(handle.listAppQuitRecoveries(WORKSPACE_ID)).toEqual([]);
   });
+
+  it("never recovers an exit-143 user stop without a note marker", () => {
+    const handle = requireDispatch();
+    const { store } = handle;
+    store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-user-stop",
+      threadId: THREAD_ID,
+    });
+    const claim = store.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a user-stopped run.");
+    const stopped = store.failRun({
+      runId: claim.run.runId,
+      exitCode: APP_QUIT_EXIT_CODE,
+      reason: "user-stop",
+    });
+
+    expect(stopped).toMatchObject({
+      exitCode: APP_QUIT_EXIT_CODE,
+      failureReason: "user-stop",
+      failureNotePosted: false,
+    });
+    expect(handle.listAppQuitRecoveries(WORKSPACE_ID)).toEqual([]);
+  });
 });

@@ -7,6 +7,7 @@ import {
   Hash,
   MessagesSquare,
   Plus,
+  Square,
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +17,7 @@ import type {
   ChatChannelRecord,
   ChatChannelShareGrantRow,
   ChatDecisionRecord,
+  ChatDispatchStateForThreadResult,
   ChatMessageRecord,
   ChatReactionRecord,
   ChatRunRecord,
@@ -117,8 +119,20 @@ interface ThreadSnapshot {
   decisions: ChatDecisionRecord[];
   attachments: ChatAttachmentRecord[];
   runRecords: Record<string, ChatRunRecord>;
+  dispatchState: ChatDispatchStateForThreadResult;
   viewerAuthorId: string;
 }
+
+interface ChannelSnapshot {
+  threads: ChannelThreadRecord[];
+  feedPosts: Record<string, FeedPostData>;
+}
+
+const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
+  liveRun: false,
+  pendingCount: 0,
+  paused: false,
+};
 
 interface ComposerReplyTarget {
   messageId: string;
@@ -603,6 +617,10 @@ export function ChatsView(props: {
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
+  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult>(
+    IDLE_DISPATCH_STATE,
+  );
+  const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [viewerAuthorId, setViewerAuthorId] = useState("");
   const [composer, setComposer] = useState("");
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
@@ -649,6 +667,7 @@ export function ChatsView(props: {
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
+  const channelRefreshSeq = useRef(0);
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
@@ -713,6 +732,8 @@ export function ChatsView(props: {
     setDecisions([]);
     setAttachments([]);
     setRunRecords({});
+    setDispatchState(IDLE_DISPATCH_STATE);
+    setDispatchActionBusy(false);
     setComposer("");
     setReplyTarget(null);
     setResolveTargetMessageId(null);
@@ -749,57 +770,77 @@ export function ChatsView(props: {
     return () => clearInterval(interval);
   }, [refreshDms, nav.level]);
 
+  const loadChannelSnapshot = useCallback(
+    async (channelId: string): Promise<ChannelSnapshot> => {
+      const result = await bridge().listChannelThreads({ workspaceId, channelId });
+      const previews = await Promise.all(
+        result.threads.map(async (thread) => {
+          try {
+            const [messageResult, reactionResult] = await Promise.all([
+              bridge().listChatMessages({ workspaceId, threadId: thread.id }),
+              bridge().listChatReactions({ workspaceId, threadId: thread.id }),
+            ]);
+            return [
+              thread.id,
+              {
+                openingMessage: messageResult.messages[0] ?? null,
+                reactions: reactionResult.reactions,
+                viewerAuthorId: reactionResult.viewerAuthorId,
+              },
+            ] as const;
+          } catch {
+            return [
+              thread.id,
+              { openingMessage: null, reactions: [], viewerAuthorId: "" },
+            ] as const;
+          }
+        }),
+      );
+      return {
+        threads: result.threads,
+        feedPosts: Object.fromEntries(previews),
+      };
+    },
+    [workspaceId],
+  );
+
+  const applyChannelSnapshot = useCallback((snapshot: ChannelSnapshot) => {
+    setChannelThreads(snapshot.threads);
+    setFeedPosts(snapshot.feedPosts);
+  }, []);
+
   const openChannel = useCallback(
     async (channel: ChatChannelRecord) => {
       const token = ++liveToken.current;
+      const refreshSeq = ++channelRefreshSeq.current;
       setNav({ level: "channel", channel });
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
+      setDispatchState(IDLE_DISPATCH_STATE);
       setThreadsLoading(true);
       try {
-        const result = await bridge().listChannelThreads({
-          workspaceId,
-          channelId: channel.id,
-        });
-        if (token !== liveToken.current) return;
-        const previews = await Promise.all(
-          result.threads.map(async (thread) => {
-            try {
-              const [messageResult, reactionResult] = await Promise.all([
-                bridge().listChatMessages({ workspaceId, threadId: thread.id }),
-                bridge().listChatReactions({ workspaceId, threadId: thread.id }),
-              ]);
-              return [
-                thread.id,
-                {
-                  openingMessage: messageResult.messages[0] ?? null,
-                  reactions: reactionResult.reactions,
-                  viewerAuthorId: reactionResult.viewerAuthorId,
-                },
-              ] as const;
-            } catch {
-              // The summary remains useful if one preview is unavailable. No
-              // partial async result touches state until the channel token is
-              // checked below.
-              return [
-                thread.id,
-                { openingMessage: null, reactions: [], viewerAuthorId: "" },
-              ] as const;
-            }
-          }),
-        );
-        if (token !== liveToken.current) return;
-        setChannelThreads(result.threads);
-        setFeedPosts(Object.fromEntries(previews));
+        const snapshot = await loadChannelSnapshot(channel.id);
+        if (
+          token !== liveToken.current ||
+          refreshSeq !== channelRefreshSeq.current
+        ) {
+          return;
+        }
+        applyChannelSnapshot(snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this channel."));
       } finally {
-        if (token === liveToken.current) setThreadsLoading(false);
+        if (
+          token === liveToken.current &&
+          refreshSeq === channelRefreshSeq.current
+        ) {
+          setThreadsLoading(false);
+        }
       }
     },
-    [props, workspaceId],
+    [applyChannelSnapshot, loadChannelSnapshot, props],
   );
 
   const loadThreadSnapshot = useCallback(
@@ -822,13 +863,21 @@ export function ChatsView(props: {
             }),
         ),
       );
-      const [result, reactionResult, decisionResult, attachmentResult, runEntries] =
+      const [
+        result,
+        reactionResult,
+        decisionResult,
+        attachmentResult,
+        runEntries,
+        nextDispatchState,
+      ] =
         await Promise.all([
           messagesPromise,
           bridge().listChatReactions({ workspaceId, threadId }),
           bridge().listChatThreadDecisions({ workspaceId, threadId }),
           bridge().listChatThreadAttachments({ workspaceId, threadId }),
           runRecordsPromise,
+          bridge().chatDispatchStateForThread({ workspaceId, threadId }),
         ]);
       return {
         messages: result.messages,
@@ -840,6 +889,7 @@ export function ChatsView(props: {
             (entry): entry is readonly [string, ChatRunRecord] => entry[1] !== null,
           ),
         ),
+        dispatchState: nextDispatchState,
         viewerAuthorId: reactionResult.viewerAuthorId,
       };
     },
@@ -853,6 +903,7 @@ export function ChatsView(props: {
       setDecisions(snapshot.decisions);
       setAttachments(snapshot.attachments);
       setRunRecords(snapshot.runRecords);
+      setDispatchState(snapshot.dispatchState);
       setViewerAuthorId(snapshot.viewerAuthorId);
       // Everything on screen is read: advance the monotonic cursor and clear
       // this thread's badge locally so back-navigation is immediately honest.
@@ -882,6 +933,8 @@ export function ChatsView(props: {
       setDecisions([]);
       setAttachments([]);
       setRunRecords({});
+      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
       setFlashMessageId(null);
@@ -912,38 +965,70 @@ export function ChatsView(props: {
   );
 
   // Main emits workspaceActivity for CLI writes, runner reports/failures, and
-  // run-record completion. Refresh only the open thread and preserve its
-  // composer/reply/resolve state; this is an invalidation signal, not a
-  // navigation event.
+  // run-record completion. Treat it as an invalidation for whichever Chats
+  // surface is open. Every response carries both the navigation token and a
+  // per-surface request sequence so a slow refresh cannot repaint a newer one.
   useEffect(() => {
-    if (nav.level !== "thread") return;
-    const threadId = nav.thread.id;
-    return bridge().onWorkspaceActivity(() => {
-      const token = liveToken.current;
-      const refreshSeq = ++threadRefreshSeq.current;
-      void loadThreadSnapshot(threadId)
-        .then((snapshot) => {
-          if (
-            token !== liveToken.current ||
-            refreshSeq !== threadRefreshSeq.current
-          ) {
-            return;
-          }
-          applyThreadSnapshot(threadId, snapshot);
-          setMessagesLoading(false);
-        })
-        .catch(() => {
-          // The invalidation is best-effort; the next activity signal or an
-          // explicit reopen retries without disturbing the user's draft.
-          if (
-            token === liveToken.current &&
-            refreshSeq === threadRefreshSeq.current
-          ) {
+    if (nav.level === "thread") {
+      const threadId = nav.thread.id;
+      return bridge().onWorkspaceActivity(() => {
+        const token = liveToken.current;
+        const refreshSeq = ++threadRefreshSeq.current;
+        void loadThreadSnapshot(threadId)
+          .then((snapshot) => {
+            if (
+              token !== liveToken.current ||
+              refreshSeq !== threadRefreshSeq.current
+            ) {
+              return;
+            }
+            applyThreadSnapshot(threadId, snapshot);
             setMessagesLoading(false);
-          }
-        });
-    });
-  }, [applyThreadSnapshot, loadThreadSnapshot, nav]);
+          })
+          .catch(() => {
+            if (
+              token === liveToken.current &&
+              refreshSeq === threadRefreshSeq.current
+            ) {
+              setMessagesLoading(false);
+            }
+          });
+      });
+    }
+    if (nav.level === "channel") {
+      const channelId = nav.channel.id;
+      return bridge().onWorkspaceActivity(() => {
+        const token = liveToken.current;
+        const refreshSeq = ++channelRefreshSeq.current;
+        void loadChannelSnapshot(channelId)
+          .then((snapshot) => {
+            if (
+              token !== liveToken.current ||
+              refreshSeq !== channelRefreshSeq.current
+            ) {
+              return;
+            }
+            applyChannelSnapshot(snapshot);
+            setThreadsLoading(false);
+          })
+          .catch(() => {
+            if (
+              token === liveToken.current &&
+              refreshSeq === channelRefreshSeq.current
+            ) {
+              setThreadsLoading(false);
+            }
+          });
+      });
+    }
+    return undefined;
+  }, [
+    applyChannelSnapshot,
+    applyThreadSnapshot,
+    loadChannelSnapshot,
+    loadThreadSnapshot,
+    nav,
+  ]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -969,6 +1054,8 @@ export function ChatsView(props: {
       setDecisions([]);
       setAttachments(result.message.attachments ?? []);
       setRunRecords({});
+      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
       messageNodes.current.clear();
@@ -1612,6 +1699,78 @@ export function ChatsView(props: {
     });
   }, []);
 
+  const stopThreadRun = useCallback(async () => {
+    if (
+      nav.level !== "thread" ||
+      !dispatchState.liveRun ||
+      dispatchActionBusy
+    ) {
+      return;
+    }
+    const token = liveToken.current;
+    const refreshSeq = ++threadRefreshSeq.current;
+    const threadId = nav.thread.id;
+    setDispatchActionBusy(true);
+    try {
+      await bridge().stopAgentRun({ workspaceId });
+      const next = await bridge().chatDispatchStateForThread({
+        workspaceId,
+        threadId,
+      });
+      if (
+        token !== liveToken.current ||
+        refreshSeq !== threadRefreshSeq.current
+      ) {
+        return;
+      }
+      setDispatchState(next);
+    } catch (error) {
+      if (
+        token !== liveToken.current ||
+        refreshSeq !== threadRefreshSeq.current
+      ) {
+        return;
+      }
+      props.onError(ipcErrorMessage(error, "Could not stop this agent run."));
+    } finally {
+      if (token === liveToken.current) setDispatchActionBusy(false);
+    }
+  }, [dispatchActionBusy, dispatchState.liveRun, nav, props, workspaceId]);
+
+  const resumeThreadDispatch = useCallback(async () => {
+    if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
+      return;
+    }
+    const token = liveToken.current;
+    const refreshSeq = ++threadRefreshSeq.current;
+    const threadId = nav.thread.id;
+    setDispatchActionBusy(true);
+    try {
+      await bridge().resumeThreadDispatch({ workspaceId, threadId });
+      const next = await bridge().chatDispatchStateForThread({
+        workspaceId,
+        threadId,
+      });
+      if (
+        token !== liveToken.current ||
+        refreshSeq !== threadRefreshSeq.current
+      ) {
+        return;
+      }
+      setDispatchState(next);
+    } catch (error) {
+      if (
+        token !== liveToken.current ||
+        refreshSeq !== threadRefreshSeq.current
+      ) {
+        return;
+      }
+      props.onError(ipcErrorMessage(error, "Could not resume dispatch."));
+    } finally {
+      if (token === liveToken.current) setDispatchActionBusy(false);
+    }
+  }, [dispatchActionBusy, dispatchState.paused, nav, props, workspaceId]);
+
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
   const onKeyDownCapture = useCallback(
@@ -1799,6 +1958,22 @@ export function ChatsView(props: {
           label={nav.thread.title}
           testId="chats-thread"
           onBack={goBack}
+          action={
+            dispatchState.liveRun ? (
+              <button
+                type="button"
+                data-testid="chats-stop-agent-run"
+                aria-label="Stop agent run"
+                title="Stop agent run"
+                disabled={dispatchActionBusy}
+                onClick={() => void stopThreadRun()}
+                className="inline-flex h-6 shrink-0 items-center gap-1 rounded border border-line px-1.5 font-mono text-[9.5px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
+              >
+                <Square size={8} fill="currentColor" aria-hidden />
+                Stop
+              </button>
+            ) : undefined
+          }
           trailing={
             <>
               {nav.channel.kind === "agent" ? (
@@ -1813,6 +1988,37 @@ export function ChatsView(props: {
             </>
           }
         />
+        {dispatchState.paused ? (
+          <div
+            data-testid="chats-dispatch-status"
+            title={dispatchState.pausedReason}
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+          >
+            <span>dispatch paused — </span>
+            <button
+              type="button"
+              data-testid="chats-resume-dispatch"
+              disabled={dispatchActionBusy}
+              onClick={() => void resumeThreadDispatch()}
+              className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
+            >
+              Resume
+            </button>
+          </div>
+        ) : dispatchState.liveRun || dispatchState.pendingCount > 0 ? (
+          <div
+            data-testid="chats-dispatch-status"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+          >
+            {dispatchState.liveRun
+              ? `agent working${
+                  dispatchState.pendingCount > 0
+                    ? ` · ${dispatchState.pendingCount} queued`
+                    : ""
+                }`
+              : `${dispatchState.pendingCount} queued`}
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
             data-testid="chats-thread-column"

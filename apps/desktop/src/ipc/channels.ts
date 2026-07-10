@@ -514,6 +514,7 @@ export const CHANNELS = {
   answerAgentPermission: "desktop:answer-agent-permission",
   stopAgentRun: "desktop:stop-chat-agent-run",
   resumeThreadDispatch: "desktop:resume-thread-dispatch",
+  chatDispatchStateForThread: "desktop:chat-dispatch-state-for-thread",
   runnerSelfTest: "desktop:runner-self-test",
   getUserSettings: "desktop:get-user-settings",
   setUserSettings: "desktop:set-user-settings",
