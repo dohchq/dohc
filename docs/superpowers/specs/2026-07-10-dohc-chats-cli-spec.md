@@ -34,8 +34,10 @@ minimal and boring.
    dohc chat export [--all|--channel <c>|--thread <t>] --out <dir>
    ```
 
-   Body is the trailing argument or `-` for stdin (long content always via
-   stdin). Shared flags: `--attach <path>` (repeatable), `--needs-decision`,
+   `post` targets channels (including the agent channel, where a post starts
+   a task thread) and rejects DM channels — DMs are streams; reply into the
+   existing thread. Body is the trailing argument or `-` for stdin (long
+   content always via stdin). Shared flags: `--attach <path>` (repeatable), `--needs-decision`,
    `--resolve <message>` (reply only — closes the open decision record on
    that message; the resolving reply is recorded as the leaving message),
    `--title <t>` (post only; otherwise first line becomes the title, same as

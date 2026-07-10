@@ -239,8 +239,15 @@ gesture) closes the specific decision record.
    stop from the thread).
 3. Does an `@agent` mention in a comment pack the whole post thread or just
    the branch? (Lean: whole thread; branches are presentation.)
-4. Re-dispatch budget defaults (lean: 5 runs per thread per 10 minutes, then
-   auto-pause with a system note).
+4. Re-dispatch budget defaults — resolved during implementation: 10 runs per
+   thread per 10 minutes, then auto-pause with an in-thread note and a
+   one-click Resume (5 proved tight for legitimate rapid back-and-forth).
+5. Answered during implementation: (1) the own-device `/log` lane already
+   replicates unshared channels — `kind:"agent"` needed only a well-known
+   wire id for cross-device convergence; also, the same trigger on two
+   runner-enabled devices double-dispatches (per-device ledgers), so v1
+   documents "enable the runner on one device" and defers a relay-side
+   dispatch lease to a future slice.
 
 ## First slice
 
