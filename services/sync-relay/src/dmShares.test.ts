@@ -262,8 +262,10 @@ describe("chat-channel share selector (DM grants)", () => {
     // The thread→channel resolver the chat branch scopes by. "t" belongs to the
     // granted DM; "t2" belongs to ANOTHER channel; "t3" is unbound.
     const chat: ChatShareThreadResolver = {
+      channelKind: (wireId) =>
+        wireId === DM_WIRE ? "dm" : wireId === OTHER_WIRE ? "channel" : undefined,
       threadChannelWireId: (threadId) =>
-        threadId === "t" ? DM_WIRE : threadId === "t2" ? OTHER_WIRE : null,
+        threadId === "t" ? DM_WIRE : threadId === "t2" ? OTHER_WIRE : undefined,
     };
     const allow = (opKind: string, payload: Record<string, unknown>) =>
       filterOpForShare(selector, opKind, JSON.stringify(payload), chat).allowed;

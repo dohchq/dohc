@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ChatChannelRecord,
+  ChatAttachmentRecord,
+  ChannelThreadRecord,
+  ChatRunRecordsForThreadResult,
+  ChatDispatchStateForThreadPayload,
+  ChatDispatchStateForThreadResult,
   ChatReactionRecord,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
@@ -11,6 +17,10 @@ import {
   PresencePublishPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
+  RunnerSelfTestPayload,
+  RunnerSelfTestResult,
+  StopAgentRunPayload,
+  ResumeThreadDispatchPayload,
   SendChatMessagePayload,
   SendChatMessageResult,
   SetChatReactionPayload,
@@ -34,6 +44,73 @@ import {
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+
+describe("chat IPC contract", () => {
+  it("accepts an opaque shared attachment without local object metadata", () => {
+    expect(
+      ChatAttachmentRecord.parse({
+        attachmentId: "attachment-redacted",
+        threadId: "thread-1",
+        messageId: "message-1",
+        targetKind: "file",
+        createdAtMs: 1,
+      }),
+    ).toEqual({
+      attachmentId: "attachment-redacted",
+      threadId: "thread-1",
+      messageId: "message-1",
+      targetKind: "file",
+      createdAtMs: 1,
+    });
+  });
+
+  it("accepts additive channel-feed previews and batched run records", () => {
+    expect(
+      ChannelThreadRecord.parse({
+        id: "thread-1",
+        title: "Launch",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        channelId: "channel-1",
+        messageCount: 2,
+        lastReadSequence: 1,
+        unreadCount: 1,
+        openingMessage: {
+          id: "message-1",
+          authorKind: "agent",
+          authorDisplayName: "Ice",
+          createdAtMs: 1,
+          bodySnippet: "Launch checks are green.",
+          reactions: [
+            {
+              reactionId: "reaction-1",
+              messageId: "message-1",
+              threadId: "thread-1",
+              emoji: "👍",
+              authorId: "user-1",
+              authorKind: "human",
+              authorDisplayName: "Ice",
+            },
+          ],
+        },
+      }).openingMessage,
+    ).toMatchObject({ id: "message-1", bodySnippet: "Launch checks are green." });
+
+    expect(
+      ChatRunRecordsForThreadResult.parse({
+        runs: {
+          "message-2": {
+            runId: "run-1",
+            threadId: "thread-1",
+            triggerMessageId: "message-1",
+            command: "codex exec",
+            startedAtMs: 2,
+          },
+        },
+      }).runs["message-2"]?.runId,
+    ).toBe("run-1");
+  });
+});
 
 describe("settings IPC contract", () => {
   it("accepts bounded user and workspace settings payloads", () => {
@@ -102,6 +179,76 @@ describe("settings IPC contract", () => {
             defaultModel: "x".repeat(201),
           },
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts only a scoped runner self-test request and bounded result", () => {
+    expect(RunnerSelfTestPayload.parse({ workspaceId: "ws-settings" })).toEqual({
+      workspaceId: "ws-settings",
+    });
+    expect(
+      RunnerSelfTestPayload.safeParse({
+        workspaceId: "ws-settings",
+        command: "untrusted command",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerSelfTestResult.parse({ ok: true, detail: "self-test ok" }),
+    ).toEqual({ ok: true, detail: "self-test ok" });
+    expect(
+      RunnerSelfTestResult.safeParse({
+        ok: false,
+        detail: "Runner timed out.",
+        logPath: "/tmp/log",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerSelfTestResult.safeParse({ ok: false, detail: "" }).success,
+    ).toBe(false);
+  });
+
+  it("keeps chat-run stop and resume controls workspace scoped", () => {
+    expect(StopAgentRunPayload.parse({ workspaceId: "ws-settings" })).toEqual({
+      workspaceId: "ws-settings",
+    });
+    expect(
+      StopAgentRunPayload.safeParse({
+        workspaceId: "ws-settings",
+        pid: 42,
+      }).success,
+    ).toBe(false);
+    expect(
+      ResumeThreadDispatchPayload.parse({
+        workspaceId: "ws-settings",
+        threadId: "thread-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
+    expect(
+      ResumeThreadDispatchPayload.safeParse({
+        workspaceId: "ws-settings",
+        threadId: "thread-1",
+        paused: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      ChatDispatchStateForThreadPayload.parse({
+        workspaceId: "ws-settings",
+        threadId: "thread-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
+    expect(
+      ChatDispatchStateForThreadResult.parse({
+        liveRun: true,
+        pendingCount: 2,
+        paused: false,
+      }),
+    ).toEqual({ liveRun: true, pendingCount: 2, paused: false });
+    expect(
+      ChatDispatchStateForThreadResult.safeParse({
+        liveRun: false,
+        pendingCount: -1,
+        paused: true,
       }).success,
     ).toBe(false);
   });
@@ -532,6 +679,22 @@ describe("try-in-version IPC contract (PR 0N-2)", () => {
 });
 
 describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
+  it("admits the auto-provisioned agent channel kind", () => {
+    expect(
+      ChatChannelRecord.parse({
+        id: "channel-agent",
+        name: "My agent",
+        slug: "my-agent",
+        kind: "agent",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        threadCount: 0,
+        unreadCount: 0,
+        wireId: "channel_wire_agent_v1",
+      }).kind,
+    ).toBe("agent");
+  });
+
   it("accepts well-formed moment pages, details, and restore results", () => {
     expect(
       ListEngineMomentsPayload.parse({

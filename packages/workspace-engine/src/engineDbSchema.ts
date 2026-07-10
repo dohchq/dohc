@@ -429,6 +429,117 @@ const CHAT_CHANNEL_TABLES_DDL = `
     ON chat_reactions(workspace_id, thread_id, message_id);
 `;
 
+const CHAT_PHASE_ONE_DDL = `
+  CREATE TABLE IF NOT EXISTS chat_decisions (
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    resolved_by_message_id TEXT,
+    at_ms INTEGER NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_decisions_thread_state
+    ON chat_decisions(workspace_id, thread_id, state, message_id);
+  CREATE TABLE IF NOT EXISTS chat_attachments (
+    workspace_id TEXT NOT NULL,
+    attachment_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind = 'file'),
+    object_id TEXT,
+    path_hint TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, attachment_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_attachments_thread_message
+    ON chat_attachments(workspace_id, thread_id, message_id, created_at_ms, attachment_id);
+  CREATE TABLE IF NOT EXISTS chat_agent_read_state (
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    last_read_created_at_ms INTEGER NOT NULL,
+    last_read_message_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id)
+  );
+  CREATE TABLE IF NOT EXISTS chat_mentions (
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    author_kind TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id, handle)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_mentions_handle
+    ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
+`;
+
+const AGENT_DISPATCH_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_workspace_created
+    ON chat_messages(workspace_id, created_at_ms, message_id);
+  CREATE TABLE IF NOT EXISTS chat_dispatch_ledger (
+    workspace_id TEXT NOT NULL,
+    trigger_message_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    run_id TEXT,
+    failure_reason TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, trigger_message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_dispatch_ledger_state
+    ON chat_dispatch_ledger(workspace_id, state, created_at_ms, trigger_message_id);
+  CREATE TABLE IF NOT EXISTS chat_dispatch_scan_cursor (
+    workspace_id TEXT NOT NULL,
+    max_created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id)
+  );
+  CREATE TABLE IF NOT EXISTS agent_run_records (
+    workspace_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    trigger_message_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    ended_at_ms INTEGER,
+    exit_code INTEGER,
+    failure_reason TEXT,
+    log_path TEXT,
+    failure_note_posted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (workspace_id, run_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_run_records_thread_started
+    ON agent_run_records(workspace_id, thread_id, started_at_ms);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_records_run_id
+    ON agent_run_records(run_id);
+  -- Local-only provenance from agent-authored chat reports to their private
+  -- runner trace. This table is deliberately absent from every replication,
+  -- projection, search, and export payload.
+  CREATE TABLE IF NOT EXISTS run_message_links (
+    workspace_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_run_message_links_run
+    ON run_message_links(workspace_id, run_id, message_id);
+  CREATE TABLE IF NOT EXISTS chat_dispatch_pause (
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    paused INTEGER NOT NULL,
+    reason TEXT,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id)
+  );
+`;
+
 // chat_threads.channel_id is a lazy additive nullable column (the
 // moments.author_json pattern): older readers select named columns and ignore
 // it; an older writer leaves it NULL (a file-linked thread — the pre-PR-12
@@ -572,6 +683,10 @@ export function initializeOrValidateEngineSchema(
   db.exec(ENGINE_YDOC_DDL);
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
+  db.exec(CHAT_PHASE_ONE_DDL);
+  db.exec(AGENT_DISPATCH_DDL);
+  ensureNullableColumn(db, "chat_dispatch_ledger", "failure_reason", "TEXT", corrupt);
+  ensureNullableColumn(db, "agent_run_records", "failure_reason", "TEXT", corrupt);
   ensureMomentsAuthorColumn(db, corrupt);
   ensureMomentsSyncRecordOnlyColumn(db, corrupt);
   // versions.sync_materialized (lazy additive, 0P-A gate fix): 1 marks a
@@ -589,6 +704,8 @@ export function initializeOrValidateEngineSchema(
   // message (display name only). Additive-nullable both ways: older readers
   // select named columns and ignore it; an older writer leaves it NULL.
   ensureNullableColumn(db, "chat_messages", "author_user_id", "TEXT", corrupt);
+  ensureNullableColumn(db, "chat_messages", "parent_message_id", "TEXT", corrupt);
+  ensureNullableColumn(db, "chat_messages", "origin", "TEXT", corrupt);
 }
 
 export function assertRequiredEngineTables(
@@ -818,6 +935,8 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       ${ACTIVE_VERSIONS_DDL};
       ${SECRET_TABLES_DDL};
       ${CHAT_CHANNEL_TABLES_DDL};
+      ${CHAT_PHASE_ONE_DDL};
+      ${AGENT_DISPATCH_DDL};
       ${SYNC_REPLICATION_DDL};
       ${SHARED_CHANNEL_SYNC_DDL};
       ${ENGINE_YDOC_DDL};

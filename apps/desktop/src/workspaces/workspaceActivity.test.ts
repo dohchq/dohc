@@ -52,6 +52,35 @@ describe("workspaceActivity capture hooks", () => {
     expect(liveSlot!()).toBeNull();
     await activity.stopAll();
   });
+
+  it("claims the single attribution slot atomically and clears by owner run id", async () => {
+    let liveSlot: (() => unknown) | null = null;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: (_workspace, hooks) => {
+        liveSlot = hooks.activeAgentRun;
+        return null;
+      },
+    });
+    await activity.open(workspace());
+    const first = {
+      agentId: "chat-runner",
+      onBehalfOf: "local",
+      agentRunId: "run-1",
+    };
+    const second = {
+      agentId: "panel",
+      onBehalfOf: "local",
+      agentRunId: "run-2",
+    };
+    expect(activity.claimAgentRun("activity-test", first)).toBe(true);
+    expect(activity.claimAgentRun("activity-test", second)).toBe(false);
+    activity.clearAgentRun("activity-test", second.agentRunId);
+    expect(liveSlot!()).toEqual(first);
+    activity.clearAgentRun("activity-test", first.agentRunId);
+    expect(liveSlot!()).toBeNull();
+    expect(activity.claimAgentRun("activity-test", second)).toBe(true);
+    await activity.stopAll();
+  });
 });
 
 describe("workspaceActivity history-off status (retirement Phase C)", () => {

@@ -529,6 +529,7 @@ export type RestoreEngineMomentFileResult = z.infer<
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
 const CHAT_THREAD_ID = z.string().min(1).max(200);
+const CHAT_MESSAGE_ID = z.string().min(1).max(200);
 const CHAT_BODY = z.string().min(1).max(65_536);
 
 export const ChatThreadRecord = z.object({
@@ -539,13 +540,29 @@ export const ChatThreadRecord = z.object({
 });
 export type ChatThreadRecord = z.infer<typeof ChatThreadRecord>;
 
+export const ChatAttachmentRecord = z.object({
+  attachmentId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  messageId: CHAT_MESSAGE_ID,
+  targetKind: z.literal("file"),
+  objectId: z.string().min(1).max(200).optional(),
+  pathHint: PATH_STRING.optional(),
+  createdAtMs: z.number(),
+});
+export type ChatAttachmentRecord = z.infer<typeof ChatAttachmentRecord>;
+
 export const ChatMessageRecord = z.object({
-  id: z.string().min(1).max(200),
+  id: CHAT_MESSAGE_ID,
   threadId: CHAT_THREAD_ID,
   authorKind: z.enum(["human", "agent"]),
   authorDisplayName: z.string().min(1).max(200),
+  parentMessageId: CHAT_MESSAGE_ID.optional(),
+  origin: z.literal("cli").optional(),
   body: CHAT_BODY,
   createdAtMs: z.number(),
+  // Optional on the wire so pre-phase-4 fixture objects and stored messages
+  // remain compatible. Main includes the engine's authoritative array.
+  attachments: z.array(ChatAttachmentRecord).optional(),
 });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
@@ -589,6 +606,7 @@ export type ListChatMessagesResult = z.infer<typeof ListChatMessagesResult>;
 export const SendChatMessagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: CHAT_THREAD_ID,
+  parentMessageId: CHAT_MESSAGE_ID.optional(),
   body: CHAT_BODY,
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
@@ -597,6 +615,130 @@ export const SendChatMessageResult = z.object({
   message: ChatMessageRecord,
 });
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
+
+export const ChatDecisionRecord = z.object({
+  threadId: CHAT_THREAD_ID,
+  messageId: CHAT_MESSAGE_ID,
+  state: z.enum(["open", "resolved"]),
+  resolvedByMessageId: CHAT_MESSAGE_ID.optional(),
+  atMs: z.number(),
+});
+export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
+
+export const ListChatThreadDecisionsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ListChatThreadDecisionsPayload = z.infer<
+  typeof ListChatThreadDecisionsPayload
+>;
+
+export const ListChatThreadDecisionsResult = z.object({
+  decisions: z.array(ChatDecisionRecord),
+});
+export type ListChatThreadDecisionsResult = z.infer<
+  typeof ListChatThreadDecisionsResult
+>;
+
+export const ResolveChatDecisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+  messageId: CHAT_MESSAGE_ID,
+  resolvedByMessageId: CHAT_MESSAGE_ID,
+});
+export type ResolveChatDecisionPayload = z.infer<
+  typeof ResolveChatDecisionPayload
+>;
+
+export const ResolveChatDecisionResult = z.object({
+  decision: ChatDecisionRecord,
+});
+export type ResolveChatDecisionResult = z.infer<
+  typeof ResolveChatDecisionResult
+>;
+
+export const ListChatThreadAttachmentsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ListChatThreadAttachmentsPayload = z.infer<
+  typeof ListChatThreadAttachmentsPayload
+>;
+
+export const ListChatThreadAttachmentsResult = z.object({
+  attachments: z.array(ChatAttachmentRecord),
+});
+export type ListChatThreadAttachmentsResult = z.infer<
+  typeof ListChatThreadAttachmentsResult
+>;
+
+export const ChatRunRecord = z.object({
+  runId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  triggerMessageId: CHAT_MESSAGE_ID,
+  command: z.string().min(1),
+  startedAtMs: z.number(),
+  endedAtMs: z.number().optional(),
+  exitCode: z.number().int().optional(),
+  logPath: PATH_STRING.optional(),
+});
+export type ChatRunRecord = z.infer<typeof ChatRunRecord>;
+
+export const ChatRunRecordsForThreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type ChatRunRecordsForThreadPayload = z.infer<
+  typeof ChatRunRecordsForThreadPayload
+>;
+
+export const ChatRunRecordsForThreadResult = z.object({
+  runs: z.record(ChatRunRecord),
+});
+export type ChatRunRecordsForThreadResult = z.infer<
+  typeof ChatRunRecordsForThreadResult
+>;
+
+// Reactions (WS-MU-C2). A reaction is durable, commutative chat data — an
+// emoji reaction by an author on a message. The renderer never supplies
+// identity: main derives the reactor from the local user, exactly like a sent
+// message. Emojis are short graphemes, never message bodies.
+//
+// This schema is the TRUST BOUNDARY for chat.reaction.set payloads — including
+// future replicated writes from other peers per the PR's forward-compat design.
+// A length bound alone accepts URLs, profanity, and arbitrary ASCII text as an
+// "emoji"; a hostile/buggy peer could inject those to render as reaction pills.
+// So we validate the actual codepoints: a single emoji grapheme cluster — one
+// pictographic (with optional variation selector / skin-tone modifier /
+// keycap), a regional-indicator pair (flag), and ZWJ sequences thereof.
+//
+// Unicode property escapes (\p{…}) with the `u` flag are ES2018 and supported by
+// every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
+// ES2022), so `\p{Extended_Pictographic}` is safe here.
+const EMOJI_ATOM =
+  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+export const EMOJI_GRAPHEME_PATTERN = new RegExp(
+  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
+  "u",
+);
+const CHAT_EMOJI = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
+
+// One ACTIVE reaction as the renderer paints it. The UI groups these by
+// (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.
+export const ChatReactionRecord = z.object({
+  reactionId: z.string().min(1).max(200),
+  messageId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  emoji: CHAT_EMOJI,
+  authorId: z.string().min(1).max(200),
+  authorKind: z.enum(["human", "agent"]),
+  authorDisplayName: z.string().min(1).max(200),
+});
+export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
 // Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
 // channels, plus per-thread monotonic read cursors. Same gate as the file
@@ -608,7 +750,7 @@ export const ChatChannelRecord = z.object({
   id: CHAT_CHANNEL_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  kind: z.enum(["channel", "dm"]),
+  kind: z.enum(["channel", "dm", "agent"]),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
   threadCount: z.number().int().min(0),
@@ -624,6 +766,23 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   messageCount: z.number().int().min(0),
   lastReadSequence: z.number().int().min(0),
   unreadCount: z.number().int().min(0),
+  // Main always supplies the engine-derived count. Optionality keeps older
+  // renderer fixtures and pre-phase-4 bridge consumers source-compatible.
+  openDecisionCount: z.number().int().min(0).optional(),
+  // Feed-only opening-message data. Optional + nullable keeps older bridge
+  // fixtures compatible while allowing an empty/corrupt legacy thread to be
+  // represented without fabricating a message.
+  openingMessage: z
+    .object({
+      id: CHAT_MESSAGE_ID,
+      authorKind: z.enum(["human", "agent"]),
+      authorDisplayName: z.string().min(1).max(200),
+      createdAtMs: z.number(),
+      bodySnippet: z.string().min(1).max(500),
+      reactions: z.array(ChatReactionRecord),
+    })
+    .nullable()
+    .optional(),
 });
 export type ChannelThreadRecord = z.infer<typeof ChannelThreadRecord>;
 
@@ -666,6 +825,9 @@ export type ListChannelThreadsPayload = z.infer<typeof ListChannelThreadsPayload
 
 export const ListChannelThreadsResult = z.object({
   threads: z.array(ChannelThreadRecord),
+  // Main-derived, shared by every opening-message reaction summary in this
+  // response. Optional for older callers/fixtures; main always supplies it.
+  viewerAuthorId: z.string().min(1).max(200).optional(),
 });
 export type ListChannelThreadsResult = z.infer<typeof ListChannelThreadsResult>;
 
@@ -698,47 +860,6 @@ export const MarkChatThreadReadResult = z.object({
   revision: z.number().int().min(0),
 });
 export type MarkChatThreadReadResult = z.infer<typeof MarkChatThreadReadResult>;
-
-// Reactions (WS-MU-C2). A reaction is durable, commutative chat data — an
-// emoji reaction by an author on a message. The renderer never supplies
-// identity: main derives the reactor from the local user, exactly like a sent
-// message. Emojis are short graphemes, never message bodies.
-//
-// This schema is the TRUST BOUNDARY for chat.reaction.set payloads — including
-// future replicated writes from other peers per the PR's forward-compat design.
-// A length bound alone accepts URLs, profanity, and arbitrary ASCII text as an
-// "emoji"; a hostile/buggy peer could inject those to render as reaction pills.
-// So we validate the actual codepoints: a single emoji grapheme cluster — one
-// pictographic (with optional variation selector / skin-tone modifier /
-// keycap), a regional-indicator pair (flag), and ZWJ sequences thereof.
-//
-// Unicode property escapes (\p{…}) with the `u` flag are ES2018 and supported by
-// every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
-// ES2022), so `\p{Extended_Pictographic}` is safe here.
-const EMOJI_ATOM =
-  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
-export const EMOJI_GRAPHEME_PATTERN = new RegExp(
-  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
-  "u",
-);
-const CHAT_EMOJI = z
-  .string()
-  .min(1)
-  .max(32)
-  .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
-
-// One ACTIVE reaction as the renderer paints it. The UI groups these by
-// (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.
-export const ChatReactionRecord = z.object({
-  reactionId: z.string().min(1).max(200),
-  messageId: z.string().min(1).max(200),
-  threadId: CHAT_THREAD_ID,
-  emoji: CHAT_EMOJI,
-  authorId: z.string().min(1).max(200),
-  authorKind: z.enum(["human", "agent"]),
-  authorDisplayName: z.string().min(1).max(200),
-});
-export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
 export const ListChatReactionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1682,6 +1803,48 @@ export const AgentPermissionResponsePayload = z.object({
 });
 export type AgentPermissionResponsePayload = z.infer<typeof AgentPermissionResponsePayload>;
 
+export const RunnerSelfTestPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
+
+export const StopAgentRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type StopAgentRunPayload = z.infer<typeof StopAgentRunPayload>;
+
+export const ResumeThreadDispatchPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+}).strict();
+export type ResumeThreadDispatchPayload = z.infer<
+  typeof ResumeThreadDispatchPayload
+>;
+
+export const ChatDispatchStateForThreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+}).strict();
+export type ChatDispatchStateForThreadPayload = z.infer<
+  typeof ChatDispatchStateForThreadPayload
+>;
+
+export const ChatDispatchStateForThreadResult = z.object({
+  liveRun: z.boolean(),
+  pendingCount: z.number().int().nonnegative(),
+  paused: z.boolean(),
+  pausedReason: z.string().min(1).max(500).optional(),
+}).strict();
+export type ChatDispatchStateForThreadResult = z.infer<
+  typeof ChatDispatchStateForThreadResult
+>;
+
+export const RunnerSelfTestResult = z.object({
+  ok: z.boolean(),
+  detail: z.string().min(1).max(2_000),
+}).strict();
+export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
+
 export const DesktopUserSettings = DesktopUserSettingsSchema;
 export const DesktopUserSettingsResult = DesktopUserSettingsResultSchema;
 export type DesktopUserSettings = DesktopUserSettingsType;
@@ -2050,6 +2213,18 @@ export interface DohcDesktopBridge {
     payload: ListChatMessagesPayload,
   ): Promise<ListChatMessagesResult>;
   sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
+  listChatThreadDecisions(
+    payload: ListChatThreadDecisionsPayload,
+  ): Promise<ListChatThreadDecisionsResult>;
+  resolveChatDecision(
+    payload: ResolveChatDecisionPayload,
+  ): Promise<ResolveChatDecisionResult>;
+  listChatThreadAttachments(
+    payload: ListChatThreadAttachmentsPayload,
+  ): Promise<ListChatThreadAttachmentsResult>;
+  chatRunRecordsForThread(
+    payload: ChatRunRecordsForThreadPayload,
+  ): Promise<ChatRunRecordsForThreadResult>;
   // Chats channels (PR 12/13, WS-E) — same flag gate as the file rail.
   listChatChannels(
     payload: ListChatChannelsPayload,
@@ -2096,6 +2271,12 @@ export interface DohcDesktopBridge {
   answerAgentPermission(
     payload: AgentPermissionResponsePayload,
   ): Promise<AgentPanelSnapshotResult>;
+  stopAgentRun(payload: StopAgentRunPayload): Promise<void>;
+  resumeThreadDispatch(payload: ResumeThreadDispatchPayload): Promise<void>;
+  chatDispatchStateForThread(
+    payload: ChatDispatchStateForThreadPayload,
+  ): Promise<ChatDispatchStateForThreadResult>;
+  runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
   resetUserSettings(): Promise<DesktopUserSettingsResult>;

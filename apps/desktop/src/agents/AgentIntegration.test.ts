@@ -156,6 +156,24 @@ describe("AgentIntegration", () => {
     await expect(integration.startAgentRun("nope")).rejects.toThrow(/Unknown workspace/);
   });
 
+  it("records a failed start when the workspace attribution slot is occupied", async () => {
+    await withWorkspace(async ({ root }) => {
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_workspaceId, run) => {
+          if (run) throw new Error("slot occupied");
+        },
+      });
+      await expect(integration.startAgentRun("ws")).rejects.toThrow(
+        "slot occupied",
+      );
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: null,
+        lastRun: { status: "failed" },
+      });
+    });
+  });
+
   // Same boundary as workspaceUiState: a malicious attached workspace can ship
   // `.dohc` as a SYMLINK to a directory outside the workspace. The run-log
   // writer must refuse instead of planting agent-runs.json at the target.

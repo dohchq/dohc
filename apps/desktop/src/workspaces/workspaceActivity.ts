@@ -298,6 +298,10 @@ export function createWorkspaceActivity(
     return statusFor(workspaceId);
   }
 
+  function listOpenWorkspaceIds(): string[] {
+    return [...watched.keys()];
+  }
+
   // Nudges the (debounced) sync engine outside the watcher path. Resolving a
   // conflict journals a replication op but may change NOTHING on disk
   // ("keep mine" keeps the local file byte-identical), so without this the
@@ -315,6 +319,25 @@ export function createWorkspaceActivity(
     const entry = watched.get(workspaceId);
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     entry.agentRun = run;
+  }
+
+  function claimAgentRun(workspaceId: string, run: ActiveAgentRun): boolean {
+    const entry = watched.get(workspaceId);
+    if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
+    if (entry.agentRun !== null) return false;
+    entry.agentRun = run;
+    return true;
+  }
+
+  function clearAgentRun(workspaceId: string, agentRunId: string): void {
+    const entry = watched.get(workspaceId);
+    if (!entry) return;
+    if (entry.agentRun?.agentRunId === agentRunId) entry.agentRun = null;
+  }
+
+  function hasAgentRun(workspaceId: string): boolean {
+    const entry = watched.get(workspaceId);
+    return entry !== undefined && entry.agentRun !== null;
   }
 
   // Registers engine-originated disk writes (restore flows, future engine
@@ -359,8 +382,12 @@ export function createWorkspaceActivity(
     reconcileCloud,
     stopEngines,
     getStatus,
+    listOpenWorkspaceIds,
     queueCloudSync,
     setAgentRun,
+    claimAgentRun,
+    clearAgentRun,
+    hasAgentRun,
     engineCaptureFor,
     registerExpectedEngineEvents,
     stopAll,

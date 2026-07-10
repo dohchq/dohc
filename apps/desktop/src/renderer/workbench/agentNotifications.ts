@@ -13,7 +13,10 @@
 // for the active workspace so a run finishing off-screen still surfaces.
 
 import type { AgentSessionStatus } from "../../agents/AgentSessionManager";
-import { mentionsAnyCandidate, type MentionCandidate } from "./mentions";
+import {
+  mentionsAnyCandidate,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
 
 export type AgentNotificationKind = "finished" | "needs-input" | "asked" | "error";
 

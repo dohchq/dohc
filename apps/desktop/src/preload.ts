@@ -168,6 +168,14 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listChatMessages, payload),
   sendChatMessage: (payload) =>
     ipcRenderer.invoke(CHANNELS.sendChatMessage, payload),
+  listChatThreadDecisions: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChatThreadDecisions, payload),
+  resolveChatDecision: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resolveChatDecision, payload),
+  listChatThreadAttachments: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChatThreadAttachments, payload),
+  chatRunRecordsForThread: (payload) =>
+    ipcRenderer.invoke(CHANNELS.chatRunRecordsForThread, payload),
   listChatChannels: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannels, payload),
   createChatChannel: (payload) =>
@@ -203,6 +211,14 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.stopAgentSession, payload),
   answerAgentPermission: (payload) =>
     ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
+  stopAgentRun: (payload) =>
+    ipcRenderer.invoke(CHANNELS.stopAgentRun, payload),
+  resumeThreadDispatch: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resumeThreadDispatch, payload),
+  chatDispatchStateForThread: (payload) =>
+    ipcRenderer.invoke(CHANNELS.chatDispatchStateForThread, payload),
+  runnerSelfTest: (payload) =>
+    ipcRenderer.invoke(CHANNELS.runnerSelfTest, payload),
   getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
   setUserSettings: (payload: SetUserSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),

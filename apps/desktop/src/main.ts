@@ -10,14 +10,16 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   protocol,
   safeStorage,
   shell,
+  Tray,
   type IpcMainInvokeEvent,
 } from "electron";
 import { existsSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -107,6 +109,14 @@ import {
   ListChatMessagesResult,
   SendChatMessagePayload,
   SendChatMessageResult,
+  ListChatThreadDecisionsPayload,
+  ListChatThreadDecisionsResult,
+  ResolveChatDecisionPayload,
+  ResolveChatDecisionResult,
+  ListChatThreadAttachmentsPayload,
+  ListChatThreadAttachmentsResult,
+  ChatRunRecordsForThreadPayload,
+  ChatRunRecordsForThreadResult,
   ListChatChannelsPayload,
   ListChatChannelsResult,
   CreateChatChannelPayload,
@@ -142,6 +152,12 @@ import {
   AgentPanelSnapshotResult,
   AgentPermissionResponsePayload,
   StartAgentSessionPayload,
+  StopAgentRunPayload,
+  ResumeThreadDispatchPayload,
+  ChatDispatchStateForThreadPayload,
+  ChatDispatchStateForThreadResult,
+  RunnerSelfTestPayload,
+  RunnerSelfTestResult,
   DesktopUserSettingsResult,
   PickWorkspaceRootResult,
   ReadWorkspaceGraphPayload,
@@ -205,6 +221,7 @@ import {
 import {
   createWorkspaceFolder,
   resetFailedJoinFolder,
+  type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
   effectiveHome,
@@ -265,6 +282,7 @@ import {
   searchWorkspaceEngine,
   SecretKeyEnvelopeError,
   ShareUnavailableError,
+  SharedChannelReadOnlyError,
   GENERAL_CHANNEL_WIRE_ID,
   fetchShareViewInfo,
   fetchSharedChannelInfo,
@@ -300,6 +318,16 @@ import {
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
+import {
+  createChatDispatchService,
+  type ChatDispatchPresenceInput,
+  type ChatDispatchWorkspace,
+} from "./agents/chatDispatchService";
+import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
+import {
+  createDesktopAgentDispatchStore,
+  type DesktopAgentDispatchStoreHandle,
+} from "./agents/desktopAgentDispatchStore";
 import {
   buildOutputSiteRoot,
   entryRelativeToSite,
@@ -345,7 +373,7 @@ import {
   DEFAULT_USER_SETTINGS,
 } from "./settings/userSettings";
 import {
-  readUserSettingsFile,
+  readCachedUserSettingsFile,
   writeUserSettingsFile,
 } from "./settings/userSettingsStore";
 import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaces/workspaceSettings";
@@ -355,6 +383,14 @@ import {
 } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { rgPath } from "@vscode/ripgrep";
+import {
+  startCliServer,
+  type CliRegistryWorkspace,
+  type CliServerHandle,
+  type CliWorkspaceContext,
+} from "./cli/cliServer";
+import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
+import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -1005,6 +1041,41 @@ function hookPresencePollCleanup(sender: Electron.WebContents): void {
   sender.once("destroyed", () => presencePollRegistry.disposeSender(sender.id));
 }
 
+async function presenceRelayTransportForScope(
+  scope: PresenceScopeInput,
+): Promise<ReturnType<typeof createRelayPresenceTransport> | null> {
+  await warmCredentialCache();
+  if (!cachedCredentials?.relayUrl) return null;
+  const baseUrl = normalizeServerUrl(cachedCredentials.relayUrl);
+  const token = cachedCredentials.token;
+  const fetchImpl = relayFetchWithTimeout(PRESENCE_PUBLISH_TIMEOUT_MS);
+  let relayScope: RelayPresenceScope;
+  if (scope.kind === "workspace") {
+    const entry = findWorkspace(scope.workspaceId);
+    const remote = entry?.remote;
+    if (!remote || !credentialMatchesRemote(remote.serverUrl)) return null;
+    relayScope = {
+      kind: "workspace",
+      workspaceId: remote.remoteWorkspaceId,
+    };
+  } else {
+    const joined = listWorkspaces().some((entry) =>
+      (entry.sharedChannels ?? []).some(
+        (channel) =>
+          channel.shareId === scope.shareId && channel.ended !== true,
+      ),
+    );
+    if (!joined) return null;
+    relayScope = { kind: "share", shareId: scope.shareId };
+  }
+  return createRelayPresenceTransport({
+    baseUrl,
+    token,
+    scope: relayScope,
+    fetch: fetchImpl,
+  });
+}
+
 const serializeSharedChannelSync = createKeyedSerializer();
 function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
   return serializeSharedChannelSync(workspaceId, () =>
@@ -1160,7 +1231,12 @@ function engineForWorkspace(
       token: cachedCredentials.token,
     },
     capture,
-    onChange: notifyRenderer,
+    onChange: () => {
+      notifyRenderer();
+      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+        console.error("[desktop] relay dispatch scan:", error);
+      });
+    },
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: () => syncWorkspaceSharedChannels(workspace.workspaceId),
@@ -1200,6 +1276,7 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       ? null
       : captureForFlaggedWorkspace(workspace, hooks),
 });
+const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
 // and persists agent-run records. The run slot is wired into the watcher
 // (workspaceActivity.setAgentRun) so a run's writes are attributed to the
@@ -1208,14 +1285,31 @@ const activity = createWorkspaceActivity(notifyRenderer, {
 // launches its own copy via the Settings config snippet.
 const agentIntegration = createAgentIntegration({
   rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
-  setAgentRun: (workspaceId, run) => activity.setAgentRun(workspaceId, run),
+  setAgentRun: (workspaceId, run) => {
+    if (run) {
+      const previous = panelAgentRunSlots.get(workspaceId);
+      if (previous) activity.clearAgentRun(workspaceId, previous);
+      if (!activity.claimAgentRun(workspaceId, run)) {
+        throw new Error("Another agent run is already active in this workspace.");
+      }
+      panelAgentRunSlots.set(workspaceId, run.agentRunId);
+      return;
+    }
+    const ownedRunId = panelAgentRunSlots.get(workspaceId);
+    if (ownedRunId) activity.clearAgentRun(workspaceId, ownedRunId);
+    panelAgentRunSlots.delete(workspaceId);
+  },
   home: stateDir(),
   // Every terminal run path funnels through endAgentRun (driver
   // turn-completed via AgentSessionManager, panel Stop, the endAgentRun IPC)
   // — the try-in-version review card listens on that single seam.
   // tryInVersionSessions is initialized just below, before any run can end.
-  onRunEnded: ({ workspaceId, runId, status }) =>
-    tryInVersionSessions.handleRunEnded(workspaceId, runId, status),
+  onRunEnded: ({ workspaceId, runId, status }) => {
+    tryInVersionSessions.handleRunEnded(workspaceId, runId, status);
+    void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
+      console.error("[desktop] post-panel-run dispatch scan:", error);
+    });
+  },
 });
 // "Try it in a version" (PR 0N-2): one gesture composing EXISTING operations
 // — fork-and-switch on the engine capture chain, then a dohc-tracked run —
@@ -1226,7 +1320,7 @@ const tryInVersionSessions = createTryInVersionSessions({
   operationsFor: async (workspaceId) => {
     desktopMarks.mark("try-in-version-ops-start");
     const workspace = requireWorkspace(workspaceId);
-    await activity.open(workspace);
+    await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
       throw new Error("Versions are not enabled for this workspace.");
@@ -1235,6 +1329,7 @@ const tryInVersionSessions = createTryInVersionSessions({
     return capture;
   },
   startRun: async (workspaceId, task, driverId) => {
+    assertChatRunnerIdle(workspaceId);
     desktopMarks.mark("try-in-version-run-start-begin");
     if (driverId) {
       // The agent panel's session path: the driver does the work and the run
@@ -1295,6 +1390,22 @@ function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }
   return store;
 }
 
+const agentDispatchStoreHandles = new Map<
+  string,
+  DesktopAgentDispatchStoreHandle
+>();
+const dispatchAgentRunSlots = new Map<string, string>();
+function agentDispatchStoreHandleFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): DesktopAgentDispatchStoreHandle {
+  const existing = agentDispatchStoreHandles.get(workspace.workspaceId);
+  if (existing) return existing;
+  const handle = createDesktopAgentDispatchStore(workspace.rootPath);
+  agentDispatchStoreHandles.set(workspace.workspaceId, handle);
+  return handle;
+}
+
 // Engine search (WS-D): per-workspace versioned-text-store connection for the
 // indexed search path, the same lazy-singleton idiom as linkedChatStores —
 // search-as-you-type must not pay a fresh SQLite open (and its quick_check)
@@ -1352,6 +1463,404 @@ function localUserId(): string {
 // the email is display-only via localUserDisplayName().
 function relayAuthorUserId(): string | undefined {
   return cachedCredentials?.userId;
+}
+
+function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null {
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace || sharedViewOf(workspaceId)) {
+    return null;
+  }
+  return {
+    workspaceId: workspace.workspaceId,
+    rootPath: workspace.rootPath,
+  };
+}
+
+function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
+  if (!cachedCredentials) return [];
+  return listWorkspaces()
+    .filter(
+      (workspace) =>
+        workspace.remote !== undefined &&
+        credentialMatchesRemote(workspace.remote.serverUrl),
+    )
+    .map((workspace) => workspaceForDispatch(workspace.workspaceId))
+    .filter(
+      (workspace): workspace is ChatDispatchWorkspace => workspace !== null,
+    );
+}
+
+// Tray-only scans use a scoped capture instead of retaining a file watcher.
+// Actual runs acquire activity temporarily so their writes are captured and
+// attributed. Normal renderer/CLI opens retain activity for the app session.
+const dispatchScopedSyncs = new Map<string, Promise<boolean>>();
+const retainedWorkspaceActivities = new Set<string>();
+const workspaceActivityOpenPromises = new Map<
+  string,
+  Promise<SyncStatusResult>
+>();
+const workspaceActivityClosePromises = new Map<string, Promise<void>>();
+
+async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
+  const closing = workspaceActivityClosePromises.get(workspaceId);
+  if (closing) await closing.catch(() => undefined);
+  if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+    activity.queueCloudSync(workspaceId);
+    return activity.engineCaptureFor(workspaceId) !== null;
+  }
+  const existing = dispatchScopedSyncs.get(workspaceId);
+  if (existing) return existing;
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace || sharedViewOf(workspaceId)) return false;
+  const scoped = (async () => {
+    const capture = await captureForFlaggedWorkspace(workspace, {
+      activeAgentRun: () => null,
+      onCaptureOutcome: () => undefined,
+    });
+    if (!capture) return false;
+    try {
+      // A normal open may have started while the scoped capture was built.
+      // Yield ownership rather than opening a second relay sync engine.
+      if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+        activity.queueCloudSync(workspaceId);
+        return activity.engineCaptureFor(workspaceId) !== null;
+      }
+      const engine = engineForWorkspace(workspace, capture);
+      if (!engine) return false;
+      try {
+        await engine.start();
+        return true;
+      } finally {
+        await engine.stop().catch(() => undefined);
+      }
+    } finally {
+      await capture.stop().catch(() => undefined);
+    }
+  })();
+  dispatchScopedSyncs.set(workspaceId, scoped);
+  try {
+    return await scoped;
+  } finally {
+    if (dispatchScopedSyncs.get(workspaceId) === scoped) {
+      dispatchScopedSyncs.delete(workspaceId);
+    }
+  }
+}
+
+async function ensureWorkspaceActivityOpen(
+  workspace: CreatedWorkspace,
+): Promise<SyncStatusResult> {
+  for (;;) {
+    const scoped = dispatchScopedSyncs.get(workspace.workspaceId);
+    if (scoped) {
+      await scoped.catch(() => undefined);
+      continue;
+    }
+    const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
+    if (closing) {
+      await closing.catch(() => undefined);
+      continue;
+    }
+    const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
+    if (existing) return existing;
+    // activity.open registers the workspace synchronously before its first
+    // await. With no yield after the checks above, a scoped scan can only
+    // start before us (and be observed on the next loop) or after us (and
+    // yield to the registered activity owner).
+    const opening = activity.open(workspace);
+    workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
+    try {
+      return await opening;
+    } finally {
+      if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
+        workspaceActivityOpenPromises.delete(workspace.workspaceId);
+      }
+    }
+  }
+}
+
+async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
+  const existing = workspaceActivityClosePromises.get(workspaceId);
+  if (existing) return existing;
+  const closing = activity.close(workspaceId);
+  workspaceActivityClosePromises.set(workspaceId, closing);
+  try {
+    await closing;
+  } finally {
+    if (workspaceActivityClosePromises.get(workspaceId) === closing) {
+      workspaceActivityClosePromises.delete(workspaceId);
+    }
+  }
+}
+
+async function acquireDispatchRunActivity(
+  workspace: CreatedWorkspace,
+): Promise<() => Promise<void>> {
+  const alreadyOpen = activity
+    .listOpenWorkspaceIds()
+    .includes(workspace.workspaceId);
+  await workspaceChatLifecycle.open(
+    workspace,
+    () => ensureWorkspaceActivityOpen(workspace),
+  );
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    if (alreadyOpen || retainedWorkspaceActivities.has(workspace.workspaceId)) {
+      return;
+    }
+    await closeDispatchRunActivity(workspace.workspaceId);
+  };
+}
+
+function openDispatchWorkspaces(): ChatDispatchWorkspace[] {
+  return activity
+    .listOpenWorkspaceIds()
+    .filter((workspaceId) => activity.engineCaptureFor(workspaceId) !== null)
+    .map(workspaceForDispatch)
+    .filter((workspace): workspace is ChatDispatchWorkspace => workspace !== null);
+}
+
+async function publishAgentPresence(
+  input: ChatDispatchPresenceInput,
+): Promise<void> {
+  const transport = await presenceRelayTransportForScope({
+    kind: "workspace",
+    workspaceId: input.workspaceId,
+  });
+  if (!transport) return;
+  const topics = [
+    `chat:thread:${input.threadId}`,
+    CHAT_AGENT_PRESENCE_TOPIC,
+  ];
+  if (input.leave) {
+    await Promise.all(
+      topics.map((topic) => transport.leave({ topic, clientId: input.clientId })),
+    );
+    return;
+  }
+  await Promise.all(
+    topics.map((topic) =>
+      transport.publish({
+        topic,
+        clientId: input.clientId,
+        state: input.state ?? null,
+      }),
+    ),
+  );
+}
+
+const chatDispatchService = createChatDispatchService({
+  workspaceFor: workspaceForDispatch,
+  listOpenWorkspaces: openDispatchWorkspaces,
+  listSyncWorkspaces: syncDispatchWorkspaces,
+  chatStoreFor: linkedChatStoreFor,
+  dispatchStoreFor: (workspace) =>
+    agentDispatchStoreHandleFor(workspace).store,
+  readRunnerSettings: async () =>
+    (await readCachedUserSettingsFile(stateDir())).settings.runner,
+  identityFor: async (workspaceId) => {
+    await warmCredentialCache();
+    const remote = findWorkspace(workspaceId)?.remote;
+    const verifiedUserId =
+      remote && credentialMatchesRemote(remote.serverUrl)
+        ? relayAuthorUserId()
+        : undefined;
+    return {
+      displayName: localUserDisplayName(),
+      ...(verifiedUserId ? { verifiedUserId } : {}),
+    };
+  },
+  stateDir,
+  appRoot: () => app.getAppPath(),
+  isPackaged: () => app.isPackaged,
+  resourcesPath: () =>
+    (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  queueSync: syncWorkspaceForDispatch,
+  prepareRunWorkspace: async (workspace) => {
+    const registered = findWorkspace(workspace.workspaceId);
+    if (!registered) {
+      throw new Error(`Unknown workspace: ${workspace.workspaceId}`);
+    }
+    const release = await acquireDispatchRunActivity(registered);
+    if (!activity.engineCaptureFor(workspace.workspaceId)) {
+      await release();
+      throw new Error("Chats are not enabled for this workspace.");
+    }
+    return release;
+  },
+  authorizeServiceNote: async (workspace, threadId) => {
+    try {
+      await assertSharedChannelWritable({
+        workspaceId: workspace.workspaceId,
+        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+        store: linkedChatStoreFor(workspace),
+        target: { threadId },
+      });
+      return true;
+    } catch (error) {
+      if (!(error instanceof SharedChannelReadOnlyError)) throw error;
+      return false;
+    }
+  },
+  onMessagePosted: (workspaceId) => {
+    notifyRenderer();
+    activity.queueCloudSync(workspaceId);
+    void syncWorkspaceSharedChannels(workspaceId);
+    void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
+      console.error("[desktop] chat dispatch scan:", error);
+    });
+  },
+  onRunUpdated: () => notifyRenderer(),
+  setRunAttribution: (workspaceId, run) => {
+    if (run) {
+      if (!activity.claimAgentRun(workspaceId, run)) {
+        throw new Error("Another agent run is already active in this workspace.");
+      }
+      dispatchAgentRunSlots.set(workspaceId, run.agentRunId);
+      return;
+    }
+    const ownedRunId = dispatchAgentRunSlots.get(workspaceId);
+    if (ownedRunId) activity.clearAgentRun(workspaceId, ownedRunId);
+    dispatchAgentRunSlots.delete(workspaceId);
+  },
+  runSlotOccupied: (workspaceId) => activity.hasAgentRun(workspaceId),
+  publishPresence: publishAgentPresence,
+  requeueFailedTrigger: (input) => {
+    const workspace = workspaceForDispatch(input.workspaceId);
+    return workspace
+      ? agentDispatchStoreHandleFor(workspace).requeueFailedTrigger(input)
+      : false;
+  },
+  listAppQuitRecoveries: (workspaceId) => {
+    const workspace = workspaceForDispatch(workspaceId);
+    return workspace
+      ? agentDispatchStoreHandleFor(workspace).listAppQuitRecoveries(
+          workspaceId,
+        )
+      : [];
+  },
+  onError: (error) => {
+    console.error("[desktop] chat dispatch:", error);
+  },
+});
+
+function assertChatRunnerIdle(workspaceId: string): void {
+  if (chatDispatchService.hasLiveRun(workspaceId)) {
+    throw new Error("Your chat runner is already working in this workspace.");
+  }
+}
+
+const workspaceChatLifecycle = createWorkspaceChatLifecycle({
+  isReadOnly: (workspaceId) => Boolean(sharedViewOf(workspaceId)),
+  maintain: async (rootPath) => {
+    await ensureAgentsChatBlock(rootPath);
+  },
+  onError: (error) => {
+    console.error("[desktop] AGENTS.md chat description:", error);
+  },
+});
+
+async function openWorkspaceActivity(
+  workspace: CreatedWorkspace,
+  afterActivityOpen?: () => Promise<void>,
+): Promise<SyncStatusResult> {
+  retainedWorkspaceActivities.add(workspace.workspaceId);
+  const result = await workspaceChatLifecycle.open(
+    workspace,
+    () => ensureWorkspaceActivityOpen(workspace),
+    afterActivityOpen,
+  );
+  void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+    console.error("[desktop] chat dispatch workspace-open scan:", error);
+  });
+  return result;
+}
+
+// Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
+// resolves the registry workspace and derives identity exactly like renderer
+// chat sends. The client can claim only the behavior-bearing human/agent kind;
+// it never supplies the user id or display identity.
+let cliServer: CliServerHandle | null = null;
+let cliServerStartup: Promise<CliServerHandle | null> | null = null;
+
+async function openCliWorkspace(
+  requested: CliRegistryWorkspace,
+): Promise<CliWorkspaceContext> {
+  const workspace = findWorkspace(requested.workspaceId);
+  if (!workspace || resolve(workspace.rootPath) !== resolve(requested.rootPath)) {
+    throw new Error("dohc: not inside a dohc workspace");
+  }
+  if (sharedViewOf(workspace.workspaceId)) {
+    throw new Error("dohc: chats are not available in a read-only shared view");
+  }
+  await openWorkspaceActivity(workspace);
+  const capture = activity.engineCaptureFor(workspace.workspaceId);
+  if (!capture) throw new Error("Chats are not enabled for this workspace.");
+  const store = linkedChatStoreFor(workspace);
+  return {
+    workspaceId: workspace.workspaceId,
+    rootPath: workspace.rootPath,
+    store,
+    dispatchStore: agentDispatchStoreHandleFor(workspace).store,
+    readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+    fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+    assertWritable: async (target) => {
+      assertWritableWorkspace(workspace);
+      await assertSharedChannelWritable({
+        workspaceId: workspace.workspaceId,
+        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+        store,
+        target,
+      });
+    },
+  };
+}
+
+async function startDesktopCliServer(): Promise<CliServerHandle> {
+  await workspaceChatLifecycle.boot(listWorkspaces()).catch((error: unknown) => {
+    console.error("[desktop] AGENTS.md boot maintenance:", error);
+  });
+  const server = await startCliServer({
+    stateDir: stateDir(),
+    listWorkspaces: () =>
+      listWorkspaces()
+        .map(({ workspaceId, rootPath }) => ({
+          workspaceId,
+          rootPath,
+          readOnly: Boolean(sharedViewOf(workspaceId)),
+        })),
+    openWorkspace: openCliWorkspace,
+    identity: async () => {
+      await warmCredentialCache();
+      const authorUserId = relayAuthorUserId();
+      return {
+        displayName: localUserDisplayName(),
+        ...(authorUserId ? { authorUserId } : {}),
+        reactionAuthorId: localUserId(),
+      };
+    },
+    onWrite: (workspace) => {
+      notifyRenderer();
+      activity.queueCloudSync(workspace.workspaceId);
+      void syncWorkspaceSharedChannels(workspace.workspaceId);
+      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+        console.error("[desktop] CLI dispatch scan:", error);
+      });
+    },
+    onError: (error) => {
+      console.error("[desktop] CLI server:", error);
+    },
+  });
+  return {
+    socketPath: server.socketPath,
+    tokenPath: server.tokenPath,
+    ready: server.ready,
+    async close() {
+      await server.close();
+    },
+  };
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
@@ -1422,6 +1931,94 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
+let dispatchTray: Tray | null = null;
+
+function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
+  return settings.runner.enabled && settings.runner.command.trim().length > 0;
+}
+
+function dispatchTrayIcon() {
+  const resourcesPath = (
+    process as NodeJS.Process & { resourcesPath?: string }
+  ).resourcesPath;
+  const packagedPath = resourcesPath
+    ? join(resourcesPath, "tray-icon.png")
+    : "";
+  const developmentPath = join(import.meta.dirname, "../../build/icon.png");
+  const preferred = app.isPackaged ? packagedPath : developmentPath;
+  let icon = nativeImage.createFromPath(preferred);
+  if (icon.isEmpty()) {
+    icon = nativeImage.createFromPath(join(app.getAppPath(), "build/icon.png"));
+  }
+  if (process.platform === "darwin") icon.setTemplateImage(true);
+  return icon;
+}
+
+async function showOrCreateMainWindow(): Promise<void> {
+  const existing = targetWindow(undefined);
+  if (existing) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    return;
+  }
+  const { createMainWindow } = await import("./window/createMainWindow");
+  const window = createMainWindow();
+  window.show();
+  window.focus();
+}
+
+function rebuildDispatchTrayMenu(): void {
+  if (!dispatchTray) return;
+  dispatchTray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "Open dohc",
+        click: () => {
+          void showOrCreateMainWindow();
+        },
+      },
+      {
+        label: "Pause agent dispatch",
+        type: "checkbox",
+        checked: chatDispatchService.isPaused(),
+        click: (item) => {
+          chatDispatchService.setPaused(item.checked);
+          rebuildDispatchTrayMenu();
+        },
+      },
+      { type: "separator" },
+      {
+        label: "Quit dohc",
+        click: () => app.quit(),
+      },
+    ]),
+  );
+}
+
+function ensureDispatchTray(): void {
+  if (!dispatchTray) {
+    dispatchTray = new Tray(dispatchTrayIcon());
+    dispatchTray.setToolTip("dohc agent dispatch");
+    dispatchTray.on("double-click", () => {
+      void showOrCreateMainWindow();
+    });
+  }
+  rebuildDispatchTrayMenu();
+}
+
+async function refreshDispatchTray(): Promise<boolean> {
+  const { settings } = await readCachedUserSettingsFile(stateDir());
+  const enabled = configuredRunnerEnabled(settings);
+  if (enabled && !quitting) {
+    ensureDispatchTray();
+  } else if (dispatchTray) {
+    dispatchTray.destroy();
+    dispatchTray = null;
+  }
+  return enabled;
+}
+
 // Quit must wait for the final settle-window flush AND its history record to
 // be durably written — otherwise a save right before quit is silently lost.
 // Bounded so a wedged disk can't make the app unquittable.
@@ -1432,12 +2029,27 @@ app.on("will-quit", (event) => {
   event.preventDefault();
   searchRegistry.killAll();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
+  const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
+  const cliServerStop = chatDispatchStop.then(() =>
+    (cliServerStartup ?? Promise.resolve(cliServer))
+    .then((server) => server?.close())
+    .catch(() => undefined),
+  );
   agentIntegration.stopAll();
   // Linked chat stores are lazy singletons with SQLite handles on the shared
   // engine.db; close them at quit so WAL locks never outlive the app.
-  const chatStoreStop = Promise.all(
-    [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
-  );
+  const chatStoreStop = chatDispatchStop.then(() =>
+    Promise.all(
+      [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
+    ));
+  const dispatchStoreStop = chatDispatchStop.then(() => {
+    for (const handle of agentDispatchStoreHandles.values()) {
+      try {
+        handle.close();
+      } catch {}
+    }
+    agentDispatchStoreHandles.clear();
+  });
   // Engine search stores hold the same kind of lazy SQLite handle; close them
   // with the chat stores so WAL locks never outlive the app.
   const searchStoreStop = Promise.all(
@@ -1449,8 +2061,11 @@ app.on("will-quit", (event) => {
   void Promise.race([
     Promise.all([
       agentSessionStop,
-      engineYDocStop.then(() => activity.stopAll()),
+      cliServerStop,
+      chatDispatchStop,
+      engineYDocStop.then(() => chatDispatchStop).then(() => activity.stopAll()),
       chatStoreStop,
+      dispatchStoreStop,
       searchStoreStop,
     ]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
@@ -2292,12 +2907,13 @@ function registerIpcHandlers(): void {
       // its start() is the first pull (materialize + cursor commit), and no
       // push can reach the relay before that pull succeeds — a fresh join can
       // never seed boilerplate into the remote or conflict against it.
-      await activity.open(created);
-      setWorkspaceRemote(created.workspaceId, {
-        serverUrl: credentials.serverUrl,
-        remoteWorkspaceId: parsed.workspaceId,
+      await openWorkspaceActivity(created, async () => {
+        setWorkspaceRemote(created.workspaceId, {
+          serverUrl: credentials.serverUrl,
+          remoteWorkspaceId: parsed.workspaceId,
+        });
+        await activity.enableCloud(created, { joinBootstrap: true });
       });
-      await activity.enableCloud(created, { joinBootstrap: true });
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
       // the ENTIRE join back — engine/watcher/capture, registry entry, and
@@ -2810,7 +3426,7 @@ function registerIpcHandlers(): void {
     }
     preferredWorkspaceId = workspace.workspaceId;
     refreshNativeWorkspaceSurfaces();
-    return SyncStatusResult.parse(await activity.open(workspace));
+    return SyncStatusResult.parse(await openWorkspaceActivity(workspace));
   });
 
   // Named versions (PR 0M-4). Every handler resolves the workspace through
@@ -2821,7 +3437,7 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(workspaceId);
     // Idempotent: guarantees the watcher + capture are live before any
     // engine operation touches the chain.
-    await activity.open(workspace);
+    await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
       throw new Error(unavailable);
@@ -3005,8 +3621,21 @@ function registerIpcHandlers(): void {
       threadId: message.threadId,
       authorKind: message.author.kind,
       authorDisplayName: message.author.displayName,
+      ...(message.parentMessageId
+        ? { parentMessageId: message.parentMessageId }
+        : {}),
+      ...(message.origin ? { origin: message.origin } : {}),
       body: message.body,
       createdAtMs: message.createdAtMs,
+      attachments: message.attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        threadId: attachment.threadId,
+        messageId: attachment.messageId,
+        targetKind: attachment.targetKind,
+        ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
+        ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
+        createdAtMs: attachment.createdAtMs,
+      })),
     };
   }
 
@@ -3149,12 +3778,127 @@ function registerIpcHandlers(): void {
       // checks it === actor.userId); omit it solo. Identity is main-derived,
       // never renderer-supplied.
       authorUserId: relayAuthorUserId(),
+      ...(input.parentMessageId
+        ? { parentMessageId: input.parentMessageId }
+        : {}),
       body: input.body,
     });
     // MU-C4: if this thread lives in a joined shared channel, push it out
     // promptly (fire-and-forget; the sync cadence is the backstop).
     void syncWorkspaceSharedChannels(workspace.workspaceId);
+    activity.queueCloudSync(workspace.workspaceId);
+    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+      console.error("[desktop] local chat dispatch scan:", error);
+    });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
+  });
+
+  ipcMain.handle(CHANNELS.listChatThreadDecisions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatThreadDecisionsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const decisions = await linkedChatStoreFor(workspace).listThreadDecisions(
+      workspace.workspaceId,
+      input.threadId,
+    );
+    return ListChatThreadDecisionsResult.parse({
+      decisions: decisions.map((decision) => ({
+        threadId: decision.threadId,
+        messageId: decision.messageId,
+        state: decision.state,
+        ...(decision.resolvedByMessageId
+          ? { resolvedByMessageId: decision.resolvedByMessageId }
+          : {}),
+        atMs: decision.atMs,
+      })),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.resolveChatDecision, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ResolveChatDecisionPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const store = linkedChatStoreFor(workspace);
+    await assertSharedChannelWritable({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+      store,
+      target: { threadId: input.threadId },
+    });
+    const decision = await store.resolveChatDecision({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      resolvedByMessageId: input.resolvedByMessageId,
+    });
+    void syncWorkspaceSharedChannels(workspace.workspaceId);
+    activity.queueCloudSync(workspace.workspaceId);
+    return ResolveChatDecisionResult.parse({
+      decision: {
+        threadId: decision.threadId,
+        messageId: decision.messageId,
+        state: decision.state,
+        ...(decision.resolvedByMessageId
+          ? { resolvedByMessageId: decision.resolvedByMessageId }
+          : {}),
+        atMs: decision.atMs,
+      },
+    });
+  });
+
+  ipcMain.handle(CHANNELS.listChatThreadAttachments, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatThreadAttachmentsPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    const attachments = await linkedChatStoreFor(workspace).listThreadAttachments(
+      workspace.workspaceId,
+      input.threadId,
+    );
+    return ListChatThreadAttachmentsResult.parse({ attachments });
+  });
+
+  ipcMain.handle(CHANNELS.chatRunRecordsForThread, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ChatRunRecordsForThreadPayload.parse(payload);
+    const { workspace } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
+    // Opening the linked-chat store ensures the phase-1 dispatch tables have
+    // been migrated before the read-only dispatch adapter validates them.
+    linkedChatStoreFor(workspace);
+    const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
+    const found = dispatchStore.runRecordsForThread(
+      workspace.workspaceId,
+      input.threadId,
+    );
+    const runs = Object.fromEntries(
+      Object.entries(found).map(([messageId, run]) => [
+        messageId,
+        {
+          runId: run.runId,
+          threadId: run.threadId,
+          triggerMessageId: run.triggerMessageId,
+          command: run.command,
+          startedAtMs: run.startedAtMs,
+          ...(run.endedAtMs !== undefined
+            ? { endedAtMs: run.endedAtMs }
+            : {}),
+          ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
+          ...(run.logPath ? { logPath: run.logPath } : {}),
+        },
+      ]),
+    );
+    return ChatRunRecordsForThreadResult.parse({ runs });
   });
 
   // --- Chats channels (PR 12/13, WS-E) -------------------------------------
@@ -3182,6 +3926,17 @@ function registerIpcHandlers(): void {
       messageCount: summary.messageCount,
       lastReadSequence: summary.lastReadSequence,
       unreadCount: summary.unreadCount,
+      openDecisionCount: summary.openDecisionCount,
+      openingMessage: summary.openingMessage
+        ? {
+            id: summary.openingMessage.id,
+            authorKind: summary.openingMessage.author.kind,
+            authorDisplayName: summary.openingMessage.author.displayName,
+            createdAtMs: summary.openingMessage.createdAtMs,
+            bodySnippet: summary.openingMessage.bodySnippet,
+            reactions: summary.openingMessage.reactions.map(chatReactionForIpc),
+          }
+        : null,
     };
   }
 
@@ -3281,6 +4036,7 @@ function registerIpcHandlers(): void {
     });
     return ListChannelThreadsResult.parse({
       threads: threads.map(channelThreadForIpc),
+      viewerAuthorId: localUserId(),
     });
   });
 
@@ -3314,12 +4070,17 @@ function registerIpcHandlers(): void {
       body: input.body,
     });
     void syncWorkspaceSharedChannels(workspace.workspaceId);
+    activity.queueCloudSync(workspace.workspaceId);
+    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+      console.error("[desktop] local chat dispatch scan:", error);
+    });
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
         thread: started.thread,
         messageCount: 1,
         lastReadSequence: 1,
         unreadCount: 0,
+        openDecisionCount: 0,
       }),
       message: chatMessageForIpc(started.message),
     });
@@ -3749,6 +4510,9 @@ function registerIpcHandlers(): void {
     // Replicate promptly: the channel/thread/message ops are journaled but chat
     // writes never pass through the file watcher.
     activity.queueCloudSync(workspace.workspaceId);
+    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+      console.error("[desktop] local chat dispatch scan:", error);
+    });
     const dm = (
       await listDmRecords({
         workspaceId: workspace.workspaceId,
@@ -3772,45 +4536,6 @@ function registerIpcHandlers(): void {
   // joined. An unauthorized/unavailable scope returns null (renderer → dormant),
   // never a leak.
   //
-  // Resolve the caller's scope to a relay-backed transport, or null when
-  // there is no signed-in relay session or the scope is not the caller's to
-  // join. The transport's fetch bounds publish/leave with a timeout; the poll
-  // passes its own AbortSignal (the presenceCancel controller), so that timeout
-  // is bypassed and the relay's long-poll hold governs instead.
-  const presenceRelayTransportForScope = async (
-    scope: PresenceScopeInput,
-  ): Promise<ReturnType<typeof createRelayPresenceTransport> | null> => {
-    await warmCredentialCache();
-    if (!cachedCredentials?.relayUrl) return null;
-    const baseUrl = normalizeServerUrl(cachedCredentials.relayUrl);
-    const token = cachedCredentials.token;
-    const fetchImpl = relayFetchWithTimeout(PRESENCE_PUBLISH_TIMEOUT_MS);
-    let relayScope: RelayPresenceScope;
-    if (scope.kind === "workspace") {
-      // Own-workspace presence: the workspace must be synced (relay-claimed) and
-      // signed into the SAME cloud server that issued the token. The relay scope
-      // keys on the REMOTE workspace id so this account's devices — and the
-      // owner side of a shared channel — fan into one scope.
-      const entry = findWorkspace(scope.workspaceId);
-      const remote = entry?.remote;
-      if (!remote) return null;
-      if (!credentialMatchesRemote(remote.serverUrl)) return null;
-      relayScope = { kind: "workspace", workspaceId: remote.remoteWorkspaceId };
-    } else {
-      // Share-scope presence (recipient side): only a share this account has
-      // actually JOINED (a live registry grant) is the caller's to address. The
-      // relay independently re-checks the grant + topic visibility.
-      const joined = listWorkspaces().some((entry) =>
-        (entry.sharedChannels ?? []).some(
-          (channel) => channel.shareId === scope.shareId && channel.ended !== true,
-        ),
-      );
-      if (!joined) return null;
-      relayScope = { kind: "share", shareId: scope.shareId };
-    }
-    return createRelayPresenceTransport({ baseUrl, token, scope: relayScope, fetch: fetchImpl });
-  };
-
   ipcMain.handle(CHANNELS.presencePublish, async (event, payload) => {
     assertTrustedSender(event);
     const input = PresencePublishPayload.parse(payload);
@@ -3905,7 +4630,8 @@ function registerIpcHandlers(): void {
     const input = AgentRunPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertAgentRunnableWorkspace(workspace.workspaceId);
-    await activity.open(workspace);
+    assertChatRunnerIdle(workspace.workspaceId);
+    await openWorkspaceActivity(workspace);
     return StartAgentRunResult.parse(await agentIntegration.startAgentRun(input.workspaceId));
   });
 
@@ -3957,7 +4683,8 @@ function registerIpcHandlers(): void {
     const input = StartAgentSessionPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertAgentRunnableWorkspace(workspace.workspaceId);
-    await activity.open(workspace);
+    assertChatRunnerIdle(workspace.workspaceId);
+    await openWorkspaceActivity(workspace);
     await warmCredentialCache();
     const sessions = await agentSessionManager();
     return AgentPanelSnapshotResult.parse(await sessions.startSession(input));
@@ -3979,15 +4706,65 @@ function registerIpcHandlers(): void {
     return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
   });
 
+  ipcMain.handle(CHANNELS.stopAgentRun, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StopAgentRunPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    await chatDispatchService.stopAgentRun(input.workspaceId);
+  });
+
+  ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ChatDispatchStateForThreadPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    return ChatDispatchStateForThreadResult.parse(
+      chatDispatchService.dispatchStateForThread(
+        input.workspaceId,
+        input.threadId,
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.resumeThreadDispatch, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ResumeThreadDispatchPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    await chatDispatchService.resumeThreadDispatch(
+      input.workspaceId,
+      input.threadId,
+    );
+  });
+
+  ipcMain.handle(CHANNELS.runnerSelfTest, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RunnerSelfTestPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertAgentRunnableWorkspace(workspace.workspaceId);
+    await openWorkspaceActivity(workspace);
+    return RunnerSelfTestResult.parse(
+      await chatDispatchService.runnerSelfTest(input.workspaceId),
+    );
+  });
+
   ipcMain.handle(CHANNELS.getUserSettings, async (event) => {
     assertTrustedSender(event);
-    return DesktopUserSettingsResult.parse(await readUserSettingsFile(stateDir()));
+    return DesktopUserSettingsResult.parse(
+      await readCachedUserSettingsFile(stateDir()),
+    );
   });
 
   ipcMain.handle(CHANNELS.setUserSettings, async (event, payload) => {
     assertTrustedSender(event);
     const input = SetUserSettingsPayload.parse(payload);
     await writeUserSettingsFile(stateDir(), input.settings);
+    await refreshDispatchTray();
+    if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
+      for (const workspace of openDispatchWorkspaces()) {
+        void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+          console.error("[desktop] runner-settings dispatch scan:", error);
+        });
+      }
+    }
     return DesktopUserSettingsResult.parse({
       settings: input.settings,
       source: "stored",
@@ -3997,6 +4774,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.resetUserSettings, async (event) => {
     assertTrustedSender(event);
     await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
+    await refreshDispatchTray();
     return DesktopUserSettingsResult.parse({
       settings: DEFAULT_USER_SETTINGS,
       source: "stored",
@@ -4356,7 +5134,14 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault();
     pendingOpenPaths.push(path);
     if (app.isReady()) {
-      void flushPendingOpenPaths(targetWindow(undefined));
+      const window = targetWindow(undefined);
+      if (window) {
+        void flushPendingOpenPaths(window);
+      } else {
+        void showOrCreateMainWindow().then(() =>
+          flushPendingOpenPaths(targetWindow(undefined)),
+        );
+      }
     }
   });
 
@@ -4366,8 +5151,15 @@ if (!app.requestSingleInstanceLock()) {
       if (window.isMinimized()) window.restore();
       window.show();
       window.focus();
+      void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
+    } else {
+      void showOrCreateMainWindow().then(() =>
+        openWorkspacePaths(
+          collectOpenWorkspaceArgs(argv),
+          targetWindow(undefined),
+        ),
+      );
     }
-    void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
   });
 
   app.on("before-quit", () => {
@@ -4380,6 +5172,25 @@ if (!app.requestSingleInstanceLock()) {
     launchMarks.appReady();
     desktopMarks.markOnce("app-ready");
     registerIpcHandlers();
+    cliServerStartup = startDesktopCliServer()
+      .then(async (server) => {
+        if (quitting) {
+          await server.close();
+          return null;
+        }
+        cliServer = server;
+        return server;
+      })
+      .catch((error: unknown) => {
+        console.error("[desktop] CLI server failed to start:", error);
+        return null;
+      });
+    void cliServerStartup.then(() => {
+      if (!quitting) chatDispatchService.start();
+    });
+    void refreshDispatchTray().catch((error) => {
+      console.error("[desktop] dispatch tray:", error);
+    });
 
     // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
     protocol.handle(DOHC_FILE_SCHEME, async (request) => {
@@ -4459,6 +5270,19 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") app.quit();
+    if (process.platform === "darwin") return;
+    void refreshDispatchTray()
+      .then((enabled) => {
+        if (!enabled && !quitting) app.quit();
+      })
+      .catch(() => {
+        if (!quitting) app.quit();
+      });
+  });
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      void showOrCreateMainWindow();
+    }
   });
 }

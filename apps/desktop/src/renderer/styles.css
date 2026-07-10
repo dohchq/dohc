@@ -19,6 +19,7 @@
   --dohc-muted: #52525b;
   --dohc-subtle: #8b8b93;
   --dohc-accent: #18181b;
+  --dohc-agent: #6b6f5f;
   --dohc-match: #3a80ec;
   --dohc-success: #15803d;
   --dohc-warning: #a16207;
@@ -35,6 +36,7 @@
   --dohc-muted: #a1a1aa;
   --dohc-subtle: #71717a;
   --dohc-accent: #fafafa;
+  --dohc-agent: #b7b8a4;
   --dohc-match: #3270f0;
   --dohc-success: #4ade80;
   --dohc-warning: #fbbf24;
@@ -52,6 +54,7 @@
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);
   --color-accent: var(--dohc-accent);
+  --color-agent: var(--dohc-agent);
   --color-match: var(--dohc-match);
   --color-line: var(--dohc-line);
   --color-success: var(--dohc-success);
@@ -59,6 +62,7 @@
   --color-danger: var(--dohc-danger);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', serif;
 }
 
 html,

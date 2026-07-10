@@ -20,7 +20,9 @@ type JournalConnection = EngineWriteLaneConnection;
 // SyncReplicationEnvelope so opKind/payload agreement is compile-checked);
 // re-exported here so engine-internal modules keep one import surface.
 export type {
+  ChatAttachmentAddPayload,
   ChatChannelCreatePayload,
+  ChatDecisionSetPayload,
   ChatMessageAppendPayload,
   ChatReactionSetPayload,
   ChatThreadCreatePayload,

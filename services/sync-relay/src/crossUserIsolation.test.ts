@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/workspace-engine/linkedChatStore";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PresenceHub } from "./presence";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
@@ -20,7 +21,7 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 // The six invariants (one describe block each):
 //   1. Byte-identical denial: every share-scoped route denies a non-recipient
 //      IDENTICALLY to a share that never existed — same status, same body,
-//      before any body/origin parse.
+//      before parsing body/origin. A stale agent-channel grant does too.
 //   2. No-forge (MU-C0): a member cannot append a chat op authored as another
 //      user; the member-append gate rejects it 403 authorship_mismatch.
 //   3. Revocation closes cleanly: after revoke, read AND append both fail
@@ -114,6 +115,7 @@ const STRANGER = "stranger";
 const WORKSPACE = "workspace-x";
 const GRANTED_WIRE = "channel_wire_granted";
 const OTHER_WIRE = "channel_wire_other";
+const AGENT_WIRE = AGENT_CHANNEL_WIRE_ID;
 
 async function claimWorkspace(h: SyncRelayHandler): Promise<void> {
   const response = await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
@@ -284,6 +286,187 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
     // Unauthenticated probes stay 401 (auth precedes the share lookup); the 404
     // invariant is specifically about AUTHENTICATED non-recipients.
     expect((await h(request(null, `/sync/shares/${chatShare}/log?since=0`))).status).toBe(401);
+  });
+
+  it("refuses new agent-channel grants and makes a poisoned legacy grant absent on every recipient route", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const privateBlobSha = await putBlob(h, "agent-private-blob");
+    // Pre-provisioned/unknown wires remain grantable for the existing
+    // grant-before-sync flow. Once the owner log identifies this wire as an
+    // agent channel, the same row must dynamically become recipient-invisible.
+    const poisonedShareId = await createShare(h, {
+      recipientUserId: MEMBER,
+      channelWireId: AGENT_WIRE,
+      access: "read-write",
+    });
+    await appendOwner(h, [
+      chatChannelCreate(AGENT_WIRE, "agent"),
+      chatThreadCreate(AGENT_WIRE, "thread-agent"),
+      chatMessage("thread-agent", "m-agent", "agent private body", OWNER),
+      {
+        opKind: "chat.reaction.set",
+        payload: {
+          reactionId: "reaction-agent",
+          messageId: "m-agent",
+          threadId: "thread-agent",
+          emoji: "x",
+          authorId: OWNER,
+          authorKind: "human",
+          authorDisplayName: "Owner",
+          state: "added",
+          atMs: 4,
+        },
+      },
+      {
+        opKind: "chat.decision.set",
+        payload: {
+          threadId: "thread-agent",
+          messageId: "m-agent",
+          state: "resolved",
+          resolvedByMessageId: "m-agent-resolution",
+          atMs: 5,
+        },
+      },
+      {
+        opKind: "chat.attachment.add",
+        payload: {
+          attachmentId: "attachment-agent",
+          threadId: "thread-agent",
+          messageId: "m-agent",
+          targetKind: "file",
+          objectId: "object-agent-private",
+          pathHint: "private/agent.md",
+          createdAtMs: 6,
+        },
+      },
+      // Earliest create is authoritative: a later forged human-kind recreate
+      // must not make the owner-only agent wire shareable.
+      chatChannelCreate(AGENT_WIRE, "channel"),
+    ]);
+
+    const refused = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({
+          recipientUserId: MEMBER,
+          channelWireId: AGENT_WIRE,
+          access: "read-write",
+        }),
+      ),
+    );
+    expect(refused.status).toBe(400);
+    expect(await json(refused)).toMatchObject({ ok: false, code: "invalid_channel" });
+
+    const absentId = "never-existed";
+    const absent = {
+      read: await denialBytes(await h(request(MEMBER, `/sync/shares/${absentId}`))),
+      log: await denialBytes(await h(request(MEMBER, `/sync/shares/${absentId}/log?since=0`))),
+      append: await denialBytes(
+        await h(
+          request(MEMBER, `/sync/shares/${absentId}/log`, {
+            method: "POST",
+            body: "not-json",
+          }),
+        ),
+      ),
+      blob: await denialBytes(
+        await h(request(MEMBER, `/sync/shares/${absentId}/blobs/${privateBlobSha}`)),
+      ),
+      presence: await denialBytes(
+        await h(
+          request(
+            MEMBER,
+            `/sync/shares/${absentId}/presence?topic=${AGENT_WIRE}`,
+            jsonBody({ clientId: "member-agent" }),
+          ),
+        ),
+      ),
+    };
+
+    expect(
+      await denialBytes(await h(request(MEMBER, `/sync/shares/${poisonedShareId}`))),
+    ).toBe(absent.read);
+    expect(
+      await denialBytes(
+        await h(request(MEMBER, `/sync/shares/${poisonedShareId}/log?since=0`)),
+      ),
+    ).toBe(absent.log);
+    expect(
+      await denialBytes(
+        await h(
+          request(MEMBER, `/sync/shares/${poisonedShareId}/log`, {
+            method: "POST",
+            body: "not-json",
+          }),
+        ),
+      ),
+    ).toBe(absent.append);
+    expect(
+      await denialBytes(
+        await h(request(MEMBER, `/sync/shares/${poisonedShareId}/blobs/${privateBlobSha}`)),
+      ),
+    ).toBe(absent.blob);
+    expect(
+      await denialBytes(
+        await h(
+          request(
+            MEMBER,
+            `/sync/shares/${poisonedShareId}/presence?topic=${AGENT_WIRE}`,
+            jsonBody({ clientId: "member-agent" }),
+          ),
+        ),
+      ),
+    ).toBe(absent.presence);
+    const listed = await json(await h(request(MEMBER, "/sync/shares")));
+    expect(listed.received).toEqual([]);
+  });
+
+  it("keeps a malformed earliest channel create permanently unshareable", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const malformedWire = "channel_wire_malformed_first";
+    const shareId = await createShare(h, {
+      recipientUserId: MEMBER,
+      channelWireId: malformedWire,
+      access: "read-write",
+    });
+    await appendOwner(h, [
+      {
+        opKind: "chat.channel.create",
+        // Missing the channelId/name/slug/createdAtMs replay shape: its claimed
+        // human kind must never be trusted or skipped in favor of a later row.
+        payload: { wireId: malformedWire, kind: "channel" },
+      },
+      chatChannelCreate(malformedWire, "agent"),
+    ]);
+    expect(storage.findChannelCreateKind(WORKSPACE, malformedWire)).toBeNull();
+
+    const refused = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({
+          recipientUserId: MEMBER,
+          channelWireId: malformedWire,
+          access: "read-write",
+        }),
+      ),
+    );
+    expect(refused.status).toBe(400);
+    expect(await json(refused)).toMatchObject({ ok: false, code: "invalid_channel" });
+
+    const absent = await denialBytes(
+      await h(request(MEMBER, "/sync/shares/never-existed/log?since=0")),
+    );
+    expect(
+      await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`))),
+    ).toBe(absent);
+    const listed = await json(await h(request(MEMBER, "/sync/shares")));
+    expect(listed.received).toEqual([]);
   });
 });
 
@@ -548,7 +731,60 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       // granted-channel share.
       chatChannelCreate(OTHER_WIRE, "channel"),
       chatThreadCreate(OTHER_WIRE, "thread-other"),
-      chatMessage("thread-other", "m-other", "SENTINEL-OTHER-CHANNEL-BODY", OWNER),
+      chatMessage("thread-other", "m-other", "SENTINEL-OTHER-CHANNEL-BODY", OWNER, {
+        parentMessageId: "SENTINEL-OTHER-PARENT",
+      }),
+      {
+        opKind: "chat.decision.set",
+        payload: {
+          threadId: "thread-other",
+          messageId: "m-other",
+          state: "resolved",
+          resolvedByMessageId: "SENTINEL-OTHER-RESOLVED-BY",
+          atMs: 5,
+        },
+      },
+      {
+        opKind: "chat.attachment.add",
+        payload: {
+          attachmentId: "attachment-other",
+          threadId: "thread-other",
+          messageId: "m-other",
+          targetKind: "file",
+          objectId: "SENTINEL-OTHER-ATTACHMENT-OBJECT",
+          pathHint: "private/SENTINEL-OTHER-ATTACHMENT-PATH.md",
+          createdAtMs: 6,
+        },
+      },
+      // Agent channels stay on the owner's own-device lane. These sentinels
+      // must not cross even if another share row targets the same workspace.
+      chatChannelCreate(AGENT_WIRE, "agent"),
+      chatThreadCreate(AGENT_WIRE, "thread-agent"),
+      chatMessage("thread-agent", "m-agent", "SENTINEL-AGENT-BODY", OWNER, {
+        parentMessageId: "SENTINEL-AGENT-PARENT",
+      }),
+      {
+        opKind: "chat.decision.set",
+        payload: {
+          threadId: "thread-agent",
+          messageId: "m-agent",
+          state: "resolved",
+          resolvedByMessageId: "SENTINEL-AGENT-RESOLVED-BY",
+          atMs: 7,
+        },
+      },
+      {
+        opKind: "chat.attachment.add",
+        payload: {
+          attachmentId: "attachment-agent",
+          threadId: "thread-agent",
+          messageId: "m-agent",
+          targetKind: "file",
+          objectId: "SENTINEL-AGENT-ATTACHMENT-OBJECT",
+          pathHint: "private/SENTINEL-AGENT-ATTACHMENT-PATH.md",
+          createdAtMs: 8,
+        },
+      },
     ]);
 
     // Two shares to the same member, covering ALL served op kinds:
@@ -586,9 +822,19 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       "SENTINEL-MSG-DEVICE",
       "SENTINEL-REACTION-INTERNAL",
       "SENTINEL-OTHER-CHANNEL-BODY",
+      "SENTINEL-OTHER-PARENT",
+      "SENTINEL-OTHER-RESOLVED-BY",
+      "SENTINEL-OTHER-ATTACHMENT-OBJECT",
+      "SENTINEL-OTHER-ATTACHMENT-PATH",
+      "SENTINEL-AGENT-BODY",
+      "SENTINEL-AGENT-PARENT",
+      "SENTINEL-AGENT-RESOLVED-BY",
+      "SENTINEL-AGENT-ATTACHMENT-OBJECT",
+      "SENTINEL-AGENT-ATTACHMENT-PATH",
       "private/secret.md", // out-of-share path
       "docs/.env", // secret path
       OTHER_WIRE, // another channel's wire id
+      AGENT_WIRE, // an owner-only agent channel's wire id
       dropSha, // out-of-selector snapshot blob
       outSha, // out-of-selector moment blob
       cipherSha, // a blob hash outside the share

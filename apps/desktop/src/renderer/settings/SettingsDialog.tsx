@@ -508,6 +508,13 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               workspaceId={props.workspaceId}
               workspacePath={props.workspacePath}
+              runner={userSettings.runner}
+              onRunnerChange={(runner) =>
+                saveUserSettings({
+                  ...userSettings,
+                  runner,
+                })
+              }
               onAgentActiveChange={props.onAgentActiveChange}
             />
           </div>

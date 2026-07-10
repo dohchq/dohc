@@ -1,4 +1,5 @@
 export * from "./backend";
+export * from "./chatMentions";
 export * from "./domain";
 export * from "./errors";
 export * from "./events";
@@ -8,11 +9,25 @@ export * from "./dataImport";
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,
+  AgentDispatchClaim,
+  AgentDispatchRecord,
+  AgentDispatchState,
+  AgentDispatchStore,
+  AgentRunRecord,
   AgentMomentAuthor,
   ChangeAuthor,
   ChatActor,
+  ChatAgentReadState,
+  ChatAttachment,
+  ChatChannel,
+  ChatChannelId,
+  ChatChannelKind,
+  ChatChannelSummary,
+  ChatDecisionRecord,
+  ChatDecisionState,
   ChatMessage,
   ChatMessageId,
+  ChatMentionRecord,
   ChatThread,
   ChatThreadId,
   EngineFilePathClassification,
@@ -40,6 +55,7 @@ export type {
   SecretFileStoreOptions,
   SecretFileWriteOutcome,
   TextFileSnapshot,
+  ThreadDispatchPauseState,
   VersionFileChange,
   VersionFileChangeStatus,
   VersionId,

@@ -165,12 +165,27 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       runs.push(record);
       await writeRuns(root, runs);
     });
-    s.activeRun = record;
-    options.setAgentRun(workspaceId, {
-      agentId: record.agentId,
-      onBehalfOf: record.onBehalfOf,
-      agentRunId: record.id,
-    });
+    try {
+      options.setAgentRun(workspaceId, {
+        agentId: record.agentId,
+        onBehalfOf: record.onBehalfOf,
+        agentRunId: record.id,
+      });
+      s.activeRun = record;
+    } catch (error) {
+      record.status = "failed";
+      record.endedAt = now();
+      await serialize(s, async () => {
+        const runs = await readRuns(root);
+        const persisted = runs.find((candidate) => candidate.id === record.id);
+        if (persisted) {
+          persisted.status = record.status;
+          persisted.endedAt = record.endedAt;
+          await writeRuns(root, runs);
+        }
+      });
+      throw error;
+    }
     return record;
   }
 

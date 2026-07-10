@@ -157,6 +157,40 @@ async function createChatShare(
   return ((await r.json()) as { shareId: string }).shareId;
 }
 
+// Append the authoritative channel kind the share/presence gates resolve from
+// the owner's log. A wire id alone is not enough to prove a channel is human.
+async function appendChannelCreate(
+  baseUrl: string,
+  owner: string,
+  workspaceId: string,
+  originSeq: number,
+  channelWireId: string,
+): Promise<void> {
+  const r = await fetch(`${baseUrl}/sync/${workspaceId}/log`, {
+    method: "POST",
+    headers: { ...bearer(owner), "content-type": "application/json" },
+    body: JSON.stringify({
+      originId: "owner-origin",
+      ops: [
+        {
+          originSeq,
+          opKind: "chat.channel.create",
+          recordedAtMs: 1,
+          payload: {
+            channelId: `channel-${channelWireId}`,
+            name: `name-${channelWireId}`,
+            slug: `slug-${channelWireId}`,
+            kind: "channel",
+            createdAtMs: 1,
+            wireId: channelWireId,
+          },
+        },
+      ],
+    }),
+  });
+  expect(r.status).toBe(200);
+}
+
 // Append a real chat.thread.create to the owner's log, binding a thread to a
 // channel wire id. The relay's forge-resistant resolver reads THIS op to decide
 // whether a `chat:thread:<threadId>` presence topic is bound to a granted
@@ -268,6 +302,7 @@ describe("two-client presence over a real relay child", () => {
     const ownerWs = "workspace-shared";
     const wireId = "wire-general";
     await claimWorkspace(baseUrl, "owner", ownerWs);
+    await appendChannelCreate(baseUrl, "owner", ownerWs, 0, wireId);
     // Owner grants the channel to a participant (chat-channel share).
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", wireId);
 
@@ -316,11 +351,13 @@ describe("two-client presence over a real relay child", () => {
     const grantedWire = "wire-general";
     const otherWire = "wire-private";
     await claimWorkspace(baseUrl, "owner", ownerWs);
+    await appendChannelCreate(baseUrl, "owner", ownerWs, 0, grantedWire);
+    await appendChannelCreate(baseUrl, "owner", ownerWs, 1, otherWire);
     // Real thread bindings in the owner's own log: `thread-in` -> the granted
     // channel, `thread-out` -> a DIFFERENT (ungranted) channel. `thread-unknown`
     // is left unbound (no chat.thread.create at all).
-    await appendThreadCreate(baseUrl, "owner", ownerWs, 0, "thread-in", grantedWire);
-    await appendThreadCreate(baseUrl, "owner", ownerWs, 1, "thread-out", otherWire);
+    await appendThreadCreate(baseUrl, "owner", ownerWs, 2, "thread-in", grantedWire);
+    await appendThreadCreate(baseUrl, "owner", ownerWs, 3, "thread-out", otherWire);
     // Owner grants ONLY the general channel to the participant.
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", grantedWire);
 

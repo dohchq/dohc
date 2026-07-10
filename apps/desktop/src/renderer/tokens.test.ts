@@ -36,6 +36,7 @@ const CSS_NAME: Record<keyof ThemeTokens, string> = {
   muted: "muted",
   subtle: "subtle",
   accent: "accent",
+  agent: "agent",
   match: "match",
   success: "success",
   warning: "warning",
@@ -111,6 +112,9 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "muted", bg: "bg", min: 4.5 },
     { fg: "ink", bg: "panel", min: 4.5 },
     { fg: "ink", bg: "panel2", min: 4.5 },
+    { fg: "agent", bg: "bg", min: 4.5 },
+    { fg: "agent", bg: "panel", min: 4.5 },
+    { fg: "agent", bg: "panel2", min: 4.5 },
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
     // EVERY surface it actually sits on, not just bg (the sidebar, history
     // timeline, and status bar all render text-subtle on panel-2).

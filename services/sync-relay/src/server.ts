@@ -14,6 +14,7 @@ import {
   validateChatChannelShareSelector,
   validateShareSelector,
   type AnyShareSelector,
+  type ChatShareChannelKind,
   type ChatShareThreadResolver,
 } from "./shareFilter";
 import {
@@ -146,6 +147,15 @@ export function createSyncRelayHandler({
     throw methodNotAllowed();
   };
 
+  const selectorTargetsBlockedChannel = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+  ): boolean => {
+    if (!isChatChannelSelector(selector)) return false;
+    const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
+    return channelKind === "agent" || channelKind === null;
+  };
+
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
   // is the same generic 404 the relay uses for absent workspaces, so probing
@@ -160,24 +170,34 @@ export function createSyncRelayHandler({
     if (!storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) throw notFound();
     const selector = parseAnyShareSelectorJson(share.selectorJson);
     if (!selector) throw notFound();
+    // Agent channels are owner-only and never use the per-recipient grant
+    // lane. Reject historical/corrupt rows centrally so metadata, log reads,
+    // append, blobs, and presence all remain byte-identical to an absent share.
+    if (selectorTargetsBlockedChannel(share.workspaceId, selector)) throw notFound();
     return { ...share, selector };
   };
 
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's OWN log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
-  // resolver (= per request): the filter asks about the SAME threadId once per
-  // message/reaction row on the hot read path, and the underlying lookup is a
-  // log scan. Safe because a resolver never outlives its request and the log
-  // it reads is append-only with earliest-binding-wins semantics.
+  // resolver (= per request): the filter asks about the SAME threadId across
+  // thread-scoped rows on the hot read path, and the underlying lookup is a log
+  // scan. Safe because a resolver never outlives its request and the log it
+  // reads is append-only with earliest-binding-wins semantics.
   const chatResolverFor = (workspaceId: string): ChatShareThreadResolver => {
-    const cache = new Map<string, string | null>();
+    const threadCache = new Map<string, string | null | undefined>();
+    const kindCache = new Map<string, ChatShareChannelKind | null | undefined>();
     return {
+      channelKind: (channelWireId) => {
+        if (kindCache.has(channelWireId)) return kindCache.get(channelWireId);
+        const kind = storage.findChannelCreateKind(workspaceId, channelWireId);
+        kindCache.set(channelWireId, kind);
+        return kind;
+      },
       threadChannelWireId: (threadId) => {
-        const cached = cache.get(threadId);
-        if (cached !== undefined || cache.has(threadId)) return cached ?? null;
+        if (threadCache.has(threadId)) return threadCache.get(threadId);
         const bound = storage.findThreadCreateChannelWireId(workspaceId, threadId);
-        cache.set(threadId, bound);
+        threadCache.set(threadId, bound);
         return bound;
       },
     };
@@ -255,11 +275,21 @@ export function createSyncRelayHandler({
         const granted = await Promise.all(
           storage.listSharesGrantedBy(actor.userId).map((share) => shareSummary(share, "granted")),
         );
-        const received = await Promise.all(
-          storage
-            .listSharesReceivedBy(actor.userId)
-            .map((share) => shareSummary(share, "received")),
+        const receivedRows = await Promise.all(
+          storage.listSharesReceivedBy(actor.userId).map(async (share) => ({
+            share,
+            summary: await shareSummary(share, "received"),
+          })),
         );
+        // Re-evaluate AFTER the async display-name lookups, immediately before
+        // serialization. A pre-provisioned wire that became an agent channel
+        // during those awaits must not get one final recipient-list exposure.
+        const received = receivedRows.flatMap(({ share, summary }) => {
+          const selector = parseAnyShareSelectorJson(share.selectorJson);
+          return selector && selectorTargetsBlockedChannel(share.workspaceId, selector)
+            ? []
+            : [summary];
+        });
         return jsonResponse({ ok: true, granted, received });
       }
       if (route.route === "shares-list") throw methodNotAllowed();
@@ -267,7 +297,9 @@ export function createSyncRelayHandler({
       if (route.route === "share" && request.method === "GET") {
         await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
-        return jsonResponse({ ok: true, ...(await shareSummary(share, "received")) });
+        const summary = await shareSummary(share, "received");
+        shareForRecipient(route.shareId, actor.userId);
+        return jsonResponse({ ok: true, ...summary });
       }
       if (route.route === "share") throw methodNotAllowed();
 
@@ -361,15 +393,22 @@ export function createSyncRelayHandler({
         // existing thread.
         const pendingThreadBindings = new Map<string, string>();
         const resolver: ChatShareThreadResolver = {
-          threadChannelWireId: (threadId) =>
-            storage.findThreadCreateChannelWireId(share.workspaceId, threadId) ??
-            pendingThreadBindings.get(threadId) ??
-            null,
+          channelKind: (channelWireId) =>
+            storage.findChannelCreateKind(share.workspaceId, channelWireId),
+          threadChannelWireId: (threadId) => {
+            const stored = storage.findThreadCreateChannelWireId(share.workspaceId, threadId);
+            return stored !== undefined ? stored : pendingThreadBindings.get(threadId);
+          },
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
           const decision = filterOpForShare(share.selector, op.opKind, op.payloadJson, resolver);
           if (!decision.allowed) throw shareOpRejected();
+          // Persist the filter's (possibly redacted) copy, never the pusher's
+          // original bytes: the owner bucket is read back over the UNfiltered
+          // owner lane, so any field the filter withholds (e.g. a member
+          // attachment's objectId/pathHint) must not survive the append.
+          op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
             const threadId = (JSON.parse(op.payloadJson) as { threadId?: unknown }).threadId;
             if (typeof threadId === "string" && threadId.length > 0) {
@@ -456,7 +495,8 @@ export function createSyncRelayHandler({
         // leaking one final snapshot. The resolver lets a chat-channel grant
         // admit a `chat:thread:<threadId>` topic for a thread BOUND (earliest
         // binding, forge-resistant) to the granted channel — the same authority
-        // the durable chat filter uses; a bare wire id needs no resolver.
+        // the durable chat filter uses; bare wire presence also resolves kind
+        // so an owner-only agent channel can never enter a share scope.
         const authorizeShare = () => {
           const share = shareForRecipient(route.shareId, actor.userId);
           const chatResolver = chatResolverFor(share.workspaceId);
@@ -524,10 +564,13 @@ export function createSyncRelayHandler({
               "a chat-channel share must not also carry paths or versionId",
             );
           }
-          const chatValidation = validateChatChannelShareSelector({
-            channelWireId: input.channelWireId,
-            access: input.access,
-          });
+          const chatValidation = validateChatChannelShareSelector(
+            {
+              channelWireId: input.channelWireId,
+              access: input.access,
+            },
+            chatResolverFor(route.workspaceId),
+          );
           if (!chatValidation.ok) {
             throw new HttpError(400, chatValidation.code, chatValidation.message);
           }
@@ -554,6 +597,9 @@ export function createSyncRelayHandler({
             MAX_ORIGIN_ID_CHARS,
           );
           if (recipientUserId === actor.userId) throw selfShare();
+          if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
+            throw new HttpError(400, "invalid_channel", "channel is not shareable");
+          }
           storage.createShare({
             shareId,
             workspaceId: route.workspaceId,
@@ -586,6 +632,11 @@ export function createSyncRelayHandler({
         }
         const resolved = await resolveUserIdByEmail(email);
         if (resolved === actor.userId) throw selfShare();
+        // Re-check after the asynchronous account lookup: a pre-provisioned
+        // wire may have become an agent channel while this request was waiting.
+        if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
+          throw new HttpError(400, "invalid_channel", "channel is not shareable");
+        }
         storage.createShare({
           shareId,
           workspaceId: route.workspaceId,
@@ -913,6 +964,9 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
 //  - chat.reaction.set.authorId       — REQUIRED. A reaction is inherently an
 //    authored act, so a missing/non-string author id is a malformed op and is
 //    rejected (fail-closed), same as a mismatch.
+//  - chat.decision.set / chat.attachment.add carry no author field. They are
+//    derived from messages whose authorship was already verified, so they are
+//    explicitly structural here and receive no separate authorship assertion.
 //
 // A future authored chat op is verified by adding it to CHAT_OP_POLICY; a
 // future no-author chat op by enumerating it as "structural".
@@ -920,9 +974,11 @@ type ChatOpPolicy =
   | { kind: "structural" }
   | { kind: "authored"; field: string; onMissing: "reject" | "stamp" };
 const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
-  // No-author structural ops: nothing to verify, pass through.
+  // No-author structural/derived ops: nothing to verify, pass through.
   "chat.channel.create": { kind: "structural" },
   "chat.thread.create": { kind: "structural" },
+  "chat.decision.set": { kind: "structural" },
+  "chat.attachment.add": { kind: "structural" },
   // Authored ops: the author field MUST equal the authenticated pusher.
   "chat.message.append": { kind: "authored", field: "authorUserId", onMissing: "stamp" },
   "chat.reaction.set": { kind: "authored", field: "authorId", onMissing: "reject" },

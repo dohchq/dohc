@@ -9,6 +9,7 @@ const electronMainTarget = "node24.15";
 const electronRendererTarget = "chrome148";
 
 export const mainBundledWorkspaceDeps = [
+  "@dohc/cli",
   "@dohc/workspace-core",
   "@dohc/workspace-contracts",
   "@dohc/workspace-engine",

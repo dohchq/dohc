@@ -1019,7 +1019,7 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(1);
   });
 
-  it("passes through known no-author chat ops (channel.create, thread.create)", async () => {
+  it("passes through known no-author structural and message-derived chat ops", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -1042,12 +1042,31 @@ describe("MU-C0 verified chat authorship", () => {
               payload: { threadId: "t-1", title: "hi", createdAtMs: 1001, channelSlug: "general" },
               recordedAtMs: 1001,
             },
+            {
+              originSeq: 2,
+              opKind: "chat.decision.set",
+              payload: { threadId: "t-1", messageId: "m-1", state: "open", atMs: 1002 },
+              recordedAtMs: 1002,
+            },
+            {
+              originSeq: 3,
+              opKind: "chat.attachment.add",
+              payload: {
+                attachmentId: "attachment-1",
+                threadId: "t-1",
+                messageId: "m-1",
+                targetKind: "file",
+                objectId: "object-1",
+                createdAtMs: 1003,
+              },
+              recordedAtMs: 1003,
+            },
           ],
         }),
       ),
     );
     expect(structural.status).toBe(200);
-    expect(await logOps(h)).toHaveLength(2);
+    expect(await logOps(h)).toHaveLength(4);
   });
 
   it("REJECTS an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {

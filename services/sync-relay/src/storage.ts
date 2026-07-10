@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/workspace-engine/linkedChatStore";
 
 export interface SyncRelayLogInput {
   originSeq: number;
@@ -148,12 +149,21 @@ export interface SyncRelayStorage {
   listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
   // MU-C4 shared channels: the channelWireId bound by the EARLIEST
   // chat.thread.create op for this threadId in the workspace's log (relay
-  // order), or null when the log holds no binding. Earliest-wins mirrors the
+  // order). undefined means no create exists; null means the earliest create
+  // exists but carries no shareable channel binding. Earliest-wins mirrors the
   // engine's insert-if-absent thread apply, so a later forged re-create can
-  // never re-bind an existing thread across a share boundary. Returns null
-  // (fail-closed: the filter then excludes) rather than a fallback for a
-  // binding op that carries no channelWireId (a file-linked thread).
-  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null;
+  // never re-bind an existing thread across a share boundary.
+  findThreadCreateChannelWireId(
+    workspaceId: string,
+    threadId: string,
+  ): string | null | undefined;
+  // The kind claimed by the EARLIEST chat.channel.create op for this wire id.
+  // undefined means no create exists; null means the earliest exact create is
+  // malformed/unshareable. Later duplicate creates never override the first.
+  findChannelCreateKind(
+    workspaceId: string,
+    channelWireId: string,
+  ): "channel" | "dm" | "agent" | null | undefined;
 }
 
 interface SqliteRunResult {
@@ -232,6 +242,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_log_thread_creates
         ON sync_relay_log(workspace_id, relay_seq)
         WHERE op_kind = 'chat.thread.create';
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_channel_creates
+        ON sync_relay_log(workspace_id, relay_seq)
+        WHERE op_kind = 'chat.channel.create';
 
       CREATE TABLE IF NOT EXISTS sync_relay_blobs (
         workspace_id TEXT NOT NULL,
@@ -955,8 +968,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .map(rowToLogRow);
   }
 
-  findThreadCreateChannelWireId(workspaceId: string, threadId: string): string | null {
-    if (!threadId) return null;
+  findThreadCreateChannelWireId(
+    workspaceId: string,
+    threadId: string,
+  ): string | null | undefined {
+    if (!threadId) return undefined;
     // LIKE pre-filter on the exact JSON fragment the canonical (sorted-key,
     // JSON.stringify-escaped) payload stores, wildcards escaped so a hostile
     // threadId cannot widen the match; the JSON.parse comparison below makes
@@ -983,13 +999,69 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const record = asObject(payload);
       if (!record || record.threadId !== threadId) continue;
       // The EARLIEST matching op is authoritative, whatever it says: a string
-      // channelWireId is the binding; anything else (a file-linked thread, a
-      // pre-wire-id slug binding) is "no shareable binding" — fail closed.
-      return typeof record.channelWireId === "string" && record.channelWireId.length > 0
+      // channelWireId with no linked-file owner is the binding; anything else
+      // (a file-linked/both-owned thread or a pre-wire-id slug binding) is "no
+      // shareable binding" — fail closed.
+      return record.linkedObjectId === undefined &&
+        typeof record.channelWireId === "string" &&
+        record.channelWireId.length > 0
         ? record.channelWireId
         : null;
     }
-    return null;
+    return undefined;
+  }
+
+  findChannelCreateKind(
+    workspaceId: string,
+    channelWireId: string,
+  ): "channel" | "dm" | "agent" | null | undefined {
+    if (!channelWireId) return undefined;
+    // Canonical payload JSON sorts keys, so this exact fragment is a useful
+    // pre-filter. Escaping LIKE metacharacters prevents a hostile wire id from
+    // widening the scan; parsed exact equality below remains authoritative.
+    const needle = `"wireId":${JSON.stringify(channelWireId)}`
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.channel.create'
+           AND payload_json LIKE ? ESCAPE '\\'
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${needle}%`);
+    for (const row of rows) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row.payload_json));
+      } catch {
+        continue;
+      }
+      const record = asObject(payload);
+      if (!record || record.wireId !== channelWireId) continue;
+      // The earliest exact create is authoritative even when malformed; do not
+      // skip forward to a later op that could forge a shareable kind. Require
+      // the engine's basic replay shape and reserved agent-wire/kind invariant
+      // before trusting a human kind; malformed creates resolve permanently
+      // unshareable.
+      if (
+        typeof record.channelId !== "string" ||
+        record.channelId.length === 0 ||
+        typeof record.name !== "string" ||
+        record.name.length === 0 ||
+        typeof record.slug !== "string" ||
+        record.slug.length === 0 ||
+        (record.kind !== "channel" && record.kind !== "dm" && record.kind !== "agent") ||
+        typeof record.createdAtMs !== "number" ||
+        !Number.isFinite(record.createdAtMs) ||
+        ((record.kind === "agent") !== (record.wireId === AGENT_CHANNEL_WIRE_ID))
+      ) {
+        return null;
+      }
+      return record.kind;
+    }
+    return undefined;
   }
 
   fetchLogPage(input: {

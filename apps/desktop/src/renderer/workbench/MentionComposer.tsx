@@ -5,7 +5,7 @@ import {
   applyMentionCompletion,
   matchMentionCandidates,
   type MentionCandidate,
-} from "./mentions";
+} from "@dohc/workspace-contracts/chat-mentions";
 
 // A chat composer with @-mention autocomplete. Same send affordances as the
 // shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while
@@ -26,6 +26,12 @@ export function MentionComposer(props: {
   onChange: (value: string) => void;
   onSend: () => void;
   onEscape?: () => void;
+  // Decision resolution is the one composer mode where an empty submit is a
+  // meaningful action: the caller records the literal fallback "Resolved ✓".
+  allowEmptySend?: boolean;
+  // Channel feeds place the start-post composer inside a card instead of on a
+  // full-width divider. Defaults preserve DMs and Linked Chats exactly.
+  surface?: "stream" | "post";
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [caret, setCaret] = useState(0);
@@ -134,7 +140,11 @@ export function MentionComposer(props: {
 
   return (
     <form
-      className="relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+      className={
+        props.surface === "post"
+          ? "relative flex shrink-0 items-end gap-1.5 rounded-xl border border-line bg-panel px-3 py-2"
+          : "relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+      }
       onSubmit={(event) => {
         event.preventDefault();
         props.onSend();
@@ -245,7 +255,9 @@ export function MentionComposer(props: {
         data-testid={`${props.testIdPrefix}-send`}
         aria-label={props.sendLabel}
         title={props.sendLabel}
-        disabled={props.sending || props.value.trim().length === 0}
+        disabled={
+          props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
+        }
         className="grid size-8 shrink-0 cursor-pointer place-items-center rounded bg-ink text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Send size={13} aria-hidden />

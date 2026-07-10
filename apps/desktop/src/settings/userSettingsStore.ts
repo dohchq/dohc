@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   DEFAULT_USER_SETTINGS,
   DesktopUserSettings,
@@ -9,6 +9,11 @@ import {
 
 export const USER_SETTINGS_FILE = "dohc-settings.json";
 export const MAX_USER_SETTINGS_FILE_BYTES = 256 * 1024;
+
+const cachedSettingsReads = new Map<
+  string,
+  Promise<DesktopUserSettingsResult>
+>();
 
 export async function readUserSettingsFile(
   dir: string,
@@ -52,16 +57,29 @@ export async function readUserSettingsFile(
   }
 }
 
+export function readCachedUserSettingsFile(
+  dir: string,
+): Promise<DesktopUserSettingsResult> {
+  const root = resolve(dir);
+  const existing = cachedSettingsReads.get(root);
+  if (existing) return existing;
+  const read = readUserSettingsFile(root);
+  cachedSettingsReads.set(root, read);
+  return read;
+}
+
 export async function writeUserSettingsFile(
   dir: string,
   settings: DesktopUserSettings,
 ): Promise<void> {
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, USER_SETTINGS_FILE);
+  const root = resolve(dir);
+  await mkdir(root, { recursive: true });
+  const path = join(root, USER_SETTINGS_FILE);
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeFile(tmp, `${JSON.stringify(DesktopUserSettings.parse(settings), null, 2)}\n`);
     await rename(tmp, path);
+    cachedSettingsReads.delete(root);
   } finally {
     await unlink(tmp).catch(() => undefined);
   }
