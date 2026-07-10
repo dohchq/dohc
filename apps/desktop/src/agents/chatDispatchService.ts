@@ -97,6 +97,7 @@ export interface ChatDispatchServiceOptions {
   resourcesPath?: () => string | undefined;
   queueSync(workspaceId: string): void;
   onMessagePosted(workspaceId: string): void;
+  onRunUpdated?(workspaceId: string): void;
   setRunAttribution(
     workspaceId: string,
     run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
@@ -287,6 +288,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       options.onError?.(error);
     } catch {}
+  }
+
+  function notifyRunUpdated(workspaceId: string): void {
+    try {
+      options.onRunUpdated?.(workspaceId);
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   function enqueue(workspaceId: string, task: () => Promise<void>): Promise<void> {
@@ -597,6 +606,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         );
       }
       dispatch.completeRun({ runId: live.claim.run.runId, exitCode: code });
+      notifyRunUpdated(live.workspace.workspaceId);
     } catch (error) {
       liveRuns.delete(live.workspace.workspaceId);
       clearLiveAttribution(live);
@@ -625,6 +635,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       exitCode: 124,
       reason: `timed out after ${live.timeoutMinutes}m`,
     });
+    notifyRunUpdated(live.workspace.workspaceId);
   }
 
   async function failClaimBeforeRun(
@@ -646,6 +657,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runId: claim.run.runId,
       reason: `runner failed to start: ${detail}`,
     });
+    notifyRunUpdated(workspace.workspaceId);
   }
 
   async function startClaim(
@@ -865,6 +877,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runId: claim.run.runId,
         reason: "app restart during run",
       });
+      notifyRunUpdated(workspace.workspaceId);
       if (claim.dispatch.attemptCount < 2) {
         options.requeueFailedTrigger?.({
           workspaceId: workspace.workspaceId,

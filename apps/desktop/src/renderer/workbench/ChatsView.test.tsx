@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -102,12 +102,23 @@ const bridgeMock = {
   syncDms: vi.fn(),
   startDm: vi.fn(),
   writeClipboardText: vi.fn(),
+  onWorkspaceActivity: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
 
+let workspaceActivityCallback: (() => void) | null = null;
+
 beforeEach(() => {
+  workspaceActivityCallback = null;
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
+  bridgeMock.onWorkspaceActivity.mockImplementation((callback: () => void) => {
+    workspaceActivityCallback = callback;
+    return () => {
+      // A stale cleanup must never detach a newer subscription.
+      if (workspaceActivityCallback === callback) workspaceActivityCallback = null;
+    };
+  });
   bridgeMock.listChatChannels.mockResolvedValue({
     channels: [channel()],
     fileThreads: [],
@@ -151,6 +162,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  workspaceActivityCallback = null;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -513,6 +525,86 @@ describe("ChatsView document thread", () => {
         body: "Monday works.",
       }),
     );
+  });
+});
+
+describe("ChatsView live activity refresh", () => {
+  it("reloads an open thread's messages, decisions, and run records in place", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const agentReport = message({
+      id: "agent-live-report",
+      parentMessageId: opening.id,
+      authorKind: "agent",
+      authorDisplayName: "You's agent",
+      body: "done: checked the exports",
+      createdAtMs: NOW + 1,
+    });
+    const openDecision = {
+      threadId: "thread-1",
+      messageId: agentReport.id,
+      state: "open" as const,
+      atMs: NOW + 1,
+    };
+    const run = {
+      runId: "run-live-123456",
+      threadId: "thread-1",
+      triggerMessageId: opening.id,
+      command: "node fakeChatRunner.mjs report",
+      startedAtMs: NOW,
+      exitCode: 0,
+      logPath: "logs/run-live-123456.log",
+    };
+    let refreshed = false;
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 1 })],
+    });
+    bridgeMock.listChatMessages.mockImplementation(() =>
+      Promise.resolve({ messages: refreshed ? [opening, agentReport] : [opening] }),
+    );
+    bridgeMock.listChatThreadDecisions.mockImplementation(() =>
+      Promise.resolve({ decisions: refreshed ? [openDecision] : [] }),
+    );
+    bridgeMock.chatRunRecordForMessage.mockImplementation(
+      ({ messageId }: { messageId: string }) =>
+        Promise.resolve({
+          run: refreshed && messageId === agentReport.id ? run : null,
+        }),
+    );
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    expect(screen.getByTestId("chats-message-body").textContent).toBe(opening.body);
+    expect(screen.queryByText(agentReport.body)).toBeNull();
+    expect(screen.queryByTestId("chats-comment-decision-open")).toBeNull();
+    expect(screen.queryByTestId("chats-run-chip")).toBeNull();
+    expect(workspaceActivityCallback).not.toBeNull();
+
+    const messageReadsBefore = bridgeMock.listChatMessages.mock.calls.length;
+    const decisionReadsBefore = bridgeMock.listChatThreadDecisions.mock.calls.length;
+    refreshed = true;
+    act(() => {
+      workspaceActivityCallback?.();
+    });
+
+    expect(await screen.findByText(agentReport.body)).toBeTruthy();
+    expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
+    expect((await screen.findByTestId("chats-run-chip")).textContent).toBe("run run-liv");
+    // The same view stayed mounted; activity caused fresh reads rather than a
+    // back/forward navigation or optimistic local append.
+    expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
+    expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(
+      messageReadsBefore,
+    );
+    expect(bridgeMock.listChatThreadDecisions.mock.calls.length).toBeGreaterThan(
+      decisionReadsBefore,
+    );
+    expect(bridgeMock.chatRunRecordForMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      messageId: agentReport.id,
+    });
   });
 });
 

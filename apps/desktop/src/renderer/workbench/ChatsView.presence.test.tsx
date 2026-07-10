@@ -38,6 +38,25 @@ const threadRecord: ChannelThreadRecord = {
   unreadCount: 0,
 };
 
+const agentChannelRecord: ChatChannelRecord = {
+  id: "channel-agent",
+  name: "My agent",
+  slug: "my-agent",
+  kind: "agent",
+  createdAtMs: NOW,
+  updatedAtMs: NOW,
+  threadCount: 1,
+  unreadCount: 0,
+  wireId: "channel-wire-agent",
+};
+
+const agentThreadRecord: ChannelThreadRecord = {
+  ...threadRecord,
+  id: "thread-agent",
+  title: "Audit the projections",
+  channelId: agentChannelRecord.id,
+};
+
 const bridgeMock = {
   listChatChannels: vi.fn(),
   listChannelThreads: vi.fn(),
@@ -62,6 +81,7 @@ const bridgeMock = {
   // DM presence (MU-C3 x MU-C1): the DM surface loads through syncDms.
   syncDms: vi.fn(),
   writeClipboardText: vi.fn(),
+  onWorkspaceActivity: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -95,6 +115,50 @@ function pushableTransport() {
   return { transport, set, publishes, topics };
 }
 
+// The agent summary and task thread are deliberately different topics. This
+// transport keeps their snapshots separate so the UI test proves each hint is
+// driven by the right surface instead of leaking one topic's state into both.
+function topicAwareTransport() {
+  const snapshots = new Map<string, PresenceSnapshot>();
+  const waiters = new Map<string, Set<(snapshot: PresenceSnapshot) => void>>();
+  const topics: string[] = [];
+  const snapshotFor = (topic: string) =>
+    snapshots.get(topic) ?? { version: 0, peers: [] };
+  function set(topic: string, peers: PresencePeer[]) {
+    const current = snapshotFor(topic);
+    const snapshot = { version: current.version + 1, peers };
+    snapshots.set(topic, snapshot);
+    for (const resolve of [...(waiters.get(topic) ?? [])]) resolve(snapshot);
+    waiters.delete(topic);
+  }
+  const transport: PresenceTransport = {
+    async publish({ topic }) {
+      topics.push(topic);
+      return snapshotFor(topic);
+    },
+    async leave() {},
+    poll({ topic, since, signal }) {
+      const current = snapshotFor(topic);
+      if (current.version !== since) return Promise.resolve(current);
+      return new Promise((resolve) => {
+        const topicWaiters = waiters.get(topic) ?? new Set();
+        const finish = (snapshot: PresenceSnapshot) => {
+          topicWaiters.delete(finish);
+          resolve(snapshot);
+        };
+        topicWaiters.add(finish);
+        waiters.set(topic, topicWaiters);
+        signal.addEventListener(
+          "abort",
+          () => finish(snapshotFor(topic)),
+          { once: true },
+        );
+      });
+    },
+  };
+  return { transport, set, topics };
+}
+
 beforeEach(() => {
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.listChatChannels.mockResolvedValue({ channels: [channelRecord], fileThreads: [] });
@@ -104,6 +168,7 @@ beforeEach(() => {
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordForMessage.mockResolvedValue({ run: null });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
+  bridgeMock.onWorkspaceActivity.mockReturnValue(() => undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });
   bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "you" });
   // Solo/dormant default: no grants, nothing received, nothing joined — the
@@ -224,6 +289,107 @@ describe("ChatsView presence (MU-C1)", () => {
     await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
     await waitFor(() =>
       expect((t.publishes.at(-1) as { typing?: boolean }).typing).toBe(false),
+    );
+  });
+
+  it("shows validated agent working/idle hints on My agent and its thread header", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [agentChannelRecord],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [agentThreadRecord] });
+    const t = topicAwareTransport();
+    const user = userEvent.setup();
+    renderView(collabWith(t.transport));
+
+    // The overview row listens on the stable workspace agent-summary topic,
+    // but is completely quiet until the reserved agent client appears.
+    await screen.findByTestId("chats-my-agent");
+    await waitFor(() => expect(t.topics).toContain("chat:agent"));
+    expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
+
+    act(() => {
+      t.set("chat:agent", [
+        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        {
+          userId: "me",
+          clientId: "agent:workspace-a",
+          state: { displayName: "Me's agent", agent: true, activity: "busy" },
+          updatedAtMs: 0,
+        },
+      ]);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
+
+    act(() => {
+      t.set("chat:agent", [
+        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        {
+          userId: "me",
+          clientId: "agent:workspace-a",
+          state: { displayName: "Me's agent", agent: true, activity: "working" },
+          updatedAtMs: 0,
+        },
+      ]);
+    });
+    expect(await screen.findByLabelText("Agent is working")).toBeTruthy();
+    expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("working");
+
+    act(() => {
+      t.set("chat:agent", [
+        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        {
+          userId: "me",
+          clientId: "agent:workspace-a",
+          state: { displayName: "Me's agent", agent: true, activity: "idle" },
+          updatedAtMs: 0,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("idle"),
+    );
+
+    await user.click(screen.getByTestId("chats-my-agent"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(t.topics).toContain("chat:thread:thread-agent"));
+    // Summary is still idle, but task presence has not arrived: the task
+    // header must not borrow status from the overview topic.
+    expect(screen.queryByTestId("chats-thread-agent-presence")).toBeNull();
+
+    act(() => {
+      t.set("chat:thread:thread-agent", [
+        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        {
+          userId: "me",
+          clientId: "agent:workspace-a",
+          state: { displayName: "Me's agent", agent: true, activity: "working" },
+          updatedAtMs: 0,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-thread-agent-presence").textContent).toBe("working"),
+    );
+
+    // A lookalike payload without the reserved client id is not agent status.
+    act(() => {
+      t.set("chat:thread:thread-agent", [
+        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        {
+          userId: "me",
+          clientId: "agent:another-workspace",
+          state: { displayName: "Other agent", agent: true, activity: "working" },
+          updatedAtMs: 0,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("chats-thread-agent-presence")).toBeNull(),
     );
   });
 });

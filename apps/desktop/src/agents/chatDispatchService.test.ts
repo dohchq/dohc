@@ -98,6 +98,7 @@ interface Fixture {
   spawnCalls: SpawnCall[];
   killCalls: Array<{ pid: number; signal: NodeJS.Signals }>;
   postedWorkspaces: string[];
+  runUpdatedWorkspaces: string[];
   syncRequests: string[];
   presence: ChatDispatchPresenceInput[];
   attributions: Array<{
@@ -174,6 +175,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   };
   const killCalls: Fixture["killCalls"] = [];
   const postedWorkspaces: string[] = [];
+  const runUpdatedWorkspaces: string[] = [];
   const syncRequests: string[] = [];
   const presence: ChatDispatchPresenceInput[] = [];
   const attributions: Fixture["attributions"] = [];
@@ -215,6 +217,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     isPackaged: () => false,
     queueSync: (workspaceId) => syncRequests.push(workspaceId),
     onMessagePosted: (workspaceId) => postedWorkspaces.push(workspaceId),
+    onRunUpdated: (workspaceId) => runUpdatedWorkspaces.push(workspaceId),
     setRunAttribution: (workspaceId, run) => {
       attributions.push({ workspaceId, run });
     },
@@ -277,6 +280,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     spawnCalls,
     killCalls,
     postedWorkspaces,
+    runUpdatedWorkspaces,
     syncRequests,
     presence,
     attributions,
@@ -506,6 +510,7 @@ describe("chatDispatchService", () => {
       exitCode: 0,
       failureNotePosted: false,
     });
+    expect(fixture.runUpdatedWorkspaces).toContain(WORKSPACE_ID);
     const firstMessages = await fixture.chat.listMessages({
       workspaceId: WORKSPACE_ID,
       threadId: first.threadId,

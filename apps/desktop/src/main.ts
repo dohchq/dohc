@@ -320,6 +320,7 @@ import {
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {
   createDesktopAgentDispatchStore,
   type DesktopAgentDispatchStoreHandle,
@@ -1490,16 +1491,25 @@ async function publishAgentPresence(
     workspaceId: input.workspaceId,
   });
   if (!transport) return;
-  const topic = `chat:thread:${input.threadId}`;
+  const topics = [
+    `chat:thread:${input.threadId}`,
+    CHAT_AGENT_PRESENCE_TOPIC,
+  ];
   if (input.leave) {
-    await transport.leave({ topic, clientId: input.clientId });
+    await Promise.all(
+      topics.map((topic) => transport.leave({ topic, clientId: input.clientId })),
+    );
     return;
   }
-  await transport.publish({
-    topic,
-    clientId: input.clientId,
-    state: input.state ?? null,
-  });
+  await Promise.all(
+    topics.map((topic) =>
+      transport.publish({
+        topic,
+        clientId: input.clientId,
+        state: input.state ?? null,
+      }),
+    ),
+  );
 }
 
 const chatDispatchService = createChatDispatchService({
@@ -1545,6 +1555,7 @@ const chatDispatchService = createChatDispatchService({
       console.error("[desktop] chat dispatch scan:", error);
     });
   },
+  onRunUpdated: () => notifyRenderer(),
   setRunAttribution: (workspaceId, run) => {
     if (run) {
       if (!activity.claimAgentRun(workspaceId, run)) {

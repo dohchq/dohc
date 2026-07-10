@@ -40,7 +40,16 @@ import { MentionComposer } from "./MentionComposer";
 import type { MentionCandidate } from "./mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
-import type { PresenceScope, PresenceTransport } from "../collab/presenceChannel";
+import type {
+  PresenceScope,
+  PresenceTransport,
+} from "../collab/presenceChannel";
+import {
+  CHAT_AGENT_PRESENCE_TOPIC,
+  agentPresenceClientId,
+  resolveAgentPresenceActivity,
+  type AgentPresenceActivity,
+} from "../../collab/agentPresence";
 
 // Multi-user chat presence (MU-C1) is opt-in: only under collaboration
 // (signedIn && relayConnected) is a transport supplied, so a solo/offline user
@@ -102,6 +111,15 @@ interface FeedPostData {
   viewerAuthorId: string;
 }
 
+interface ThreadSnapshot {
+  messages: ChatMessageRecord[];
+  reactions: ChatReactionRecord[];
+  decisions: ChatDecisionRecord[];
+  attachments: ChatAttachmentRecord[];
+  runRecords: Record<string, ChatRunRecord>;
+  viewerAuthorId: string;
+}
+
 interface ComposerReplyTarget {
   messageId: string;
   authorLabel: string;
@@ -119,6 +137,30 @@ function AgentBadge(props: { testIdPrefix: string }) {
       className="rounded border border-agent/40 px-1 font-mono text-[8.5px] text-agent"
     >
       agent
+    </span>
+  );
+}
+
+function AgentPresenceHint(props: {
+  activity: AgentPresenceActivity | null;
+  testId: string;
+}) {
+  if (props.activity === null) return null;
+  const working = props.activity === "working";
+  return (
+    <span
+      data-testid={props.testId}
+      aria-label={`Agent is ${props.activity}`}
+      title={`Agent is ${props.activity}`}
+      className="inline-flex shrink-0 items-center gap-1 font-mono text-[9.5px] text-subtle"
+    >
+      <span
+        aria-hidden
+        className={`size-1.5 rounded-full ${
+          working ? "bg-agent" : "border border-agent/60 bg-transparent"
+        }`}
+      />
+      {props.activity}
     </span>
   );
 }
@@ -300,6 +342,15 @@ function RunChip(props: { run: ChatRunRecord }) {
   );
 }
 
+// A derived title repeats the body's first line; the card already shows it
+// in serif, so the excerpt starts after it.
+function postExcerpt(title: string, body: string): string {
+  const newline = body.indexOf("\n");
+  const firstLine = (newline === -1 ? body : body.slice(0, newline)).trim();
+  if (firstLine !== title.trim()) return body;
+  return newline === -1 ? "" : body.slice(newline + 1).trim();
+}
+
 function PostCard(props: {
   thread: ChannelThreadRecord;
   data: FeedPostData;
@@ -310,6 +361,7 @@ function PostCard(props: {
   const isAgent = message?.authorKind === "agent";
   const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
+  const excerpt = message ? postExcerpt(props.thread.title, message.body) : "";
   return (
     <li
       data-testid="chats-post-card"
@@ -363,12 +415,12 @@ function PostCard(props: {
         >
           {props.thread.title}
         </span>
-        {message ? (
+        {excerpt ? (
           <span
             data-testid="chats-post-excerpt"
             className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-[13px] text-muted"
           >
-            {message.body}
+            {excerpt}
           </span>
         ) : null}
       </div>
@@ -593,6 +645,10 @@ export function ChatsView(props: {
   const sendingRef = useRef(false);
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
+  // A live thread can refresh repeatedly without changing navigation. Keep a
+  // request sequence separate from the workspace/navigation liveness token so
+  // an older activity response can never overwrite a newer one.
+  const threadRefreshSeq = useRef(0);
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
@@ -746,9 +802,80 @@ export function ChatsView(props: {
     [props, workspaceId],
   );
 
+  const loadThreadSnapshot = useCallback(
+    async (threadId: string): Promise<ThreadSnapshot> => {
+      const messagesPromise = bridge().listChatMessages({ workspaceId, threadId });
+      const runRecordsPromise = messagesPromise.then(async (result) =>
+        Promise.all(
+          result.messages
+            .filter((message) => message.authorKind === "agent")
+            .map(async (message) => {
+              try {
+                const runResult = await bridge().chatRunRecordForMessage({
+                  workspaceId,
+                  messageId: message.id,
+                });
+                return [message.id, runResult.run] as const;
+              } catch {
+                return [message.id, null] as const;
+              }
+            }),
+        ),
+      );
+      const [result, reactionResult, decisionResult, attachmentResult, runEntries] =
+        await Promise.all([
+          messagesPromise,
+          bridge().listChatReactions({ workspaceId, threadId }),
+          bridge().listChatThreadDecisions({ workspaceId, threadId }),
+          bridge().listChatThreadAttachments({ workspaceId, threadId }),
+          runRecordsPromise,
+        ]);
+      return {
+        messages: result.messages,
+        reactions: reactionResult.reactions,
+        decisions: decisionResult.decisions,
+        attachments: attachmentResult.attachments,
+        runRecords: Object.fromEntries(
+          runEntries.filter(
+            (entry): entry is readonly [string, ChatRunRecord] => entry[1] !== null,
+          ),
+        ),
+        viewerAuthorId: reactionResult.viewerAuthorId,
+      };
+    },
+    [workspaceId],
+  );
+
+  const applyThreadSnapshot = useCallback(
+    (threadId: string, snapshot: ThreadSnapshot) => {
+      setMessages(snapshot.messages);
+      setReactions(snapshot.reactions);
+      setDecisions(snapshot.decisions);
+      setAttachments(snapshot.attachments);
+      setRunRecords(snapshot.runRecords);
+      setViewerAuthorId(snapshot.viewerAuthorId);
+      // Everything on screen is read: advance the monotonic cursor and clear
+      // this thread's badge locally so back-navigation is immediately honest.
+      const upToSequence = snapshot.messages.length;
+      setChannelThreads((current) =>
+        current.map((entry) =>
+          entry.id === threadId ? { ...entry, unreadCount: 0 } : entry,
+        ),
+      );
+      void bridge()
+        .markChatThreadRead({ workspaceId, threadId, upToSequence })
+        .catch(() => {
+          // Mark-read is best-effort; the badge re-appears on next refresh if
+          // the cursor write did not land.
+        });
+    },
+    [workspaceId],
+  );
+
   const openThread = useCallback(
     async (channel: ChatChannelRecord, thread: ChannelThreadRecord) => {
       const token = ++liveToken.current;
+      const refreshSeq = ++threadRefreshSeq.current;
       setNav({ level: "thread", channel, thread });
       setMessages([]);
       setReactions([]);
@@ -761,75 +888,62 @@ export function ChatsView(props: {
       messageNodes.current.clear();
       setMessagesLoading(true);
       try {
-        const messagesPromise = bridge().listChatMessages({
-          workspaceId,
-          threadId: thread.id,
-        });
-        const runRecordsPromise = messagesPromise.then(async (result) =>
-          Promise.all(
-            result.messages
-              .filter((message) => message.authorKind === "agent")
-              .map(async (message) => {
-                try {
-                  const runResult = await bridge().chatRunRecordForMessage({
-                    workspaceId,
-                    messageId: message.id,
-                  });
-                  return [message.id, runResult.run] as const;
-                } catch {
-                  return [message.id, null] as const;
-                }
-              }),
-          ),
-        );
-        const [result, reactionResult, decisionResult, attachmentResult, runEntries] =
-          await Promise.all([
-            messagesPromise,
-            bridge().listChatReactions({ workspaceId, threadId: thread.id }),
-            bridge().listChatThreadDecisions({ workspaceId, threadId: thread.id }),
-            bridge().listChatThreadAttachments({
-              workspaceId,
-              threadId: thread.id,
-            }),
-            runRecordsPromise,
-          ]);
-        if (token !== liveToken.current) return;
-        setMessages(result.messages);
-        setReactions(reactionResult.reactions);
-        setDecisions(decisionResult.decisions);
-        setAttachments(attachmentResult.attachments);
-        setRunRecords(
-          Object.fromEntries(
-            runEntries.filter(
-              (entry): entry is readonly [string, ChatRunRecord] => entry[1] !== null,
-            ),
-          ),
-        );
-        setViewerAuthorId(reactionResult.viewerAuthorId);
-        // Everything on screen is read: advance the monotonic cursor and
-        // clear this thread's badge locally so back-navigation is honest
-        // without a refetch round trip.
-        const upToSequence = result.messages.length;
-        setChannelThreads((current) =>
-          current.map((entry) =>
-            entry.id === thread.id ? { ...entry, unreadCount: 0 } : entry,
-          ),
-        );
-        void bridge()
-          .markChatThreadRead({ workspaceId, threadId: thread.id, upToSequence })
-          .catch(() => {
-            // Mark-read is best-effort; the badge re-appears on next refresh
-            // if the cursor write did not land.
-          });
+        const snapshot = await loadThreadSnapshot(thread.id);
+        if (
+          token !== liveToken.current ||
+          refreshSeq !== threadRefreshSeq.current
+        ) {
+          return;
+        }
+        applyThreadSnapshot(thread.id, snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."));
       } finally {
-        if (token === liveToken.current) setMessagesLoading(false);
+        if (
+          token === liveToken.current &&
+          refreshSeq === threadRefreshSeq.current
+        ) {
+          setMessagesLoading(false);
+        }
       }
     },
-    [props, workspaceId],
+    [applyThreadSnapshot, loadThreadSnapshot, props],
   );
+
+  // Main emits workspaceActivity for CLI writes, runner reports/failures, and
+  // run-record completion. Refresh only the open thread and preserve its
+  // composer/reply/resolve state; this is an invalidation signal, not a
+  // navigation event.
+  useEffect(() => {
+    if (nav.level !== "thread") return;
+    const threadId = nav.thread.id;
+    return bridge().onWorkspaceActivity(() => {
+      const token = liveToken.current;
+      const refreshSeq = ++threadRefreshSeq.current;
+      void loadThreadSnapshot(threadId)
+        .then((snapshot) => {
+          if (
+            token !== liveToken.current ||
+            refreshSeq !== threadRefreshSeq.current
+          ) {
+            return;
+          }
+          applyThreadSnapshot(threadId, snapshot);
+          setMessagesLoading(false);
+        })
+        .catch(() => {
+          // The invalidation is best-effort; the next activity signal or an
+          // explicit reopen retries without disturbing the user's draft.
+          if (
+            token === liveToken.current &&
+            refreshSeq === threadRefreshSeq.current
+          ) {
+            setMessagesLoading(false);
+          }
+        });
+    });
+  }, [applyThreadSnapshot, loadThreadSnapshot, nav]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -1185,6 +1299,10 @@ export function ChatsView(props: {
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
     [joinedByWire],
   );
+  const agentChannel =
+    overview.status === "ready"
+      ? overview.channels.find((channel) => channel.kind === "agent") ?? null
+      : null;
 
   // Cross-user co-presence for the open channel/thread turns on two decisions
   // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
@@ -1236,13 +1354,16 @@ export function ChatsView(props: {
   const scopeShareId =
     activeJoined?.shareId ??
     (activeDm?.role === "participant" ? activeDm.shareId : null);
+  const workspacePresenceTransport = useMemo(() => {
+    if (!collaboration) return null;
+    return collaboration.transportForScope({ kind: "workspace", workspaceId });
+  }, [collaboration, workspaceId]);
   const presenceTransport = useMemo(() => {
     if (!collaboration) return null;
-    const scope: PresenceScope = scopeShareId
-      ? { kind: "share", shareId: scopeShareId }
-      : { kind: "workspace", workspaceId };
+    if (!scopeShareId) return workspacePresenceTransport;
+    const scope: PresenceScope = { kind: "share", shareId: scopeShareId };
     return collaboration.transportForScope(scope);
-  }, [collaboration, scopeShareId, workspaceId]);
+  }, [collaboration, scopeShareId, workspacePresenceTransport]);
   // Presence stays dormant until the scope is DEFINITIVELY resolved for the
   // active conversation in the CURRENT workspace: a joined channel's scope is
   // derived from channelShares, so publishing before that share state loads
@@ -1257,6 +1378,32 @@ export function ChatsView(props: {
     clientId: collaboration?.clientId ?? "",
     displayName: collaboration?.displayName ?? "",
   });
+  // Agent summary presence is workspace-private and deliberately independent
+  // from the open conversation. It lets the overview row report the one
+  // workspace runner while a task-specific thread keeps its own presence
+  // scope. With no agent channel/collaboration this channel is never built.
+  const agentSummaryPresence = usePresence({
+    enabled:
+      collaboration !== null && agentChannel !== null && scopeResolved,
+    transport: workspacePresenceTransport,
+    topic: CHAT_AGENT_PRESENCE_TOPIC,
+    clientId: collaboration?.clientId ?? "",
+    displayName: collaboration?.displayName ?? "",
+  });
+  const conversationAgentActivity = resolveAgentPresenceActivity(
+    presence.others,
+    workspaceId,
+  );
+  const agentSummaryActivity = resolveAgentPresenceActivity(
+    agentSummaryPresence.others,
+    workspaceId,
+  );
+  const reservedAgentClientId = agentPresenceClientId(workspaceId);
+  const peoplePresence = useMemo(
+    () =>
+      presence.others.filter((peer) => peer.clientId !== reservedAgentClientId),
+    [presence.others, reservedAgentClientId],
+  );
 
   const refreshShares = useCallback(async () => {
     const token = liveToken.current;
@@ -1652,7 +1799,19 @@ export function ChatsView(props: {
           label={nav.thread.title}
           testId="chats-thread"
           onBack={goBack}
-          trailing={<PresenceFaces others={presence.others} />}
+          trailing={
+            <>
+              {nav.channel.kind === "agent" ? (
+                <AgentPresenceHint
+                  activity={conversationAgentActivity}
+                  testId="chats-thread-agent-presence"
+                />
+              ) : null}
+              <PresenceFaces
+                others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
+              />
+            </>
+          }
         />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
@@ -2043,7 +2202,19 @@ export function ChatsView(props: {
               <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
             )
           }
-          trailing={<PresenceFaces others={presence.others} />}
+          trailing={
+            <>
+              {nav.channel.kind === "agent" ? (
+                <AgentPresenceHint
+                  activity={agentSummaryActivity}
+                  testId="chats-channel-agent-presence"
+                />
+              ) : null}
+              <PresenceFaces
+                others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
+              />
+            </>
+          }
           action={
             canShare ? (
               <button
@@ -2228,8 +2399,6 @@ export function ChatsView(props: {
     );
   }
 
-  const agentChannel = overview.channels.find((channel) => channel.kind === "agent") ?? null;
-
   return (
     <div
       data-testid="chats-view"
@@ -2266,6 +2435,10 @@ export function ChatsView(props: {
               >
                 My agent
               </span>
+              <AgentPresenceHint
+                activity={agentSummaryActivity}
+                testId="chats-my-agent-presence"
+              />
               <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
             </button>
           </section>

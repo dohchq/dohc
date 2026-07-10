@@ -63,10 +63,10 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await composer.press("Enter");
     await expect(page.getByTestId("chats-message-body")).toHaveCount(2);
 
-    // Back in the channel: the thread row shows the snippet title, no
+    // Back in the channel: the post card shows the snippet title, no
     // unread badge for your own messages.
     await page.getByTestId("chats-thread-back").click();
-    await expect(page.getByTestId("chats-thread-name")).toHaveText(
+    await expect(page.getByTestId("chats-post-title")).toHaveText(
       "Let's plan the launch this week.",
     );
     await expect(page.getByTestId("chats-thread-unread")).toHaveCount(0);
