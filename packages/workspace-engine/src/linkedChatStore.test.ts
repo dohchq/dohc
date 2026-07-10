@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createAgentDispatchStore } from "./agentDispatchStore";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import {
   LINKED_CHAT_STORE_RELATIVE_PATH,
@@ -185,7 +186,7 @@ describe("linked chat store", () => {
     await chats.sendMessage({
       workspaceId: "workspace-a",
       threadId: thread.id,
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       body: "I will check the files and report back.",
     });
 
@@ -206,7 +207,7 @@ describe("linked chat store", () => {
     expect(projection.path).not.toContain(thread.id);
     expect(projection.text).toContain("# Launch notes");
     expect(projection.text).toContain("## Ice\n\nShip the obvious path first.");
-    expect(projection.text).toContain("## Ice's agent (agent)\n\nI will check");
+    expect(projection.text).toContain("## Ice (agent)\n\nI will check");
   });
 
   it("rejects unsafe projection identity before constructing a path", async () => {
@@ -462,6 +463,60 @@ describe("linked chat store hardening (CodeRabbit arc gate)", () => {
       "Written under contention.",
     ]);
     await chats.close();
+  });
+
+  it("commits before a queued in-process dispatch scan can take the write lock", async () => {
+    let queueScan = false;
+    let scanFinished: Promise<void> = Promise.resolve();
+    let scanFailure: unknown = null;
+    let scanRan = false;
+    let dispatchDb: RawSqliteDb | null = null;
+    const counters = { channel: 0, message: 0, thread: 0 };
+    const chats = createLinkedChatStore(root, {
+      nowMs: () => {
+        now += 10;
+        if (queueScan) {
+          queueScan = false;
+          scanFinished = new Promise<void>((resolveScan) => {
+            queueMicrotask(() => {
+              scanRan = true;
+              try {
+                if (!dispatchDb) throw new Error("Dispatch database is not open.");
+                createAgentDispatchStore(dispatchDb).recordEligibleTriggers({
+                  workspaceId: "workspace-a",
+                });
+              } catch (error) {
+                scanFailure = error;
+              } finally {
+                resolveScan();
+              }
+            });
+          });
+        }
+        return now;
+      },
+      createId: (kind) => {
+        counters[kind] += 1;
+        return `${kind}-${counters[kind]}`;
+      },
+    });
+    await chats.ensureGeneralChannel({ workspaceId: "workspace-a" });
+    dispatchDb = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
+    dispatchDb.exec("PRAGMA busy_timeout = 25");
+
+    try {
+      queueScan = true;
+      await chats.createChannel({
+        workspaceId: "workspace-a",
+        name: "dispatch-race",
+      });
+      await scanFinished;
+      expect(scanRan).toBe(true);
+      expect(scanFailure).toBeNull();
+    } finally {
+      dispatchDb.close();
+      await chats.close();
+    }
   });
 
   // Single-source schema: whichever store opens a brand-new workspace FIRST
@@ -751,17 +806,46 @@ describe("channel threads", () => {
       threadId: started.thread.id,
       body: "Should we ship on Friday?\nSecond line ignored.",
     });
+    const comment = await chats.sendMessage({
+      workspaceId: "workspace-a",
+      threadId: started.thread.id,
+      author: { kind: "agent", displayName: "You" },
+      body: "I checked the release board.",
+    });
+    const openingReaction = await chats.setReaction({
+      workspaceId: "workspace-a",
+      threadId: started.thread.id,
+      messageId: started.message.id,
+      emoji: "👍",
+      author: { authorId: "user-a", kind: "human", displayName: "You" },
+      state: "added",
+    });
+    await chats.setReaction({
+      workspaceId: "workspace-a",
+      threadId: started.thread.id,
+      messageId: comment.id,
+      emoji: "👀",
+      author: { authorId: "user-a", kind: "human", displayName: "You" },
+      state: "added",
+    });
     // The derived title also comes back from every read path.
     const listed = await chats.listChannelThreads({
       workspaceId: "workspace-a",
       channelId: channel.id,
     });
     expect(listed[0]?.thread.title).toBe("Should we ship on Friday?");
+    expect(listed[0]?.openingMessage).toEqual({
+      id: started.message.id,
+      author: { kind: "human", displayName: "You" },
+      createdAtMs: started.message.createdAtMs,
+      bodySnippet: "Should we ship on Friday?\nSecond line ignored.",
+      reactions: [openingReaction],
+    });
     const messages = await chats.listMessages({
       workspaceId: "workspace-a",
       threadId: started.thread.id,
     });
-    expect(messages).toHaveLength(1);
+    expect(messages).toHaveLength(2);
     await chats.close();
   });
 

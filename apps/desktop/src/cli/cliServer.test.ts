@@ -28,11 +28,6 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "../workspaces/testTemp";
 import {
-  AGENTS_CHAT_BEGIN_MARKER,
-  AGENTS_CHAT_END_MARKER,
-  ensureAgentsChatBlock,
-} from "./agentsChatBlock";
-import {
   CLI_SOCKET_FILE,
   cliThreadId,
   handleCliRequestLine,
@@ -258,12 +253,10 @@ describe("CLI socket server", () => {
         throw error;
       }
       // The managed test sandbox forbids every listener, including AF_UNIX.
-      // startCliServer already exercised state/token setup and AGENTS.md
-      // setup before listen failed. Maintain the same fixture instructions,
-      // then run requests through the exact authenticated line handler so
-      // command/store coverage remains live.
+      // State/token setup already ran before listen failed. Run requests
+      // through the exact authenticated line handler so command/store
+      // coverage remains live.
       server = null;
-      await ensureAgentsChatBlock(workspaceRoot);
       token = "a".repeat(64);
     }
   });
@@ -476,7 +469,7 @@ describe("CLI socket server", () => {
       {
         id: replied.messageId,
         kind: "agent",
-        displayName: "Ice's agent",
+        displayName: "Ice",
         body: "Agent response from the terminal",
         parentMessageId: opened.messageId,
         decisionState: undefined,
@@ -506,7 +499,7 @@ describe("CLI socket server", () => {
       },
       {
         kind: "agent",
-        displayName: "Ice's agent",
+        displayName: "Ice",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -749,7 +742,7 @@ describe("CLI socket server", () => {
     await store.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       body: "This file-linked thread is unread too",
     });
     const fileThreadId = cliThreadId(fileThread.id);
@@ -824,6 +817,46 @@ describe("CLI socket server", () => {
       message: opened.messageId,
       emoji: "👍",
     })).resolves.toEqual({ ...added, state: "removed" });
+  });
+
+  it("loads only FTS candidate threads for substring grep", async () => {
+    const matching = await post({
+      actor: "human",
+      title: "Candidate search thread",
+      body: "The selective-corpus-needle lives here",
+    });
+    await post({
+      actor: "human",
+      title: "Unrelated search thread",
+      body: "This thread must not be hydrated by substring grep",
+    });
+    if (!store) throw new Error("Store is not available");
+    const loadedThreadIds: string[] = [];
+    const originalListMessages = store.listMessages;
+    store.listMessages = async (input) => {
+      loadedThreadIds.push(input.threadId);
+      return originalListMessages(input);
+    };
+
+    let grep: CliResultByVerb["grep"] | null = null;
+    try {
+      grep = await invoke("grep", {
+        cwd: workspaceRoot,
+        actor: "human",
+        pattern: "selective-corpus-needle",
+        ignoreCase: true,
+        filesWithMatches: false,
+        context: 0,
+        limit: 20,
+        regex: false,
+      });
+    } finally {
+      store.listMessages = originalListMessages;
+    }
+
+    if (!grep || !("matches" in grep)) throw new Error("Expected message grep results");
+    expect(grep.matches.map((match) => match.threadId)).toEqual([matching.threadId]);
+    expect(loadedThreadIds).toHaveLength(1);
   });
 
   it("searches with surrounding messages and exports canonical markdown", async () => {
@@ -1073,14 +1106,7 @@ describe("CLI socket server", () => {
     expect(await agentUnreadIds()).not.toContain(agentTarget.threadId);
   });
 
-  it("installs the managed chat instructions in every registered workspace on boot", async () => {
-    const agents = await readFile(join(workspaceRoot, "AGENTS.md"), "utf8");
-    expect(agents).toContain("# Workspace instructions");
-    expect(agents).toContain("Keep this user-owned line.");
-    expect(agents).toContain(AGENTS_CHAT_BEGIN_MARKER);
-    expect(agents).toContain(AGENTS_CHAT_END_MARKER);
-    expect(agents).toContain("`dohc chat inbox --as-agent`");
-    expect(agents).toContain("Always pass `--as-agent` on every chat command");
+  it("secures the CLI state directory, token, and socket", async () => {
     if (server) {
       expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
       expect((await stat(server.tokenPath)).mode & 0o777).toBe(0o600);
@@ -1088,49 +1114,5 @@ describe("CLI socket server", () => {
     }
     expect(calls.openWorkspace).toBe(0);
     expect(errors).toEqual([]);
-  });
-
-  it("installs chat instructions when a workspace is registered after boot", async () => {
-    const lateRoot = join(tempRoot, "late-workspace");
-    await mkdir(lateRoot, { recursive: true });
-    const lateWorkspace: CliRegistryWorkspace = {
-      workspaceId: "workspace-cli-late",
-      rootPath: lateRoot,
-    };
-    const lateStore = createLinkedChatStore(lateRoot);
-    await lateStore.listChannels({ workspaceId: lateWorkspace.workspaceId });
-    const lateDispatchDb = new DatabaseSync(
-      join(lateRoot, LINKED_CHAT_STORE_RELATIVE_PATH),
-    );
-    const lateDispatchStore = createAgentDispatchStore(lateDispatchDb);
-    const originalOpenWorkspace = serverOptions.openWorkspace;
-    serverOptions.listWorkspaces = () => [registryWorkspace, lateWorkspace];
-    serverOptions.openWorkspace = async (workspace) => {
-      if (workspace.workspaceId !== lateWorkspace.workspaceId) {
-        return originalOpenWorkspace(workspace);
-      }
-      return {
-        ...lateWorkspace,
-        store: lateStore,
-        dispatchStore: lateDispatchStore,
-        readOnly: false,
-        async fileObjectIdForPath() {
-          return null;
-        },
-        async assertWritable() {
-          calls.writable += 1;
-        },
-      };
-    };
-
-    try {
-      await invoke("channels", { cwd: lateRoot, actor: "human" });
-      const agents = await readFile(join(lateRoot, "AGENTS.md"), "utf8");
-      expect(agents).toContain(AGENTS_CHAT_BEGIN_MARKER);
-      expect(agents).toContain("`dohc chat inbox --as-agent`");
-    } finally {
-      lateDispatchDb.close();
-      await lateStore.close();
-    }
   });
 });

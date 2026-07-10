@@ -483,7 +483,7 @@ export const CHANNELS = {
   listChatThreadDecisions: "desktop:list-chat-thread-decisions",
   resolveChatDecision: "desktop:resolve-chat-decision",
   listChatThreadAttachments: "desktop:list-chat-thread-attachments",
-  chatRunRecordForMessage: "desktop:chat-run-record-for-message",
+  chatRunRecordsForThread: "desktop:chat-run-records-for-thread",
   listChatChannels: "desktop:list-chat-channels",
   createChatChannel: "desktop:create-chat-channel",
   listChannelThreads: "desktop:list-channel-threads",

@@ -43,7 +43,6 @@ import {
 } from "node:path";
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
-import { ensureAgentsChatBlock } from "./agentsChatBlock";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 export const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -239,7 +238,7 @@ function authorForCli(message: ChatMessage): CliAuthor {
 
 function authorForActor(identity: CliMainIdentity, actor: CliActor): CliAuthor {
   return actor === "agent"
-    ? { kind: "agent", displayName: `${identity.displayName}'s agent` }
+    ? { kind: "agent", displayName: identity.displayName }
     : { kind: "human", displayName: identity.displayName };
 }
 
@@ -1156,13 +1155,23 @@ async function dispatch(
         (!scopedChannel || thread.channel.id === scopedChannel.id) &&
         (!scopedThread || thread.thread.id === scopedThread.thread.id),
       );
-      const messagesByThread = await loadMessagesByThread(context, selected);
-      const searchableTexts = [...new Set(selected.flatMap((thread) => [
-        thread.thread.title,
-        ...(messagesByThread.get(thread.thread.id) ?? []).map((message) => message.body),
-      ]))];
+      // Substring grep asks FTS for candidate thread/message ids before any
+      // bodies are loaded. A candidate thread is then loaded in full so
+      // context lines remain exact; regex and FTS fallbacks retain the
+      // deadline-bounded full scan.
+      const fts = request.args.regex
+        ? null
+        : queryFtsCandidates(context, request.args.pattern);
+      const scanThreads = !request.args.regex && fts
+        ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
+        : selected;
+      const messagesByThread = await loadMessagesByThread(context, scanThreads);
       let matchesText: (text: string) => boolean;
       if (request.args.regex) {
+        const searchableTexts = [...new Set(scanThreads.flatMap((thread) => [
+          thread.thread.title,
+          ...(messagesByThread.get(thread.thread.id) ?? []).map((message) => message.body),
+        ]))];
         const regexMatches = await regexMatchesForTexts(
           {
             pattern: request.args.pattern,
@@ -1179,11 +1188,8 @@ async function dispatch(
         matchesText = substringTextMatcher(request.args);
       }
       const threshold = sinceThreshold(request.args.since, nowMs());
-      const fts = request.args.regex
-        ? null
-        : queryFtsCandidates(context, request.args.pattern);
       const matches: CliGrepMatch[] = [];
-      for (const thread of selected) {
+      for (const thread of scanThreads) {
         const messages = messagesByThread.get(thread.thread.id) ?? [];
         for (let index = 0; index < messages.length; index += 1) {
           const message = messages[index]!;
@@ -1268,15 +1274,7 @@ async function workspaceContextForRequest(
   if (workspace.readOnly) {
     throw new CliCommandError("chats are not available in a read-only shared view");
   }
-  const context = await options.openWorkspace(workspace);
-  if (!context.readOnly) {
-    try {
-      await ensureAgentsChatBlock(workspace.rootPath);
-    } catch (error) {
-      options.onError?.(error);
-    }
-  }
-  return context;
+  return options.openWorkspace(workspace);
 }
 
 export async function handleCliRequestLine(
@@ -1465,27 +1463,7 @@ export async function startCliServer(
   }
   server.unref();
   server.on("error", (error) => options.onError?.(error));
-  const ready = Promise.resolve()
-    .then(() => options.listWorkspaces())
-    .then((workspaces) => Promise.all(
-      workspaces
-        .filter((workspace) => !workspace.readOnly)
-        .map(async (workspace) => {
-          try {
-            await ensureAgentsChatBlock(workspace.rootPath);
-          } catch (error) {
-            try {
-              options.onError?.(error);
-            } catch {}
-          }
-        }),
-    ))
-    .then(() => undefined)
-    .catch((error: unknown) => {
-      try {
-        options.onError?.(error);
-      } catch {}
-    });
+  const ready = Promise.resolve();
 
   let closed = false;
   return {

@@ -174,8 +174,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.resolveChatDecision, payload),
   listChatThreadAttachments: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatThreadAttachments, payload),
-  chatRunRecordForMessage: (payload) =>
-    ipcRenderer.invoke(CHANNELS.chatRunRecordForMessage, payload),
+  chatRunRecordsForThread: (payload) =>
+    ipcRenderer.invoke(CHANNELS.chatRunRecordsForThread, payload),
   listChatChannels: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannels, payload),
   createChatChannel: (payload) =>

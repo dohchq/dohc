@@ -37,7 +37,7 @@ const showResult: ShowResult = {
     },
     {
       id: "msg_reply",
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       body: "Risk: block forks need a stable blockId.",
       createdAtMs: Date.parse("2026-07-03T05:06:07.000Z"),
       parentMessageId: "msg_root",
@@ -57,7 +57,7 @@ describe("markdown renderers", () => {
       Right now versioning pops a merge dialog...
       [attach: q3-plan.md]
 
-      **Ice's agent** · 2026-07-03T05:06:07.000Z · msg_reply · replying to msg_root · run rn_77xy
+      **Ice** · 2026-07-03T05:06:07.000Z · msg_reply · replying to msg_root · run rn_77xy
       Risk: block forks need a stable blockId.
       "
     `);
@@ -107,7 +107,7 @@ describe("markdown renderers", () => {
       renderChannels({
         channels: [
           engineering,
-          { id: "ch_agent", name: "Ice's agent", slug: "my-agent", kind: "agent" },
+          { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
         ],
       }),
     ).toMatchInlineSnapshot(`
@@ -141,7 +141,7 @@ describe("markdown renderers", () => {
           channel: engineering,
           threadId: "th_8f2k1c",
           messageId: "msg_reply",
-          author: { kind: "agent" as const, displayName: "Ice's agent" },
+          author: { kind: "agent" as const, displayName: "Ice" },
           createdAtMs: Date.parse("2026-07-03T05:06:07.000Z"),
           text: "  stable\n blockId  ",
           contextBefore: [
@@ -158,7 +158,7 @@ describe("markdown renderers", () => {
     };
     expect(renderGrep(result, { filesWithMatches: false, context: 1 })).toMatchInlineSnapshot(`
       "#engineering th_8f2k1c msg_root Ice de Vera 2026-07-03  - Earlier context
-      #engineering th_8f2k1c msg_reply Ice's agent 2026-07-03  stable blockId"
+      #engineering th_8f2k1c msg_reply Ice 2026-07-03  stable blockId"
     `);
     expect(renderGrep(result, { filesWithMatches: true, context: 1 })).toBe("th_8f2k1c");
     expect(

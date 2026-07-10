@@ -9,7 +9,7 @@ import {
   type AgentNotification,
   type AgentSessionLike,
 } from "./agentNotifications";
-import type { MentionCandidate } from "./mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 const userCandidates: MentionCandidate[] = [
   { id: "user:you", kind: "user", handle: "you", label: "You" },

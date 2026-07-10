@@ -112,10 +112,16 @@ export const GENERAL_CHANNEL_NAME = "general";
 export const GENERAL_CHANNEL_WIRE_ID = "channel_wire_general_v1";
 export const AGENT_CHANNEL_WIRE_ID = "channel_wire_agent_v1";
 export const AGENT_CHANNEL_NAME = "My agent";
+const OPENING_MESSAGE_BODY_SNIPPET_MAX_CHARS = 500;
 // Display-title derivation lives in chatThreadTitle.ts (a leaf shared with
 // the search index rebuild); re-exported here so store consumers keep one
 // import surface.
 export { THREAD_SNIPPET_TITLE_MAX_CHARS, UNTITLED_THREAD_FALLBACK_TITLE, threadSnippetTitle };
+
+function openingMessageBodySnippet(body: string): string {
+  if (body.length <= OPENING_MESSAGE_BODY_SNIPPET_MAX_CHARS) return body;
+  return `${body.slice(0, OPENING_MESSAGE_BODY_SNIPPET_MAX_CHARS - 1).trimEnd()}…`;
+}
 
 export class LinkedChatStoreError extends Error {
   readonly code: LinkedChatStoreErrorCode;
@@ -1264,7 +1270,7 @@ export function createLinkedChatStore(
     return dbHandle;
   }
 
-  function serialize<T>(task: (db: SqliteDb) => Promise<T>): Promise<T> {
+  function serialize<T>(task: (db: SqliteDb) => T): Promise<T> {
     const run = writeChain.then(() => withTransaction(task), () => withTransaction(task));
     writeChain = run.then(
       () => undefined,
@@ -1282,11 +1288,15 @@ export function createLinkedChatStore(
     return task(db());
   }
 
-  async function withTransaction<T>(task: (db: SqliteDb) => Promise<T>): Promise<T> {
+  function withTransaction<T>(task: (db: SqliteDb) => T): T {
     const txDb = db();
     try {
       txDb.exec("BEGIN IMMEDIATE");
-      const result = await task(txDb);
+      // Every linked-chat transaction is synchronous. Committing in the same
+      // turn is important because node:sqlite waits synchronously on a busy
+      // second connection: yielding here can leave our write lock held while
+      // that connection blocks the event loop that would release it.
+      const result = task(txDb);
       txDb.exec("COMMIT");
       return result;
     } catch (error) {
@@ -1357,7 +1367,7 @@ export function createLinkedChatStore(
 
   return {
     createThread(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const title = normalizeThreadTitle(input.title);
         // Exactly-one-owner at creation: this path creates FILE-LINKED
@@ -1434,7 +1444,7 @@ export function createLinkedChatStore(
     },
 
     createChannel(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const name = normalizeChannelName(input.name);
         const kind = normalizeChannelKind(input.kind);
@@ -1503,7 +1513,7 @@ export function createLinkedChatStore(
     // Idempotent inside the write chain: first chat use creates "general",
     // every later call returns the same row.
     ensureGeneralChannel(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const slug = channelSlugForName(GENERAL_CHANNEL_NAME);
         const existing = db
@@ -1556,7 +1566,7 @@ export function createLinkedChatStore(
     },
 
     ensureAgentChannel(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const mappedChannelId = channelIdForWireId(db, workspaceId, AGENT_CHANNEL_WIRE_ID);
         if (mappedChannelId !== undefined) {
@@ -1710,7 +1720,7 @@ export function createLinkedChatStore(
     // Thread + first message in ONE transaction (the fast composer path): a
     // failed send can never strand an empty thread.
     startChannelThread(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const channel = requireWorkspaceChannel(db, workspaceId, input.channelId);
         const title = normalizeOptionalThreadTitle(input.title);
@@ -1850,9 +1860,13 @@ export function createLinkedChatStore(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         return withDb((db) => {
           const channel = requireWorkspaceChannel(db, workspaceId, input.channelId);
-          return db
+          const rows = db
             .prepare(
               `SELECT ${THREAD_SELECT_COLUMNS},
+                    opening.message_id AS opening_message_id,
+                    opening.author_kind AS opening_author_kind,
+                    opening.author_display_name AS opening_author_display_name,
+                    opening.created_at_ms AS opening_created_at_ms,
                     (SELECT COUNT(*) FROM chat_messages m
                      WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id)
                       AS message_count,
@@ -1868,12 +1882,51 @@ export function createLinkedChatStore(
                        AND d.thread_id = t.thread_id
                        AND d.state = 'open') AS open_decision_count
                FROM chat_threads t
+               LEFT JOIN chat_messages opening
+                 ON opening.workspace_id = t.workspace_id
+                AND opening.thread_id = t.thread_id
+                AND opening.message_id = (
+                  SELECT first.message_id FROM chat_messages first
+                  WHERE first.workspace_id = t.workspace_id
+                    AND first.thread_id = t.thread_id
+                  ORDER BY first.created_at_ms, first.message_id LIMIT 1
+                )
                WHERE t.workspace_id = ? AND t.channel_id = ?
                ORDER BY t.updated_at_ms DESC, t.thread_id DESC`,
             )
-            .all(workspaceId, channel.id)
+            .all(workspaceId, channel.id);
+          const reactionsByMessageId = new Map<ChatMessageId, ChatReaction[]>();
+          const reactionRows = db
+            .prepare(
+              `SELECT r.*
+               FROM chat_threads t
+               JOIN chat_messages opening
+                 ON opening.workspace_id = t.workspace_id
+                AND opening.thread_id = t.thread_id
+                AND opening.message_id = (
+                  SELECT first.message_id FROM chat_messages first
+                  WHERE first.workspace_id = t.workspace_id
+                    AND first.thread_id = t.thread_id
+                  ORDER BY first.created_at_ms, first.message_id LIMIT 1
+                )
+               JOIN chat_reactions r
+                 ON r.workspace_id = opening.workspace_id
+                AND r.thread_id = opening.thread_id
+                AND r.message_id = opening.message_id
+               WHERE t.workspace_id = ? AND t.channel_id = ? AND r.state = 'added'
+               ORDER BY r.at_ms, r.reaction_id`,
+            )
+            .all(workspaceId, channel.id);
+          for (const reactionRow of reactionRows) {
+            const reaction = reactionFromRow(reactionRow);
+            const reactions = reactionsByMessageId.get(reaction.messageId) ?? [];
+            reactions.push(reaction);
+            reactionsByMessageId.set(reaction.messageId, reactions);
+          }
+          return rows
             .map((row): ChannelThreadSummary => {
               const messageCount = numberValue(row.message_count);
+              const openingMessageId = optionalString(row.opening_message_id);
               // Fail closed on negative/non-integer cursors; clamp a (not yet
               // repaired) over-count cursor to the real message count so the
               // summary never claims more read than exists.
@@ -1887,6 +1940,20 @@ export function createLinkedChatStore(
                 lastReadSequence,
                 unreadCount: Math.max(0, messageCount - lastReadSequence),
                 openDecisionCount: numberValue(row.open_decision_count),
+                ...(openingMessageId !== undefined
+                  ? {
+                      openingMessage: {
+                        id: openingMessageId,
+                        author: {
+                          kind: actorKindValue(row.opening_author_kind),
+                          displayName: stringValue(row.opening_author_display_name),
+                        },
+                        createdAtMs: numberValue(row.opening_created_at_ms),
+                        bodySnippet: openingMessageBodySnippet(stringValue(row.first_body)),
+                        reactions: reactionsByMessageId.get(openingMessageId) ?? [],
+                      },
+                    }
+                  : {}),
               };
             })
             .map(cloneJson);
@@ -1895,7 +1962,7 @@ export function createLinkedChatStore(
     },
 
     markThreadRead(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const upToSequence = normalizeReadSequence(input.upToSequence);
         const expectedRevision = normalizeExpectedRevision(input.expectedRevision);
@@ -1949,7 +2016,7 @@ export function createLinkedChatStore(
     },
 
     sendMessage(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const authorUserId = normalizeAuthorUserId(input.authorUserId);
@@ -2068,7 +2135,7 @@ export function createLinkedChatStore(
     },
 
     resolveChatDecision(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const resolvedByMessageId = normalizeParentMessageId(input.resolvedByMessageId);
@@ -2136,7 +2203,7 @@ export function createLinkedChatStore(
     },
 
     markThreadReadByAgent(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const expectedRevision = normalizeExpectedRevision(input.expectedRevision);
@@ -2203,16 +2270,6 @@ export function createLinkedChatStore(
           next.updatedAtMs,
         );
         return cloneJson(next);
-      });
-    },
-
-    agentReadState(workspaceIdInput, threadId) {
-      return afterWrites(async () => {
-        const workspaceId = normalizeWorkspaceId(workspaceIdInput);
-        return withDb((db) => {
-          const thread = requireWorkspaceThread(db, workspaceId, threadId);
-          return cloneJson(agentReadStateForThread(db, workspaceId, thread.id));
-        });
       });
     },
 
@@ -2296,7 +2353,7 @@ export function createLinkedChatStore(
     },
 
     setReaction(input) {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         // requireWorkspaceThread fails closed on a foreign-workspace thread;
         // the message must live in THIS thread so a reaction can never target a
@@ -2419,7 +2476,7 @@ export function createLinkedChatStore(
     },
 
     applyReplicationOp(input): Promise<SyncApplyResult> {
-      return serialize(async (db) => {
+      return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         if (
           typeof input.originId !== "string" ||

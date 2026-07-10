@@ -7,7 +7,6 @@ import type {
   AgentDispatchStore,
   AgentRunRecord,
   ChannelThreadSummary,
-  ChatAgentReadState,
   ChatActor,
   ChatAttachment,
   ChatAttachmentAddPayload,
@@ -319,14 +318,6 @@ export const engineContractCompileCheck = (() => {
       state: decisionState,
       atMs: 6,
     };
-    const agentReadState: ChatAgentReadState = {
-      workspaceId,
-      threadId,
-      lastReadCreatedAtMs: 6,
-      lastReadMessageId: messageId,
-      revision: 1,
-      updatedAtMs: 7,
-    };
     const mention: ChatMentionRecord = {
       threadId,
       messageId,
@@ -482,9 +473,11 @@ export const engineContractCompileCheck = (() => {
     type RecordRunMessage = AgentDispatchStore["recordRunMessage"];
     type ListRunMessages = AgentDispatchStore["listRunMessages"];
     type RunIdForMessage = AgentDispatchStore["runIdForMessage"];
+    type RunRecordsForThread = AgentDispatchStore["runRecordsForThread"];
     const recordRunMessage: RecordRunMessage | null = null;
     const listRunMessages: ListRunMessages | null = null;
     const runIdForMessage: RunIdForMessage | null = null;
+    const runRecordsForThread: RunRecordsForThread | null = null;
 
     const surface: SearchSurface = "file";
     const visibility: SearchVisibility = { searchable: true, projectionFileAccess: access };
@@ -550,7 +543,6 @@ export const engineContractCompileCheck = (() => {
     void attachment;
     void message;
     void decision;
-    void agentReadState;
     void mention;
     void projection;
     void chatSend;
@@ -577,6 +569,7 @@ export const engineContractCompileCheck = (() => {
     void recordRunMessage;
     void listRunMessages;
     void runIdForMessage;
+    void runRecordsForThread;
     void searchPolicy;
     void searchResult;
     void searchOptions;

@@ -64,7 +64,7 @@ const bridgeMock = {
   listChatThreadDecisions: vi.fn(),
   resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
-  chatRunRecordForMessage: vi.fn(),
+  chatRunRecordsForThread: vi.fn(),
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   sendChatMessage: vi.fn(),
@@ -166,7 +166,7 @@ beforeEach(() => {
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
   bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
-  bridgeMock.chatRunRecordForMessage.mockResolvedValue({ run: null });
+  bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.onWorkspaceActivity.mockReturnValue(() => undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });

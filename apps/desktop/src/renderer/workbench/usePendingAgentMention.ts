@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { MentionCandidate } from "./mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 // One @-mention that must reach the agent through the chat-reply path.
 export interface AgentMentionInput {

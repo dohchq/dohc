@@ -20,6 +20,7 @@ import {
   RUNNER_KILL_GRACE_MS,
   RUNNER_SELF_TEST_TIMEOUT_MS,
   createChatDispatchService,
+  messageCanTrigger,
   tokenizeRunnerCommand,
   type ChatDispatchIdentity,
   type ChatDispatchPresenceInput,
@@ -87,7 +88,11 @@ interface FixtureOptions {
   identity?: ChatDispatchIdentity;
   serviceNotesWritable?: boolean;
   pumpWorkspace?: boolean;
-  onQueueSync?: (workspaceId: string, chat: LinkedChatStore) => void | Promise<void>;
+  pumpWorkspaces?: ChatDispatchWorkspace[];
+  onQueueSync?: (
+    workspaceId: string,
+    chat: LinkedChatStore,
+  ) => void | boolean | Promise<void | boolean>;
   temporaryRunActivity?: boolean;
 }
 
@@ -200,7 +205,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const service = createChatDispatchService({
     workspaceFor: (workspaceId) => (workspaceId === WORKSPACE_ID ? workspace : null),
     listOpenWorkspaces: () => [],
-    listSyncWorkspaces: () => (options.pumpWorkspace ? [workspace] : []),
+    listSyncWorkspaces: () =>
+      options.pumpWorkspaces ?? (options.pumpWorkspace ? [workspace] : []),
     chatStoreFor: () => chat,
     dispatchStoreFor: () => dispatch,
     readRunnerSettings: async () => ({ ...runner }),
@@ -214,7 +220,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     isPackaged: () => false,
     queueSync: async (workspaceId) => {
       syncRequests.push(workspaceId);
-      await options.onQueueSync?.(workspaceId, chat);
+      return options.onQueueSync?.(workspaceId, chat);
     },
     ...(options.temporaryRunActivity
       ? {
@@ -335,7 +341,7 @@ async function createAgentThread(
     author:
       actor === "human"
         ? { kind: "human", displayName: "Ice" }
-        : { kind: "agent", displayName: "Ice's agent" },
+        : { kind: "agent", displayName: "Ice" },
     ...(input.authorUserId === undefined ? {} : { authorUserId: input.authorUserId }),
     ...(input.origin === undefined ? {} : { origin: input.origin }),
     body: input.body,
@@ -352,7 +358,7 @@ async function linkAgentReply(
   const message = await fixture.chat.sendMessage({
     workspaceId: WORKSPACE_ID,
     threadId,
-    author: { kind: "agent", displayName: "Ice's agent" },
+    author: { kind: "agent", displayName: "Ice" },
     origin: "cli",
     body,
   });
@@ -384,6 +390,19 @@ afterEach(async () => {
 describe("chatDispatchService", () => {
   it("allows ten dispatches per rolling budget window", () => {
     expect(CHAT_DISPATCH_BUDGET_MAX).toBe(10);
+  });
+
+  it("provisions the agent channel during the first trigger scan", async () => {
+    const fixture = await createFixture({ runner: { enabled: false } });
+
+    fixture.service.setPaused(true);
+    await activate(fixture);
+
+    expect(
+      (await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).filter(
+        (channel) => channel.kind === "agent",
+      ),
+    ).toHaveLength(1);
   });
 
   it("records only owner human UI triggers and deduplicates repeated scans", async () => {
@@ -424,7 +443,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       body: "@agent does not recursively dispatch itself.",
     });
 
@@ -440,6 +459,126 @@ describe("chatDispatchService", () => {
       fixture.dispatch.listPending(WORKSPACE_ID).map((record) => record.triggerMessageId),
     ).toEqual([agentHuman.messageId, localWithoutRelayIdentity.messageId, mention.message.id]);
     expect(fixture.spawnCalls).toHaveLength(0);
+  });
+
+  it("keeps the SQL trigger predicate aligned with the service predicate matrix", async () => {
+    const fixture = await createFixture();
+    const agentChannel = await fixture.chat.ensureAgentChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const generalChannel = await fixture.chat.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const candidates: Array<{
+      message: Awaited<ReturnType<LinkedChatStore["startChannelThread"]>>["message"];
+      channelKind: "agent" | "channel";
+      mentionsAgent: boolean;
+    }> = [];
+    let caseNumber = 0;
+    for (const authorKind of ["human", "agent"] as const) {
+      for (const cliOrigin of [false, true]) {
+        for (const channelKind of ["agent", "channel"] as const) {
+          for (const mentionsAgent of [false, true]) {
+            caseNumber += 1;
+            const started = await fixture.chat.startChannelThread({
+              workspaceId: WORKSPACE_ID,
+              channelId:
+                channelKind === "agent" ? agentChannel.id : generalChannel.id,
+              author: { kind: authorKind, displayName: "Ice" },
+              authorUserId: "user_local",
+              ...(cliOrigin ? { origin: "cli" as const } : {}),
+              body: `Trigger predicate case ${caseNumber}${
+                mentionsAgent ? " @agent" : ""
+              }`,
+            });
+            candidates.push({
+              message: started.message,
+              channelKind,
+              mentionsAgent,
+            });
+          }
+        }
+      }
+    }
+
+    const recordedCount = fixture.dispatch.recordEligibleTriggers({
+      workspaceId: WORKSPACE_ID,
+      verifiedUserId: "user_local",
+    });
+    const recordedIds = new Set(
+      fixture.dispatch
+        .listPending(WORKSPACE_ID)
+        .map((record) => record.triggerMessageId),
+    );
+    const expected = candidates.filter(({ message, channelKind, mentionsAgent }) =>
+      messageCanTrigger(message, "user_local", {
+        channelKind,
+        mentionsAgent,
+      }),
+    );
+
+    expect(recordedCount).toBe(expected.length);
+    for (const candidate of candidates) {
+      expect(recordedIds.has(candidate.message.id)).toBe(
+        messageCanTrigger(candidate.message, "user_local", {
+          channelKind: candidate.channelKind,
+          mentionsAgent: candidate.mentionsAgent,
+        }),
+      );
+    }
+  });
+
+  it("advances across all scanned messages while overlapping cursor ties", async () => {
+    const fixture = await createFixture();
+    const generalChannel = await fixture.chat.ensureGeneralChannel({
+      workspaceId: WORKSPACE_ID,
+    });
+    const unrelated = await fixture.chat.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: generalChannel.id,
+      author: { kind: "human", displayName: "Ice" },
+      authorUserId: "user_local",
+      body: "A general message with no agent mention.",
+    });
+    expect(
+      fixture.dispatch.recordEligibleTriggers({
+        workspaceId: WORKSPACE_ID,
+        verifiedUserId: "user_local",
+      }),
+    ).toBe(0);
+    expect(
+      fixture.dispatchDb
+        .prepare(
+          `SELECT max_created_at_ms
+           FROM chat_dispatch_scan_cursor
+           WHERE workspace_id = ?`,
+        )
+        .get(WORKSPACE_ID),
+    ).toEqual({ max_created_at_ms: unrelated.message.createdAtMs });
+
+    const tied = await createAgentThread(fixture, {
+      body: "A trigger tied at the cursor timestamp.",
+      authorUserId: "user_local",
+    });
+    fixture.dispatchDb
+      .prepare(
+        `UPDATE chat_messages
+         SET created_at_ms = ?
+         WHERE workspace_id = ? AND message_id = ?`,
+      )
+      .run(unrelated.message.createdAtMs, WORKSPACE_ID, tied.messageId);
+
+    expect(
+      fixture.dispatch.recordEligibleTriggers({
+        workspaceId: WORKSPACE_ID,
+        verifiedUserId: "user_local",
+      }),
+    ).toBe(1);
+    expect(
+      fixture.dispatch
+        .listPending(WORKSPACE_ID)
+        .map((record) => record.triggerMessageId),
+    ).toEqual([tied.messageId]);
   });
 
   it("keeps workspace FIFO to one live run and builds the configured spawn contract", async () => {
@@ -622,6 +761,38 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[0]!.args.at(-1)).toContain("Remote tray-only task.");
   });
 
+  it("starts workspace pump syncs concurrently", async () => {
+    vi.useFakeTimers();
+    const secondWorkspace = {
+      workspaceId: "workspace-chat-dispatch-second",
+      rootPath: "/unused/second-workspace",
+    };
+    let releaseFirst: (() => void) | undefined;
+    const firstSync = new Promise<void>((resolveFirst) => {
+      releaseFirst = resolveFirst;
+    });
+    const starts: string[] = [];
+    const fixture = await createFixture({
+      pumpWorkspaces: [
+        { workspaceId: WORKSPACE_ID, rootPath: "/unused/first-workspace" },
+        secondWorkspace,
+      ],
+      onQueueSync: async (workspaceId) => {
+        starts.push(workspaceId);
+        if (workspaceId === WORKSPACE_ID) await firstSync;
+        return false;
+      },
+    });
+
+    fixture.service.start();
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
+    await flushMicrotasks();
+    expect(starts).toEqual([WORKSPACE_ID, secondWorkspace.workspaceId]);
+
+    releaseFirst?.();
+    await flushMicrotasks();
+  });
+
   it("fails no-runner triggers and keeps one setup note per thread", async () => {
     const fixture = await createFixture({ runner: { enabled: false } });
     const trigger = await createAgentThread(fixture, {
@@ -645,7 +816,14 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
     });
-    expect(messages.filter((message) => message.body === NO_RUNNER_NOTE)).toHaveLength(1);
+    const setupNotes = messages.filter(
+      (message) => message.body === NO_RUNNER_NOTE,
+    );
+    expect(setupNotes).toHaveLength(1);
+    expect(setupNotes[0]?.author).toEqual({
+      kind: "agent",
+      displayName: "Ice",
+    });
 
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
@@ -1089,7 +1267,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId,
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       origin: "cli",
       body: "self-test ok",
     });

@@ -65,6 +65,14 @@ function normalizeWorkspaceId(value: WorkspaceId): WorkspaceId {
   return normalizeRequiredId(value, "Workspace id");
 }
 
+function normalizeOptionalVerifiedUserId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value || value.length > 512 || value.includes("\u0000")) {
+    throw invalidInput("Verified user id is invalid.");
+  }
+  return value;
+}
+
 function normalizeCommand(value: string | undefined): string {
   if (value === undefined) return "";
   if (typeof value !== "string" || value.includes("\u0000")) {
@@ -352,6 +360,98 @@ export function createAgentDispatchStore(
   }
 
   return {
+    recordEligibleTriggers(input) {
+      const workspaceId = normalizeWorkspaceId(input.workspaceId);
+      const verifiedUserId = normalizeOptionalVerifiedUserId(input.verifiedUserId);
+      const atMs = timestamp();
+      return withImmediateTransaction(() => {
+        const cursorRow = db
+          .prepare(
+            `SELECT max_created_at_ms
+             FROM chat_dispatch_scan_cursor
+             WHERE workspace_id = ?`,
+          )
+          .get(workspaceId);
+        const maxCreatedAtMs = cursorRow
+          ? timestampValue(cursorRow.max_created_at_ms)
+          : undefined;
+        // Keep a one-millisecond overlap. Chat timestamps are integer
+        // milliseconds, so this rechecks every row tied at the high-water mark
+        // while the ledger's primary key keeps the scan idempotent.
+        const scanAfterMs = maxCreatedAtMs === undefined
+          ? -1
+          : Math.max(-1, maxCreatedAtMs - 1);
+        const recorded = db
+          .prepare(
+            `INSERT OR IGNORE INTO chat_dispatch_ledger (
+               workspace_id, trigger_message_id, thread_id, state, run_id,
+               attempt_count, created_at_ms, updated_at_ms
+             )
+             SELECT m.workspace_id, m.message_id, m.thread_id, 'pending', NULL,
+                    0, m.created_at_ms, ?
+             FROM chat_messages m
+             JOIN chat_threads t
+               ON t.workspace_id = m.workspace_id
+              AND t.thread_id = m.thread_id
+             LEFT JOIN chat_channels c
+               ON c.workspace_id = t.workspace_id
+              AND c.channel_id = t.channel_id
+             LEFT JOIN chat_dispatch_ledger ledger
+               ON ledger.workspace_id = m.workspace_id
+              AND ledger.trigger_message_id = m.message_id
+             WHERE m.workspace_id = ?
+               AND m.created_at_ms > ?
+               AND ledger.trigger_message_id IS NULL
+               AND (
+                 c.kind = 'agent'
+                 OR EXISTS (
+                   SELECT 1
+                   FROM chat_mentions mention
+                   WHERE mention.workspace_id = m.workspace_id
+                     AND mention.message_id = m.message_id
+                     AND mention.handle = 'agent'
+                 )
+               )
+               AND m.author_kind = 'human'
+               AND COALESCE(m.origin, '') <> 'cli'
+               AND (
+                 m.author_user_id IS NULL
+                 OR (? IS NOT NULL AND m.author_user_id = ?)
+               )`,
+          )
+          .run(
+            atMs,
+            workspaceId,
+            scanAfterMs,
+            verifiedUserId ?? null,
+            verifiedUserId ?? null,
+          );
+        const scanned = db
+          .prepare(
+            `SELECT MAX(m.created_at_ms) AS max_created_at_ms
+             FROM chat_messages m
+             WHERE m.workspace_id = ?
+               AND m.created_at_ms > ?`,
+          )
+          .get(workspaceId, scanAfterMs);
+        const scannedMax = optionalTimestamp(scanned?.max_created_at_ms);
+        if (scannedMax !== undefined) {
+          db.prepare(
+            `INSERT INTO chat_dispatch_scan_cursor (
+               workspace_id, max_created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?)
+             ON CONFLICT(workspace_id) DO UPDATE SET
+               max_created_at_ms = MAX(
+                 chat_dispatch_scan_cursor.max_created_at_ms,
+                 excluded.max_created_at_ms
+               ),
+               updated_at_ms = excluded.updated_at_ms`,
+          ).run(workspaceId, scannedMax, atMs);
+        }
+        return recorded.changes;
+      });
+    },
+
     recordTrigger(input) {
       const workspaceId = normalizeWorkspaceId(input.workspaceId);
       const triggerMessageId = normalizeRequiredId(input.triggerMessageId, "Trigger message id");
@@ -657,6 +757,25 @@ export function createAgentDispatchStore(
         )
         .get(workspaceId, messageId);
       return row ? stringValue(row.run_id) : null;
+    },
+
+    runRecordsForThread(workspaceIdInput, threadIdInput) {
+      const workspaceId = normalizeWorkspaceId(workspaceIdInput);
+      const threadId = normalizeRequiredId(threadIdInput, "Thread id");
+      const rows = db
+        .prepare(
+          `SELECT links.message_id AS linked_message_id, runs.*
+           FROM run_message_links links
+           JOIN agent_run_records runs
+             ON runs.workspace_id = links.workspace_id
+            AND runs.run_id = links.run_id
+           WHERE runs.workspace_id = ? AND runs.thread_id = ?
+           ORDER BY links.message_id`,
+        )
+        .all(workspaceId, threadId);
+      return Object.fromEntries(
+        rows.map((row) => [stringValue(row.linked_message_id), runFromRow(row)]),
+      );
     },
 
     getRunRecord(runIdInput) {

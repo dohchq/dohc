@@ -12,6 +12,7 @@ import type {
   AgentDispatchClaim,
   AgentDispatchStore,
   AgentRunRecord,
+  ChatChannelKind,
   ChatMessage,
   LinkedChatStore,
 } from "@dohc/workspace-engine";
@@ -276,10 +277,15 @@ export function buildRunnerPrompt(threadMarkdown: string, threadId: string): str
 Work on the request represented by this thread. Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`. Report outcomes, not tool logs. On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
 }
 
-function messageCanTrigger(
+export function messageCanTrigger(
   message: ChatMessage,
   verifiedUserId: string | undefined,
+  context: {
+    channelKind: ChatChannelKind | undefined;
+    mentionsAgent: boolean;
+  },
 ): boolean {
+  if (context.channelKind !== "agent" && !context.mentionsAgent) return false;
   if (message.author.kind !== "human" || message.origin === "cli") return false;
   if (message.authorUserId === undefined) return true;
   return verifiedUserId !== undefined && message.authorUserId === verifiedUserId;
@@ -498,7 +504,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       threadId,
       author: {
         kind: "agent",
-        displayName: runnerDisplayName(identity.displayName),
+        displayName: identity.displayName,
       },
       body,
     });
@@ -572,11 +578,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): void {
     if (processHandle.hasExited() || !validPid(processHandle.pid)) return;
     if (platform === "win32" && processHandle.rawChild) {
-      if (signal === "SIGTERM") {
-        void killChildTreeWin32(processHandle.rawChild).catch(() => undefined);
-      } else {
-        void killChildTreeWin32(processHandle.rawChild).catch(() => undefined);
-      }
+      void killChildTreeWin32(processHandle.rawChild).catch(() => undefined);
       return;
     }
     try {
@@ -936,60 +938,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function scanTriggers(workspace: ChatDispatchWorkspace): Promise<void> {
-    const chat = options.chatStoreFor(workspace);
-    const identity = await options.identityFor(workspace.workspaceId);
-    const agentChannel = await chat.ensureAgentChannel({
-      workspaceId: workspace.workspaceId,
-    });
-    const [agentThreads, mentions] = await Promise.all([
-      chat.listChannelThreads({
+    const [identity] = await Promise.all([
+      options.identityFor(workspace.workspaceId),
+      options.chatStoreFor(workspace).ensureAgentChannel({
         workspaceId: workspace.workspaceId,
-        channelId: agentChannel.id,
       }),
-      chat.listMentionsForHandle(workspace.workspaceId, "agent"),
     ]);
-    const agentThreadIds = new Set(
-      agentThreads.map((summary) => summary.thread.id),
-    );
-    const mentionedMessageIds = new Set(
-      mentions.map((mention) => mention.messageId),
-    );
-    const threadIds = new Set([
-      ...agentThreadIds,
-      ...mentions.map((mention) => mention.threadId),
-    ]);
-    const messages = (
-      await Promise.all(
-        [...threadIds].map((threadId) =>
-          chat.listMessages({
-            workspaceId: workspace.workspaceId,
-            threadId,
-          }),
-        ),
-      )
-    )
-      .flat()
-      .filter(
-        (message) =>
-          (agentThreadIds.has(message.threadId) ||
-            mentionedMessageIds.has(message.id)) &&
-          messageCanTrigger(message, identity.verifiedUserId),
-      )
-      .sort(
-        (left, right) =>
-          left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id),
-      );
-    const dispatch = options.dispatchStoreFor(workspace);
-    let recordedTrigger = false;
-    for (const message of messages) {
-      recordedTrigger =
-        dispatch.recordTrigger({
-          workspaceId: workspace.workspaceId,
-          triggerMessageId: message.id,
-          threadId: message.threadId,
-        }) || recordedTrigger;
-    }
-    if (recordedTrigger) notifyRunUpdated(workspace.workspaceId);
+    const recordedCount = options.dispatchStoreFor(workspace).recordEligibleTriggers({
+      workspaceId: workspace.workspaceId,
+      ...(identity.verifiedUserId
+        ? { verifiedUserId: identity.verifiedUserId }
+        : {}),
+    });
+    if (recordedCount > 0) notifyRunUpdated(workspace.workspaceId);
   }
 
   async function startupSweep(workspace: ChatDispatchWorkspace): Promise<void> {
@@ -1068,17 +1029,31 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   async function pump(): Promise<void> {
     const workspaces = options.listSyncWorkspaces();
-    for (const workspace of workspaces) {
-      try {
-        const ready = await options.queueSync(workspace.workspaceId);
-        if (ready === false) continue;
-      } catch (error) {
-        // A transient pull failure must not prevent scans of locally-cached
-        // triggers or starve the remaining registered workspaces.
-        reportError(error);
-      }
-      await scanWorkspace(workspace.workspaceId).catch(reportError);
-    }
+    await Promise.allSettled(
+      workspaces.map(async (workspace) => {
+        try {
+          const ready = await options.queueSync(workspace.workspaceId);
+          if (ready === false) return;
+        } catch (cause) {
+          // A transient pull failure must not prevent a scan of this
+          // workspace's locally-cached triggers.
+          const error = new Error(
+            `Agent dispatch sync failed for workspace ${workspace.workspaceId}.`,
+          );
+          (error as Error & { cause?: unknown }).cause = cause;
+          reportError(error);
+        }
+        try {
+          await scanWorkspace(workspace.workspaceId);
+        } catch (cause) {
+          const error = new Error(
+            `Agent dispatch scan failed for workspace ${workspace.workspaceId}.`,
+          );
+          (error as Error & { cause?: unknown }).cause = cause;
+          reportError(error);
+        }
+      }),
+    );
   }
 
   function schedulePump(): void {
@@ -1384,6 +1359,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pumpTimer = null;
     const pumpAtStop = pumpInFlight;
     const appQuitRuns: LiveRun[] = [];
+    const runWorkspacesToRelease: LiveRun[] = [];
     const quitProcesses: RunnerProcess[] = [];
     for (const test of selfTests.values()) {
       if (test.killEscalation) clearTimeout(test.killEscalation);
@@ -1397,14 +1373,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         live.finalized = true;
         clearTimeout(live.timeout);
         if (live.presenceHeartbeat) clearInterval(live.presenceHeartbeat);
-        options.dispatchStoreFor(live.workspace).failRun({
-          runId: live.claim.run.runId,
-          exitCode: APP_QUIT_EXIT_CODE,
-          reason: "app-quit",
-        });
         appQuitRuns.push(live);
       }
+      clearLiveAttribution(live);
+      runWorkspacesToRelease.push(live);
       quitProcesses.push(live.child);
+    }
+    for (const live of appQuitRuns) {
+      options.dispatchStoreFor(live.workspace).failRun({
+        runId: live.claim.run.runId,
+        exitCode: APP_QUIT_EXIT_CODE,
+        reason: "app-quit",
+      });
     }
     const quitTerminations = quitProcesses.map(terminateForAppQuit);
     await Promise.all([
@@ -1430,13 +1410,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     selfTestReservations.clear();
     runReservations.clear();
     budgetBypassThreads.clear();
-    for (const live of appQuitRuns) {
-      clearLiveAttribution(live);
-    }
-    for (const live of liveRuns.values()) {
-      if (!appQuitRuns.includes(live)) clearLiveAttribution(live);
-    }
-    const runWorkspacesToRelease = [...liveRuns.values()];
     liveRuns.clear();
     await Promise.all([...workspaceChains.values()].map((chain) => chain.catch(() => undefined)));
     await Promise.all(quitTerminations);

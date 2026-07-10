@@ -57,6 +57,20 @@ function message(overrides: Partial<ChatMessageRecord> = {}): ChatMessageRecord 
   };
 }
 
+function openingPreview(
+  overrides: Partial<NonNullable<ChannelThreadRecord["openingMessage"]>> = {},
+): NonNullable<ChannelThreadRecord["openingMessage"]> {
+  return {
+    id: "message-1",
+    authorKind: "human",
+    authorDisplayName: "You",
+    bodySnippet: "Should we ship on Friday?",
+    createdAtMs: NOW,
+    reactions: [],
+    ...overrides,
+  };
+}
+
 const fileThread: FileChatThreadRecord = {
   id: "thread-file-1",
   title: "Naming discussion",
@@ -94,7 +108,7 @@ const bridgeMock = {
   listChatThreadDecisions: vi.fn(),
   resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
-  chatRunRecordForMessage: vi.fn(),
+  chatRunRecordsForThread: vi.fn(),
   sendChatMessage: vi.fn(),
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
@@ -135,7 +149,7 @@ beforeEach(() => {
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
   bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
-  bridgeMock.chatRunRecordForMessage.mockResolvedValue({ run: null });
+  bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.chatDispatchStateForThread.mockResolvedValue({
     liveRun: false,
@@ -259,14 +273,37 @@ describe("ChatsView channels", () => {
 describe("ChatsView hybrid feed", () => {
   it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
     const user = userEvent.setup();
-    const humanThread = thread({ messageCount: 3, openDecisionCount: 1 });
+    const reaction = {
+      reactionId: "reaction-1",
+      messageId: "message-1",
+      threadId: "thread-1",
+      emoji: "👍",
+      authorId: "you@example.com",
+      authorKind: "human" as const,
+      authorDisplayName: "You",
+    };
+    const humanThread = thread({
+      messageCount: 3,
+      openDecisionCount: 1,
+      openingMessage: openingPreview({
+        bodySnippet: "Should we ship on Friday? The launch checklist is ready.",
+        reactions: [reaction],
+      }),
+    });
     const agentThread = thread({
       id: "thread-agent",
       title: "Pipeline review complete",
       messageCount: 1,
+      openingMessage: openingPreview({
+        id: "message-agent",
+        authorKind: "agent",
+        authorDisplayName: "You",
+        bodySnippet: "The release pipeline is green across all checks.",
+      }),
     });
     bridgeMock.listChannelThreads.mockResolvedValue({
       threads: [humanThread, agentThread],
+      viewerAuthorId: "you@example.com",
     });
     bridgeMock.listChatMessages.mockImplementation(
       ({ threadId }: { threadId: string }) =>
@@ -277,7 +314,7 @@ describe("ChatsView hybrid feed", () => {
                   id: "message-agent",
                   threadId,
                   authorKind: "agent",
-                  authorDisplayName: "You's agent",
+                  authorDisplayName: "You",
                   body: "The release pipeline is green across all checks.",
                 })
               : message({
@@ -290,20 +327,7 @@ describe("ChatsView hybrid feed", () => {
     bridgeMock.listChatReactions.mockImplementation(
       ({ threadId }: { threadId: string }) =>
         Promise.resolve({
-          reactions:
-            threadId === "thread-1"
-              ? [
-                  {
-                    reactionId: "reaction-1",
-                    messageId: "message-1",
-                    threadId,
-                    emoji: "👍",
-                    authorId: "you@example.com",
-                    authorKind: "human" as const,
-                    authorDisplayName: "You",
-                  },
-                ]
-              : [],
+          reactions: threadId === "thread-1" ? [reaction] : [],
           viewerAuthorId: "you@example.com",
         }),
     );
@@ -325,6 +349,13 @@ describe("ChatsView hybrid feed", () => {
     expect(screen.getAllByTestId("chats-post-author")[1]?.textContent).toBe(
       "You's agent",
     );
+    expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.listChannelThreads).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      channelId: "channel-1",
+    });
+    expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
+    expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
 
     await user.click(cards[0]!);
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
@@ -466,7 +497,7 @@ describe("ChatsView document thread", () => {
       id: "comment-3",
       parentMessageId: opening.id,
       authorKind: "agent",
-      authorDisplayName: "You's agent",
+      authorDisplayName: "You",
       body: "Returning to the opening question",
     });
     bridgeMock.listChannelThreads.mockResolvedValue({
@@ -582,7 +613,7 @@ describe("ChatsView live activity refresh", () => {
       id: "agent-live-report",
       parentMessageId: opening.id,
       authorKind: "agent",
-      authorDisplayName: "You's agent",
+      authorDisplayName: "You",
       body: "done: checked the exports",
       createdAtMs: NOW + 1,
     });
@@ -611,11 +642,10 @@ describe("ChatsView live activity refresh", () => {
     bridgeMock.listChatThreadDecisions.mockImplementation(() =>
       Promise.resolve({ decisions: refreshed ? [openDecision] : [] }),
     );
-    bridgeMock.chatRunRecordForMessage.mockImplementation(
-      ({ messageId }: { messageId: string }) =>
-        Promise.resolve({
-          run: refreshed && messageId === agentReport.id ? run : null,
-        }),
+    bridgeMock.chatRunRecordsForThread.mockImplementation(() =>
+      Promise.resolve({
+        runs: refreshed ? { [agentReport.id]: run } : {},
+      }),
     );
     renderView();
 
@@ -647,9 +677,9 @@ describe("ChatsView live activity refresh", () => {
     expect(bridgeMock.listChatThreadDecisions.mock.calls.length).toBeGreaterThan(
       decisionReadsBefore,
     );
-    expect(bridgeMock.chatRunRecordForMessage).toHaveBeenCalledWith({
+    expect(bridgeMock.chatRunRecordsForThread).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
-      messageId: agentReport.id,
+      threadId: "thread-1",
     });
   });
 });
@@ -755,7 +785,7 @@ describe("ChatsView work and run links", () => {
       id: "agent-report",
       parentMessageId: opening.id,
       authorKind: "agent",
-      authorDisplayName: "You's agent",
+      authorDisplayName: "You",
       body: "I finished the review.",
     });
     bridgeMock.listChannelThreads.mockResolvedValue({
@@ -775,28 +805,29 @@ describe("ChatsView work and run links", () => {
         },
       ],
     });
-    bridgeMock.chatRunRecordForMessage.mockImplementation(
-      ({ messageId }: { messageId: string }) =>
-        Promise.resolve({
-          run:
-            messageId === agentComment.id
-              ? {
-                  runId: "run-123456789",
-                  threadId: "thread-1",
-                  triggerMessageId: opening.id,
-                  command: "dohc agent run review",
-                  startedAtMs: NOW,
-                  exitCode: 0,
-                  logPath: "logs/run-123456789.log",
-                }
-              : null,
-        }),
-    );
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({
+      runs: {
+        [agentComment.id]: {
+          runId: "run-123456789",
+          threadId: "thread-1",
+          triggerMessageId: opening.id,
+          command: "dohc agent run review",
+          startedAtMs: NOW,
+          exitCode: 0,
+          logPath: "logs/run-123456789.log",
+        },
+      },
+    });
     renderView(vi.fn(), vi.fn(), { onOpenPath });
 
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     const attachment = await screen.findByTestId("chats-attachment-chip");
+    expect(bridgeMock.chatRunRecordsForThread).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.chatRunRecordsForThread).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+    });
     expect(attachment.textContent).toContain("brief.md");
     expect(attachment.getAttribute("title")).toBe("projects/launch/brief.md");
     await user.click(attachment);

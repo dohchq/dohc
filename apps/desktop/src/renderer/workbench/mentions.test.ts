@@ -9,7 +9,7 @@ import {
   resolveMentionCandidate,
   toMentionSegments,
   type MentionCandidate,
-} from "./mentions";
+} from "@dohc/workspace-contracts/chat-mentions";
 
 const you: MentionCandidate = {
   id: "user:you",

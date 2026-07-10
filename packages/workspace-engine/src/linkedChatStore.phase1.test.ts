@@ -3,6 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  findMentions,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
 import type { LinkedChatStore, SyncReplicationEnvelope } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseMentionHandles } from "./chatMentions";
@@ -936,7 +940,27 @@ describe("phase-one linked chat model", () => {
       parseMentionHandles(
         "Hi @Agent and @agent. email@ignored é@ignored @K @ſ `ignore @inline`\n```ts\nignore @fenced\n```\n`multi line\nignore @multiline`\n@other-team",
       ),
-    ).toEqual(["agent", "other-team"]);
+    ).toEqual(["agent", "agent.", "k", "ſ", "other-team"]);
+
+    const parityCandidates: MentionCandidate[] = [
+      { id: "agent", kind: "agent", handle: "agent", label: "Agent" },
+      { id: "ops", kind: "agent", handle: "agent.ops_v2", label: "Ops agent" },
+      { id: "you", kind: "user", handle: "you_name", label: "You" },
+    ];
+    const parityBodies = [
+      "@Agent and (@agent.ops_v2) plus [@you_name]",
+      "email@agent and slash/@agent are inert",
+      "outside @agent `inside @agent.ops_v2`",
+      "```ts\n@agent\n```\n@you_name",
+      "~~~~\n@agent.ops_v2\n~~~~\n@Agent",
+    ];
+    for (const body of parityBodies) {
+      const highlighted = findMentions(body, parityCandidates, { ignoreCode: true });
+      const expected = [...new Set(
+        highlighted.map((mention) => mention.candidate.handle.toLowerCase()),
+      )];
+      expect(parseMentionHandles(body)).toEqual(expected);
+    }
 
     const source = await makeEngine("mention-source");
     const receiver = await makeEngine("mention-receiver");

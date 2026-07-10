@@ -5,7 +5,7 @@ import {
   applyMentionCompletion,
   matchMentionCandidates,
   type MentionCandidate,
-} from "./mentions";
+} from "@dohc/workspace-contracts/chat-mentions";
 
 // A chat composer with @-mention autocomplete. Same send affordances as the
 // shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while

@@ -50,6 +50,7 @@ function nodeSqlite(): SqliteModule {
 function requireDispatchSchema(db: SqliteDb): void {
   for (const table of [
     "chat_dispatch_ledger",
+    "chat_dispatch_scan_cursor",
     "agent_run_records",
     "run_message_links",
   ]) {

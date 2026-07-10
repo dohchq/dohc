@@ -7,7 +7,7 @@ import {
   reduceAgentNotifications,
   type AgentNotification,
 } from "./agentNotifications";
-import type { MentionCandidate } from "./mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 // Shell-level poller behind Agent -> user notifications. It watches the active
 // workspace's agent session so a run that finishes / blocks / asks / fails

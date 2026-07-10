@@ -60,7 +60,7 @@ describe("buildRunnerThreadContext", () => {
     await store.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: thread.id,
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       body: "I found one rollback gap and documented it.",
       attachments: [{ objectId: "object_without_path" }],
     });
@@ -91,7 +91,7 @@ describe("buildRunnerThreadContext", () => {
         },
         {
           id: "msg_2",
-          author: { kind: "agent", displayName: "Ice's agent" },
+          author: { kind: "agent", displayName: "Ice" },
           body: "I found one rollback gap and documented it.",
           createdAtMs: FIRST_MESSAGE_AT_MS + 1_000,
           attachments: [{ objectId: "object_without_path" }],

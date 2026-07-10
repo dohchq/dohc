@@ -7,7 +7,6 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./ids": "./src/ids.ts",
     "./protocol": "./src/protocol.ts",
     "./render": "./src/render.ts",
     "./thread-markdown": "./src/threadMarkdown.ts"

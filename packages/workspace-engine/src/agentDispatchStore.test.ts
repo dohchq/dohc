@@ -387,6 +387,11 @@ describe("agent dispatch store", () => {
     ]);
     expect(store.runIdForMessage(WORKSPACE_ID, "message-report-a")).toBe(first.run.runId);
     expect(store.runIdForMessage(WORKSPACE_ID, "message-unlinked")).toBeNull();
+    expect(store.runRecordsForThread(WORKSPACE_ID, "thread-1")).toEqual({
+      "message-report-a": first.run,
+      "message-report-b": first.run,
+    });
+    expect(store.runRecordsForThread(WORKSPACE_ID, "thread-unlinked")).toEqual({});
 
     expect(db.prepare("SELECT op_kind FROM replication_log").all()).toEqual([]);
 

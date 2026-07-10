@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MentionComposer } from "./MentionComposer";
-import type { MentionCandidate } from "./mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { useState } from "react";
 
 const candidates: MentionCandidate[] = [

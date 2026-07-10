@@ -158,7 +158,7 @@ describe("Phase 0 proof arc", () => {
     await chats.sendMessage({
       workspaceId,
       threadId: thread.id,
-      author: { kind: "agent", displayName: "Ice's agent" },
+      author: { kind: "agent", displayName: "Ice" },
       body: "The alpha chat context stays beside the plan.",
     });
     // PR 08 hardened "no .env leakage": the text store now refuses to hold a

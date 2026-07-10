@@ -12,7 +12,10 @@ import {
 } from "react";
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { toMentionSegments, type MentionCandidate } from "./mentions";
+import {
+  toMentionSegments,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these SAME
@@ -26,9 +29,8 @@ export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
 ): string {
   if (author.authorKind !== "agent") return author.authorDisplayName;
-  // Phase-3 CLI/runner messages already persist the display form. Older and
-  // hand-authored records still carry the owning user's name, so keep the
-  // historical suffixing rule without producing "Ice's agent's agent".
+  // Backward compatibility for rows written before agent authors stored the
+  // raw owner name; never turn "Ice's agent" into "Ice's agent's agent".
   return /['’]s agent$/i.test(author.authorDisplayName)
     ? author.authorDisplayName
     : `${author.authorDisplayName}'s agent`;

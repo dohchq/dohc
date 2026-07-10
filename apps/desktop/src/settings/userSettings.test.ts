@@ -20,6 +20,7 @@ import {
 } from "./userSettings";
 import {
   MAX_USER_SETTINGS_FILE_BYTES,
+  readCachedUserSettingsFile,
   readUserSettingsFile,
   USER_SETTINGS_FILE,
   writeUserSettingsFile,
@@ -124,6 +125,27 @@ describe("desktop user settings store", () => {
     });
     const raw = await readFile(join(root, USER_SETTINGS_FILE), "utf8");
     expect(raw.endsWith("\n")).toBe(true);
+  });
+
+  it("caches reads until the settings writer invalidates them", async () => {
+    const root = await tempRoot();
+    const first = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+      appearance: { themeMode: "dark" },
+    });
+    const second = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+      appearance: { themeMode: "light" },
+    });
+    await writeUserSettingsFile(root, first);
+    expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
+
+    await writeFile(
+      join(root, USER_SETTINGS_FILE),
+      `${JSON.stringify(second)}\n`,
+    );
+    expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
+
+    await writeUserSettingsFile(root, second);
+    expect((await readCachedUserSettingsFile(root)).settings).toEqual(second);
   });
 
   it("a missing file reads as defaults", async () => {

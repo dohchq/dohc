@@ -67,7 +67,7 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import type { AgentNotification } from "./workbench/agentNotifications";
-import type { MentionCandidate } from "./workbench/mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {

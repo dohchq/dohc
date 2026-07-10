@@ -684,20 +684,61 @@ export const ChatRunRecord = z.object({
 });
 export type ChatRunRecord = z.infer<typeof ChatRunRecord>;
 
-export const ChatRunRecordForMessagePayload = z.object({
+export const ChatRunRecordsForThreadPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  messageId: CHAT_MESSAGE_ID,
+  threadId: CHAT_THREAD_ID,
 });
-export type ChatRunRecordForMessagePayload = z.infer<
-  typeof ChatRunRecordForMessagePayload
+export type ChatRunRecordsForThreadPayload = z.infer<
+  typeof ChatRunRecordsForThreadPayload
 >;
 
-export const ChatRunRecordForMessageResult = z.object({
-  run: ChatRunRecord.nullable(),
+export const ChatRunRecordsForThreadResult = z.object({
+  runs: z.record(ChatRunRecord),
 });
-export type ChatRunRecordForMessageResult = z.infer<
-  typeof ChatRunRecordForMessageResult
+export type ChatRunRecordsForThreadResult = z.infer<
+  typeof ChatRunRecordsForThreadResult
 >;
+
+// Reactions (WS-MU-C2). A reaction is durable, commutative chat data — an
+// emoji reaction by an author on a message. The renderer never supplies
+// identity: main derives the reactor from the local user, exactly like a sent
+// message. Emojis are short graphemes, never message bodies.
+//
+// This schema is the TRUST BOUNDARY for chat.reaction.set payloads — including
+// future replicated writes from other peers per the PR's forward-compat design.
+// A length bound alone accepts URLs, profanity, and arbitrary ASCII text as an
+// "emoji"; a hostile/buggy peer could inject those to render as reaction pills.
+// So we validate the actual codepoints: a single emoji grapheme cluster — one
+// pictographic (with optional variation selector / skin-tone modifier /
+// keycap), a regional-indicator pair (flag), and ZWJ sequences thereof.
+//
+// Unicode property escapes (\p{…}) with the `u` flag are ES2018 and supported by
+// every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
+// ES2022), so `\p{Extended_Pictographic}` is safe here.
+const EMOJI_ATOM =
+  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+export const EMOJI_GRAPHEME_PATTERN = new RegExp(
+  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
+  "u",
+);
+const CHAT_EMOJI = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
+
+// One ACTIVE reaction as the renderer paints it. The UI groups these by
+// (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.
+export const ChatReactionRecord = z.object({
+  reactionId: z.string().min(1).max(200),
+  messageId: z.string().min(1).max(200),
+  threadId: CHAT_THREAD_ID,
+  emoji: CHAT_EMOJI,
+  authorId: z.string().min(1).max(200),
+  authorKind: z.enum(["human", "agent"]),
+  authorDisplayName: z.string().min(1).max(200),
+});
+export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
 // Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
 // channels, plus per-thread monotonic read cursors. Same gate as the file
@@ -728,6 +769,20 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   // Main always supplies the engine-derived count. Optionality keeps older
   // renderer fixtures and pre-phase-4 bridge consumers source-compatible.
   openDecisionCount: z.number().int().min(0).optional(),
+  // Feed-only opening-message data. Optional + nullable keeps older bridge
+  // fixtures compatible while allowing an empty/corrupt legacy thread to be
+  // represented without fabricating a message.
+  openingMessage: z
+    .object({
+      id: CHAT_MESSAGE_ID,
+      authorKind: z.enum(["human", "agent"]),
+      authorDisplayName: z.string().min(1).max(200),
+      createdAtMs: z.number(),
+      bodySnippet: z.string().min(1).max(500),
+      reactions: z.array(ChatReactionRecord),
+    })
+    .nullable()
+    .optional(),
 });
 export type ChannelThreadRecord = z.infer<typeof ChannelThreadRecord>;
 
@@ -770,6 +825,9 @@ export type ListChannelThreadsPayload = z.infer<typeof ListChannelThreadsPayload
 
 export const ListChannelThreadsResult = z.object({
   threads: z.array(ChannelThreadRecord),
+  // Main-derived, shared by every opening-message reaction summary in this
+  // response. Optional for older callers/fixtures; main always supplies it.
+  viewerAuthorId: z.string().min(1).max(200).optional(),
 });
 export type ListChannelThreadsResult = z.infer<typeof ListChannelThreadsResult>;
 
@@ -802,47 +860,6 @@ export const MarkChatThreadReadResult = z.object({
   revision: z.number().int().min(0),
 });
 export type MarkChatThreadReadResult = z.infer<typeof MarkChatThreadReadResult>;
-
-// Reactions (WS-MU-C2). A reaction is durable, commutative chat data — an
-// emoji reaction by an author on a message. The renderer never supplies
-// identity: main derives the reactor from the local user, exactly like a sent
-// message. Emojis are short graphemes, never message bodies.
-//
-// This schema is the TRUST BOUNDARY for chat.reaction.set payloads — including
-// future replicated writes from other peers per the PR's forward-compat design.
-// A length bound alone accepts URLs, profanity, and arbitrary ASCII text as an
-// "emoji"; a hostile/buggy peer could inject those to render as reaction pills.
-// So we validate the actual codepoints: a single emoji grapheme cluster — one
-// pictographic (with optional variation selector / skin-tone modifier /
-// keycap), a regional-indicator pair (flag), and ZWJ sequences thereof.
-//
-// Unicode property escapes (\p{…}) with the `u` flag are ES2018 and supported by
-// every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
-// ES2022), so `\p{Extended_Pictographic}` is safe here.
-const EMOJI_ATOM =
-  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
-export const EMOJI_GRAPHEME_PATTERN = new RegExp(
-  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
-  "u",
-);
-const CHAT_EMOJI = z
-  .string()
-  .min(1)
-  .max(32)
-  .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
-
-// One ACTIVE reaction as the renderer paints it. The UI groups these by
-// (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.
-export const ChatReactionRecord = z.object({
-  reactionId: z.string().min(1).max(200),
-  messageId: z.string().min(1).max(200),
-  threadId: CHAT_THREAD_ID,
-  emoji: CHAT_EMOJI,
-  authorId: z.string().min(1).max(200),
-  authorKind: z.enum(["human", "agent"]),
-  authorDisplayName: z.string().min(1).max(200),
-});
-export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
 export const ListChatReactionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2205,9 +2222,9 @@ export interface DohcDesktopBridge {
   listChatThreadAttachments(
     payload: ListChatThreadAttachmentsPayload,
   ): Promise<ListChatThreadAttachmentsResult>;
-  chatRunRecordForMessage(
-    payload: ChatRunRecordForMessagePayload,
-  ): Promise<ChatRunRecordForMessageResult>;
+  chatRunRecordsForThread(
+    payload: ChatRunRecordsForThreadPayload,
+  ): Promise<ChatRunRecordsForThreadResult>;
   // Chats channels (PR 12/13, WS-E) — same flag gate as the file rail.
   listChatChannels(
     payload: ListChatChannelsPayload,

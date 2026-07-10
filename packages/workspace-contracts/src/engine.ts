@@ -1119,6 +1119,17 @@ export interface ChannelThreadSummary {
   // Derived: messageCount - lastReadSequence, clamped at zero. Never stored.
   unreadCount: number;
   openDecisionCount: number;
+  // Additive feed preview: listChannelThreads supplies the opening message
+  // without making callers load every message in every listed thread. Older
+  // consumers can omit it; an empty thread has no preview.
+  openingMessage?: {
+    id: ChatMessageId;
+    author: ChatActor;
+    createdAtMs: number;
+    bodySnippet: string;
+    // Only active reactions belonging to this opening message.
+    reactions: ChatReaction[];
+  };
 }
 
 export type ChatDecisionState = "open" | "resolved";
@@ -1339,10 +1350,6 @@ export interface LinkedChatStore {
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  agentReadState(
-    workspaceId: WorkspaceId,
-    threadId: ChatThreadId,
-  ): Promise<ChatAgentReadState>;
   listAgentUnreadThreads(workspaceId: WorkspaceId): Promise<ChatThread[]>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
@@ -1435,6 +1442,10 @@ export interface ThreadDispatchPauseState {
 }
 
 export interface AgentDispatchStore {
+  recordEligibleTriggers(input: {
+    workspaceId: WorkspaceId;
+    verifiedUserId?: string;
+  }): number;
   recordTrigger(input: {
     workspaceId: WorkspaceId;
     triggerMessageId: ChatMessageId;
@@ -1466,6 +1477,10 @@ export interface AgentDispatchStore {
   }): boolean;
   listRunMessages(workspaceId: WorkspaceId, runId: string): ChatMessageId[];
   runIdForMessage(workspaceId: WorkspaceId, messageId: ChatMessageId): string | null;
+  runRecordsForThread(
+    workspaceId: WorkspaceId,
+    threadId: ChatThreadId,
+  ): Record<ChatMessageId, AgentRunRecord>;
   getRunRecord(runId: string): AgentRunRecord | null;
   setThreadDispatchPaused(input: {
     workspaceId: WorkspaceId;

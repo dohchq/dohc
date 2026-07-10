@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   ChatChannelRecord,
   ChatAttachmentRecord,
+  ChannelThreadRecord,
+  ChatRunRecordsForThreadResult,
   ChatDispatchStateForThreadPayload,
   ChatDispatchStateForThreadResult,
   ChatReactionRecord,
@@ -60,6 +62,53 @@ describe("chat IPC contract", () => {
       targetKind: "file",
       createdAtMs: 1,
     });
+  });
+
+  it("accepts additive channel-feed previews and batched run records", () => {
+    expect(
+      ChannelThreadRecord.parse({
+        id: "thread-1",
+        title: "Launch",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        channelId: "channel-1",
+        messageCount: 2,
+        lastReadSequence: 1,
+        unreadCount: 1,
+        openingMessage: {
+          id: "message-1",
+          authorKind: "agent",
+          authorDisplayName: "Ice",
+          createdAtMs: 1,
+          bodySnippet: "Launch checks are green.",
+          reactions: [
+            {
+              reactionId: "reaction-1",
+              messageId: "message-1",
+              threadId: "thread-1",
+              emoji: "👍",
+              authorId: "user-1",
+              authorKind: "human",
+              authorDisplayName: "Ice",
+            },
+          ],
+        },
+      }).openingMessage,
+    ).toMatchObject({ id: "message-1", bodySnippet: "Launch checks are green." });
+
+    expect(
+      ChatRunRecordsForThreadResult.parse({
+        runs: {
+          "message-2": {
+            runId: "run-1",
+            threadId: "thread-1",
+            triggerMessageId: "message-1",
+            command: "codex exec",
+            startedAtMs: 2,
+          },
+        },
+      }).runs["message-2"]?.runId,
+    ).toBe("run-1");
   });
 });
 

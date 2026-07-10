@@ -115,8 +115,8 @@ import {
   ResolveChatDecisionResult,
   ListChatThreadAttachmentsPayload,
   ListChatThreadAttachmentsResult,
-  ChatRunRecordForMessagePayload,
-  ChatRunRecordForMessageResult,
+  ChatRunRecordsForThreadPayload,
+  ChatRunRecordsForThreadResult,
   ListChatChannelsPayload,
   ListChatChannelsResult,
   CreateChatChannelPayload,
@@ -373,7 +373,7 @@ import {
   DEFAULT_USER_SETTINGS,
 } from "./settings/userSettings";
 import {
-  readUserSettingsFile,
+  readCachedUserSettingsFile,
   writeUserSettingsFile,
 } from "./settings/userSettingsStore";
 import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaces/workspaceSettings";
@@ -390,6 +390,7 @@ import {
   type CliWorkspaceContext,
 } from "./cli/cliServer";
 import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
+import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -1598,7 +1599,10 @@ async function acquireDispatchRunActivity(
   const alreadyOpen = activity
     .listOpenWorkspaceIds()
     .includes(workspace.workspaceId);
-  await ensureWorkspaceActivityOpen(workspace);
+  await workspaceChatLifecycle.open(
+    workspace,
+    () => ensureWorkspaceActivityOpen(workspace),
+  );
   let released = false;
   return async () => {
     if (released) return;
@@ -1655,7 +1659,7 @@ const chatDispatchService = createChatDispatchService({
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
-    (await readUserSettingsFile(stateDir())).settings.runner,
+    (await readCachedUserSettingsFile(stateDir())).settings.runner,
   identityFor: async (workspaceId) => {
     await warmCredentialCache();
     const remote = findWorkspace(workspaceId)?.remote;
@@ -1748,11 +1752,26 @@ function assertChatRunnerIdle(workspaceId: string): void {
   }
 }
 
+const workspaceChatLifecycle = createWorkspaceChatLifecycle({
+  isReadOnly: (workspaceId) => Boolean(sharedViewOf(workspaceId)),
+  maintain: async (rootPath) => {
+    await ensureAgentsChatBlock(rootPath);
+  },
+  onError: (error) => {
+    console.error("[desktop] AGENTS.md chat description:", error);
+  },
+});
+
 async function openWorkspaceActivity(
   workspace: CreatedWorkspace,
+  afterActivityOpen?: () => Promise<void>,
 ): Promise<SyncStatusResult> {
   retainedWorkspaceActivities.add(workspace.workspaceId);
-  const result = await ensureWorkspaceActivityOpen(workspace);
+  const result = await workspaceChatLifecycle.open(
+    workspace,
+    () => ensureWorkspaceActivityOpen(workspace),
+    afterActivityOpen,
+  );
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
@@ -1765,25 +1784,6 @@ async function openWorkspaceActivity(
 // it never supplies the user id or display identity.
 let cliServer: CliServerHandle | null = null;
 let cliServerStartup: Promise<CliServerHandle | null> | null = null;
-
-async function maintainWorkspaceChatDescription(workspace: {
-  workspaceId: string;
-  rootPath: string;
-}): Promise<void> {
-  if (sharedViewOf(workspace.workspaceId)) return;
-  try {
-    await ensureAgentsChatBlock(workspace.rootPath);
-  } catch (error) {
-    console.error("[desktop] AGENTS.md chat description:", error);
-  }
-}
-
-async function registerWorkspaceWithChatDescription(
-  workspace: CreatedWorkspace,
-): Promise<void> {
-  registerWorkspace(workspace);
-  await maintainWorkspaceChatDescription(workspace);
-}
 
 async function openCliWorkspace(
   requested: CliRegistryWorkspace,
@@ -1819,7 +1819,10 @@ async function openCliWorkspace(
 }
 
 async function startDesktopCliServer(): Promise<CliServerHandle> {
-  return startCliServer({
+  await workspaceChatLifecycle.boot(listWorkspaces()).catch((error: unknown) => {
+    console.error("[desktop] AGENTS.md boot maintenance:", error);
+  });
+  const server = await startCliServer({
     stateDir: stateDir(),
     listWorkspaces: () =>
       listWorkspaces()
@@ -1850,6 +1853,14 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       console.error("[desktop] CLI server:", error);
     },
   });
+  return {
+    socketPath: server.socketPath,
+    tokenPath: server.tokenPath,
+    ready: server.ready,
+    async close() {
+      await server.close();
+    },
+  };
 }
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
@@ -1997,7 +2008,7 @@ function ensureDispatchTray(): void {
 }
 
 async function refreshDispatchTray(): Promise<boolean> {
-  const { settings } = await readUserSettingsFile(stateDir());
+  const { settings } = await readCachedUserSettingsFile(stateDir());
   const enabled = configuredRunnerEnabled(settings);
   if (enabled && !quitting) {
     ensureDispatchTray();
@@ -2157,7 +2168,7 @@ async function ensureWorkspaceRegistered(rootPath: string): Promise<WorkspaceSum
     kind: "personal",
   });
   const summary = WorkspaceSummary.parse(created);
-  await registerWorkspaceWithChatDescription(created);
+  registerWorkspace(created);
   refreshNativeWorkspaceSurfaces();
   return summary;
 }
@@ -2169,7 +2180,6 @@ async function openWorkspacePath(
   const rootPath = workspaceRootForOpenPath(path);
   if (!rootPath) return null;
   const workspace = await ensureWorkspaceRegistered(rootPath);
-  await maintainWorkspaceChatDescription(workspace);
   sendWorkspaceActivated(window, workspace);
   refreshNativeWorkspaceSurfaces();
   return workspace;
@@ -2285,7 +2295,7 @@ function registerIpcHandlers(): void {
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
-    await registerWorkspaceWithChatDescription(created);
+    registerWorkspace(created);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
@@ -2303,7 +2313,7 @@ function registerIpcHandlers(): void {
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
     const summary = WorkspaceSummary.parse(attached);
-    await registerWorkspaceWithChatDescription(attached);
+    registerWorkspace(attached);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
@@ -2897,13 +2907,13 @@ function registerIpcHandlers(): void {
       // its start() is the first pull (materialize + cursor commit), and no
       // push can reach the relay before that pull succeeds — a fresh join can
       // never seed boilerplate into the remote or conflict against it.
-      await openWorkspaceActivity(created);
-      setWorkspaceRemote(created.workspaceId, {
-        serverUrl: credentials.serverUrl,
-        remoteWorkspaceId: parsed.workspaceId,
+      await openWorkspaceActivity(created, async () => {
+        setWorkspaceRemote(created.workspaceId, {
+          serverUrl: credentials.serverUrl,
+          remoteWorkspaceId: parsed.workspaceId,
+        });
+        await activity.enableCloud(created, { joinBootstrap: true });
       });
-      await activity.enableCloud(created, { joinBootstrap: true });
-      await maintainWorkspaceChatDescription(created);
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
       // the ENTIRE join back — engine/watcher/capture, registry entry, and
@@ -3255,7 +3265,6 @@ function registerIpcHandlers(): void {
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
       }
-      await maintainWorkspaceChatDescription(created);
     } catch (error) {
       console.error(`[desktop] open-share rollback for ${rootPath}:`, error);
       try {
@@ -3304,7 +3313,6 @@ function registerIpcHandlers(): void {
       relay: { baseUrl: cachedCredentials.relayUrl, token: cachedCredentials.token },
       shareId: shareView.shareId,
     });
-    await maintainWorkspaceChatDescription(workspace);
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
@@ -3412,7 +3420,6 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    await maintainWorkspaceChatDescription(workspace);
     const previousWorkspaceId = preferredWorkspaceId;
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
       await stopSitePreviewsForWorkspace(previousWorkspaceId);
@@ -3859,9 +3866,9 @@ function registerIpcHandlers(): void {
     return ListChatThreadAttachmentsResult.parse({ attachments });
   });
 
-  ipcMain.handle(CHANNELS.chatRunRecordForMessage, async (event, payload) => {
+  ipcMain.handle(CHANNELS.chatRunRecordsForThread, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ChatRunRecordForMessagePayload.parse(payload);
+    const input = ChatRunRecordsForThreadPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
@@ -3870,26 +3877,28 @@ function registerIpcHandlers(): void {
     // been migrated before the read-only dispatch adapter validates them.
     linkedChatStoreFor(workspace);
     const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
-    const runId = dispatchStore.runIdForMessage(
+    const found = dispatchStore.runRecordsForThread(
       workspace.workspaceId,
-      input.messageId,
+      input.threadId,
     );
-    const found = runId ? dispatchStore.getRunRecord(runId) : null;
-    const run = found?.workspaceId === workspace.workspaceId
-      ? {
-          runId: found.runId,
-          threadId: found.threadId,
-          triggerMessageId: found.triggerMessageId,
-          command: found.command,
-          startedAtMs: found.startedAtMs,
-          ...(found.endedAtMs !== undefined
-            ? { endedAtMs: found.endedAtMs }
+    const runs = Object.fromEntries(
+      Object.entries(found).map(([messageId, run]) => [
+        messageId,
+        {
+          runId: run.runId,
+          threadId: run.threadId,
+          triggerMessageId: run.triggerMessageId,
+          command: run.command,
+          startedAtMs: run.startedAtMs,
+          ...(run.endedAtMs !== undefined
+            ? { endedAtMs: run.endedAtMs }
             : {}),
-          ...(found.exitCode !== undefined ? { exitCode: found.exitCode } : {}),
-          ...(found.logPath ? { logPath: found.logPath } : {}),
-        }
-      : null;
-    return ChatRunRecordForMessageResult.parse({ run });
+          ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
+          ...(run.logPath ? { logPath: run.logPath } : {}),
+        },
+      ]),
+    );
+    return ChatRunRecordsForThreadResult.parse({ runs });
   });
 
   // --- Chats channels (PR 12/13, WS-E) -------------------------------------
@@ -3918,6 +3927,16 @@ function registerIpcHandlers(): void {
       lastReadSequence: summary.lastReadSequence,
       unreadCount: summary.unreadCount,
       openDecisionCount: summary.openDecisionCount,
+      openingMessage: summary.openingMessage
+        ? {
+            id: summary.openingMessage.id,
+            authorKind: summary.openingMessage.author.kind,
+            authorDisplayName: summary.openingMessage.author.displayName,
+            createdAtMs: summary.openingMessage.createdAtMs,
+            bodySnippet: summary.openingMessage.bodySnippet,
+            reactions: summary.openingMessage.reactions.map(chatReactionForIpc),
+          }
+        : null,
     };
   }
 
@@ -4017,6 +4036,7 @@ function registerIpcHandlers(): void {
     });
     return ListChannelThreadsResult.parse({
       threads: threads.map(channelThreadForIpc),
+      viewerAuthorId: localUserId(),
     });
   });
 
@@ -4728,7 +4748,9 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(CHANNELS.getUserSettings, async (event) => {
     assertTrustedSender(event);
-    return DesktopUserSettingsResult.parse(await readUserSettingsFile(stateDir()));
+    return DesktopUserSettingsResult.parse(
+      await readCachedUserSettingsFile(stateDir()),
+    );
   });
 
   ipcMain.handle(CHANNELS.setUserSettings, async (event, payload) => {

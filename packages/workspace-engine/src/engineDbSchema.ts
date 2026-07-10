@@ -479,6 +479,8 @@ const CHAT_PHASE_ONE_DDL = `
 `;
 
 const AGENT_DISPATCH_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_workspace_created
+    ON chat_messages(workspace_id, created_at_ms, message_id);
   CREATE TABLE IF NOT EXISTS chat_dispatch_ledger (
     workspace_id TEXT NOT NULL,
     trigger_message_id TEXT NOT NULL,
@@ -493,6 +495,12 @@ const AGENT_DISPATCH_DDL = `
   );
   CREATE INDEX IF NOT EXISTS idx_chat_dispatch_ledger_state
     ON chat_dispatch_ledger(workspace_id, state, created_at_ms, trigger_message_id);
+  CREATE TABLE IF NOT EXISTS chat_dispatch_scan_cursor (
+    workspace_id TEXT NOT NULL,
+    max_created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id)
+  );
   CREATE TABLE IF NOT EXISTS agent_run_records (
     workspace_id TEXT NOT NULL,
     run_id TEXT NOT NULL,

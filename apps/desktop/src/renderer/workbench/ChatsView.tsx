@@ -39,7 +39,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
-import type { MentionCandidate } from "./mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import type {
@@ -107,8 +107,13 @@ type Nav =
   | { level: "dm"; dm: DmRecord }
   | { level: "dm-new" };
 
+type FeedOpeningMessage = Omit<
+  NonNullable<ChannelThreadRecord["openingMessage"]>,
+  "reactions"
+>;
+
 interface FeedPostData {
-  openingMessage: ChatMessageRecord | null;
+  openingMessage: FeedOpeningMessage | null;
   reactions: ChatReactionRecord[];
   viewerAuthorId: string;
 }
@@ -375,7 +380,7 @@ function PostCard(props: {
   const isAgent = message?.authorKind === "agent";
   const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const excerpt = message ? postExcerpt(props.thread.title, message.body) : "";
+  const excerpt = message ? postExcerpt(props.thread.title, message.bodySnippet) : "";
   return (
     <li
       data-testid="chats-post-card"
@@ -773,32 +778,29 @@ export function ChatsView(props: {
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
       const result = await bridge().listChannelThreads({ workspaceId, channelId });
-      const previews = await Promise.all(
-        result.threads.map(async (thread) => {
-          try {
-            const [messageResult, reactionResult] = await Promise.all([
-              bridge().listChatMessages({ workspaceId, threadId: thread.id }),
-              bridge().listChatReactions({ workspaceId, threadId: thread.id }),
-            ]);
+      return {
+        threads: result.threads,
+        feedPosts: Object.fromEntries(
+          result.threads.map((thread) => {
+            const preview = thread.openingMessage;
             return [
               thread.id,
               {
-                openingMessage: messageResult.messages[0] ?? null,
-                reactions: reactionResult.reactions,
-                viewerAuthorId: reactionResult.viewerAuthorId,
+                openingMessage: preview
+                  ? {
+                      id: preview.id,
+                      authorKind: preview.authorKind,
+                      authorDisplayName: preview.authorDisplayName,
+                      createdAtMs: preview.createdAtMs,
+                      bodySnippet: preview.bodySnippet,
+                    }
+                  : null,
+                reactions: preview?.reactions ?? [],
+                viewerAuthorId: result.viewerAuthorId ?? "",
               },
             ] as const;
-          } catch {
-            return [
-              thread.id,
-              { openingMessage: null, reactions: [], viewerAuthorId: "" },
-            ] as const;
-          }
-        }),
-      );
-      return {
-        threads: result.threads,
-        feedPosts: Object.fromEntries(previews),
+          }),
+        ),
       };
     },
     [workspaceId],
@@ -845,38 +847,22 @@ export function ChatsView(props: {
 
   const loadThreadSnapshot = useCallback(
     async (threadId: string): Promise<ThreadSnapshot> => {
-      const messagesPromise = bridge().listChatMessages({ workspaceId, threadId });
-      const runRecordsPromise = messagesPromise.then(async (result) =>
-        Promise.all(
-          result.messages
-            .filter((message) => message.authorKind === "agent")
-            .map(async (message) => {
-              try {
-                const runResult = await bridge().chatRunRecordForMessage({
-                  workspaceId,
-                  messageId: message.id,
-                });
-                return [message.id, runResult.run] as const;
-              } catch {
-                return [message.id, null] as const;
-              }
-            }),
-        ),
-      );
       const [
         result,
         reactionResult,
         decisionResult,
         attachmentResult,
-        runEntries,
+        runResult,
         nextDispatchState,
       ] =
         await Promise.all([
-          messagesPromise,
+          bridge().listChatMessages({ workspaceId, threadId }),
           bridge().listChatReactions({ workspaceId, threadId }),
           bridge().listChatThreadDecisions({ workspaceId, threadId }),
           bridge().listChatThreadAttachments({ workspaceId, threadId }),
-          runRecordsPromise,
+          bridge()
+            .chatRunRecordsForThread({ workspaceId, threadId })
+            .catch(() => ({ runs: {} })),
           bridge().chatDispatchStateForThread({ workspaceId, threadId }),
         ]);
       return {
@@ -884,11 +870,7 @@ export function ChatsView(props: {
         reactions: reactionResult.reactions,
         decisions: decisionResult.decisions,
         attachments: attachmentResult.attachments,
-        runRecords: Object.fromEntries(
-          runEntries.filter(
-            (entry): entry is readonly [string, ChatRunRecord] => entry[1] !== null,
-          ),
-        ),
+        runRecords: runResult.runs,
         dispatchState: nextDispatchState,
         viewerAuthorId: reactionResult.viewerAuthorId,
       };
