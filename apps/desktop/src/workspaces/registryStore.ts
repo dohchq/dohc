@@ -43,6 +43,9 @@ export interface JoinedSharedChannel {
 export interface RegistryEntry extends CreatedWorkspace {
   // Present only after the user explicitly enables cloud sync (Phase 9).
   remote?: RemoteIdentity;
+  // Durable join gate: true from registration until the first pull has
+  // materialized and committed. Boot-time local writers must skip the entry.
+  joinBootstrapPending?: true;
   shareView?: ShareViewIdentity;
   // MU-C4: shared channels joined INTO this workspace's chat store.
   sharedChannels?: JoinedSharedChannel[];
@@ -149,6 +152,15 @@ export function createRegistryStore(registryFile: string) {
       const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       entry.remote = remote;
+      write(registry);
+    },
+
+    completeJoinBootstrap(workspaceId: string): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (entry.joinBootstrapPending !== true) return;
+      delete entry.joinBootstrapPending;
       write(registry);
     },
 

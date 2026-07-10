@@ -73,6 +73,16 @@ describe("registry store", () => {
     });
   });
 
+  it("persists and clears the first-pull join maintenance gate", () => {
+    store.register({ ...personal, joinBootstrapPending: true });
+    const reopened = createRegistryStore(registryPath);
+    expect(reopened.find("ws-1")?.joinBootstrapPending).toBe(true);
+
+    reopened.completeJoinBootstrap("ws-1");
+    expect(createRegistryStore(registryPath).find("ws-1")?.joinBootstrapPending).toBeUndefined();
+    expect(() => reopened.completeJoinBootstrap("missing")).toThrow(/Unknown workspace/);
+  });
+
   it("refuses to wipe a future-version registry", async () => {
     await writeFile(
       registryPath,

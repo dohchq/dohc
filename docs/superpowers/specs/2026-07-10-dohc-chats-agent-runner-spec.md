@@ -49,9 +49,15 @@ phone surface ships, it plugs into this loop unchanged.
    the loop would "work" but never report. Codex's workspace-write sandbox
    blocks network by default, which kills the loopback IPC transport.)
    **Config-time self-test:** on save, dohc spawns the runner with a canned
-   prompt that must post exactly one message to a scratch thread and verifies
-   it lands. A sandbox that blocks the report path is caught at setup, not on
-   the first remote dispatch.
+   prompt that must post exactly one agent-authored message, containing a
+   unique test marker, to the workspace's single reserved self-test scratch
+   thread and verifies it lands. The reserved thread is reused across saves
+   and retries; both its setup post and the runner's reply are agent-authored
+   and therefore structurally unable to trigger dispatch. The test has a
+   bounded timeout that terminates the runner's owned process group. Save and
+   retry are idempotent and never accumulate scratch threads. A sandbox that
+   blocks the report path is caught at setup, not on the first remote
+   dispatch.
 2. **One agent per workspace, v1.** "My agent" — matching the
    `<User>'s agent` author model. Specialization is skills, not personas.
 3. **The runner host is the desktop.** Subscription auth lives on the user's
@@ -66,10 +72,10 @@ phone surface ships, it plugs into this loop unchanged.
    the per-recipient shareFilter grant lane human DMs ride. Everything that
    keys on DM-ness must point at the new kind too: the dispatcher triggers on
    `kind:"agent"` channels, the projection default ("agent DM threads
-   project") keys on it, and presence scoping resolves it. Implementation
-   gate: confirm the own-device sync lane actually replicates unshared
-   channels today; if only share-backed channels replicate, an owner-device
-   replication path for `kind:"agent"` is part of this work (open question 1).
+   project") keys on it, and presence scoping resolves it. Confirmed during
+   implementation: the own-device `/log` lane already replicates unshared
+   channels, so `kind:"agent"` needs only a well-known wire id for
+   cross-device convergence, not a new owner-device replication path.
 5. **Triggers are engine-side and author-gated.** v1 triggers: a
    **human-authored** message in the agent-DM channel, and an `@agent`
    mention by the workspace owner in a post or comment. Only committed,
@@ -232,19 +238,16 @@ gesture) closes the specific decision record.
 
 ## Open questions
 
-1. Does the own-device sync lane replicate unshared channels today, or does
-   `kind:"agent"` need a new owner-device replication path? (Must be answered
-   before the first slice; the phone hop depends on it.)
-2. Default run timeout (lean: 30m — long tasks post progress and the user can
+1. Default run timeout (lean: 30m — long tasks post progress and the user can
    stop from the thread).
-3. Does an `@agent` mention in a comment pack the whole post thread or just
+2. Does an `@agent` mention in a comment pack the whole post thread or just
    the branch? (Lean: whole thread; branches are presentation.)
-4. Re-dispatch budget defaults — resolved during implementation: 10 runs per
+3. Re-dispatch budget defaults — resolved during implementation: 10 runs per
    thread per 10 minutes, then auto-pause with an in-thread note and a
    one-click Resume (5 proved tight for legitimate rapid back-and-forth).
-5. Answered during implementation: (1) the own-device `/log` lane already
-   replicates unshared channels — `kind:"agent"` needed only a well-known
-   wire id for cross-device convergence; also, the same trigger on two
+4. Answered during implementation: the own-device `/log` lane already
+   replicates unshared channels, so `kind:"agent"` needed only a well-known
+   wire id for cross-device convergence. The same trigger on two
    runner-enabled devices double-dispatches (per-device ledgers), so v1
    documents "enable the runner on one device" and defers a relay-side
    dispatch lease to a future slice.

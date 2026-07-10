@@ -74,6 +74,38 @@ describe("workspace chat lifecycle", () => {
     expect(order).toEqual(["open", "hydrate", "maintain"]);
   });
 
+  it("skips boot maintenance until join hydration completes through the open seam", async () => {
+    const order: string[] = [];
+    let joinComplete = false;
+    const maintain = vi.fn(async () => {
+      order.push("maintain");
+    });
+    const lifecycle = createWorkspaceChatLifecycle({
+      isReadOnly: () => false,
+      isReadyForMaintenance: () => joinComplete,
+      maintain,
+      onError: vi.fn(),
+    });
+    const workspace = { workspaceId: "joining", rootPath: "/joining" };
+
+    await lifecycle.boot([workspace]);
+    expect(maintain).not.toHaveBeenCalled();
+
+    await lifecycle.open(
+      workspace,
+      async () => {
+        order.push("open");
+      },
+      async () => {
+        order.push("hydrate");
+        joinComplete = true;
+      },
+    );
+
+    expect(order).toEqual(["open", "hydrate", "maintain"]);
+    expect(maintain).toHaveBeenCalledTimes(1);
+  });
+
   it("reports maintenance errors without making workspace open fail", async () => {
     const error = new Error("read-only filesystem");
     const onError = vi.fn();

@@ -198,7 +198,11 @@ export function RunnerSettingsCard(props: {
           <SwitchControl
             label="Enable chat runner"
             checked={runner.enabled}
-            onChange={(enabled) => void commitDrafts(enabled)}
+            disabled={!configured && !runner.enabled}
+            onChange={(enabled) => {
+              if (enabled && !configured) return;
+              void commitDrafts(enabled);
+            }}
           />
         </div>
 

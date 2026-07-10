@@ -13,6 +13,7 @@ import {
   DEFAULT_RUNNER_SETTINGS,
   DEFAULT_USER_SETTINGS,
   DesktopUserSettings,
+  RunnerSettings,
   effectiveThemeMode,
   mergeDesktopUserSettings,
   parseDesktopUserSettings,
@@ -102,6 +103,39 @@ describe("desktop user settings model", () => {
         runner: { ...next.runner, timeoutMinutes: 1441 },
       }).success,
     ).toBe(false);
+  });
+
+  it("requires a non-empty command whenever the runner is enabled", () => {
+    for (const command of ["", "   \t\n"]) {
+      expect(
+        RunnerSettings.safeParse({
+          command,
+          enabled: true,
+          timeoutMinutes: 30,
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      RunnerSettings.safeParse({
+        command: "   ",
+        enabled: false,
+        timeoutMinutes: 30,
+      }).success,
+    ).toBe(true);
+    expect(() =>
+      mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+        runner: { enabled: true },
+      }),
+    ).toThrow("Runner command is required when dispatch is enabled.");
+    expect(
+      mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+        runner: { command: "codex exec", enabled: true },
+      }).runner,
+    ).toEqual({
+      command: "codex exec",
+      enabled: true,
+      timeoutMinutes: 30,
+    });
   });
 
   it("resolves system theme from the OS preference", () => {

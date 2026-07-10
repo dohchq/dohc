@@ -10,7 +10,13 @@ export const RunnerSettings = z.object({
   command: z.string().max(4096),
   enabled: z.boolean(),
   timeoutMinutes: z.number().int().min(1).max(1440),
-}).strict();
+}).strict().refine(
+  (runner) => !runner.enabled || runner.command.trim().length > 0,
+  {
+    message: "Runner command is required when dispatch is enabled.",
+    path: ["command"],
+  },
+);
 export type RunnerSettings = z.infer<typeof RunnerSettings>;
 
 export const DEFAULT_RUNNER_SETTINGS: RunnerSettings = {

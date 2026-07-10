@@ -37,6 +37,9 @@ export const NO_RUNNER_NOTE =
 
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const SELF_TEST_POLL_MS = 250;
+const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
+const SELF_TEST_SCRATCH_BODY =
+  "Reserved runner self-test thread. Agent-authored messages here never trigger dispatch.";
 
 export interface ChatDispatchWorkspace {
   workspaceId: string;
@@ -682,13 +685,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           live.workspace,
           live.claim.run,
           `⚠ Agent run failed (exit ${code}). Open the run chip for details.`,
-        );
+        ).catch(reportError);
       } else if (linkedMessages.length === 0) {
         await postFailureNote(
           live.workspace,
           live.claim.run,
           "⚠ Agent run produced no reply. Open the run chip for details.",
-        );
+        ).catch(reportError);
       }
       dispatch.completeRun({ runId: live.claim.run.runId, exitCode: code });
       notifyRunUpdated(live.workspace.workspaceId);
@@ -716,7 +719,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.workspace,
       live.claim.run,
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
-    );
+    ).catch(reportError);
     dispatch.failRun({
       runId: live.claim.run.runId,
       exitCode: 124,
@@ -738,7 +741,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       workspace,
       claim.run,
       "⚠ Agent run failed to start. Open the run chip for details.",
-    );
+    ).catch(reportError);
     options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
       reason: `runner failed to start: ${detail}`,
@@ -967,7 +970,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           workspace,
           claim.run,
           "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
-        );
+        ).catch(reportError);
       }
       dispatch.failRun({
         runId: claim.run.runId,
@@ -1000,7 +1003,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           workspace,
           recovery.run,
           "⚠ Agent run failed (app quit during run). Open the run chip for details.",
-        );
+        ).catch(reportError);
       }
       if (recovery.attemptCount < 2) {
         options.requeueFailedTrigger?.({
@@ -1183,170 +1186,195 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const command = runner.command.trim();
       if (!command) return { ok: false, detail: "Configure a runner command first." };
 
-    const chat = options.chatStoreFor(workspace);
-    const identity = await options.identityFor(workspaceId);
-    const agentChannel = await chat.ensureAgentChannel({ workspaceId });
-    const scratch = await chat.startChannelThread({
-      workspaceId,
-      channelId: agentChannel.id,
-      author: { kind: "human", displayName: identity.displayName },
-      authorUserId: identity.verifiedUserId,
-      origin: "cli",
-      body: "Runner self-test",
-    });
-    options.onMessagePosted(workspaceId);
-    const runId = `run_self_test_${createId()}`;
-    const logPath = join(options.stateDir(), "run-logs", `${runId}.log`);
-    const prompt = `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\ndohc chat reply ${scratch.thread.id} --as-agent "self-test ok"`;
-    try {
-      if (
-        shuttingDown ||
-        liveRuns.has(workspaceId) ||
-        runReservations.has(workspaceId) ||
-        selfTests.has(workspaceId) ||
-        options.runSlotOccupied?.(workspaceId) === true
-      ) {
-        return {
-          ok: false,
-          detail: shuttingDown
-            ? "Agent dispatch is stopping."
-            : "A runner became active before the self-test could start.",
-        };
-      }
-      options.setRunAttribution(workspaceId, {
-        agentId: "dohc-chat-runner-self-test",
-        onBehalfOf: "local",
-        agentRunId: runId,
+      const chat = options.chatStoreFor(workspace);
+      const identity = await options.identityFor(workspaceId);
+      const agentChannel = await chat.ensureAgentChannel({ workspaceId });
+      const summaries = await chat.listChannelThreads({
+        workspaceId,
+        channelId: agentChannel.id,
       });
-      const spawned = spawnConfiguredRunner({
-        workspace,
-        threadId: scratch.thread.id,
-        runId,
-        logPath,
-        command,
-        prompt,
-      });
-      return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {
-        const complete = async (result: { ok: boolean; detail: string }) => {
-          const test = selfTests.get(workspaceId);
-          if (!test || test.settled) return;
-          test.settled = true;
-          if (test.poll) clearTimeout(test.poll);
-          clearTimeout(test.timeout);
-          if (test.killEscalation && test.child.hasExited()) {
-            clearTimeout(test.killEscalation);
-            test.killEscalation = null;
-          }
-          selfTests.delete(workspaceId);
-          try {
-            options.setRunAttribution(workspaceId, null);
-          } catch (error) {
-            reportError(error);
-          }
-          const releaseReservation = () => {
-            if (!selfTestReservations.delete(workspaceId)) return;
-            if (!stopped) void scanWorkspace(workspaceId).catch(reportError);
-          };
-          if (!test.child.hasExited()) {
-            reservationHeldByProcess = true;
-            test.killEscalation = terminateWithEscalation(
-              test.child,
-              test.killEscalation,
-            );
-            test.child.onExit(() => releaseReservation());
-            setTimeout(releaseReservation, RUNNER_KILL_GRACE_MS + 1_000);
-          } else {
-            releaseReservation();
-          }
-          resolveResult(result);
-        };
-        const check = async () => {
-          const test = selfTests.get(workspaceId);
-          if (!test || test.settled) return;
-          try {
-            const messages = await chat.listMessages({
-              workspaceId,
-              threadId: scratch.thread.id,
-            });
-            if (
-              messages.some(
-                (message) =>
-                  message.author.kind === "agent" &&
-                  message.body.trim() === "self-test ok",
-              )
-            ) {
-              await complete({
-                ok: true,
-                detail: "Runner self-test passed. The harness reported through dohc chat.",
-              });
-              return;
-            }
-          } catch (error) {
-            reportError(error);
-          }
-          const current = selfTests.get(workspaceId);
-          if (current && !current.settled) {
-            current.poll = setTimeout(() => {
-              void check();
-            }, SELF_TEST_POLL_MS);
-          }
-        };
-        const timeout = setTimeout(() => {
-          const test = selfTests.get(workspaceId);
-          if (test) {
-            test.killEscalation = terminateWithEscalation(
-              test.child,
-              test.killEscalation,
-            );
-          }
-          void complete({
-            ok: false,
-            detail: `Runner self-test timed out after 120 seconds. Log: ${logPath}`,
-          });
-        }, RUNNER_SELF_TEST_TIMEOUT_MS);
-        const state: SelfTestState = {
+      let scratchThreadId: string | null = null;
+      for (const summary of summaries) {
+        if (summary.thread.title !== SELF_TEST_THREAD_TITLE) continue;
+        const messages = await chat.listMessages({
           workspaceId,
-          child: spawned.child,
-          threadId: scratch.thread.id,
-          runId,
-          settled: false,
-          poll: null,
-          timeout,
-          killEscalation: null,
-          resolve: resolveResult,
-        };
-        selfTests.set(workspaceId, state);
-        spawned.child.onError((error) => {
-          reportError(error);
-          void complete({
-            ok: false,
-            detail: `Runner self-test failed to start. Log: ${logPath}`,
-          });
+          threadId: summary.thread.id,
         });
-        spawned.child.onExit(() => {
-          void (async () => {
-            await check();
+        const opening = messages[0];
+        if (
+          opening?.author.kind === "agent" &&
+          opening.body === SELF_TEST_SCRATCH_BODY
+        ) {
+          scratchThreadId = summary.thread.id;
+          break;
+        }
+      }
+      if (!scratchThreadId) {
+        const scratch = await chat.startChannelThread({
+          workspaceId,
+          channelId: agentChannel.id,
+          title: SELF_TEST_THREAD_TITLE,
+          author: { kind: "agent", displayName: identity.displayName },
+          origin: "cli",
+          body: SELF_TEST_SCRATCH_BODY,
+        });
+        scratchThreadId = scratch.thread.id;
+        options.onMessagePosted(workspaceId);
+      }
+      const runId = `run_self_test_${createId()}`;
+      const marker = `dohc-runner-self-test:${runId}`;
+      const logPath = join(options.stateDir(), "run-logs", `${runId}.log`);
+      const prompt = `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\ndohc chat reply ${scratchThreadId} --as-agent "${marker}"`;
+      try {
+        if (
+          shuttingDown ||
+          liveRuns.has(workspaceId) ||
+          runReservations.has(workspaceId) ||
+          selfTests.has(workspaceId) ||
+          options.runSlotOccupied?.(workspaceId) === true
+        ) {
+          return {
+            ok: false,
+            detail: shuttingDown
+              ? "Agent dispatch is stopping."
+              : "A runner became active before the self-test could start.",
+          };
+        }
+        options.setRunAttribution(workspaceId, {
+          agentId: "dohc-chat-runner-self-test",
+          onBehalfOf: "local",
+          agentRunId: runId,
+        });
+        const spawned = spawnConfiguredRunner({
+          workspace,
+          threadId: scratchThreadId,
+          runId,
+          logPath,
+          command,
+          prompt,
+        });
+        return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {
+          const complete = async (result: { ok: boolean; detail: string }) => {
+            const test = selfTests.get(workspaceId);
+            if (!test || test.settled) return;
+            test.settled = true;
+            if (test.poll) clearTimeout(test.poll);
+            clearTimeout(test.timeout);
+            if (test.killEscalation && test.child.hasExited()) {
+              clearTimeout(test.killEscalation);
+              test.killEscalation = null;
+            }
+            selfTests.delete(workspaceId);
+            try {
+              options.setRunAttribution(workspaceId, null);
+            } catch (error) {
+              reportError(error);
+            }
+            const releaseReservation = () => {
+              if (!selfTestReservations.delete(workspaceId)) return;
+              if (!stopped) void scanWorkspace(workspaceId).catch(reportError);
+            };
+            if (!test.child.hasExited()) {
+              reservationHeldByProcess = true;
+              test.killEscalation = terminateWithEscalation(
+                test.child,
+                test.killEscalation,
+              );
+              test.child.onExit(() => releaseReservation());
+              setTimeout(releaseReservation, RUNNER_KILL_GRACE_MS + 1_000);
+            } else {
+              releaseReservation();
+            }
+            resolveResult(result);
+          };
+          const check = async () => {
+            const test = selfTests.get(workspaceId);
+            if (!test || test.settled) return;
+            try {
+              const messages = await chat.listMessages({
+                workspaceId,
+                threadId: scratchThreadId,
+              });
+              if (
+                messages.some(
+                  (message) =>
+                    message.author.kind === "agent" &&
+                    message.body.trim() === marker,
+                )
+              ) {
+                await complete({
+                  ok: true,
+                  detail:
+                    "Runner self-test passed. The harness reported through dohc chat.",
+                });
+                return;
+              }
+            } catch (error) {
+              reportError(error);
+            }
             const current = selfTests.get(workspaceId);
             if (current && !current.settled) {
-              await complete({
-                ok: false,
-                detail: `Runner exited before reporting self-test success. Log: ${logPath}`,
-              });
+              current.poll = setTimeout(() => {
+                void check();
+              }, SELF_TEST_POLL_MS);
             }
-          })();
+          };
+          const timeout = setTimeout(() => {
+            const test = selfTests.get(workspaceId);
+            if (test) {
+              test.killEscalation = terminateWithEscalation(
+                test.child,
+                test.killEscalation,
+              );
+            }
+            void complete({
+              ok: false,
+              detail: `Runner self-test timed out after 120 seconds. Log: ${logPath}`,
+            });
+          }, RUNNER_SELF_TEST_TIMEOUT_MS);
+          const state: SelfTestState = {
+            workspaceId,
+            child: spawned.child,
+            threadId: scratchThreadId,
+            runId,
+            settled: false,
+            poll: null,
+            timeout,
+            killEscalation: null,
+            resolve: resolveResult,
+          };
+          selfTests.set(workspaceId, state);
+          spawned.child.onError((error) => {
+            reportError(error);
+            void complete({
+              ok: false,
+              detail: `Runner self-test failed to start. Log: ${logPath}`,
+            });
+          });
+          spawned.child.onExit(() => {
+            void (async () => {
+              await check();
+              const current = selfTests.get(workspaceId);
+              if (current && !current.settled) {
+                await complete({
+                  ok: false,
+                  detail: `Runner exited before reporting self-test success. Log: ${logPath}`,
+                });
+              }
+            })();
+          });
+          void check();
         });
-        void check();
-      });
-    } catch (error) {
-      try {
-        options.setRunAttribution(workspaceId, null);
-      } catch {}
-      reportError(error);
-      return {
-        ok: false,
-        detail: `Runner self-test could not start. Log: ${logPath}`,
-      };
-    }
+      } catch (error) {
+        try {
+          options.setRunAttribution(workspaceId, null);
+        } catch {}
+        reportError(error);
+        return {
+          ok: false,
+          detail: `Runner self-test could not start. Log: ${logPath}`,
+        };
+      }
     } finally {
       if (!reservationHeldByProcess) selfTestReservations.delete(workspaceId);
     }

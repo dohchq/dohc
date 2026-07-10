@@ -288,6 +288,41 @@ describe("DesktopSettings", () => {
     ).toBe("active");
   });
 
+  it("keeps runner enable disabled until the command draft is non-empty", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    const command = await screen.findByTestId("runner-command-input");
+    const enable = screen.getByRole("switch", { name: "Enable chat runner" });
+    expect(enable.getAttribute("disabled")).not.toBeNull();
+    await user.type(command, "   ");
+    expect(enable.getAttribute("disabled")).not.toBeNull();
+    expect(bridge.setUserSettings).not.toHaveBeenCalled();
+
+    await user.type(command, "codex exec");
+    expect(enable.getAttribute("disabled")).toBeNull();
+    await user.click(enable);
+
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        settings: expect.objectContaining({
+          runner: {
+            command: "   codex exec",
+            enabled: true,
+            timeoutMinutes: 30,
+          },
+        }),
+      }),
+    );
+  });
+
   it("saves the runner draft before self-test and reports success", async () => {
     const user = userEvent.setup();
     render(

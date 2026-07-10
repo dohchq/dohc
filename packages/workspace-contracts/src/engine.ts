@@ -1480,6 +1480,7 @@ export interface AgentDispatchStore {
   runRecordsForThread(
     workspaceId: WorkspaceId,
     threadId: ChatThreadId,
+    options?: { limit?: number },
   ): Record<ChatMessageId, AgentRunRecord>;
   getRunRecord(runId: string): AgentRunRecord | null;
   setThreadDispatchPaused(input: {

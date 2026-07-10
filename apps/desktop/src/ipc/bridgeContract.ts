@@ -693,7 +693,9 @@ export type ChatRunRecordsForThreadPayload = z.infer<
 >;
 
 export const ChatRunRecordsForThreadResult = z.object({
-  runs: z.record(ChatRunRecord),
+  runs: z.record(ChatRunRecord).describe(
+    "Run records linked to messages from the thread's 200 most recent runs, newest first.",
+  ),
 });
 export type ChatRunRecordsForThreadResult = z.infer<
   typeof ChatRunRecordsForThreadResult

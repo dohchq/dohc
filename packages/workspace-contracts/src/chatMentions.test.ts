@@ -74,6 +74,35 @@ describe("shared mention scanning", () => {
       { type: "mention", text: "@you", candidate: you },
     ]);
   });
+
+  it("trims sentence punctuation from handles while preserving interior dots", () => {
+    const punctuationCandidates: MentionCandidate[] = [
+      { id: "agent", kind: "agent", handle: "agent", label: "Agent" },
+      { id: "dotted", kind: "agent", handle: "a.b", label: "Dotted" },
+    ];
+    const body = "@agent. @agent, @agent... @a.b";
+
+    const tokens = scanMentionTokens(body);
+    expect(tokens.map((mention) => mention.handle)).toEqual([
+      "agent",
+      "agent",
+      "agent",
+      "a.b",
+    ]);
+    expect(tokens.map((mention) => body.slice(mention.start, mention.end))).toEqual([
+      "@agent",
+      "@agent",
+      "@agent",
+      "@a.b",
+    ]);
+    expect(
+      findMentions(body, punctuationCandidates).map((mention) => mention.candidate.handle),
+    ).toEqual(["agent", "agent", "agent", "a.b"]);
+    expect(toMentionSegments("@agent.", punctuationCandidates)).toEqual([
+      { type: "mention", text: "@agent", candidate: punctuationCandidates[0] },
+      { type: "text", text: "." },
+    ]);
+  });
 });
 
 describe("shared mention composer helpers", () => {
