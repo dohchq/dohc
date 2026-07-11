@@ -38,9 +38,8 @@ type Notice = {
   Icon: typeof Bell;
 };
 
-// Coarse relative time for the notice ledger. Not live-ticking on purpose:
-// the list re-derives on every notice/state change, which is exactly when a
-// stale label would matter.
+// Coarse relative time for the notice ledger. Recomputed on every render;
+// a 30s tick while the panel is open keeps labels honest between updates.
 function relativeTime(thenMs: number): string {
   const elapsedMs = Math.max(0, Date.now() - thenMs);
   const deltaMinutes = Math.floor(elapsedMs / 60_000);
@@ -95,6 +94,14 @@ export function NoticeCenter(props: {
   onDismissAgentNotification?: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Relative-time labels ("3m ago") are computed at render; tick every 30s
+  // while the panel is open so they can't sit stale between state updates.
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const interval = setInterval(() => forceTick((n) => n + 1), 30_000);
+    return () => clearInterval(interval);
+  }, [open]);
   const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
   const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
     string | null
