@@ -166,6 +166,58 @@ describe("MarkdownEditor slash command: image", () => {
   });
 });
 
+describe("MarkdownEditor slash command: math", () => {
+  function makeEditor(markdown: string): Editor {
+    return new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        Markdown.configure({ indentation: { style: "space", size: 2 } }),
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+  }
+
+  it("inserts an empty $$ math block ready for editing", () => {
+    const editor = makeEditor("/math");
+    const setSlashState = vi.fn();
+    // "/math" is 5 chars starting at doc pos 1 (inside the paragraph).
+    const state: SlashCommandState = {
+      open: true,
+      from: 1,
+      to: 6,
+      query: "math",
+      selected: 0,
+      x: 0,
+      y: 0,
+      maxHeight: 0,
+      placement: "below",
+    };
+
+    runSlashCommand(editor, "math", state, setSlashState);
+
+    expect(setSlashState).toHaveBeenCalledWith(CLOSED_SLASH_COMMAND_STATE);
+    let mathBlock: { attrs: { tex: unknown } } | null = null;
+    editor.state.doc.descendants((node) => {
+      if (node.type.name === "mathBlock") {
+        mathBlock = node as unknown as { attrs: { tex: unknown } };
+      }
+    });
+    expect(mathBlock).not.toBeNull();
+    expect(mathBlock!.attrs.tex).toBe("");
+    // The block is selected (NodeSelection) so its NodeView opens edit-ready.
+    const selectedNode = (
+      editor.state.selection as unknown as { node?: { type: { name: string } } }
+    ).node;
+    expect(selectedNode?.type.name).toBe("mathBlock");
+    editor.destroy();
+  });
+});
+
 describe("MarkdownEditor code block continuation", () => {
   function makeEditor(markdown: string): Editor {
     return new Editor({

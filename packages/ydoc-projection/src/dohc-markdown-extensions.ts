@@ -802,6 +802,148 @@ const DohcHighlight = Mark.create({
   renderMarkdown: (node, helpers) => `==${helpers.renderChildren(node.content ?? [])}==`,
 })
 
+// Obsidian/Pandoc TeX math. Inline `$...$` and block `$$...$$` (single- or
+// multi-line). Both are atom nodes carrying the raw TeX in a `tex` attr; the
+// original `$`/`$$` delimiters are re-emitted verbatim so the round-trip is
+// byte-identical. Rendering the TeX to KaTeX is a desktop-only concern
+// (mathRender.ts) — these nodes stay pure so the projection package, which
+// never paints a screen, has no KaTeX dependency.
+//
+// Inline flanking rules mirror Pandoc's `tex_math_dollars` so ordinary prose
+// with dollar signs never turns into math:
+//   - the opening `$` must be followed by a non-space, non-`$` character,
+//   - the closing `$` must be preceded by a non-space character,
+//   - the closing `$` must NOT be immediately followed by a digit.
+// So `$5 and $6` and `a $ b` never fire, while `$x$` does. A backslash-escaped
+// `\$` is left to the base `escape` token (an escapedPunctuation node), so it
+// stays a literal dollar and never opens or closes math — findClosingInlineMath
+// skips `\`-escaped characters for the same reason.
+function findClosingInlineMath(src: string): number {
+  for (let index = 1; index < src.length; index += 1) {
+    if (src[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (src[index] === '$') return index
+  }
+  return -1
+}
+
+const DohcMathInline = Node.create({
+  name: 'mathInline',
+  priority: 1000,
+  inline: true,
+  group: 'inline',
+  atom: true,
+
+  addAttributes() {
+    return {
+      tex: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'span[data-dohc-math-inline]' }]
+  },
+
+  renderHTML({ node }) {
+    return [
+      'span',
+      { class: 'dohc-math dohc-math-inline', 'data-dohc-math-inline': '' },
+      `$${String(node.attrs.tex ?? '')}$`,
+    ]
+  },
+
+  markdownTokenizer: {
+    name: 'mathInline',
+    level: 'inline',
+    start(src) {
+      // Opening `$` must not be preceded by `\` (escaped) or another `$` (that
+      // is block/display `$$`), and must be followed by a non-space, non-`$`.
+      return firstUnescapedIndex(src, /(^|[^\\$])\$(?=[^\s$])/)
+    },
+    tokenize(src) {
+      if (!src.startsWith('$')) return undefined
+      const opening = src[1] ?? ''
+      // Opening `$` must be followed by a non-space, non-`$` char (a leading
+      // `$$` is block/display math, handled by the block tokenizer).
+      if (opening === '' || opening === '$' || /\s/.test(opening)) return undefined
+      const closing = findClosingInlineMath(src)
+      if (closing === -1) return undefined
+      // Closing `$` preceded by non-space, and not immediately followed by a
+      // digit — so `$20 and $30` stays literal.
+      if (/\s/.test(src[closing - 1] ?? '')) return undefined
+      if (/\d/.test(src[closing + 1] ?? '')) return undefined
+      const raw = src.slice(0, closing + 1)
+      const tex = raw.slice(1, -1)
+      if (!tex) return undefined
+      return { type: 'mathInline', raw, tex }
+    },
+  },
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('mathInline', { tex: token.tex }),
+
+  renderMarkdown: (node) => `$${String(node.attrs?.tex ?? '')}$`,
+})
+
+const DohcMathBlock = Node.create({
+  name: 'mathBlock',
+  priority: 1000,
+  group: 'block',
+  atom: true,
+
+  addAttributes() {
+    return {
+      tex: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'div[data-dohc-math-block]' }]
+  },
+
+  renderHTML({ node }) {
+    return [
+      'div',
+      { class: 'dohc-math dohc-math-block', 'data-dohc-math-block': '' },
+      `$$${String(node.attrs.tex ?? '')}$$`,
+    ]
+  },
+
+  // Block-level tokenizer so a standalone `$$...$$` (single- or multi-line) is
+  // its own block. The `tex` attr stores the EXACT text between the delimiters
+  // — including any surrounding newlines — so `$$\nx\n$$` and `$$x$$` each
+  // re-serialize byte-for-byte.
+  markdownTokenizer: {
+    name: 'mathBlock',
+    level: 'block',
+    start(src) {
+      const match = /(?:^|\n)(\$\$)/.exec(src)
+      if (!match) return -1
+      return match.index === 0 ? 0 : match.index + 1
+    },
+    tokenize(src) {
+      if (!src.startsWith('$$')) return undefined
+      const closing = src.indexOf('$$', 2)
+      if (closing === -1) return undefined
+      // The closing `$$` must end its line (or the document), so a mid-line
+      // `$$x$$ trailing` is left as literal text instead of being sliced into
+      // a stray block that would not round-trip.
+      const afterClosing = src[closing + 2] ?? '\n'
+      if (afterClosing !== '\n') return undefined
+      const raw = src.slice(0, closing + 2)
+      const tex = src.slice(2, closing)
+      return { type: 'mathBlock', raw, tex }
+    },
+  },
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('mathBlock', { tex: token.tex }),
+
+  renderMarkdown: (node) => `$$${String(node.attrs?.tex ?? '')}$$`,
+})
+
 export const dohcMarkdownExtensions = [
   DohcImage,
   DohcEscapedPunctuation,
@@ -811,4 +953,6 @@ export const dohcMarkdownExtensions = [
   DohcQueryBlock,
   DohcCallout,
   DohcHighlight,
+  DohcMathInline,
+  DohcMathBlock,
 ]

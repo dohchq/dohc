@@ -52,7 +52,8 @@ Tiptap's Collaboration extension can bind to a raw Yjs fragment. v2 uses that sh
 | `queryBlock` | Tiptap node | `body` | yes | custom extension | required |
 | `callout` | Tiptap node | `body` | yes | custom extension | required |
 | `highlight` | Tiptap mark | `body` | yes | custom extension | required |
-| `math` | Tiptap node/text syntax | `body` | yes | passthrough | preserve as text in Phase 1 |
+| `mathInline` | Tiptap node | `body` | yes | custom extension | required |
+| `mathBlock` | Tiptap node | `body` | yes | custom extension | required |
 | `htmlAtom` | raw atom body mode | `meta` | no | raw HTML atom mode | separate mode |
 | `frontmatter` | `Y.Map` | `frontmatter` | no | frontmatter map projection | required |
 
@@ -73,6 +74,23 @@ because the type is captured up to the first `]`. The node stores
 custom inline tokenizer (the base parser has no `==` rule). Flanking non-space
 characters are required so stray `=` and `a == b` never fire, and nested marks
 like `**==x==**` round-trip.
+
+### TeX math
+
+`mathInline` (`$...$`) and `mathBlock` (`$$...$$`, single- or multi-line) are
+Obsidian/Pandoc TeX-math atoms. Each stores the raw TeX in a `tex` attr and
+re-emits the original `$`/`$$` delimiters verbatim, so the round-trip is
+byte-identical. Inline flanking rules mirror Pandoc's `tex_math_dollars`: the
+opening `$` must be followed by a non-space, non-`$` character; the closing `$`
+must be preceded by a non-space character and must not be immediately followed
+by a digit — so `$5 and $6` and `a $ b` stay literal while `$x$` renders. A
+backslash-escaped `\$` is left to the base `escape` token, so it stays a
+literal dollar. `mathBlock` only claims a standalone `$$...$$` whose closing
+`$$` ends its line; a mid-paragraph `$$x$$ trailing` stays literal text. As
+with every inline atom, a mark that *wraps* math (e.g. `**$x$**`) does not
+round-trip its mark (the base manager only attaches marks to text nodes);
+marks *adjacent* to math are unaffected. Rendering the TeX with KaTeX is a
+desktop-only concern (`mathRender.ts`); the projection package stays pure.
 
 ## First-Class AI-Native Constructs
 
