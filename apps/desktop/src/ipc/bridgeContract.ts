@@ -218,6 +218,38 @@ export const ExportWorkspaceZipResult = z.object({
 });
 export type ExportWorkspaceZipResult = z.infer<typeof ExportWorkspaceZipResult>;
 
+// Document export ("Copy as Markdown" ships purely through the renderer's own
+// clipboard call — no IPC needed). HTML/PDF export both land through this ONE
+// channel: the renderer always builds the same self-contained HTML (title +
+// rendered body + inline styles, no external assets); main either writes it
+// verbatim (`kind: "html"`) or renders it in a hidden offscreen window and
+// writes the resulting PDF bytes (`kind: "pdf"`). The output path — like
+// ExportWorkspaceZipPayload — comes from a MAIN-process save dialog outside
+// the workspace, since export is explicitly user-directed; null = cancelled.
+const EXPORT_DOCUMENT_SUGGESTED_NAME = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => !/[/\\\0]/.test(value), {
+    message: "suggested export name must not contain path separators",
+  });
+
+export const ExportDocumentFilePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  suggestedName: EXPORT_DOCUMENT_SUGGESTED_NAME,
+  // The rendered, self-contained HTML document — for a PDF export this is the
+  // source main prints, not the output bytes. Bounded generously; a document
+  // this large has no business round-tripping through IPC as a single string.
+  content: z.string().min(1).max(20 * 1024 * 1024),
+  kind: z.enum(["html", "pdf"]),
+});
+export type ExportDocumentFilePayload = z.infer<typeof ExportDocumentFilePayload>;
+
+export const ExportDocumentFileResult = z.object({
+  path: PATH_STRING.nullable(),
+});
+export type ExportDocumentFileResult = z.infer<typeof ExportDocumentFileResult>;
+
 // Explorer context menu: the renderer names WHAT was right-clicked, main
 // builds the native Menu from main-owned labels over the closed
 // EXPLORER_MENU_COMMANDS tuple (channels.ts) and resolves the SAME invoke
@@ -355,6 +387,37 @@ export const WorkspaceGraphResult = z.object({
   truncatedFileCount: z.number().int().nonnegative(),
 });
 export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
+
+// Backlinks ("Linked mentions"): the OPEN document's inbound links, derived
+// read-only in main from the same source graph. `path` is the open file; the
+// result lists every OTHER file that links to it with a highlighted snippet per
+// mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
+// here so this shared contract never imports the main-only fs module).
+export const GetBacklinksPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type GetBacklinksPayload = z.infer<typeof GetBacklinksPayload>;
+
+const BacklinkSnippet = z.object({
+  // A single source line, trimmed/windowed to ~160 chars (+ ellipses).
+  text: z.string().max(400),
+  line: z.number().int().positive(),
+  // [start, end) of the link within `text`; the UI marks this range.
+  highlightStart: z.number().int().nonnegative(),
+  highlightEnd: z.number().int().nonnegative(),
+});
+
+const BacklinkSource = z.object({
+  sourcePath: PATH_STRING,
+  sourceTitle: z.string().max(120),
+  snippets: z.array(BacklinkSnippet).max(20),
+});
+
+export const GetBacklinksResult = z.object({
+  sources: z.array(BacklinkSource).max(500),
+});
+export type GetBacklinksResult = z.infer<typeof GetBacklinksResult>;
 
 // Visible SQLite: the studio reads a snapshot (tables/columns/bounded rows),
 // edits rows in place, and imports a source file into a new database. The
@@ -2132,6 +2195,11 @@ export interface DohcDesktopBridge {
   exportWorkspaceZip(
     payload: ExportWorkspaceZipPayload,
   ): Promise<ExportWorkspaceZipResult>;
+  // Document export ("Copy as Markdown" / "Export as HTML" / "Export as
+  // PDF" menu, ViewHeader). See the payload's comment for the kind split.
+  exportDocumentFile(
+    payload: ExportDocumentFilePayload,
+  ): Promise<ExportDocumentFileResult>;
   // Native explorer context menu; resolves with the chosen closed-tuple
   // command (validated in the preload via isExplorerMenuCommand) or null.
   showExplorerMenu(
@@ -2157,6 +2225,7 @@ export interface DohcDesktopBridge {
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;
+  getBacklinks(payload: GetBacklinksPayload): Promise<GetBacklinksResult>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;

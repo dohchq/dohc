@@ -33,7 +33,8 @@ describe('dohc v2 schema contracts', () => {
       'queryBlock',
       'callout',
       'highlight',
-      'math',
+      'mathInline',
+      'mathBlock',
       'htmlAtom',
       'frontmatter',
     ])

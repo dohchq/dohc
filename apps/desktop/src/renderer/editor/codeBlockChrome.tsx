@@ -11,6 +11,7 @@ const CODE_LANGUAGE_OPTIONS = [
   { value: "bash", label: "Shell" },
   { value: "json", label: "JSON" },
   { value: "markdown", label: "Markdown" },
+  { value: "mermaid", label: "Mermaid" },
   { value: "html", label: "HTML" },
   { value: "css", label: "CSS" },
   { value: "sql", label: "SQL" },

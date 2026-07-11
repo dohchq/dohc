@@ -21,6 +21,8 @@ describe('desktop editor schema parity with hocuspocus', () => {
       'formula',
       'queryBlock',
       'callout',
+      'mathInline',
+      'mathBlock',
       'taskList',
       'taskItem',
     ]) {

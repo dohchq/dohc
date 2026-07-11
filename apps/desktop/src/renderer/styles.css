@@ -2239,3 +2239,452 @@ mark.dohc-highlight,
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+
+/* Mermaid diagrams (mermaidRender.ts) — the fence stays the source of
+ * truth; this is a rendered widget below the ```mermaid code block. While
+ * the cursor sits outside the block, the fence (including its language
+ * toolbar) collapses to zero height so the diagram reads as the primary
+ * content — mirrors the wikilink pill's source/preview toggle. Clicking the
+ * diagram (or arrow-key navigation into the block) restores it instantly. */
+.dohc-mermaid-block {
+  transition:
+    max-height 160ms ease-out,
+    opacity 120ms ease-out,
+    padding 160ms ease-out,
+    margin 160ms ease-out,
+    border-color 160ms ease-out;
+}
+
+.dohc-mermaid-collapsed {
+  max-height: 0;
+  overflow: hidden;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-color: transparent;
+  opacity: 0;
+}
+
+.dohc-mermaid-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: auto;
+  margin: 0 0 12px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-bg);
+  padding: 18px;
+  cursor: text;
+}
+
+.dohc-mermaid-preview-canvas {
+  display: flex;
+  max-width: 100%;
+}
+
+.dohc-mermaid-preview-canvas svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.dohc-mermaid-preview-status {
+  margin-top: 10px;
+  align-self: stretch;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.dohc-mermaid-preview--error .dohc-mermaid-preview-status {
+  border: 1px solid color-mix(in srgb, var(--dohc-danger) 40%, transparent);
+  background: color-mix(in srgb, var(--dohc-danger) 12%, transparent);
+  color: var(--dohc-danger);
+}
+
+.dohc-mermaid-preview--skipped .dohc-mermaid-preview-status {
+  border: 1px solid var(--dohc-line);
+  background: var(--dohc-panel-2);
+  /* subtle-on-panel-2 fails WCAG AA at this 11.5px size (light 3.46:1, dark
+   * 4.16:1). muted clears AA in both themes (light 6.37:1, dark 7.28:1) — the
+   * same fix applied to code comments in phase 1. */
+  color: var(--dohc-muted);
+}
+
+/* ===================================================================== *
+ * Linked mentions (BacklinksPanel.tsx) — the inbound-link "backlinks"
+ * section at the bottom of a document. Quiet chrome aligned to the shared
+ * editor reading measure (like page identity above the body): a serif
+ * section title per brand, a hairline separator, and muted source/snippet
+ * rows that warm on hover. Colors ride the theme tokens so both themes come
+ * for free.
+ * ===================================================================== */
+.dohc-backlinks {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 56px 48px;
+  background: var(--dohc-bg);
+}
+
+.dohc-backlinks__inner {
+  max-width: 720px;
+  margin: 0 auto;
+  border-top: 1px solid var(--dohc-line);
+  padding-top: 12px;
+}
+
+.dohc-backlinks__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  color: var(--dohc-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.dohc-backlinks__header:hover {
+  color: var(--dohc-ink);
+}
+
+.dohc-backlinks__chevron {
+  flex-shrink: 0;
+  color: var(--dohc-subtle);
+  transition: transform 120ms ease-out;
+}
+
+.dohc-backlinks__chevron[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+.dohc-backlinks__header-icon {
+  flex-shrink: 0;
+  color: var(--dohc-subtle);
+}
+
+.dohc-backlinks__title {
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dohc-ink);
+}
+
+.dohc-backlinks__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--dohc-panel-2);
+  color: var(--dohc-subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dohc-backlinks__list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dohc-backlinks__source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dohc-backlinks__source-link {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  margin: 0 -6px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dohc-backlinks__source-link:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-backlinks__source-title {
+  color: var(--dohc-ink);
+  font-size: 13.5px;
+  font-weight: 550;
+}
+
+.dohc-backlinks__source-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+}
+
+.dohc-backlinks__snippets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dohc-backlinks__snippet {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-left: 2px solid var(--dohc-line);
+  background: transparent;
+  padding: 2px 8px;
+  color: var(--dohc-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.dohc-backlinks__snippet:hover {
+  border-left-color: var(--dohc-subtle);
+  color: var(--dohc-ink);
+}
+
+.dohc-backlinks__mark {
+  background: color-mix(in srgb, var(--dohc-accent) 22%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+  font-weight: 600;
+}
+
+
+/* `:shortcode:` emoji autocomplete picker — same floating-popover
+ * conventions as .dohc-wikilink-picker (border/shadow/pop-in shared via
+ * that rule's selector group; this file only adds emoji-specific layout). */
+.dohc-emoji-picker {
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  width: 220px;
+  padding: 4px;
+}
+
+[data-theme='dark'] .dohc-emoji-picker {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-emoji-picker__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-ink);
+  text-align: left;
+  padding: 5px 7px;
+}
+
+.dohc-emoji-picker__item.is-active {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-emoji-picker__item-glyph {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.dohc-emoji-picker__item-shortcode {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.dohc-emoji-picker__empty {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-size: 11px;
+  padding: 6px 7px;
+}
+
+/* ── document header "…" menu (DocumentMenu.tsx) ──
+ * Same box treatment as .dohc-turn-into-menu/.dohc-slash-menu; anchored to
+ * the RIGHT edge (not left) since the trigger sits at the end of ViewHeader,
+ * close to the window's edge — a left-aligned menu would overflow offscreen. */
+.dohc-document-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.dohc-document-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 71;
+  width: 190px;
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 5px;
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.dohc-document-menu-list:focus {
+  outline: none;
+}
+
+[data-theme='dark'] .dohc-document-menu-list {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-document-menu-item {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 6px 8px;
+  color: var(--dohc-ink);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.dohc-document-menu-item.is-selected {
+  background: var(--dohc-panel-2);
+}
+
+/* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled
+ * katex.min.css; these rules only theme the dohc wrappers, the source-edit
+ * field, and the empty/error states so math reads correctly in both themes.
+ * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
+:root {
+  --dohc-math-error-color: #a6402c;
+}
+[data-theme='dark'] {
+  --dohc-math-error-color: #e08065;
+}
+
+.dohc-math-inline {
+  display: inline-block;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.dohc-math-inline:hover {
+  background: color-mix(in srgb, var(--dohc-match) 12%, transparent);
+}
+
+.dohc-math-block {
+  display: block;
+  margin: 0.6em 0;
+  padding: 0.5em 0.75em;
+  text-align: center;
+  cursor: pointer;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.dohc-math-block:hover {
+  background: color-mix(in srgb, var(--dohc-match) 8%, transparent);
+}
+
+/* Empty math (e.g. a freshly inserted `$$` block) shows a calm hint so it is
+ * visible and clickable instead of collapsing to nothing. */
+.dohc-math--empty .dohc-math__preview::after,
+.dohc-math__preview.dohc-math--empty::after {
+  content: 'Empty math — click to edit';
+  color: var(--dohc-subtle);
+  font-size: 12px;
+  font-style: italic;
+}
+.dohc-math-inline.dohc-math--empty .dohc-math__preview::after,
+.dohc-math-inline .dohc-math__preview.dohc-math--empty::after {
+  content: 'math';
+}
+
+/* Invalid TeX: KaTeX paints its own error text in --dohc-math-error-color;
+ * this adds a subtle underline so the warning reads at a glance. */
+.dohc-math--error .dohc-math__preview,
+.dohc-math__preview.dohc-math--error {
+  color: var(--dohc-math-error-color);
+  text-decoration: underline wavy var(--dohc-math-error-color);
+  text-underline-offset: 3px;
+}
+
+.dohc-math--editing {
+  outline: 1px solid color-mix(in srgb, var(--dohc-match) 45%, transparent);
+  border-radius: 4px;
+}
+
+/* Source-edit field revealed while editing math. Monospace + themed to match
+ * the code surfaces. */
+.dohc-math__source {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dohc-ink);
+  background: var(--dohc-panel-2);
+  border: 1px solid var(--dohc-line);
+  border-radius: 4px;
+  padding: 2px 6px;
+  box-sizing: border-box;
+}
+.dohc-math__source:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dohc-match) 55%, var(--dohc-line));
+}
+textarea.dohc-math__source {
+  display: block;
+  width: 100%;
+  min-height: 4.5em;
+  resize: vertical;
+  text-align: left;
+  white-space: pre;
+}
+input.dohc-math__source {
+  min-width: 8ch;
+}

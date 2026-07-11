@@ -32,6 +32,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
 import { dohcMarkdownExtensions, escapeHighlightMarkdown } from "./extensions";
 import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
+import { makeMathNodeView } from "./mathRender";
 import {
   handleImageDrop,
   handleImagePaste,
@@ -58,6 +59,8 @@ import {
 } from "./wikilinkPlugin";
 import { makeMentionPlugin } from "./mentionTrigger";
 import { WikilinkPicker } from "./WikilinkPicker";
+import { makeEmojiPlugin } from "./emojiTrigger";
+import { EmojiPicker } from "./EmojiPicker";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
@@ -92,6 +95,7 @@ import {
 } from "./codeBlockChrome";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
+import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import { OutlinePanel } from "./OutlinePanel";
 import { WordCountBadge } from "./WordCountBadge";
 
@@ -259,6 +263,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [mentionState, setMentionState] = useState<AutocompleteState>({
       active: false,
     });
+    const [emojiState, setEmojiState] = useState<AutocompleteState>({
+      active: false,
+    });
     const [slashState, setSlashState] = useState<SlashCommandState>(
       CLOSED_SLASH_COMMAND_STATE,
     );
@@ -376,12 +383,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 (state) => setAcState(state),
               ),
               makeMentionPlugin((state) => setMentionState(state)),
+              makeEmojiPlugin((state) => setEmojiState(state)),
               wikilinkClickPlugin,
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
               makeCodeBlockContinuationPlugin(),
               makeCalloutChromePlugin(),
               makeCodeHighlightPlugin(),
+              makeMermaidPreviewPlugin(),
               makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
               makeTableControlsPlugin(),
@@ -453,6 +462,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           // attr stays the original relative path).
           nodeViews: {
             image: makeImageNodeView(() => imageContextRef.current),
+            mathInline: makeMathNodeView(false),
+            mathBlock: makeMathNodeView(true),
           },
           handlePaste: (view, event) =>
             handleImagePaste(view, event, pasteContextRef.current),
@@ -642,6 +653,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const pickerView = editor
       ? (editor.view as Parameters<typeof WikilinkPicker>[0]["view"])
       : null;
+    const emojiPickerView = editor
+      ? (editor.view as Parameters<typeof EmojiPicker>[0]["view"])
+      : null;
     const pickerState: Parameters<typeof WikilinkPicker>[0]["state"] =
       acState.active
         ? { open: true, from: acState.from, query: acState.query }
@@ -649,6 +663,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const mentionPickerState: Parameters<typeof WikilinkPicker>[0]["state"] =
       mentionState.active
         ? { open: true, from: mentionState.from, query: mentionState.query }
+        : { open: false };
+    const emojiPickerState: Parameters<typeof EmojiPicker>[0]["state"] =
+      emojiState.active
+        ? { open: true, from: emojiState.from, query: emojiState.query }
         : { open: false };
 
     return (
@@ -672,7 +690,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         {/* .dohc-editor-surface — NOT .dohc-tiptap-editor — is the CSS
          * container-query context for the outline/word-count grid trick.
          * Every position: fixed popover below (slash menu, block menu,
-         * both wikilink/@-mention pickers, link menu) MUST stay a sibling
+         * wikilink/@-mention/emoji pickers, link menu) MUST stay a sibling
          * of this wrapper, never a descendant: container-type makes an
          * element the containing block for fixed descendants too, which
          * would turn their view.coordsAtPos(...) viewport coordinates into
@@ -765,6 +783,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               view={pickerView}
               insertMode="node"
               onDismiss={() => setMentionState({ active: false })}
+            />
+            <EmojiPicker
+              state={emojiPickerState}
+              view={emojiPickerView}
+              onDismiss={() => setEmojiState({ active: false })}
             />
             <LinkMenu
               editor={editor}

@@ -23,17 +23,28 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
-import { parseFrontmatter } from "./markdown/frontmatter";
+import {
+  applyFrontmatter,
+  orderFrontmatter,
+  parseFrontmatter,
+} from "./markdown/frontmatter";
 import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
+import { DocumentMenu } from "./DocumentMenu";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
+
+// The engine Y.Doc frontmatter map field name — the same key PageIdentity and
+// PropertiesPanel write title/icon/properties into (v2 schema). Read directly
+// here so engine-mode export/copy reflects live frontmatter edits.
+const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
 // main process resolves <workspaceId> to a real workspace root and enforces
@@ -476,6 +487,9 @@ function MarkdownView(props: {
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
   reopenKey?: number;
+  // Workspace-activity token: bumps after saves / external edits so the linked
+  // mentions section recomputes without polling.
+  refreshKey?: number;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -523,6 +537,32 @@ function MarkdownView(props: {
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
     return latestDraft.current;
+  };
+
+  // Engine-mode export/serialize: in the engine branch the WYSIWYG editor is
+  // ALWAYS mounted and collab-bound to the engine Y.Doc, so its live body is
+  // the canonical current markdown. serializeDraftRef can't be reused here
+  // because it falls back to the stale (possibly truncated) props.body whenever
+  // the properties panel is open or the doc opened in read mode, neither of
+  // which reflects the live edit. This reads the editor on demand at click time
+  // so the exported source is fresh.
+  //
+  // Frontmatter (title / icon / properties) is edited through PageIdentity and
+  // PropertiesPanel, which write straight into the engine Y.Doc's frontmatter
+  // MAP — NOT into latestDraft.current, which stays at this mount's initial
+  // markdown. Reading latestDraft.current for the frontmatter therefore exports
+  // a stale title. Serialize the LIVE map instead. Reading it directly (rather
+  // than yDocToMarkdown) keeps import-export's heavy schema/KaTeX stack out of
+  // this eager chunk — the mounted WYSIWYG editor already owns the body.
+  const serializeEngineDraft = () => {
+    const body =
+      wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(props.body);
+    const liveMeta = engine.doc
+      ? (Object.fromEntries(
+          engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+        ) as Record<string, unknown>)
+      : parseFrontmatter(latestDraft.current).meta;
+    return applyFrontmatter(body, orderFrontmatter(liveMeta));
   };
 
   useEffect(() => {
@@ -776,6 +816,18 @@ function MarkdownView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush, readOnly]);
 
+  // Linked mentions live at the BOTTOM of the document, inside the reading
+  // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
+  // file has none, so it only ever adds chrome when there's something to show.
+  const backlinks = (
+    <BacklinksPanel
+      workspaceId={props.workspaceId}
+      path={props.path}
+      refreshKey={props.refreshKey}
+      onOpenPath={props.onOpenPath}
+    />
+  );
+
   // Engine mode: the engine-native rich Y.Doc drives Tiptap (recordUpdate +
   // debounced settle in main; engine.db + the .md are the durable artifact).
   // There is no read/source/Edit gate here — the CRDT is canonical the whole
@@ -813,6 +865,11 @@ function MarkdownView(props: {
               >
                 <SlidersHorizontal size={13} aria-hidden />
               </button>
+              <DocumentMenu
+                workspaceId={props.workspaceId}
+                suggestedName={filenameStem(props.path)}
+                getMarkdown={() => serializeEngineDraft()}
+              />
             </>
           }
         />
@@ -859,6 +916,7 @@ function MarkdownView(props: {
               }}
             />
           </Suspense>
+          {backlinks}
         </div>
       </div>
     );
@@ -919,6 +977,17 @@ function MarkdownView(props: {
             >
               {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
+            {/* A truncated doc only loaded a bounded prefix into
+                serializeDraftRef — copying/exporting it would silently emit a
+                partial document. Hide the menu until the full file is loaded
+                (same gate as the properties toggle above). */}
+            {!props.truncated ? (
+              <DocumentMenu
+                workspaceId={props.workspaceId}
+                suggestedName={filenameStem(props.path)}
+                getMarkdown={() => serializeDraftRef.current()}
+              />
+            ) : null}
           </>
         }
       />
@@ -981,6 +1050,7 @@ function MarkdownView(props: {
               collab={null}
             />
           </Suspense>
+          {backlinks}
         </div>
       ) : (
         <div
@@ -994,6 +1064,7 @@ function MarkdownView(props: {
             readOnly={readOnly}
           />
           <div className="dohc-readable-text p-6 text-[15px]">{renderedDocument}</div>
+          {backlinks}
         </div>
       )}
     </div>
@@ -1715,6 +1786,7 @@ export function FileInspector(props: {
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
             reopenKey={props.engineVersionKey}
+            refreshKey={props.refreshKey}
           />
         </div>
       );

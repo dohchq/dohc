@@ -50,6 +50,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.deleteWorkspacePath, payload),
   exportWorkspaceZip: (payload) =>
     ipcRenderer.invoke(CHANNELS.exportWorkspaceZip, payload),
+  exportDocumentFile: (payload) =>
+    ipcRenderer.invoke(CHANNELS.exportDocumentFile, payload),
   // The invoke RESULT is validated here like main→renderer events are: only
   // an exact member of the closed EXPLORER_MENU_COMMANDS tuple reaches
   // renderer code — anything else reads as null ("dismissed").
@@ -97,6 +99,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.openFileExternally, payload),
   readWorkspaceGraph: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
+  getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
   applyDatabaseEdit: (payload) =>
