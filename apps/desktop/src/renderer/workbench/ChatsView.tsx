@@ -2066,7 +2066,7 @@ export function ChatsView(props: {
                   </div>
                   <p
                     data-testid="chats-message-body"
-                    className="mb-0 mt-3 whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
+                    className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
                   >
                     {mentionCandidates.length > 0 ? (
                       <MentionText
@@ -2196,7 +2196,7 @@ export function ChatsView(props: {
                           </div>
                           <p
                             data-testid="chats-message-body"
-                            className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
+                            className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
                           >
                             {mentionCandidates.length > 0 ? (
                               <MentionText

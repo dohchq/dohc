@@ -14,6 +14,7 @@ import {
   Square,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "./ui/controls";
 import type {
   SitePackageInfo,
   SitePreviewMode,
@@ -297,8 +298,7 @@ export function SitePreviewPage(props: {
           ))}
           {preview ? (
             <>
-              <button
-                type="button"
+              <IconButton
                 data-testid="site-preview-reload"
                 aria-label="Reload preview"
                 title="Reload preview"
@@ -307,20 +307,19 @@ export function SitePreviewPage(props: {
                   url.searchParams.set("t", String(Date.now()));
                   setPreview({ ...preview, url: url.href });
                 }}
-                className="grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                className="size-7"
               >
                 <RefreshCcw size={13} aria-hidden />
-              </button>
-              <button
-                type="button"
+              </IconButton>
+              <IconButton
                 data-testid="site-preview-stop"
                 aria-label="Stop preview"
                 title="Stop preview"
                 onClick={() => void stop()}
-                className="grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                className="size-7"
               >
                 <Square size={13} aria-hidden />
-              </button>
+              </IconButton>
             </>
           ) : null}
         </div>
@@ -373,16 +372,15 @@ export function SitePreviewPage(props: {
                     {modeLabel(preview.mode)} preview
                   </span>
                   <span className="truncate font-mono text-[11px] text-subtle">{preview.url}</span>
-                  <button
-                    type="button"
+                  <IconButton
                     data-testid="site-preview-open-external"
                     aria-label="Open preview externally"
                     title="Open preview externally"
                     onClick={() => void bridge().openExternalUrl({ url: preview.url })}
-                    className="ml-auto grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                    className="ml-auto"
                   >
                     <ExternalLink size={12} aria-hidden />
-                  </button>
+                  </IconButton>
                 </div>
                 {/* allow-same-origin keeps localhost previews on their loopback
                     origin; without it sandboxed frames send "null" origins and

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { PrimaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton } from "./ui/controls";
 
 // "Join a synced workspace" (0P-C): the second-machine half of multi-machine
 // sync. Paste the code copied from the machine that already has the
@@ -119,15 +119,14 @@ export function JoinSyncedWorkspace(props: {
           // the workspace was durably created, so "back as if nothing
           // happened" would strand an invisible registration — the only
           // honest affordance left is "Open workspace" below.
-          <button
-            type="button"
+          <IconButton
             aria-label="Back"
             disabled={joining}
             onClick={props.onBack}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+            className="shrink-0"
           >
             <ArrowLeft size={13} aria-hidden />
-          </button>
+          </IconButton>
         ) : null}
         <h2 className="m-0 text-sm font-semibold text-ink">Join a synced workspace</h2>
       </div>

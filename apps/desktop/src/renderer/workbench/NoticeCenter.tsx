@@ -42,10 +42,11 @@ type Notice = {
 // the list re-derives on every notice/state change, which is exactly when a
 // stale label would matter.
 function relativeTime(thenMs: number): string {
-  const deltaMinutes = Math.round((Date.now() - thenMs) / 60_000);
+  const elapsedMs = Math.max(0, Date.now() - thenMs);
+  const deltaMinutes = Math.floor(elapsedMs / 60_000);
   if (deltaMinutes < 1) return "just now";
   if (deltaMinutes < 60) return `${deltaMinutes}m ago`;
-  const deltaHours = Math.round(deltaMinutes / 60);
+  const deltaHours = Math.floor(deltaMinutes / 60);
   if (deltaHours < 24) return `${deltaHours}h ago`;
   return new Date(thenMs).toLocaleDateString(undefined, {
     month: "short",
@@ -443,8 +444,11 @@ export function NoticeCenter(props: {
                     <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
                       {notice.body}
                     </p>
-                    {notice.timeMs ? (
-                      <time className="mt-1 block font-mono text-[10px] text-subtle">
+                    {notice.timeMs !== undefined ? (
+                      <time
+                        dateTime={new Date(notice.timeMs).toISOString()}
+                        className="mt-1 block font-mono text-[10px] text-subtle"
+                      >
                         {relativeTime(notice.timeMs)}
                       </time>
                     ) : null}

@@ -214,7 +214,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   onChange={(event) => setKey(index, event.target.value)}
                   onBlur={() => commit(entries)}
-                  className={`h-7 min-w-0 rounded-md border border-line bg-bg px-2 font-mono text-[12px] outline-none transition-colors placeholder:text-subtle focus:border-ink ${
+                  className={`h-7 min-w-0 rounded-md border border-line bg-bg px-2 font-mono text-[12px] transition-colors placeholder:text-subtle focus:border-ink ${
                     reserved || duplicate ? "text-danger" : "text-muted"
                   }`}
                 />
@@ -242,7 +242,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                     placeholder="Empty"
                     spellCheck={false}
                     onChange={(event) => setValue(index, event.target.value)}
-                    className="h-7 min-w-0 rounded-md border border-line bg-bg px-2 text-[13px] text-ink outline-none transition-colors placeholder:text-subtle focus:border-ink"
+                    className="h-7 min-w-0 rounded-md border border-line bg-bg px-2 text-[13px] text-ink transition-colors placeholder:text-subtle focus:border-ink"
                   />
                 )}
                 <button

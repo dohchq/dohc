@@ -78,7 +78,9 @@ export function CommandPalette(props: {
         data-testid={props.testId ?? "command-palette"}
         className="dohc-popover w-135 max-w-[80vw] overflow-hidden rounded-xl border border-line bg-panel"
       >
-        <div className="flex items-center gap-2.5 border-b border-line px-4">
+        {/* Focus lives on the framing row (focus-within), not the input: an
+            input ring would clip into the rounded popover's overflow-hidden. */}
+        <div className="flex items-center gap-2.5 border-b border-line px-4 transition-colors focus-within:border-ink">
           <Search size={14} aria-hidden className="shrink-0 text-subtle" />
           <input
             spellCheck={false}

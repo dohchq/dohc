@@ -1,7 +1,7 @@
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { bridge } from "./bridge";
-import { PrimaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton } from "./ui/controls";
 
 // The grant side of a relay share (PR 18): pick who gets it, create the
 // grant, hand back the copyable share code. The selection (a file, a folder,
@@ -76,14 +76,9 @@ export function RelayShareDialog(props: {
       <div className="flex items-center gap-2">
         <Share2 size={14} aria-hidden className="text-subtle" />
         <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Share</h2>
-        <button
-          type="button"
-          aria-label="Close"
-          onClick={props.onClose}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
-        >
+        <IconButton aria-label="Close" onClick={props.onClose}>
           <X size={13} aria-hidden />
-        </button>
+        </IconButton>
       </div>
 
       <p className="m-0 text-xs leading-relaxed text-muted">

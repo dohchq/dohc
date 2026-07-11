@@ -97,7 +97,7 @@ export function DesktopFirstRun(props: {
           <div className="flex items-start justify-between gap-2">
             {/* The whole point of this screen is where files live: never
                 truncate the path. */}
-            <code className="break-all font-mono text-[13px] leading-snug text-ink">
+            <code className="select-text cursor-text break-all font-mono text-[13px] leading-snug text-ink">
               {root ?? "…"}
             </code>
             <button

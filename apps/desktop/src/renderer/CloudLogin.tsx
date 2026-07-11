@@ -273,14 +273,13 @@ export function CloudLogin(props: {
               className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
-          <button
-            type="button"
+          <PrimaryButton
             data-testid="cloud-connect-start"
             onClick={() => void connect()}
-            className="mt-3 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
+            className="mt-3"
           >
             Connect
-          </button>
+          </PrimaryButton>
         </>
       ) : null}
 
@@ -295,15 +294,14 @@ export function CloudLogin(props: {
           >
             {phase.userCode}
           </p>
-          <button
-            type="button"
+          <PrimaryButton
             data-testid="cloud-open-browser"
             onClick={() => void bridge().openExternalUrl({ url: phase.verificationUri })}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
+            className="flex items-center gap-1.5"
           >
             <ExternalLink size={12} aria-hidden />
             Open browser
-          </button>
+          </PrimaryButton>
           <p className="mb-0 mt-2 text-[11px] text-subtle">
             Waiting for approval — this updates by itself.
           </p>
@@ -430,15 +428,14 @@ export function CloudLogin(props: {
               {syncError}
             </p>
           ) : null}
-          <button
-            type="button"
+          <SecondaryButton
             data-testid="cloud-disconnect"
             onClick={() => void disconnect()}
-            className="mt-3 flex items-center gap-1.5 rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+            className="mt-3 flex items-center gap-1.5"
           >
             <LogOut size={12} aria-hidden />
             Disconnect
-          </button>
+          </SecondaryButton>
         </div>
       ) : null}
     </div>

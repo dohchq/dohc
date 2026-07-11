@@ -52,7 +52,11 @@ cards — never pure black/white.
 - **Serif** — `'Iowan Old Style', 'Charter', Georgia, serif` (system
   stack). Brand moments, editor blockquotes, empty-state headlines.
 - **Sans** — `'InterVariable', system-ui, 'Segoe UI', sans-serif`
-  (bundled webfont). All daily UI, body, buttons, menus.
+  (bundled webfont). All daily UI, body, buttons, menus. This is a
+  deliberate divergence from the brand-reference stack in
+  `packages/brand` (`'Aptos', …`): Aptos is not redistributable, so the
+  app bundles Inter for identical rendering on every OS; the Aptos stack
+  remains for external brand surfaces that inherit system fonts.
 - **Mono** — `'IBM Plex Mono', ui-monospace, …` (bundled webfont).
   Metadata, file names, counts, source state, keyboard hints.
 

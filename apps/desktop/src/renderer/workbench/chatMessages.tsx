@@ -421,7 +421,7 @@ export function ChatMessageList(props: {
                 </span>
                 <p
                   data-testid={`${props.testIdPrefix}-message-body`}
-                  className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
+                  className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
                 >
                   {candidates.length > 0 ? (
                     <MentionText

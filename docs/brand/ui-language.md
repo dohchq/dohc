@@ -84,7 +84,11 @@ Ghost icon button (toolbars, row affordances):
 `grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`
 
 Text input:
-`w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink` (mono content → add `font-mono`)
+`w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink` (mono content → add `font-mono`).
+No `outline-none`: the global `:focus-visible` accent ring must stay for
+keyboard users — `focus:border-ink` alone is too subtle. Only opt out where
+a ring would clip (rounded overflow-hidden popovers) AND the frame provides
+an equivalent (e.g. the command palette's `focus-within:border-ink` row).
 
 List row (menus, trees, results):
 `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state:

@@ -7,7 +7,12 @@ import type {
   McpConfigResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { SectionLabel } from "./ui/controls";
+import {
+  IconButton,
+  primaryButtonClass,
+  secondaryButtonClass,
+  SectionLabel,
+} from "./ui/controls";
 
 type SessionSnapshot = NonNullable<AgentPanelSnapshotResult["session"]>;
 const AGENT_POLL_INTERVAL_MS = 300;
@@ -287,11 +292,11 @@ export function AgentPanelView(props: {
             data-testid="agent-run-toggle"
             disabled={!canToggleRun}
             onClick={activeSession ? stopSession : externalRun ? stopExternalRun : startSession}
-            className={
-              activeAgent
-                ? "inline-flex h-8 w-fit items-center gap-2 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50"
-                : "inline-flex h-9 w-fit items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
-            }
+            // One element that BRANCHES recipes (a component swap would
+            // remount the button and drop keyboard focus mid-toggle).
+            className={`${
+              activeAgent ? secondaryButtonClass : primaryButtonClass
+            } inline-flex w-fit items-center gap-2`}
           >
             {activeAgent ? <Square size={13} aria-hidden /> : <Play size={13} aria-hidden />}
             {activeAgent ? "Stop" : "Start"}
@@ -402,16 +407,15 @@ export function AgentPanelView(props: {
       <section className="rounded-lg border border-line bg-panel p-3">
         <div className="mb-2 flex items-center gap-2">
           <h3 className="m-0 text-[10px] font-semibold uppercase tracking-wide text-subtle">MCP</h3>
-          <button
-            type="button"
+          <IconButton
             data-testid="agent-copy-mcp"
             aria-label="Copy MCP config"
             title="Copy MCP config"
             onClick={copyConfig}
-            className="ml-auto grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+            className="ml-auto"
           >
             <Copy size={13} aria-hidden />
-          </button>
+          </IconButton>
         </div>
         <pre
           data-testid="agent-mcp-config"

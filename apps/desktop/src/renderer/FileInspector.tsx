@@ -30,7 +30,7 @@ import type {
 } from "./editor/MarkdownEditor";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { SectionLabel } from "./ui/controls";
+import { IconButton, SectionLabel } from "./ui/controls";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -288,16 +288,14 @@ function ViewHeader(props: {
         {props.label}
       </SectionLabel>
       {props.onShare ? (
-        <button
-          type="button"
+        <IconButton
           data-testid="file-share"
           aria-label="Share file"
           title="Share file"
           onClick={props.onShare}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
         >
           <Share2 size={13} aria-hidden />
-        </button>
+        </IconButton>
       ) : null}
       {props.actions}
     </header>

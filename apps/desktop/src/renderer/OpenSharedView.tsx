@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { PrimaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton } from "./ui/controls";
 
 // "Open a share" (PR 18): the receive side of an external share grant.
 // Paste the code someone sent you, pick an empty folder, and a READ-ONLY
@@ -95,15 +95,14 @@ export function OpenSharedView(props: {
       className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
-        <button
-          type="button"
+        <IconButton
           aria-label="Back"
           disabled={opening}
           onClick={props.onBack}
-          className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+          className="shrink-0"
         >
           <ArrowLeft size={13} aria-hidden />
-        </button>
+        </IconButton>
         <h2 className="m-0 text-sm font-semibold text-ink">Open a share</h2>
       </div>
 

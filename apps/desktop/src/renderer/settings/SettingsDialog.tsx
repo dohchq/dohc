@@ -672,7 +672,7 @@ export function SettingsDialog(props: {
               description="Settings in the Workspace scope apply only to this registered local folder."
               testId="settings-row-current-workspace"
             >
-              <code className="max-w-sm truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
+              <code className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
                 {props.workspacePath}
               </code>
             </SettingRow>
@@ -828,7 +828,7 @@ export function SettingsDialog(props: {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search settings"
-              className="h-8 w-full rounded-md border border-line bg-bg pl-8 pr-3 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
+              className="h-8 w-full rounded-md border border-line bg-bg pl-8 pr-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
           </div>
           <StatusPill state={saveState} />
