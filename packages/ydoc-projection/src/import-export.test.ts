@@ -474,4 +474,93 @@ describe('hocuspocus markdown import/export', () => {
       ['a == b stays literal'],
     )
   })
+
+  it('round-trips a callout nested inside a list item without dropping it', () => {
+    const input = ['- item', '  > [!note] In list', '  > body'].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('keeps a list item and a following callout distinct (nested callout survives)', () => {
+    const input = [
+      '- item',
+      '  > [!note] In list',
+      '  > body',
+      '',
+      '- second',
+    ].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    // The blank line between tight list items normalizes away, but the nested
+    // callout and both list items survive, and the result is idempotent.
+    expect(once).toContain('> [!note] In list')
+    expect(once).toContain('> body')
+    expect(once).toContain('- item')
+    expect(once).toContain('- second')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('emits a title-only callout without a stray trailing > line', () => {
+    expect(yDocToMarkdown(markdownToYDoc('> [!note] Just a title'))).toBe(
+      '> [!note] Just a title',
+    )
+    expect(yDocToMarkdown(markdownToYDoc('> [!tip]'))).toBe('> [!tip]')
+    expect(yDocToMarkdown(markdownToYDoc('> [!warning]- Folded title'))).toBe(
+      '> [!warning]- Folded title',
+    )
+  })
+
+  it('absorbs a lazy-continuation line into the callout instead of reflowing it out', () => {
+    const input = ['> [!note] Title', '> first line', 'lazy continuation'].join(
+      '\n',
+    )
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    // First pass normalizes the lazy line to a `>`-prefixed body line inside the
+    // callout (rather than reflowing it into a separate paragraph)...
+    expect(once).toBe(
+      ['> [!note] Title', '> first line', '> lazy continuation'].join('\n'),
+    )
+    // ...and the normalized form is byte-stable thereafter.
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('losslessly round-trips a highlight applied over text containing ==', () => {
+    const highlighted = (text: string): Y.Doc =>
+      yDocFromBody([
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text, marks: [{ type: 'highlight' }] }],
+        },
+      ])
+    // The concrete escaped form is unambiguous and reversible.
+    expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==')
+    for (const text of [
+      'a==b',
+      'a ==b== c',
+      'a==b==c',
+      '==edge==',
+      'trailing==',
+      'x = y',
+      'plain',
+    ]) {
+      const once = yDocToMarkdown(highlighted(text))
+      const twice = yDocToMarkdown(markdownToYDoc(once))
+      expect(twice, `text=${JSON.stringify(text)}`).toBe(once)
+      // The highlight is preserved as a single `==...==` span, never split.
+      expect(once.startsWith('=='), `text=${JSON.stringify(text)}`).toBe(true)
+      expect(once.endsWith('=='), `text=${JSON.stringify(text)}`).toBe(true)
+    }
+  })
+
+  it('keeps adversarial raw == sequences literal and byte-stable', () => {
+    for (const input of ['==a ==b== c==', 'a ==b==c== d', '==x==y==z==']) {
+      const once = yDocToMarkdown(markdownToYDoc(input))
+      expect(once, `input=${JSON.stringify(input)}`).toBe(input)
+      const twice = yDocToMarkdown(markdownToYDoc(once))
+      expect(twice, `input=${JSON.stringify(input)}`).toBe(once)
+    }
+  })
 })

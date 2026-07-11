@@ -1,4 +1,5 @@
 import { Mark, Node, markInputRule } from '@tiptap/core'
+import type { JSONContent } from '@tiptap/core'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -447,6 +448,13 @@ const DohcQueryBlock = Node.create({
 
   parseMarkdown: (token, helpers) => {
     const fence = queryFenceInfo(token.lang)
+    // DEFER for a non-query fence so an ordinary ```lang code block falls
+    // through to the default code-fence handler (StarterKit codeBlock) instead
+    // of being dropped. In @tiptap/markdown the type-valid defer signal is an
+    // EMPTY result array: the dispatcher treats a `[]` (or otherwise empty)
+    // parse result as "this handler produced nothing — try the next handler,
+    // then the built-in fallback" (see MarkdownManager.parseToken). `null` is
+    // NOT a permitted MarkdownParseResult. A code-fence round-trip test locks it.
     if (!fence.isQuery) return []
     return helpers.createNode(
       'queryBlock',
@@ -501,6 +509,111 @@ function findClosingHighlight(src: string): number {
   return -1
 }
 
+// Runs of `==` inside highlighted text are backslash-escaped per-`=` so the
+// inline tokenizer's `\`-skipping in findClosingHighlight never mistakes them
+// for the closing delimiter. The base markdown manager renders a mark's inner
+// text verbatim (only its opening/closing `==` delimiters come from
+// renderMarkdown), so this escaping has to be applied to the highlight-marked
+// text nodes before serialization — see escapeHighlightMarkdown below. Each
+// `\=` round-trips back through the base `escape` token (an escapedPunctuation
+// node whose renderMarkdown re-emits `\=`), so once escaped the text carries no
+// bare `==` and the transform is idempotent.
+function escapeHighlightBody(body: string): string {
+  return body.replace(/={2,}/g, (run) => run.replace(/=/g, '\\='))
+}
+
+function hasHighlightMark(node: JSONContent): boolean {
+  return (node.marks ?? []).some((mark) => mark.type === 'highlight')
+}
+
+// Escape literal `==` inside every highlight-marked text node so a highlight
+// applied over text containing `==` (only reachable via the toggle command,
+// which wraps an arbitrary selection) serializes to an unambiguous, losslessly
+// reversible `==a\=\=b==` instead of the ambiguous `==a==b==`. Returns a fresh
+// tree; the input JSON is not mutated.
+export function escapeHighlightMarkdown(node: JSONContent): JSONContent {
+  const next: JSONContent = { ...node }
+  if (typeof node.text === 'string' && hasHighlightMark(node)) {
+    next.text = escapeHighlightBody(node.text)
+  }
+  if (Array.isArray(node.content)) {
+    next.content = node.content.map(escapeHighlightMarkdown)
+  }
+  return next
+}
+
+// A `\=` inside a highlight must round-trip as a literal `=` in a plain text
+// node — NOT as an escapedPunctuation atom, because the base manager closes and
+// reopens marks around every inline atom, which would split the `==...==` span.
+// We therefore decode `\=` to this private-use placeholder before tokenizing
+// (so marked sees ordinary text, and no bare `==` can re-fire the highlight
+// rule), then restore it to `=` in the parsed text nodes.
+const HIGHLIGHT_EQUALS_PLACEHOLDER = '\uE010'
+
+function restoreHighlightPlaceholders(nodes: JSONContent[]): JSONContent[] {
+  return nodes.map((node) => {
+    const next: JSONContent = { ...node }
+    if (typeof node.text === 'string' && node.text.includes(HIGHLIGHT_EQUALS_PLACEHOLDER)) {
+      next.text = node.text.split(HIGHLIGHT_EQUALS_PLACEHOLDER).join('=')
+    }
+    if (Array.isArray(node.content)) {
+      next.content = restoreHighlightPlaceholders(node.content)
+    }
+    return next
+  })
+}
+
+// Inline (non-block) node types this pipeline can emit. Loose inline children
+// under a `block+` callout (e.g. a callout nested in a tight list item, where
+// marked yields inline text tokens instead of a paragraph) must be wrapped in a
+// paragraph or the projection drops them.
+const INLINE_CALLOUT_CHILD_TYPES = new Set([
+  'text',
+  'hardBreak',
+  'image',
+  'escapedPunctuation',
+  'wikilink',
+  'inlineAtom',
+  'formula',
+])
+
+type CalloutParseHelpers = {
+  createNode: (
+    type: string,
+    attrs?: Record<string, unknown>,
+    content?: JSONContent[],
+  ) => JSONContent
+}
+
+function wrapLooseCalloutChildren(
+  children: JSONContent[],
+  helpers: CalloutParseHelpers,
+): JSONContent[] {
+  const result: JSONContent[] = []
+  let run: JSONContent[] = []
+  const flush = () => {
+    if (run.length > 0) {
+      result.push(helpers.createNode('paragraph', {}, run))
+      run = []
+    }
+  }
+  for (const child of children) {
+    if (typeof child?.type === 'string' && INLINE_CALLOUT_CHILD_TYPES.has(child.type)) {
+      run.push(child)
+    } else {
+      flush()
+      result.push(child)
+    }
+  }
+  flush()
+  return result
+}
+
+// A line that begins a new block construct, so it must NOT be absorbed as a
+// blockquote-style lazy-continuation line of the callout's trailing paragraph.
+const CALLOUT_LAZY_BREAK_RE =
+  /^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:```|~~~)|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:\*[ \t]*){3,}$|<[a-zA-Z!/])/
+
 const DohcCallout = Node.create({
   name: 'callout',
   priority: 1000,
@@ -548,8 +661,27 @@ const DohcCallout = Node.create({
     tokenize(src, _tokens, helpers) {
       const lines = src.split('\n')
       let count = 0
-      while (count < lines.length && CALLOUT_LINE_RE.test(lines[count] ?? '')) {
-        count += 1
+      // Track whether the previous consumed line left an open paragraph, so we
+      // only absorb lazy-continuation lines (mirroring CommonMark blockquotes).
+      let lastInnerBlank = true
+      while (count < lines.length) {
+        const line = lines[count] ?? ''
+        if (CALLOUT_LINE_RE.test(line)) {
+          lastInnerBlank = stripBlockquotePrefix(line).trim() === ''
+          count += 1
+          continue
+        }
+        if (
+          count > 0 &&
+          !lastInnerBlank &&
+          line.trim() !== '' &&
+          !CALLOUT_LAZY_BREAK_RE.test(line)
+        ) {
+          lastInnerBlank = false
+          count += 1
+          continue
+        }
+        break
       }
       if (count === 0) return undefined
       const consumed = lines.slice(0, count)
@@ -570,7 +702,8 @@ const DohcCallout = Node.create({
   },
 
   parseMarkdown: (token, helpers) => {
-    const children = token.tokens?.length ? helpers.parseChildren(token.tokens) : []
+    const parsed = token.tokens?.length ? helpers.parseChildren(token.tokens) : []
+    const children = wrapLooseCalloutChildren(parsed, helpers)
     return helpers.createNode(
       'callout',
       {
@@ -588,19 +721,24 @@ const DohcCallout = Node.create({
     const title = calloutTitleForMarkdown(node.attrs?.title)
     const header = `[!${calloutType}]${fold}${title ? ` ${title}` : ''}`
     const prefix = '>'
-    const blocks: string[] = []
     const content = node.content ?? []
-    content.forEach((child, index) => {
-      const rendered = helpers.renderChild
+    const rendered = content.map((child, index) =>
+      helpers.renderChild
         ? helpers.renderChild(child, index)
-        : helpers.renderChildren([child])
-      const lines = rendered
+        : helpers.renderChildren([child]),
+    )
+    // A callout whose only content is an empty paragraph (e.g. a title-only
+    // callout) has no body: emit just the header instead of a stray `>` line.
+    if (!rendered.some((block) => block.trim() !== '')) {
+      return `${prefix} ${header}`
+    }
+    const blocks = rendered.map((block) =>
+      block
         .split('\n')
         .map((line) => (line.trim() === '' ? prefix : `${prefix} ${line}`))
-      blocks.push(lines.join('\n'))
-    })
-    const body = blocks.join(`\n${prefix}\n`)
-    return body ? `${prefix} ${header}\n${body}` : `${prefix} ${header}`
+        .join('\n'),
+    )
+    return `${prefix} ${header}\n${blocks.join(`\n${prefix}\n`)}`
   },
 })
 
@@ -650,12 +788,16 @@ const DohcHighlight = Mark.create({
       const raw = src.slice(0, closing + 2)
       const inner = raw.slice(2, -2)
       if (!inner) return undefined
-      return { type: 'highlight', raw, tokens: helpers.inlineTokens(inner) }
+      const decoded = inner.replace(/\\=/g, HIGHLIGHT_EQUALS_PLACEHOLDER)
+      return { type: 'highlight', raw, tokens: helpers.inlineTokens(decoded) }
     },
   },
 
   parseMarkdown: (token, helpers) =>
-    helpers.applyMark('highlight', helpers.parseInline(token.tokens ?? [])),
+    helpers.applyMark(
+      'highlight',
+      restoreHighlightPlaceholders(helpers.parseInline(token.tokens ?? [])),
+    ),
 
   renderMarkdown: (node, helpers) => `==${helpers.renderChildren(node.content ?? [])}==`,
 })

@@ -9,6 +9,7 @@ import {
   resolveFloatingMenuPosition,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
+import { escapeHighlightMarkdown } from "./extensions";
 
 type TopLevelDocLike = {
   forEach: (
@@ -477,7 +478,9 @@ export function serializeBlockToMarkdown(
 ): string {
   const manager = editor.storage.markdown?.manager;
   if (!manager) return node.textContent;
-  return manager.serialize({ type: "doc", content: [node.toJSON()] });
+  return manager.serialize(
+    escapeHighlightMarkdown({ type: "doc", content: [node.toJSON()] }),
+  );
 }
 
 async function writeClipboardText(text: string): Promise<void> {
