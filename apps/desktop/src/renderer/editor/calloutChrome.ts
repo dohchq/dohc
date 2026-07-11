@@ -12,10 +12,9 @@ type DocLike = {
   descendants: (
     cb: (node: DocDescendantNode, pos: number) => boolean | void,
   ) => void;
-  nodeAt: (pos: number) => DocDescendantNode | null;
 };
 
-const calloutChromeKey = new PluginKey("dohc-callout-chrome");
+const calloutChromeKey = new PluginKey<DecorationSet>("dohc-callout-chrome");
 
 function stopEditorMouseEvent(event: Event) {
   event.preventDefault();
@@ -70,18 +69,36 @@ function normalizeCalloutFoldAttr(value: unknown): "" | "-" | "+" {
   return value === "-" || value === "+" ? value : "";
 }
 
+// The header lives in a widget decoration placed at `calloutStart + 1` (inside
+// the callout, before its first child), so `getPos()` reports that inner
+// position — NOT the callout's own start. Resolve upward to the enclosing
+// callout so every handler reads/writes the live node at the correct pos.
+function resolveCallout(
+  view: EditorView,
+  getPos: () => number | undefined,
+): { pos: number; attrs: Record<string, unknown> } | null {
+  const widgetPos = getPos();
+  if (widgetPos === undefined) return null;
+  const $pos = view.state.doc.resolve(widgetPos);
+  for (let depth = $pos.depth; depth > 0; depth--) {
+    const node = $pos.node(depth);
+    if (node.type.name === "callout") {
+      return { pos: $pos.before(depth), attrs: node.attrs as Record<string, unknown> };
+    }
+  }
+  return null;
+}
+
 function updateCalloutAttr(
   view: EditorView,
   getPos: () => number | undefined,
   patch: Record<string, unknown>,
 ): void {
   if (view.editable === false) return;
-  const pos = getPos();
-  if (pos === undefined) return;
-  const current = view.state.doc.nodeAt(pos);
-  if (!current || current.type.name !== "callout") return;
+  const callout = resolveCallout(view, getPos);
+  if (!callout) return;
   view.dispatch(
-    view.state.tr.setNodeMarkup(pos, undefined, { ...current.attrs, ...patch }),
+    view.state.tr.setNodeMarkup(callout.pos, undefined, { ...callout.attrs, ...patch }),
   );
 }
 
@@ -105,12 +122,10 @@ function buildCalloutHeader(
   chevron.addEventListener("mousedown", stopEditorMouseEvent);
   chevron.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    const pos = getPos();
-    if (pos === undefined) return;
-    const current = view.state.doc.nodeAt(pos);
-    if (!current || current.type.name !== "callout") return;
+    const callout = resolveCallout(view, getPos);
+    if (!callout) return;
     updateCalloutAttr(view, getPos, {
-      fold: current.attrs.fold === "-" ? "" : "-",
+      fold: callout.attrs.fold === "-" ? "" : "-",
     });
   });
 
@@ -139,12 +154,24 @@ function buildCalloutHeader(
     updateCalloutAttr(view, getPos, { calloutType: select.value });
   });
 
+  // Read the callout's CURRENT title from the live doc (not this render
+  // closure's `attrs`, which goes stale the moment a remote/agent edit lands).
+  const liveCalloutTitle = (): string | null => {
+    const callout = resolveCallout(view, getPos);
+    return callout ? String(callout.attrs.title ?? "") : null;
+  };
+
   const input = document.createElement("input");
   input.type = "text";
   input.className = "dohc-callout-title-input";
   input.placeholder = "Add a title…";
   input.value = attrs.title;
   input.disabled = view.editable === false;
+
+  // Title captured when the input gained focus. commitTitle uses it to tell a
+  // real user edit apart from a stale value sitting over a newer live title.
+  let focusTitle = attrs.title;
+
   input.addEventListener("mousedown", (event) => event.stopPropagation());
   input.addEventListener("keydown", (event) => {
     event.stopPropagation();
@@ -154,20 +181,33 @@ function buildCalloutHeader(
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      input.value = attrs.title;
+      // Cancel to the CURRENT node title, not the stale closure snapshot.
+      input.value = liveCalloutTitle() ?? attrs.title;
       input.blur();
     }
   });
   const commitTitle = () => {
-    const pos = getPos();
-    if (pos === undefined) return;
-    const current = view.state.doc.nodeAt(pos);
-    if (!current || current.type.name !== "callout") return;
-    if (input.value === String(current.attrs.title ?? "")) return;
+    const liveTitle = liveCalloutTitle();
+    if (liveTitle === null) return;
+    // Input still shows what it did at focus => no user edit this session; do
+    // not overwrite a concurrent remote/agent title change that landed while
+    // the input was focused.
+    if (input.value === focusTitle) return;
+    if (input.value === liveTitle) return;
     updateCalloutAttr(view, getPos, { title: input.value });
   };
+
+  input.addEventListener("focus", () => {
+    focusTitle = liveCalloutTitle() ?? input.value;
+  });
   input.addEventListener("change", commitTitle);
-  input.addEventListener("blur", commitTitle);
+  input.addEventListener("blur", () => {
+    commitTitle();
+    // Re-sync to the live title in case a remote/agent change landed while the
+    // input was focused (reconcileTitleInputs defers to focused inputs, so the
+    // final catch-up happens here once the user leaves the field).
+    input.value = liveCalloutTitle() ?? input.value;
+  });
 
   header.append(chevron, icon, select, input);
   return header;
@@ -181,6 +221,9 @@ function buildCalloutChromeDecorations(doc: unknown): DecorationSet {
     const type = String(node.attrs.calloutType ?? "note");
     const fold = normalizeCalloutFoldAttr(node.attrs.fold);
     const title = String(node.attrs.title ?? "");
+    // The key intentionally omits title: a title-only change reuses this widget
+    // DOM (no caret-dropping remint) and reconcileTitleInputs re-seeds the input
+    // value instead. type/fold DO alter the header chrome, so they stay in the key.
     decorations.push(
       Decoration.widget(
         pos + 1,
@@ -198,8 +241,25 @@ function buildCalloutChromeDecorations(doc: unknown): DecorationSet {
   return DecorationSet.create(doc as never, decorations);
 }
 
+// After every view update, re-seed each callout title input from its live node
+// title so a remote/agent rename shows immediately (the decoration key omits
+// title, so the widget itself is reused rather than reminted). The input the
+// user is actively editing is skipped — deferring the sync until blur keeps the
+// caret from being yanked mid-edit.
+function reconcileTitleInputs(view: EditorView): void {
+  view.state.doc.descendants((node, pos) => {
+    if (node.type.name !== "callout") return;
+    const dom = view.nodeDOM(pos);
+    if (!(dom instanceof HTMLElement)) return;
+    const input = dom.querySelector<HTMLInputElement>(".dohc-callout-title-input");
+    if (!input || document.activeElement === input) return;
+    const title = String(node.attrs.title ?? "");
+    if (input.value !== title) input.value = title;
+  });
+}
+
 export function makeCalloutChromePlugin() {
-  return new Plugin({
+  return new Plugin<DecorationSet>({
     key: calloutChromeKey,
     state: {
       init(_, instance) {
@@ -210,9 +270,14 @@ export function makeCalloutChromePlugin() {
         return buildCalloutChromeDecorations(tr.doc);
       },
     },
+    view() {
+      return {
+        update: (view) => reconcileTitleInputs(view),
+      };
+    },
     props: {
       decorations(state) {
-        return calloutChromeKey.getState(state) as DecorationSet | undefined;
+        return calloutChromeKey.getState(state);
       },
     },
   });
