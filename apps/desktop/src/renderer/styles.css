@@ -2239,3 +2239,73 @@ mark.dohc-highlight,
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+
+/* Mermaid diagrams (mermaidRender.ts) — the fence stays the source of
+ * truth; this is a rendered widget below the ```mermaid code block. While
+ * the cursor sits outside the block, the fence (including its language
+ * toolbar) collapses to zero height so the diagram reads as the primary
+ * content — mirrors the wikilink pill's source/preview toggle. Clicking the
+ * diagram (or arrow-key navigation into the block) restores it instantly. */
+.dohc-mermaid-block {
+  transition:
+    max-height 160ms ease-out,
+    opacity 120ms ease-out,
+    padding 160ms ease-out,
+    margin 160ms ease-out,
+    border-color 160ms ease-out;
+}
+
+.dohc-mermaid-collapsed {
+  max-height: 0;
+  overflow: hidden;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-color: transparent;
+  opacity: 0;
+}
+
+.dohc-mermaid-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: auto;
+  margin: 0 0 12px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-bg);
+  padding: 18px;
+  cursor: text;
+}
+
+.dohc-mermaid-preview-canvas {
+  display: flex;
+  max-width: 100%;
+}
+
+.dohc-mermaid-preview-canvas svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.dohc-mermaid-preview-status {
+  margin-top: 10px;
+  align-self: stretch;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.dohc-mermaid-preview--error .dohc-mermaid-preview-status {
+  border: 1px solid color-mix(in srgb, var(--dohc-danger) 40%, transparent);
+  background: color-mix(in srgb, var(--dohc-danger) 12%, transparent);
+  color: var(--dohc-danger);
+}
+
+.dohc-mermaid-preview--skipped .dohc-mermaid-preview-status {
+  border: 1px solid var(--dohc-line);
+  background: var(--dohc-panel-2);
+  color: var(--dohc-subtle);
+}

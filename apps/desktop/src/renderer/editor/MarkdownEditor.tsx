@@ -92,6 +92,7 @@ import {
 } from "./codeBlockChrome";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
+import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import { OutlinePanel } from "./OutlinePanel";
 import { WordCountBadge } from "./WordCountBadge";
 
@@ -382,6 +383,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeCodeBlockContinuationPlugin(),
               makeCalloutChromePlugin(),
               makeCodeHighlightPlugin(),
+              makeMermaidPreviewPlugin(),
               makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
               makeTableControlsPlugin(),

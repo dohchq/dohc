@@ -7,6 +7,7 @@ import {
   resolveFloatingMenuPosition,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
+import { MERMAID_STARTER_SNIPPET } from "./mermaidRender";
 
 export type SlashCommandId =
   | "wikilink"
@@ -20,6 +21,7 @@ export type SlashCommandId =
   | "callout"
   | "toggle"
   | "code-block"
+  | "mermaid"
   | "divider"
   | "table"
   | "image";
@@ -125,6 +127,13 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     hint: "Write code or raw text",
     glyph: "</>",
     aliases: ["code", "fence", "pre"],
+  },
+  {
+    id: "mermaid",
+    label: "Mermaid diagram",
+    hint: "Flowchart, sequence & more",
+    glyph: "dgm",
+    aliases: ["mermaid", "diagram", "flowchart", "chart", "graph"],
   },
   {
     id: "divider",
@@ -445,6 +454,9 @@ export function runSlashCommand(
       return;
     case "code-block":
       chain.setCodeBlock({ language: "" }).run();
+      return;
+    case "mermaid":
+      chain.setCodeBlock({ language: "mermaid" }).insertContent(MERMAID_STARTER_SNIPPET).run();
       return;
     case "divider":
       chain.setHorizontalRule().run();
