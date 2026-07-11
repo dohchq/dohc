@@ -564,10 +564,34 @@ body {
   content: "⋮";
 }
 
+.dohc-block-handle {
+  cursor: grab;
+}
+
+.dohc-block-handle:active {
+  cursor: grabbing;
+}
+
 .dohc-block-gutter-btn:hover {
   border-color: var(--dohc-line);
   background: var(--dohc-panel-2);
   color: var(--dohc-ink);
+}
+
+.dohc-block-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  z-index: -1;
+  max-width: 640px;
+  padding: 6px 12px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 8px;
+  background: var(--dohc-panel);
+  color: var(--dohc-ink);
+  box-shadow: 0 8px 24px rgba(28, 27, 24, 0.18);
+  opacity: 0.92;
+  pointer-events: none;
 }
 
 .dohc-graph-edge {
@@ -1193,4 +1217,91 @@ body {
 
 .dohc-find-replace__text-btn:disabled {
   opacity: 0.4;
+}
+
+/* ── block menu ── */
+
+.dohc-block-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 69;
+}
+
+.dohc-block-menu {
+  position: fixed;
+  z-index: 70;
+  width: 240px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.dohc-block-menu:focus {
+  outline: none;
+}
+
+[data-theme='dark'] .dohc-block-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-block-menu__section {
+  padding: 6px 8px 3px;
+  color: var(--dohc-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dohc-block-menu__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-ink);
+  text-align: left;
+}
+
+.dohc-block-menu__item.is-selected {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-block-menu__item.is-danger.is-selected,
+.dohc-block-menu__item.is-danger:hover {
+  color: var(--dohc-danger, #b3261e);
+}
+
+.dohc-block-menu__glyph {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.dohc-block-menu__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
 }
