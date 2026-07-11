@@ -226,6 +226,10 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
           select.value = language;
 
           const commit = () => {
+            // The decoration only rebuilds on doc/meta transactions, so a
+            // select built while editable can outlive an editability flip.
+            // Refuse to mutate the block once the view is read-only.
+            if (view.editable === false) return;
             const blockPos = getPos();
             if (blockPos === undefined) return;
             const current = view.state.doc.nodeAt(blockPos);
@@ -268,7 +272,18 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
           copy.addEventListener("mousedown", stopEditorMouseEvent);
           copy.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
-            const write = navigator.clipboard?.writeText(node.textContent);
+            // The widget key is keyed on pos+language, not the code text, so
+            // ProseMirror reuses this DOM (and its captured `node`) across
+            // pure text edits. Read the live node at click time so "copy"
+            // never writes pre-edit content.
+            const blockPos = getPos();
+            const current =
+              blockPos === undefined ? null : view.state.doc.nodeAt(blockPos);
+            const text =
+              current && isCodeBlockNode(current)
+                ? current.textContent
+                : node.textContent;
+            const write = navigator.clipboard?.writeText(text);
             if (!write) return;
             void write.then(() => {
               copy.textContent = "copied";

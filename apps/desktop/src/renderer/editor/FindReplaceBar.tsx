@@ -147,6 +147,10 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
               if (event.key === "Escape") {
                 event.preventDefault();
                 close();
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                const tr = buildReplaceActiveTransaction(editor.state, state);
+                if (tr) editor.view.dispatch(tr);
               }
             }}
           />

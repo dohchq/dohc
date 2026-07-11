@@ -62,16 +62,22 @@ export function slugifyBaseName(name: string): string {
   return slug.length > 0 ? slug : "image";
 }
 
-// Short, stable content hash (FNV-1a → base36). Same bytes → same filename, so
-// re-pasting one image dedupes rather than piling up near-identical files.
+// Short, stable content hash (twin FNV-1a lanes → base36). Same bytes → same
+// filename, so re-pasting one image dedupes rather than piling up
+// near-identical files. Two independently-seeded 32-bit lanes give a ~64-bit
+// effective space: the filename is the ONLY guard against two DIFFERENT images
+// with the same slug overwriting each other, and a 32-bit hash's birthday
+// bound (~65k images per slug) is reachable for default screenshot names — so
+// the extra lane keeps dedup from silently becoming data loss.
 export function shortContentHash(bytes: Uint8Array): string {
-  let hash = 0x811c9dc5;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
   for (let i = 0; i < bytes.length; i += 1) {
-    hash ^= bytes[i]!;
     // FNV prime multiply, kept in 32-bit unsigned range via Math.imul.
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+    h1 = Math.imul(h1 ^ bytes[i]!, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ bytes[i]!, 0x85ebca6b) >>> 0;
   }
-  return hash.toString(36).padStart(7, "0").slice(0, 8);
+  return h1.toString(36).padStart(7, "0") + h2.toString(36).padStart(7, "0");
 }
 
 // Picks a file extension: a known image extension on the name wins; otherwise

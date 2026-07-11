@@ -64,6 +64,16 @@ describe("normalizeLinkUrl", () => {
     expect(normalizeLinkUrl("hi@dohc.ai")).toBe("mailto:hi@dohc.ai");
   });
 
+  it("prefixes host:port dev links with https:// instead of rejecting them", () => {
+    expect(normalizeLinkUrl("localhost:3000")).toBe("https://localhost:3000/");
+    expect(normalizeLinkUrl("example.com:8080/path")).toBe(
+      "https://example.com:8080/path",
+    );
+    expect(normalizeLinkUrl("127.0.0.1:5173")).toBe("https://127.0.0.1:5173/");
+    // A declared scheme with a numeric tail must not be misread as host:port.
+    expect(normalizeLinkUrl("tel:1234")).toBeNull();
+  });
+
   it("refuses dangerous or unrecognized declared schemes", () => {
     expect(normalizeLinkUrl("javascript:alert(1)")).toBeNull();
     expect(normalizeLinkUrl("data:text/html,evil")).toBeNull();

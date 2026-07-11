@@ -166,18 +166,27 @@ export function findReplaceReducer(
       return { ...state, activeIndex: prevMatchIndex(state.matches.length, state.activeIndex) }
     case 'sync': {
       // The doc changed underneath an open search (typing, a paste, a
-      // replace-active) — recompute, and try to keep the SAME match
-      // active by its (now possibly shifted) start position before
-      // falling back to the first match.
+      // replace-active) — recompute, and keep the search progressing
+      // forward: first try to hold the SAME match by its (now possibly
+      // shifted) start position; if it's gone (e.g. it was just replaced),
+      // advance to the nearest remaining match at or after where we were,
+      // wrapping to the first only when nothing follows. This makes
+      // repeated single "Replace" clicks walk down the document instead of
+      // snapping back to the top.
       if (!state.query) return state
       const matches = computeMatches(doc, state.query, state.caseSensitive)
       const prevFrom = state.matches[state.activeIndex]?.from
-      const preserved = prevFrom === undefined ? -1 : matches.findIndex((m) => m.from === prevFrom)
-      return {
-        ...state,
-        matches,
-        activeIndex: preserved >= 0 ? preserved : matches.length ? 0 : -1,
+      let activeIndex: number
+      if (matches.length === 0) {
+        activeIndex = -1
+      } else if (prevFrom === undefined) {
+        activeIndex = 0
+      } else {
+        const exact = matches.findIndex((m) => m.from === prevFrom)
+        const forward = exact >= 0 ? exact : matches.findIndex((m) => m.from >= prevFrom)
+        activeIndex = forward >= 0 ? forward : 0
       }
+      return { ...state, matches, activeIndex }
     }
     default:
       return state

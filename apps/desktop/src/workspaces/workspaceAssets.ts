@@ -114,6 +114,43 @@ export async function writeWorkspaceText(
 // cap so a giant paste can't wedge the main process.
 const MAX_ASSET_WRITE_BYTES = 20 * 1024 * 1024;
 
+// The security-critical write core shared by asset and restore writes:
+// validate → realpath-contain (via the nearest existing ancestor, since the
+// target/parent may not exist yet) → mkdir → re-contain the now-real parent
+// (defeats a symlink swapped in during mkdir) → atomic temp+rename. Kept in
+// ONE place so a future hardening tweak can't be applied to one caller and
+// silently miss the other. `kind` only feeds the error strings.
+async function writeContainedFile(
+  rootPath: string,
+  relativePath: string,
+  data: Uint8Array | string,
+  kind: "asset" | "restore",
+): Promise<void> {
+  const label = kind === "asset" ? "Asset" : "Restore";
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
+  }
+  const realRoot = await realpath(rootPath);
+  const absolute = join(rootPath, validated.normalized);
+  const parent = dirname(absolute);
+  if (!isInside(realRoot, await existingAncestor(parent))) {
+    throw new Error(`${label} path escapes workspace: ${relativePath}`);
+  }
+  await mkdir(parent, { recursive: true });
+  if (!isInside(realRoot, await realpath(parent))) {
+    throw new Error(`${label} path escapes workspace: ${relativePath}`);
+  }
+  const { rename, writeFile } = await import("node:fs/promises");
+  const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
+  if (typeof data === "string") {
+    await writeFile(temp, data, "utf8");
+  } else {
+    await writeFile(temp, data);
+  }
+  await rename(temp, absolute);
+}
+
 export async function writeWorkspaceAsset(
   rootPath: string,
   relativePath: string,
@@ -124,24 +161,7 @@ export async function writeWorkspaceAsset(
       `Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`,
     );
   }
-  const validated = validateUserWritePath(relativePath);
-  if (!validated.ok) {
-    throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
-  }
-  const realRoot = await realpath(rootPath);
-  const absolute = join(rootPath, validated.normalized);
-  const parent = dirname(absolute);
-  if (!isInside(realRoot, await existingAncestor(parent))) {
-    throw new Error(`Asset path escapes workspace: ${relativePath}`);
-  }
-  await mkdir(parent, { recursive: true });
-  if (!isInside(realRoot, await realpath(parent))) {
-    throw new Error(`Asset path escapes workspace: ${relativePath}`);
-  }
-  const { rename, writeFile } = await import("node:fs/promises");
-  const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
-  await writeFile(temp, bytes);
-  await rename(temp, absolute);
+  await writeContainedFile(rootPath, relativePath, bytes, "asset");
 }
 
 export async function restoreWorkspaceText(
@@ -152,24 +172,7 @@ export async function restoreWorkspaceText(
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  const validated = validateUserWritePath(relativePath);
-  if (!validated.ok) {
-    throw new Error(`Invalid restore path (${validated.reason}): ${relativePath}`);
-  }
-  const realRoot = await realpath(rootPath);
-  const absolute = join(rootPath, validated.normalized);
-  const parent = dirname(absolute);
-  if (!isInside(realRoot, await existingAncestor(parent))) {
-    throw new Error(`Restore path escapes workspace: ${relativePath}`);
-  }
-  await mkdir(parent, { recursive: true });
-  if (!isInside(realRoot, await realpath(parent))) {
-    throw new Error(`Restore path escapes workspace: ${relativePath}`);
-  }
-  const { rename, writeFile } = await import("node:fs/promises");
-  const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
-  await writeFile(temp, text, "utf8");
-  await rename(temp, absolute);
+  await writeContainedFile(rootPath, relativePath, text, "restore");
 }
 
 export async function readWorkspaceText(
