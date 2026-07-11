@@ -1,10 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import {
-  filterSlashCommands,
-  findEmptyListItemParagraph,
-  findSlashCommandMatch,
-} from "./MarkdownEditor";
+import { findEmptyListItemParagraph } from "./codeBlockChrome";
+import { filterSlashCommands, findSlashCommandMatch } from "./slashCommands";
 
 describe("MarkdownEditor slash commands", () => {
   it("detects a trailing slash command query inside plain text", () => {
