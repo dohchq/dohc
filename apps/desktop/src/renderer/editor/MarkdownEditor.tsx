@@ -176,13 +176,20 @@ const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
 // would double up with linkMenu.tsx's own paste-over-selection handling.
 // Both are owned by linkMenu.tsx's plugin instead.
 const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
+// Dropcursor defaults to a thin `currentColor` line (width 1). Paint it in the
+// brand accent at 2px so the "this is where the drop lands" indicator reads
+// clearly against warm paper and charcoal alike — the inline style resolves the
+// CSS variable against the editor's cascade.
+const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const MARKDOWN_EXTENSION = Markdown.configure({

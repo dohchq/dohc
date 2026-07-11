@@ -277,6 +277,16 @@ body {
   margin-right: auto;
 }
 
+/* The document opens flush to the editor's top padding and ends flush to its
+ * bottom, regardless of which block leads/trails — a heading's space-before
+ * (e.g. h2's 30px) must not compound with the 40px pad into a lopsided gap. */
+.dohc-notion-editor > :first-child {
+  margin-top: 0;
+}
+.dohc-notion-editor > :last-child {
+  margin-bottom: 0;
+}
+
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
   cursor: text;
 }
@@ -305,7 +315,7 @@ body {
 /* Heading margins use `auto` inline margins so they stay in the centered
  * column (the shorthand would otherwise beat the `> *` centering rule). */
 .dohc-notion-editor h1 {
-  margin: 8px auto 18px;
+  margin: 32px auto 12px;
   font-size: 31px;
   font-weight: 700;
   letter-spacing: -0.021em;
@@ -522,6 +532,48 @@ body {
   pointer-events: none;
 }
 
+/* Inline images (DohcImage is an inline atom) — cap to the reading measure,
+ * keep aspect ratio, and round the corners to match the paper's other framed
+ * blocks. The atom gets no default selected-state paint (prosemirror-view's
+ * base stylesheet isn't loaded), so its selection outline is defined here. */
+.dohc-notion-editor .dohc-editor-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  vertical-align: middle;
+}
+
+.dohc-notion-editor .dohc-editor-image.ProseMirror-selectednode {
+  outline: 2px solid var(--dohc-accent);
+  outline-offset: 2px;
+}
+
+/* Gapcursor (the caret shown between/around block nodes and atoms) also ships
+ * unstyled without prosemirror-gapcursor's base CSS — theme it to warm ink so
+ * navigating past an image or code block shows a visible insertion point. */
+.dohc-notion-editor .ProseMirror-gapcursor {
+  display: none;
+  position: relative;
+  pointer-events: none;
+}
+.dohc-notion-editor .ProseMirror-gapcursor::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 24px;
+  border-top: 1px solid var(--dohc-ink);
+  animation: dohc-gapcursor-blink 1.1s steps(2, start) infinite;
+}
+.dohc-notion-editor.ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
+@keyframes dohc-gapcursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
 .dohc-block-node {
   position: relative;
 }
@@ -554,6 +606,11 @@ body {
   color: var(--dohc-subtle);
   font-size: 13px;
   line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 100ms ease-out,
+    border-color 100ms ease-out,
+    color 100ms ease-out;
 }
 
 .dohc-block-plus::before {
@@ -574,7 +631,7 @@ body {
 
 .dohc-block-gutter-btn:hover {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -718,7 +775,7 @@ body {
 .dohc-code-copy-btn,
 .dohc-code-block-continue-btn {
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--dohc-muted);
   font: inherit;
@@ -732,7 +789,7 @@ body {
 .dohc-code-copy-btn:hover,
 .dohc-code-block-continue-btn:hover {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -796,9 +853,15 @@ body {
   padding: 6px 7px;
 }
 
+/* Selected/hover fill across the whole editor menu family is --dohc-line, NOT
+ * --dohc-panel-2: these menus paint on a --dohc-panel surface, and in dark
+ * panel-2 (#181715) is DARKER than panel (#1b1d1a) — a keyboard-selected row
+ * would recede into a barely-visible well. --dohc-line (#2a2925) is lighter
+ * than panel, so selection reads clearly in both themes, and it matches the
+ * canonical list-row recipe (docs/brand/ui-language.md: active `bg-line`). */
 .dohc-slash-menu__item.is-selected,
 .dohc-wikilink-picker__item.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-slash-menu__glyph {
@@ -895,6 +958,11 @@ body {
   color: var(--dohc-match);
   font-family: var(--font-mono);
   font-size: 13px;
+  /* A little horizontal breathing room so the tint doesn't hug the glyphs —
+   * matches the padded wikilink pill; clone keeps it intact across wraps. */
+  padding: 0 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .dohc-bubble-menu {
@@ -927,12 +995,12 @@ body {
 }
 
 .dohc-bubble-menu__button:hover {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
 .dohc-bubble-menu__button.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-accent);
 }
 
@@ -1092,7 +1160,7 @@ body {
 }
 
 .dohc-link-menu__button:hover:not(:disabled) {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1198,7 +1266,7 @@ body {
 
 .dohc-find-replace__icon-btn:hover:not(:disabled) {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1207,7 +1275,7 @@ body {
 }
 
 .dohc-find-replace__icon-btn.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-accent);
 }
 
@@ -1224,7 +1292,7 @@ body {
 }
 
 .dohc-find-replace__text-btn:hover:not(:disabled) {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1289,7 +1357,7 @@ body {
 }
 
 .dohc-block-menu__item.is-selected {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-block-menu__item.is-danger.is-selected,
@@ -1494,7 +1562,7 @@ body {
 
 .dohc-turn-into__trigger:hover,
 .dohc-turn-into__trigger[aria-expanded='true'] {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1549,7 +1617,7 @@ body {
 }
 
 .dohc-turn-into-menu__item.is-selected {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-turn-into-menu__glyph {
@@ -2513,7 +2581,7 @@ mark.dohc-highlight,
 }
 
 .dohc-emoji-picker__item.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-emoji-picker__item-glyph {
@@ -2595,7 +2663,7 @@ mark.dohc-highlight,
 }
 
 .dohc-document-menu-item.is-selected {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 /* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled
