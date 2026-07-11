@@ -1573,3 +1573,239 @@ body {
   font-size: 12.5px;
   font-weight: 500;
 }
+
+/* ---------------------------------------------------------------------
+ * Document outline rail + word count (OutlinePanel.tsx, WordCountBadge.tsx)
+ *
+ * Both float in the editor's margins WITHOUT taking part in the document's
+ * own layout, so neither can ever shift the prose. The trick: turn
+ * .dohc-tiptap-editor into a single-cell CSS grid and stack EditorContent,
+ * the outline, and the word-count badge all in that one cell (grid items
+ * can overlap on purpose). The outline/badge wrappers are height: 0 so
+ * they never affect the grid row's size — EditorContent (the tall one)
+ * is what actually sizes it — then position: sticky pins each wrapper to
+ * the TOP (outline) or BOTTOM (word count) of the nearest scrolling
+ * ancestor (FileInspector's overflow-auto pane), so they read as fixed
+ * chrome even though the document under them keeps scrolling.
+ *
+ * The outline additionally collapses below ~900px of inline size via a
+ * native CSS container query — no JS width tracking needed for that.
+ * --------------------------------------------------------------------- */
+.dohc-tiptap-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  container-type: inline-size;
+  container-name: dohc-editor;
+}
+
+.dohc-outline {
+  position: sticky;
+  top: 44px;
+  grid-row: 1;
+  grid-column: 1;
+  align-self: start;
+  justify-self: end;
+  height: 0;
+  margin-right: 18px;
+  overflow: visible;
+  z-index: 3;
+}
+
+@container dohc-editor (max-width: 900px) {
+  .dohc-outline {
+    display: none;
+  }
+}
+
+.dohc-outline-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 2px;
+}
+
+.dohc-outline-rail-mark {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--dohc-line);
+  transition: background-color 120ms ease-out;
+}
+
+.dohc-outline-rail-mark--level-1 {
+  width: 18px;
+}
+.dohc-outline-rail-mark--level-2 {
+  width: 14px;
+}
+.dohc-outline-rail-mark--level-3 {
+  width: 11px;
+}
+.dohc-outline-rail-mark--level-4 {
+  width: 9px;
+}
+.dohc-outline-rail-mark--level-5 {
+  width: 7px;
+}
+.dohc-outline-rail-mark--level-6 {
+  width: 6px;
+}
+
+.dohc-outline-rail-mark.is-active {
+  background: var(--dohc-accent);
+}
+
+.dohc-outline:hover .dohc-outline-rail-mark,
+.dohc-outline:focus-within .dohc-outline-rail-mark {
+  background: var(--dohc-subtle);
+}
+
+.dohc-outline:hover .dohc-outline-rail-mark.is-active,
+.dohc-outline:focus-within .dohc-outline-rail-mark.is-active {
+  background: var(--dohc-accent);
+}
+
+/* Sits to the LEFT of the rail (right: 100% of the rail's own box) so it
+ * expands into the editor's margin rather than off the window edge. */
+.dohc-outline-panel {
+  position: absolute;
+  top: -10px;
+  right: 100%;
+  margin-right: 10px;
+  width: 216px;
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--dohc-line);
+  background: var(--dohc-panel);
+  padding: 10px;
+  opacity: 0;
+  transform: translateY(2px);
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.dohc-outline:hover .dohc-outline-panel,
+.dohc-outline:focus-within .dohc-outline-panel {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.dohc-outline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.dohc-outline-item {
+  overflow: hidden;
+  width: 100%;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-muted);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.dohc-outline-item--level-2 {
+  padding-left: 16px;
+}
+.dohc-outline-item--level-3 {
+  padding-left: 26px;
+}
+.dohc-outline-item--level-4,
+.dohc-outline-item--level-5,
+.dohc-outline-item--level-6 {
+  padding-left: 36px;
+  font-size: 12px;
+}
+
+.dohc-outline-item:hover {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-outline-item.is-active {
+  color: var(--dohc-ink);
+  font-weight: 600;
+}
+
+.dohc-outline-wordcount {
+  border-top: 1px solid var(--dohc-line);
+  padding-top: 8px;
+  color: var(--dohc-subtle);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* A brief warm-ink wash on the heading the outline just scrolled to —
+ * "briefly focuses it" without stealing keyboard focus in read-only mode. */
+@keyframes dohc-outline-target-flash {
+  from {
+    background: var(--dohc-selection);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.dohc-outline-target-flash {
+  border-radius: 4px;
+  animation: dohc-outline-target-flash 900ms ease-out;
+}
+
+/* Independent of the outline: a quiet words/characters line, hover-reveal
+ * over the WHOLE editor area — like the block gutter — not just the badge
+ * itself (it's invisible+non-interactive until then, so hovering only the
+ * badge's own footprint would be unreachable). */
+.dohc-word-count-badge {
+  position: sticky;
+  bottom: 14px;
+  grid-row: 1;
+  grid-column: 1;
+  align-self: end;
+  justify-self: end;
+  height: 0;
+  margin-right: 18px;
+  overflow: visible;
+  z-index: 3;
+}
+
+.dohc-word-count-badge-text {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  padding: 4px 10px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 999px;
+  background: var(--dohc-panel);
+  color: var(--dohc-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.dohc-tiptap-editor:hover .dohc-word-count-badge-text {
+  opacity: 1;
+}
+
+[data-theme='dark'] .dohc-outline-panel,
+[data-theme='dark'] .dohc-word-count-badge-text {
+  border-color: color-mix(in srgb, var(--dohc-line) 80%, transparent);
+}
