@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineDocSaveState } from "./collab/useEngineDoc";
@@ -64,7 +64,11 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     const header = await screen.findByTestId("markdown-save-state");
     // The tab-level dirty indicator (onSaveStateChange) receives the ENGINE's
     // in-flight state — not the stuck-"saved" local state — so the dot is alive.
-    expect(onSaveStateChange).toHaveBeenLastCalledWith("saving");
+    // (waitFor, not a bare assert: the lift is a passive effect, so a sibling's
+    // mount work can push it a tick past when the header first paints.)
+    await waitFor(() =>
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saving"),
+    );
     // And the header agrees.
     expect(header.getAttribute("data-state")).toBe("saving");
 

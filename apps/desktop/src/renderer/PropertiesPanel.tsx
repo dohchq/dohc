@@ -8,7 +8,7 @@ import {
   type FrontmatterEntry,
 } from "./markdown/frontmatter";
 
-const HIDDEN_KEYS = new Set(["id", "title"]);
+const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
 
 export type PropertiesPanelProps =

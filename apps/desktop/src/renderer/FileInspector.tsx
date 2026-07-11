@@ -29,6 +29,7 @@ import type {
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
+import { PageIdentity } from "./PageIdentity";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
 
@@ -45,6 +46,15 @@ function assetUrl(workspaceId: string, path: string): string {
 function extensionOf(path: string): string {
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
+}
+
+// The filename without its directory or extension — the Notion-style empty
+// title placeholder ("2026-plan.md" -> "2026-plan").
+function filenameStem(path: string): string {
+  const slash = path.lastIndexOf("/");
+  const leaf = slash >= 0 ? path.slice(slash + 1) : path;
+  const dot = leaf.lastIndexOf(".");
+  return dot > 0 ? leaf.slice(0, dot) : leaf;
 }
 
 // A search result landing in the editor (Phase E5.0). nonce distinguishes
@@ -808,6 +818,11 @@ function MarkdownView(props: {
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
+          <PageIdentity
+            ydoc={engine.doc}
+            filenameStem={filenameStem(props.path)}
+            onEnterBody={() => wysiwygRef.current?.focus("start")}
+          />
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-xs text-subtle">
@@ -926,6 +941,13 @@ function MarkdownView(props: {
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
+          <PageIdentity
+            body={draft}
+            onChange={onPropertiesDraft}
+            filenameStem={filenameStem(props.path)}
+            readOnly={readOnly}
+            onEnterBody={() => wysiwygRef.current?.focus("start")}
+          />
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-xs text-subtle">
@@ -950,9 +972,15 @@ function MarkdownView(props: {
       ) : (
         <div
           data-testid="view-markdown"
-          className="dohc-readable-text min-h-0 flex-1 overflow-auto p-6 text-[15px]"
+          className="min-h-0 flex-1 overflow-auto"
         >
-          {renderedDocument}
+          <PageIdentity
+            body={draft}
+            onChange={onPropertiesDraft}
+            filenameStem={filenameStem(props.path)}
+            readOnly={readOnly}
+          />
+          <div className="dohc-readable-text p-6 text-[15px]">{renderedDocument}</div>
         </div>
       )}
     </div>

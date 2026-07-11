@@ -138,6 +138,10 @@ export type ListWorkspaceFilesPayload = z.infer<
 export const WorkspaceFileEntry = z.object({
   path: PATH_STRING,
   kind: z.enum(["file", "database"]),
+  // Optional page emoji, read from the file's `icon` frontmatter key. The
+  // explorer shows it in place of the generic file glyph. Read-only metadata,
+  // bounded on the main side; absent for files without an icon.
+  icon: z.string().max(64).optional(),
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
