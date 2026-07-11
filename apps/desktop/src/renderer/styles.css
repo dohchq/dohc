@@ -925,3 +925,63 @@ body {
   border-radius: 999px;
   background: var(--dohc-success);
 }
+
+/* ── code syntax highlighting ── */
+/* Decoration classes from codeHighlight.ts (lowlight/highlight.js). Palette
+ * stays inside the warm-paper + graphite system — no stock hljs theme, color
+ * only where it carries meaning. --dohc-success/--dohc-warning/--dohc-agent
+ * already flip per [data-theme='dark'] above, so these rules need no
+ * separate dark-mode block. */
+.dohc-notion-editor pre code .hljs-keyword,
+.dohc-notion-editor pre code .hljs-tag,
+.dohc-notion-editor pre code .hljs-name {
+  color: var(--dohc-ink);
+  font-weight: 600;
+}
+
+.dohc-notion-editor pre code .hljs-string,
+.dohc-notion-editor pre code .hljs-regexp {
+  color: var(--dohc-success);
+}
+
+.dohc-notion-editor pre code .hljs-comment {
+  color: var(--dohc-subtle);
+  font-style: italic;
+}
+
+.dohc-notion-editor pre code .hljs-doctag {
+  font-style: normal;
+  font-weight: 600;
+}
+
+.dohc-notion-editor pre code .hljs-number,
+.dohc-notion-editor pre code .hljs-literal,
+.dohc-notion-editor pre code .hljs-symbol {
+  color: var(--dohc-warning);
+}
+
+.dohc-notion-editor pre code .hljs-title,
+.dohc-notion-editor pre code .hljs-built_in,
+.dohc-notion-editor pre code .hljs-type,
+.dohc-notion-editor pre code .hljs-selector-class,
+.dohc-notion-editor pre code .hljs-selector-id,
+.dohc-notion-editor pre code .hljs-section,
+.dohc-notion-editor pre code .hljs-link {
+  color: var(--dohc-agent);
+}
+
+.dohc-notion-editor pre code .hljs-attr,
+.dohc-notion-editor pre code .hljs-attribute,
+.dohc-notion-editor pre code .hljs-meta,
+.dohc-notion-editor pre code .hljs-bullet,
+.dohc-notion-editor pre code .hljs-punctuation {
+  color: var(--dohc-muted);
+}
+
+.dohc-notion-editor pre code .hljs-strong {
+  font-weight: 700;
+}
+
+.dohc-notion-editor pre code .hljs-emphasis {
+  font-style: italic;
+}

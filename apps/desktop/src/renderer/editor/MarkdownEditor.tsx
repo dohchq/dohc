@@ -58,6 +58,7 @@ import {
   makeCodeBlockContinuationPlugin,
   makeEmptyListItemFocusPlugin,
 } from "./codeBlockChrome";
+import { makeCodeHighlightPlugin } from "./codeHighlight";
 
 export type MarkdownEditorHandle = {
   focus: () => void;
@@ -286,6 +287,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               wikilinkClickPlugin,
               makeCodeBlockChromePlugin(),
               makeCodeBlockContinuationPlugin(),
+              makeCodeHighlightPlugin(),
               makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
             ];
