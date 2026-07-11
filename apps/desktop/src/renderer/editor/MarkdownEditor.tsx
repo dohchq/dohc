@@ -53,6 +53,7 @@ import {
   type AutocompleteState,
   type WikilinkFile,
 } from "./wikilinkPlugin";
+import { makeMentionPlugin } from "./mentionTrigger";
 import { WikilinkPicker } from "./WikilinkPicker";
 import {
   FLOATING_MENU_MAX_HEIGHT,
@@ -227,6 +228,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     ref,
   ) {
     const [acState, setAcState] = useState<AutocompleteState>({ active: false });
+    const [mentionState, setMentionState] = useState<AutocompleteState>({
+      active: false,
+    });
     const [slashState, setSlashState] = useState<SlashCommandState>(
       CLOSED_SLASH_COMMAND_STATE,
     );
@@ -342,6 +346,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 () => knownFilesRef.current,
                 (state) => setAcState(state),
               ),
+              makeMentionPlugin((state) => setMentionState(state)),
               wikilinkClickPlugin,
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
@@ -588,6 +593,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       acState.active
         ? { open: true, from: acState.from, query: acState.query }
         : { open: false };
+    const mentionPickerState: Parameters<typeof WikilinkPicker>[0]["state"] =
+      mentionState.active
+        ? { open: true, from: mentionState.from, query: mentionState.query }
+        : { open: false };
 
     return (
       <div className="dohc-tiptap-editor" data-collab-state={collab?.status ?? "local"}>
@@ -672,6 +681,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               files={knownFiles}
               view={pickerView}
               onDismiss={() => setAcState({ active: false })}
+            />
+            <WikilinkPicker
+              state={mentionPickerState}
+              files={knownFiles}
+              view={pickerView}
+              insertMode="node"
+              onDismiss={() => setMentionState({ active: false })}
             />
             <LinkMenu
               editor={editor}

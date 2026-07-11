@@ -67,14 +67,17 @@ export type AutocompleteState =
 
 const WIKILINK_RE = /\\?\[\\?\[(!?)([^\]\n[]+)\\?\]\\?\]/g
 
-function isCodeMark(m: { type: { name: string; spec?: { code?: boolean } } }) {
+// Exported so other trigger surfaces (e.g. mentionTrigger.ts's `@`
+// autocomplete) can reuse the same "don't fire inside code" rules
+// without re-deriving them.
+export function isCodeMark(m: { type: { name: string; spec?: { code?: boolean } } }) {
   return (
     m.type.name === 'inlineCode' ||
     m.type.name === 'code' ||
     m.type.spec?.code === true
   )
 }
-function isCodeBlock(node: PMNodeLike | null) {
+export function isCodeBlock(node: PMNodeLike | null) {
   return (
     !!node &&
     (node.type.name === 'code_block' ||

@@ -13,26 +13,96 @@ export type WikilinkPickerState =
       query: string;
     };
 
+/** How a picked file gets written into the doc.
+ *  - "text" — the `[[` picker's original behavior: insert literal
+ *    `[[path]]` text. The wikilink pill comes later, from either the
+ *    decoration plugin (wikilinkPlugin.ts) or a markdown round-trip.
+ *  - "node" — the `@`-mention picker: insert the real `wikilink`
+ *    atom node directly, with a `label` attr set to the file's
+ *    display name, so it reads like a Notion mention pill
+ *    immediately (no decoration/round-trip needed). */
+export type WikilinkInsertMode = "text" | "node";
+
+type PickerView = {
+  coordsAtPos(pos: number): { left: number; top: number; bottom: number };
+  state: {
+    tr: {
+      replaceWith(from: number, to: number, content: unknown): unknown;
+      setSelection(s: unknown): unknown;
+    };
+    schema: {
+      text(s: string): unknown;
+      nodes: Record<string, { create(attrs?: Record<string, unknown>): unknown } | undefined>;
+    };
+    selection: { from: number };
+  };
+  dispatch(tr: unknown): void;
+  focus(): void;
+};
+
 type Props = {
   state: WikilinkPickerState;
   files: ReadonlyArray<WikilinkFile>;
-  view: {
-    coordsAtPos(pos: number): { left: number; top: number; bottom: number };
-    state: {
-      tr: {
-        replaceWith(from: number, to: number, content: unknown): unknown;
-        setSelection(s: unknown): unknown;
-      };
-      schema: { text(s: string): unknown };
-      selection: { from: number };
-    };
-    dispatch(tr: unknown): void;
-    focus(): void;
-  } | null;
+  view: PickerView | null;
+  /** @default "text" */
+  insertMode?: WikilinkInsertMode;
   onDismiss: () => void;
 };
 
-export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
+/** The picker-list display name for a file: its title, falling back
+ *  to the leaf segment of its path. Shared between the list render
+ *  and the "node" insert mode's `label` attr so they never drift. */
+function defaultDisplayName(file: WikilinkFile): string {
+  return (
+    (file.title ?? "").trim() ||
+    (file.path.replace(/\.md$/i, "").split("/").pop() ?? file.path)
+  );
+}
+
+/** Replace the `from..cursor` range with the picked file, either as
+ *  literal `[[path]]` text or as a real `wikilink` node. Exported
+ *  standalone (not a closure inside the component) so it's directly
+ *  testable against a real Editor without rendering React. */
+export function applyWikilinkPick(
+  view: PickerView,
+  from: number,
+  file: WikilinkFile,
+  insertMode: WikilinkInsertMode = "text",
+): void {
+  const cursorPos = view.state.selection.from;
+  const pathNoExt = file.path.replace(/\.md$/i, "");
+  let content: unknown;
+  let insertedSize: number;
+  if (insertMode === "node") {
+    const wikilinkNodeType = view.state.schema.nodes.wikilink;
+    if (!wikilinkNodeType) return; // schema doesn't have the node — no-op, not a throw.
+    content = wikilinkNodeType.create({
+      target: pathNoExt,
+      label: defaultDisplayName(file),
+    });
+    insertedSize = 1; // atom nodes occupy a single doc position.
+  } else {
+    const insert = `[[${pathNoExt}]]`;
+    content = view.state.schema.text(insert);
+    insertedSize = insert.length;
+  }
+  const tr = view.state.tr.replaceWith(from, cursorPos, content) as {
+    doc: { resolve(pos: number): ResolvedPos };
+    setSelection(s: unknown): unknown;
+  };
+  const afterInsert = from + insertedSize;
+  tr.setSelection(TextSelection.near(tr.doc.resolve(afterInsert)));
+  view.dispatch(tr);
+  view.focus();
+}
+
+export function WikilinkPicker({
+  state,
+  files,
+  view,
+  insertMode = "text",
+  onDismiss,
+}: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -68,21 +138,7 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
 
   function commit(file: WikilinkFile) {
     if (!view || !state.open) return;
-    const cursorPos = view.state.selection.from;
-    const pathNoExt = file.path.replace(/\.md$/i, "");
-    const insert = `[[${pathNoExt}]]`;
-    const tr = view.state.tr.replaceWith(
-      state.from,
-      cursorPos,
-      view.state.schema.text(insert),
-    ) as {
-      doc: { resolve(pos: number): ResolvedPos };
-      setSelection(s: unknown): unknown;
-    };
-    const afterInsert = state.from + insert.length;
-    tr.setSelection(TextSelection.near(tr.doc.resolve(afterInsert)));
-    view.dispatch(tr);
-    view.focus();
+    applyWikilinkPick(view, state.from, file, insertMode);
     onDismiss();
   }
 
@@ -156,9 +212,7 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
       ) : (
         <div>
           {matches.map((f, i) => {
-            const display =
-              (f.title ?? "").trim() ||
-              (f.path.replace(/\.md$/i, "").split("/").pop() ?? f.path);
+            const display = defaultDisplayName(f);
             const subpath = f.path.replace(/\.md$/i, "");
             return (
               <button
