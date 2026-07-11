@@ -10,7 +10,10 @@ import {
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
-import { dohcMarkdownExtensions } from './dohc-markdown-extensions.js'
+import {
+  dohcMarkdownExtensions,
+  escapeHighlightMarkdown,
+} from './dohc-markdown-extensions.js'
 
 const BODY_FIELD = 'body'
 const PLAIN_TEXT_FIELD = 'plainText'
@@ -113,7 +116,7 @@ export function getDohcProseMirrorSchema() {
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   const plainText = getDohcYDocPlainText(doc)
   if (plainText) return plainText.toString()
-  return markdownManager.serialize(yDocBodyToJSON(doc))
+  return markdownManager.serialize(escapeHighlightMarkdown(yDocBodyToJSON(doc)))
 }
 
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {

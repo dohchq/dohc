@@ -30,7 +30,7 @@ import {
 import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
-import { dohcMarkdownExtensions } from "./extensions";
+import { dohcMarkdownExtensions, escapeHighlightMarkdown } from "./extensions";
 import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
@@ -626,7 +626,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           editor?.commands.focus(position);
         },
         getMarkdown() {
-          return editor?.getMarkdown() ?? value;
+          if (!editor) return value;
+          // Escape literal `==` inside highlight marks before serializing so a
+          // WYSIWYG highlight over text containing `==` saves as an unambiguous,
+          // losslessly reversible `==a\=\=b==` (matches import-export.ts).
+          return editor.storage.markdown.manager.serialize(
+            escapeHighlightMarkdown(editor.getJSON()),
+          );
         },
       }),
       [editor, value],
