@@ -4,8 +4,11 @@ import {
   extractImageFiles,
   generateAssetFilename,
   handleImagePaste,
+  IMAGE_PICKER_ACCEPT,
   imageExtension,
   insertImageAtPosition,
+  pickAndInsertImages,
+  pickImageFiles,
   shortContentHash,
   slugifyBaseName,
 } from "./imagePaste";
@@ -216,5 +219,115 @@ describe("handleImagePaste", () => {
     expect(writeAsset).not.toHaveBeenCalled();
     expect(dispatched).toHaveLength(0);
     warn.mockRestore();
+  });
+});
+
+// A minimal Document stand-in: the `/image` slash command triggers a native
+// file picker via `document.createElement("input")` + `.click()`. Neither the
+// input's presence in a live DOM nor the OS dialog is testable in jsdom, so
+// these tests fake just the surface pickImageFiles touches (create/append/
+// click/change) and never exercise a real `<input>`.
+function makeFakeInputDocument() {
+  const listeners: Record<string, () => void> = {};
+  const input = {
+    type: "",
+    accept: "",
+    multiple: false,
+    style: {} as Record<string, string>,
+    files: null as unknown as FileList | null,
+    addEventListener: (event: string, cb: () => void) => {
+      listeners[event] = cb;
+    },
+    click: vi.fn(),
+    remove: vi.fn(),
+  };
+  const doc = {
+    createElement: vi.fn(() => input),
+    body: { appendChild: vi.fn() },
+  } as unknown as Document;
+  return { doc, input, fireChange: () => listeners.change?.() };
+}
+
+describe("pickImageFiles", () => {
+  it("opens a hidden multi-file image input and triggers its picker", () => {
+    const { doc, input } = makeFakeInputDocument();
+    const onFiles = vi.fn();
+
+    pickImageFiles(onFiles, doc);
+
+    expect(input.type).toBe("file");
+    expect(input.accept).toBe(IMAGE_PICKER_ACCEPT);
+    expect(input.multiple).toBe(true);
+    expect(doc.body.appendChild).toHaveBeenCalledWith(input);
+    expect(input.click).toHaveBeenCalledTimes(1);
+    expect(onFiles).not.toHaveBeenCalled();
+  });
+
+  it("forwards the chosen files on change and cleans up the element", () => {
+    const { doc, input, fireChange } = makeFakeInputDocument();
+    const onFiles = vi.fn();
+    const file = fakeImageFile("a.png", "image/png", new Uint8Array([1]));
+
+    pickImageFiles(onFiles, doc);
+    input.files = [file] as unknown as FileList;
+    fireChange();
+
+    expect(onFiles).toHaveBeenCalledTimes(1);
+    expect(onFiles).toHaveBeenCalledWith([file]);
+    expect(input.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("never calls onFiles if the picker is dismissed (no change event)", () => {
+    const { doc } = makeFakeInputDocument();
+    const onFiles = vi.fn();
+    pickImageFiles(onFiles, doc);
+    expect(onFiles).not.toHaveBeenCalled();
+  });
+});
+
+describe("pickAndInsertImages", () => {
+  it("writes and inserts each file chosen through the picker", async () => {
+    const { doc, input, fireChange } = makeFakeInputDocument();
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const file = fakeImageFile(
+      "Diagram.png",
+      "image/png",
+      new Uint8Array([5, 6, 7]),
+    );
+
+    pickAndInsertImages(
+      view as never,
+      3,
+      { workspaceId: "ws1", docPath: "notes/plan.md", writeAsset },
+      doc,
+    );
+    input.files = [file] as unknown as FileList;
+    fireChange();
+
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    const [writePath] = writeAsset.mock.calls[0]!;
+    expect(writePath).toMatch(/^notes\/assets\/diagram-[0-9a-z]+\.png$/);
+
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    expect(dispatched[0]!.pos).toBe(3);
+  });
+
+  it("writes nothing when the picker yields no files", () => {
+    const { doc, input, fireChange } = makeFakeInputDocument();
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+
+    pickAndInsertImages(
+      view as never,
+      3,
+      { workspaceId: "ws1", docPath: "notes/plan.md", writeAsset },
+      doc,
+    );
+    input.files = [] as unknown as FileList;
+    fireChange();
+
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
   });
 });

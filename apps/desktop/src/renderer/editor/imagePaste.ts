@@ -124,7 +124,10 @@ export function insertImageAtPosition(
 // Writes each image to the workspace and inserts an image node for it. Files
 // too large are skipped with a quiet console warning. Insertions walk forward
 // from the starting position so multiple images land in order.
-async function placeImageFiles(
+//
+// Exported so other entry points (the `/image` slash command) can reuse the
+// exact same write+insert pathway paste/drop use, rather than duplicating it.
+export async function placeImageFiles(
   view: EditorView,
   files: File[],
   context: ImagePasteContext,
@@ -192,4 +195,48 @@ export function handleImageDrop(
     view.state.selection.from;
   void placeImageFiles(view, files, context, dropPos);
   return true;
+}
+
+// The mime types offered by the native file picker for `/image`.
+export const IMAGE_PICKER_ACCEPT =
+  "image/png,image/jpeg,image/webp,image/gif,image/svg+xml";
+
+// Opens a transient, unattached-until-triggered `<input type="file">` and
+// hands the chosen files to `onFiles`. No new IPC: the native picker is a
+// plain DOM affordance the renderer already has access to. The element is
+// removed after firing (or never appended at all — appendChild isn't
+// required for `.click()`/`change` to work) so nothing leaks into the DOM.
+export function pickImageFiles(
+  onFiles: (files: File[]) => void,
+  doc: Document = document,
+): void {
+  const input = doc.createElement("input");
+  input.type = "file";
+  input.accept = IMAGE_PICKER_ACCEPT;
+  input.multiple = true;
+  input.style.display = "none";
+  input.addEventListener(
+    "change",
+    () => {
+      onFiles(Array.from(input.files ?? []));
+      input.remove();
+    },
+    { once: true },
+  );
+  doc.body.appendChild(input);
+  input.click();
+}
+
+// `/image` slash command entry point: opens the picker, then writes+inserts
+// each chosen file through the same `placeImageFiles` pathway paste/drop use.
+export function pickAndInsertImages(
+  view: EditorView,
+  pos: number,
+  context: ImagePasteContext,
+  doc: Document = document,
+): void {
+  pickImageFiles((files) => {
+    if (files.length === 0) return;
+    void placeImageFiles(view, files, context, pos);
+  }, doc);
 }

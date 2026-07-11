@@ -6,12 +6,15 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { dohcMarkdownExtensions } from "./extensions";
 import {
+  activeTurnIntoId,
   blockDragSlice,
   copyBlockAsMarkdown,
   deleteBlock,
   duplicateBlock,
   serializeBlockToMarkdown,
+  topLevelBlockPos,
   turnBlockInto,
+  TURN_INTO_ENTRIES,
 } from "./blockControls";
 
 function makeEditor(markdown: string): Editor {
@@ -124,6 +127,75 @@ describe("blockControls turn into", () => {
     const list = editor.getJSON().content?.[0];
     expect(list?.type).toBe("taskList");
     expect(list?.content?.[0]?.type).toBe("taskItem");
+  });
+});
+
+// The bubble menu's turn-into dropdown (blockControls.tsx's TurnIntoMenu)
+// doesn't get handed a block position the way the block context menu does —
+// it derives one from the current text selection via topLevelBlockPos, and
+// reads the active entry via activeTurnIntoId. These tests exercise that
+// same command-level path (resolve pos from selection -> turnBlockInto),
+// rather than re-testing turnBlockInto's own per-id branches above.
+describe("blockControls turn-into dropdown (bubble menu) command path", () => {
+  it("resolves the top-level block position from a selection nested in its text", () => {
+    const editor = track(makeEditor("Hello world"));
+    editor.commands.setTextSelection(5);
+    expect(topLevelBlockPos(editor)).toBe(0);
+  });
+
+  it("resolves the top-level block position from the second block in the doc", () => {
+    const editor = track(makeEditor("First\n\nSecond"));
+    const [, second] = topLevelBlocks(editor);
+    editor.commands.setTextSelection(second.pos + 2);
+    expect(topLevelBlockPos(editor)).toBe(second.pos);
+  });
+
+  it("reports the active turn-into entry for the block the selection sits in", () => {
+    const editor = track(makeEditor("# Heading"));
+    editor.commands.setTextSelection(3);
+    expect(activeTurnIntoId(editor)).toBe("heading-1");
+  });
+
+  it("reports paragraph as the default active entry for plain text", () => {
+    const editor = track(makeEditor("Just text"));
+    editor.commands.setTextSelection(3);
+    expect(activeTurnIntoId(editor)).toBe("paragraph");
+  });
+
+  it("converts paragraph -> heading using the position resolved from selection", () => {
+    const editor = track(makeEditor("Some text"));
+    editor.commands.setTextSelection(5);
+    const pos = topLevelBlockPos(editor);
+    expect(pos).not.toBeNull();
+    turnBlockInto(editor, pos!, "heading-2");
+    const first = editor.getJSON().content?.[0];
+    expect(first?.type).toBe("heading");
+    expect(first?.attrs?.level).toBe(2);
+    expect(activeTurnIntoId(editor)).toBe("heading-2");
+  });
+
+  it("converts heading -> todo list using the position resolved from selection", () => {
+    const editor = track(makeEditor("## Section"));
+    editor.commands.setTextSelection(4);
+    const pos = topLevelBlockPos(editor);
+    expect(pos).not.toBeNull();
+    turnBlockInto(editor, pos!, "task-list");
+    const list = editor.getJSON().content?.[0];
+    expect(list?.type).toBe("taskList");
+    expect(activeTurnIntoId(editor)).toBe("task-list");
+  });
+
+  it("keeps TURN_INTO_ENTRIES' labels/order identical to the block menu's turn-into section", () => {
+    expect(TURN_INTO_ENTRIES.map((entry) => entry.label)).toEqual([
+      "Text",
+      "Heading 1",
+      "Heading 2",
+      "Heading 3",
+      "Bulleted list",
+      "Numbered list",
+      "Todo list",
+      "Quote",
+    ]);
   });
 });
 

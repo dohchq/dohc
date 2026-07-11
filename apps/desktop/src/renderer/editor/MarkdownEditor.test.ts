@@ -1,7 +1,18 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { Editor } from "@tiptap/core";
+import { StarterKit } from "@tiptap/starter-kit";
+import { Markdown } from "@tiptap/markdown";
+import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { dohcMarkdownExtensions } from "./extensions";
 import { findEmptyListItemParagraph } from "./codeBlockChrome";
-import { filterSlashCommands, findSlashCommandMatch } from "./slashCommands";
+import {
+  CLOSED_SLASH_COMMAND_STATE,
+  filterSlashCommands,
+  findSlashCommandMatch,
+  runSlashCommand,
+  type SlashCommandState,
+} from "./slashCommands";
 
 describe("MarkdownEditor slash commands", () => {
   it("detects a trailing slash command query inside plain text", () => {
@@ -27,6 +38,77 @@ describe("MarkdownEditor slash commands", () => {
     expect(filterSlashCommands("todo").map((item) => item.id)).toEqual([
       "task-list",
     ]);
+  });
+
+  it("lists the image command by label and by its aliases", () => {
+    expect(filterSlashCommands("image").map((item) => item.id)).toContain("image");
+    expect(filterSlashCommands("photo").map((item) => item.id)).toEqual(["image"]);
+    expect(filterSlashCommands("upload").map((item) => item.id)).toEqual(["image"]);
+  });
+});
+
+describe("MarkdownEditor slash command: image", () => {
+  function makeEditor(markdown: string): Editor {
+    return new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        Markdown.configure({ indentation: { style: "space", size: 2 } }),
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+  }
+
+  it("deletes the '/image' text and hands off to the picker trigger instead of inserting text", () => {
+    const editor = makeEditor("/image");
+    const setSlashState = vi.fn();
+    const insertImage = vi.fn();
+    // "/image" is 6 chars starting at doc pos 1 (inside the paragraph).
+    const state: SlashCommandState = {
+      open: true,
+      from: 1,
+      to: 7,
+      query: "image",
+      selected: 0,
+      x: 0,
+      y: 0,
+      maxHeight: 0,
+      placement: "below",
+    };
+
+    runSlashCommand(editor, "image", state, setSlashState, insertImage);
+
+    expect(setSlashState).toHaveBeenCalledWith(CLOSED_SLASH_COMMAND_STATE);
+    expect(editor.getText()).toBe("");
+    expect(insertImage).toHaveBeenCalledTimes(1);
+    expect(insertImage).toHaveBeenCalledWith(editor.view, 1);
+    editor.destroy();
+  });
+
+  it("does not touch the picker when insertImage isn't wired up (no-op, not a throw)", () => {
+    const editor = makeEditor("/image");
+    const setSlashState = vi.fn();
+    const state: SlashCommandState = {
+      open: true,
+      from: 1,
+      to: 7,
+      query: "image",
+      selected: 0,
+      x: 0,
+      y: 0,
+      maxHeight: 0,
+      placement: "below",
+    };
+
+    expect(() =>
+      runSlashCommand(editor, "image", state, setSlashState),
+    ).not.toThrow();
+    expect(editor.getText()).toBe("");
+    editor.destroy();
   });
 });
 
