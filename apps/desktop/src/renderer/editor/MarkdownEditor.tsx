@@ -90,6 +90,8 @@ import {
   makeEmptyListItemFocusPlugin,
 } from "./codeBlockChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
+import { OutlinePanel } from "./OutlinePanel";
+import { WordCountBadge } from "./WordCountBadge";
 
 export type MarkdownEditorHandle = {
   focus: () => void;
@@ -266,6 +268,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       CLOSED_LINK_MENU_STATE,
     );
     const linkMenuStateRef = useRef<LinkMenuState>(linkMenuState);
+    const containerRef = useRef<HTMLDivElement>(null);
     const slashStateRef = useRef<SlashCommandState>(slashState);
     const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
@@ -639,7 +642,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         : { open: false };
 
     return (
-      <div className="dohc-tiptap-editor" data-collab-state={collab?.status ?? "local"}>
+      <div
+        className="dohc-tiptap-editor"
+        data-collab-state={collab?.status ?? "local"}
+        ref={containerRef}
+      >
         {collab && collab.status !== "disabled" ? (
           <div className="dohc-editor-presence" role="status" aria-live="polite">
             <span className="dohc-editor-presence-dot" aria-hidden="true" />
@@ -736,6 +743,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             />
           </>
         ) : null}
+        <OutlinePanel editor={editor} containerRef={containerRef} />
+        <WordCountBadge editor={editor} />
       </div>
     );
   },

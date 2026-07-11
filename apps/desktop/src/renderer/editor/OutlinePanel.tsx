@@ -1,0 +1,181 @@
+// Notion-style outline rail: a slim column of dash marks pinned to the
+// editor's right margin once the doc has ≥ 2 headings. Hovering (or
+// keyboard-focusing, via :focus-within) expands it into a floating panel
+// listing every heading; clicking one scrolls the editor there. The active
+// section — the topmost heading currently in view — is emphasized in both.
+//
+// Positioning is CSS-only (position: sticky inside the shared grid cell
+// set up in styles.css — see the "outline rail" comment there), so this
+// component never measures or tracks its own placement; the only DOM
+// measurement it does is figuring out which heading is "active" as the
+// user scrolls, which is inherently scroll-driven and can't be CSS-only.
+
+import { useEffect, useState, type RefObject } from "react";
+import type { Editor } from "@tiptap/core";
+import {
+  extractOutline,
+  resolveActiveHeadingIndex,
+  type OutlineHeading,
+} from "./outline";
+import {
+  countWordsAndCharacters,
+  createDebouncer,
+  EMPTY_WORD_CHAR_COUNT,
+  getDocText,
+  type WordCharCount,
+} from "./wordCount";
+
+// How far below the viewport's top edge a heading must scroll before it's
+// considered "reached" — keeps the very top heading active for a beat
+// after the user starts scrolling, instead of flipping the instant a new
+// heading's pixel crosses y=0.
+const ACTIVE_HEADING_READING_OFFSET = 72;
+const WORD_COUNT_DEBOUNCE_MS = 300;
+
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const overflowY = window.getComputedStyle(node).overflowY;
+    if (/(auto|scroll)/.test(overflowY) && node.scrollHeight > node.clientHeight) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/** Scroll the editor to a heading, briefly flashing it, and (when the
+ *  editor is editable) moving the cursor there. Read-only mode still gets
+ *  the scroll + flash, just no cursor move. */
+function scrollToHeading(editor: Editor, heading: OutlineHeading) {
+  try {
+    const { node } = editor.view.domAtPos(heading.pos, 1);
+    let el: Node | null = node;
+    while (el && el.nodeType !== Node.ELEMENT_NODE) el = el.parentNode;
+    const target = el as HTMLElement | null;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.classList.add("dohc-outline-target-flash");
+    window.setTimeout(() => target.classList.remove("dohc-outline-target-flash"), 900);
+    if (editor.isEditable) {
+      editor.chain().setTextSelection(heading.pos).run();
+    }
+  } catch {
+    // Offscreen/jsdom editors cannot always resolve DOM positions.
+  }
+}
+
+export type OutlinePanelProps = {
+  editor: Editor | null;
+  /** The `.dohc-tiptap-editor` container — used only to find the
+   *  scrollable ancestor for active-heading tracking. */
+  containerRef: RefObject<HTMLDivElement | null>;
+};
+
+export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
+  const [headings, setHeadings] = useState<OutlineHeading[]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [wordCount, setWordCount] = useState<WordCharCount>(EMPTY_WORD_CHAR_COUNT);
+
+  // Recompute the heading list synchronously (cheap: a handful of nodes)
+  // and the word count debounced (spec'd ~300ms) on every doc change.
+  useEffect(() => {
+    if (!editor) {
+      setHeadings([]);
+      setWordCount(EMPTY_WORD_CHAR_COUNT);
+      return;
+    }
+    const recomputeHeadings = () => setHeadings(extractOutline(editor.state.doc));
+    const recomputeWordCount = () =>
+      setWordCount(countWordsAndCharacters(getDocText(editor.state.doc)));
+    const debouncer = createDebouncer(recomputeWordCount, WORD_COUNT_DEBOUNCE_MS);
+
+    recomputeHeadings();
+    recomputeWordCount();
+
+    const onUpdate = () => {
+      recomputeHeadings();
+      debouncer.schedule();
+    };
+    editor.on("update", onUpdate);
+    return () => {
+      editor.off("update", onUpdate);
+      debouncer.cancel();
+    };
+  }, [editor]);
+
+  // Track scroll to resolve which section is active. Only wires up once
+  // there's something to track (≥ 1 heading) — the panel itself only
+  // renders at ≥ 2, but resolving early avoids a jump the moment a 2nd
+  // heading appears.
+  useEffect(() => {
+    if (!editor || headings.length === 0) return;
+    const scrollEl = findScrollParent(containerRef.current);
+    if (!scrollEl) return;
+
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const containerRect = scrollEl.getBoundingClientRect();
+      const tops = headings.map((h) => {
+        try {
+          return editor.view.coordsAtPos(h.pos).top - containerRect.top + scrollEl.scrollTop;
+        } catch {
+          return 0;
+        }
+      });
+      setActiveIndex(
+        resolveActiveHeadingIndex(tops, scrollEl.scrollTop, ACTIVE_HEADING_READING_OFFSET),
+      );
+    };
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(update);
+    };
+
+    update();
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scrollEl.removeEventListener("scroll", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [editor, headings, containerRef]);
+
+  if (!editor || headings.length < 2) return null;
+
+  return (
+    <nav className="dohc-outline" aria-label="Document outline">
+      <div className="dohc-outline-rail" aria-hidden="true">
+        {headings.map((h, i) => (
+          <span
+            key={h.pos}
+            className={`dohc-outline-rail-mark dohc-outline-rail-mark--level-${h.level}${
+              i === activeIndex ? " is-active" : ""
+            }`}
+          />
+        ))}
+      </div>
+      <div className="dohc-outline-panel dohc-popover">
+        <ul className="dohc-outline-list">
+          {headings.map((h, i) => (
+            <li key={h.pos}>
+              <button
+                type="button"
+                className={`dohc-outline-item dohc-outline-item--level-${h.level}${
+                  i === activeIndex ? " is-active" : ""
+                }`}
+                onClick={() => scrollToHeading(editor, h)}
+              >
+                {h.text}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="dohc-outline-wordcount">
+          {wordCount.words.toLocaleString()} words · {wordCount.characters.toLocaleString()}{" "}
+          characters
+        </div>
+      </div>
+    </nav>
+  );
+}
