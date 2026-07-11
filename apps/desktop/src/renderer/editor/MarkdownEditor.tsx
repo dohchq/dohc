@@ -22,6 +22,7 @@ import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
   Code,
+  Highlighter,
   Italic,
   Strikethrough,
   Underline as UnderlineIcon,
@@ -89,6 +90,7 @@ import {
   makeCodeBlockContinuationPlugin,
   makeEmptyListItemFocusPlugin,
 } from "./codeBlockChrome";
+import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { OutlinePanel } from "./OutlinePanel";
 import { WordCountBadge } from "./WordCountBadge";
@@ -378,6 +380,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
               makeCodeBlockContinuationPlugin(),
+              makeCalloutChromePlugin(),
               makeCodeHighlightPlugin(),
               makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
@@ -703,6 +706,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               onClick={() => editor.chain().focus().toggleCode().run()}
             >
               <Code size={14} aria-hidden />
+            </BubbleButton>
+            <BubbleButton
+              label="Highlight"
+              active={editor.isActive("highlight")}
+              onClick={() => editor.chain().focus().toggleMark("highlight").run()}
+            >
+              <Highlighter size={14} aria-hidden />
             </BubbleButton>
             <LinkBubbleButton editor={editor} onOpen={setLinkMenuState} />
           </BubbleMenu>

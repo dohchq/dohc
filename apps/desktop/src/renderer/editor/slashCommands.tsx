@@ -17,6 +17,8 @@ export type SlashCommandId =
   | "numbered-list"
   | "task-list"
   | "quote"
+  | "callout"
+  | "toggle"
   | "code-block"
   | "divider"
   | "table"
@@ -102,6 +104,20 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     hint: "Call out a thought",
     glyph: ">",
     aliases: ["blockquote", "quote"],
+  },
+  {
+    id: "callout",
+    label: "Callout",
+    hint: "Highlighted info box",
+    glyph: "!",
+    aliases: ["callout", "note", "info", "warning", "admonition", "aside"],
+  },
+  {
+    id: "toggle",
+    label: "Toggle",
+    hint: "Collapsible callout",
+    glyph: "▸",
+    aliases: ["toggle", "fold", "collapse", "details", "accordion"],
   },
   {
     id: "code-block",
@@ -408,6 +424,24 @@ export function runSlashCommand(
       return;
     case "quote":
       chain.toggleBlockquote().run();
+      return;
+    case "callout":
+      chain
+        .insertContent({
+          type: "callout",
+          attrs: { calloutType: "note", title: "", fold: "" },
+          content: [{ type: "paragraph" }],
+        })
+        .run();
+      return;
+    case "toggle":
+      chain
+        .insertContent({
+          type: "callout",
+          attrs: { calloutType: "note", title: "", fold: "-" },
+          content: [{ type: "paragraph" }],
+        })
+        .run();
       return;
     case "code-block":
       chain.setCodeBlock({ language: "" }).run();

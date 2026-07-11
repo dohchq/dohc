@@ -48,6 +48,7 @@ function isBlockControlTarget(nodeName: string): boolean {
     "paragraph",
     "heading",
     "blockquote",
+    "callout",
     "bulletList",
     "orderedList",
     "codeBlock",

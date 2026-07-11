@@ -359,4 +359,98 @@ describe('hocuspocus markdown import/export', () => {
     // proving the extension consumed the query fence while deferring plain ones.
     expect(out).toContain('```dohc-query')
   })
+
+  it('round-trips Obsidian callouts across every core type, fold flag, and title state', () => {
+    const once = expectStableMarkdownRoundTrip(
+      [
+        '> [!note] Titled note',
+        '> note body',
+        '',
+        '> [!tip]',
+        '> untitled tip body',
+        '',
+        '> [!info]+ Explicitly open',
+        '> info body',
+        '',
+        '> [!warning]- Folded warning',
+        '> hidden until expanded',
+        '',
+        '> [!danger] Danger zone',
+        '> danger body',
+        '',
+        '> [!quote] A quote callout',
+        '> quoted body',
+      ].join('\n'),
+      [
+        '> [!note] Titled note',
+        '> [!tip]',
+        '> [!info]+ Explicitly open',
+        '> [!warning]- Folded warning',
+        '> [!danger] Danger zone',
+        '> [!quote] A quote callout',
+        '> hidden until expanded',
+      ],
+    )
+    expect(once).toContain('> untitled tip body')
+  })
+
+  it('preserves unknown callout types verbatim instead of dropping them', () => {
+    expectStableMarkdownRoundTrip(
+      ['> [!custom-thing]- Secret label', '> body text'].join('\n'),
+      ['> [!custom-thing]- Secret label', '> body text'],
+    )
+  })
+
+  it('preserves callout titles that contain brackets', () => {
+    expectStableMarkdownRoundTrip(
+      ['> [!note] Title with ] bracket', '> body'].join('\n'),
+      ['> [!note] Title with ] bracket'],
+    )
+  })
+
+  it('round-trips callouts that contain lists and code blocks', () => {
+    expectStableMarkdownRoundTrip(
+      [
+        '> [!info] With blocks',
+        '> - first',
+        '> - second',
+        '>',
+        '> ```ts',
+        '> const x = 1',
+        '> ```',
+      ].join('\n'),
+      [
+        '> [!info] With blocks',
+        '> - first',
+        '> - second',
+        '> ```ts',
+        '> const x = 1',
+        '> ```',
+      ],
+    )
+  })
+
+  it('leaves a plain blockquote (no callout header) as an ordinary blockquote', () => {
+    const once = expectStableMarkdownRoundTrip(
+      ['> just a quote', '> second line'].join('\n'),
+      ['> just a quote', '> second line'],
+    )
+    expect(once).not.toContain('[!')
+  })
+
+  it('round-trips ==highlight== including adjacent and nested marks', () => {
+    const once = expectStableMarkdownRoundTrip(
+      'Plain ==highlighted== then ==one== ==two== adjacent, plus **==bold highlight==** and ==**inner bold**==.',
+      ['==highlighted==', '==one==', '==two=='],
+    )
+    expect(once).toContain('bold highlight')
+    expect(once).toContain('inner bold')
+  })
+
+  it('does not fire highlight on stray or spaced equals', () => {
+    expectStableMarkdownRoundTrip(
+      'Prose a == b stays literal and a lone = sign too.',
+      ['a == b stays literal'],
+    )
+  })
 })

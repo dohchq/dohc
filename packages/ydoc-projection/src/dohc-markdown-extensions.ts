@@ -1,4 +1,4 @@
-import { Node } from '@tiptap/core'
+import { Mark, Node, markInputRule } from '@tiptap/core'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -475,6 +475,198 @@ const DohcQueryBlock = Node.create({
   },
 })
 
+// Obsidian callout syntax: a blockquote whose first line is `[!type]` with an
+// optional fold flag (`-` folded, `+` open) and an optional title, e.g.
+// `> [!note]- My title`. Unknown callout types are preserved verbatim (styled
+// like a note but keeping the original type string) so nothing is ever dropped.
+const DEFAULT_CALLOUT_TYPE = 'note'
+const CALLOUT_HEADER_RE = /^\[!([^\]\n]+)\]([+-]?)[ \t]*(.*)$/
+const CALLOUT_LINE_RE = /^ {0,3}>/
+
+function stripBlockquotePrefix(line: string): string {
+  return line.replace(/^ {0,3}> ?/, '')
+}
+
+function normalizeCalloutFold(value: unknown): '' | '-' | '+' {
+  return value === '-' || value === '+' ? value : ''
+}
+
+function calloutTitleForMarkdown(value: unknown): string {
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+}
+
+function findClosingHighlight(src: string): number {
+  for (let index = 2; index < src.length - 1; index += 1) {
+    if (src[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (src[index] === '=' && src[index + 1] === '=') return index
+  }
+  return -1
+}
+
+const DohcCallout = Node.create({
+  name: 'callout',
+  priority: 1000,
+  group: 'block',
+  content: 'block+',
+  defining: true,
+
+  addAttributes() {
+    return {
+      calloutType: { default: DEFAULT_CALLOUT_TYPE },
+      title: { default: '' },
+      fold: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'div[data-dohc-callout]' }]
+  },
+
+  renderHTML({ node }) {
+    return [
+      'div',
+      {
+        class: 'dohc-callout',
+        'data-dohc-callout': '',
+        'data-callout-type': String(node.attrs.calloutType ?? DEFAULT_CALLOUT_TYPE),
+        'data-fold': normalizeCalloutFold(node.attrs.fold),
+        'data-callout-title': String(node.attrs.title ?? ''),
+      },
+      ['div', { class: 'dohc-callout-body' }, 0],
+    ]
+  },
+
+  // Block-level tokenizer so plain blockquotes (no `[!type]` first line) fall
+  // through to the built-in blockquote tokenizer untouched — we only claim the
+  // block when the header line matches, otherwise we return undefined.
+  markdownTokenizer: {
+    name: 'callout',
+    level: 'block',
+    start(src) {
+      const match = /(?:^|\n)( {0,3}>\s?\[!)/.exec(src)
+      if (!match) return -1
+      return match.index === 0 ? 0 : match.index + 1
+    },
+    tokenize(src, _tokens, helpers) {
+      const lines = src.split('\n')
+      let count = 0
+      while (count < lines.length && CALLOUT_LINE_RE.test(lines[count] ?? '')) {
+        count += 1
+      }
+      if (count === 0) return undefined
+      const consumed = lines.slice(0, count)
+      const inner = consumed.map(stripBlockquotePrefix)
+      const header = CALLOUT_HEADER_RE.exec(inner[0] ?? '')
+      if (!header) return undefined
+      const [, calloutType = '', fold = '', title = ''] = header
+      const body = inner.slice(1).join('\n')
+      return {
+        type: 'callout',
+        raw: consumed.join('\n'),
+        calloutType: calloutType.trim() || DEFAULT_CALLOUT_TYPE,
+        fold: normalizeCalloutFold(fold),
+        title: title.trim(),
+        tokens: body.trim() ? helpers.blockTokens(body) : [],
+      }
+    },
+  },
+
+  parseMarkdown: (token, helpers) => {
+    const children = token.tokens?.length ? helpers.parseChildren(token.tokens) : []
+    return helpers.createNode(
+      'callout',
+      {
+        calloutType: token.calloutType ?? DEFAULT_CALLOUT_TYPE,
+        title: token.title ?? '',
+        fold: normalizeCalloutFold(token.fold),
+      },
+      children.length > 0 ? children : [helpers.createNode('paragraph', {}, [])],
+    )
+  },
+
+  renderMarkdown: (node, helpers) => {
+    const calloutType = String(node.attrs?.calloutType ?? DEFAULT_CALLOUT_TYPE)
+    const fold = normalizeCalloutFold(node.attrs?.fold)
+    const title = calloutTitleForMarkdown(node.attrs?.title)
+    const header = `[!${calloutType}]${fold}${title ? ` ${title}` : ''}`
+    const prefix = '>'
+    const blocks: string[] = []
+    const content = node.content ?? []
+    content.forEach((child, index) => {
+      const rendered = helpers.renderChild
+        ? helpers.renderChild(child, index)
+        : helpers.renderChildren([child])
+      const lines = rendered
+        .split('\n')
+        .map((line) => (line.trim() === '' ? prefix : `${prefix} ${line}`))
+      blocks.push(lines.join('\n'))
+    })
+    const body = blocks.join(`\n${prefix}\n`)
+    return body ? `${prefix} ${header}\n${body}` : `${prefix} ${header}`
+  },
+})
+
+// Obsidian/extended-CommonMark `==highlight==`. The base parser has no `==`
+// rule, so we register a custom inline tokenizer (mirroring the wikilink hook)
+// that requires flanking non-space characters so stray `=` and `a == b` never
+// fire, and round-trips nested marks like `**==x==**`.
+const DohcHighlight = Mark.create({
+  name: 'highlight',
+
+  parseHTML() {
+    return [{ tag: 'mark' }, { tag: 'span[data-dohc-highlight]' }]
+  },
+
+  renderHTML() {
+    return ['mark', { class: 'dohc-highlight', 'data-dohc-highlight': '' }, 0]
+  },
+
+  addInputRules() {
+    return [
+      markInputRule({
+        find: /(?:^|\s)(==(?!\s)((?:[^=]+))==)$/,
+        type: this.type,
+      }),
+    ]
+  },
+
+  addKeyboardShortcuts() {
+    return {
+      'Mod-Shift-h': () => this.editor.commands.toggleMark(this.name),
+    }
+  },
+
+  markdownTokenizer: {
+    name: 'highlight',
+    level: 'inline',
+    start(src) {
+      return firstUnescapedIndex(src, /(^|[^\\=])==(?!\s)(?!=)/)
+    },
+    tokenize(src, _tokens, helpers) {
+      if (!src.startsWith('==')) return undefined
+      if (src.length < 5) return undefined
+      if (/\s/.test(src[2] ?? '')) return undefined
+      const closing = findClosingHighlight(src)
+      if (closing === -1) return undefined
+      if (/\s/.test(src[closing - 1] ?? '')) return undefined
+      const raw = src.slice(0, closing + 2)
+      const inner = raw.slice(2, -2)
+      if (!inner) return undefined
+      return { type: 'highlight', raw, tokens: helpers.inlineTokens(inner) }
+    },
+  },
+
+  parseMarkdown: (token, helpers) =>
+    helpers.applyMark('highlight', helpers.parseInline(token.tokens ?? [])),
+
+  renderMarkdown: (node, helpers) => `==${helpers.renderChildren(node.content ?? [])}==`,
+})
+
 export const dohcMarkdownExtensions = [
   DohcImage,
   DohcEscapedPunctuation,
@@ -482,4 +674,6 @@ export const dohcMarkdownExtensions = [
   DohcInlineAtom,
   DohcFormula,
   DohcQueryBlock,
+  DohcCallout,
+  DohcHighlight,
 ]
