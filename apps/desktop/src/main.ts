@@ -161,6 +161,8 @@ import {
   DesktopUserSettingsResult,
   PickWorkspaceRootResult,
   ReadWorkspaceGraphPayload,
+  GetBacklinksPayload,
+  GetBacklinksResult,
   ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
@@ -359,7 +361,10 @@ import {
   importToDatabase,
   readDatabaseSnapshot,
 } from "./workspaces/workspaceDatabase";
-import { readWorkspaceGraph } from "./workspaces/workspaceGraph";
+import {
+  readWorkspaceGraph,
+  readWorkspaceBacklinks,
+} from "./workspaces/workspaceGraph";
 import {
   collectZipEntries,
   copyIntoWorkspace,
@@ -2672,6 +2677,15 @@ function registerIpcHandlers(): void {
     const input = ReadWorkspaceGraphPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return WorkspaceGraphResult.parse(await readWorkspaceGraph(workspace.rootPath));
+  });
+
+  ipcMain.handle(CHANNELS.getBacklinks, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetBacklinksPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return GetBacklinksResult.parse({
+      sources: await readWorkspaceBacklinks(workspace.rootPath, input.path),
+    });
   });
 
   // The ONLY path from renderer to the OS browser (window.open is a pure

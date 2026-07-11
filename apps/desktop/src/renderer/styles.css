@@ -2309,3 +2309,165 @@ mark.dohc-highlight,
   background: var(--dohc-panel-2);
   color: var(--dohc-subtle);
 }
+
+/* ===================================================================== *
+ * Linked mentions (BacklinksPanel.tsx) — the inbound-link "backlinks"
+ * section at the bottom of a document. Quiet chrome aligned to the shared
+ * editor reading measure (like page identity above the body): a serif
+ * section title per brand, a hairline separator, and muted source/snippet
+ * rows that warm on hover. Colors ride the theme tokens so both themes come
+ * for free.
+ * ===================================================================== */
+.dohc-backlinks {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 56px 48px;
+  background: var(--dohc-bg);
+}
+
+.dohc-backlinks__inner {
+  max-width: 720px;
+  margin: 0 auto;
+  border-top: 1px solid var(--dohc-line);
+  padding-top: 12px;
+}
+
+.dohc-backlinks__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  color: var(--dohc-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.dohc-backlinks__header:hover {
+  color: var(--dohc-ink);
+}
+
+.dohc-backlinks__chevron {
+  flex-shrink: 0;
+  color: var(--dohc-subtle);
+  transition: transform 120ms ease-out;
+}
+
+.dohc-backlinks__chevron[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+.dohc-backlinks__header-icon {
+  flex-shrink: 0;
+  color: var(--dohc-subtle);
+}
+
+.dohc-backlinks__title {
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dohc-ink);
+}
+
+.dohc-backlinks__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--dohc-panel-2);
+  color: var(--dohc-subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dohc-backlinks__list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dohc-backlinks__source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dohc-backlinks__source-link {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  margin: 0 -6px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dohc-backlinks__source-link:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-backlinks__source-title {
+  color: var(--dohc-ink);
+  font-size: 13.5px;
+  font-weight: 550;
+}
+
+.dohc-backlinks__source-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+}
+
+.dohc-backlinks__snippets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dohc-backlinks__snippet {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-left: 2px solid var(--dohc-line);
+  background: transparent;
+  padding: 2px 8px;
+  color: var(--dohc-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.dohc-backlinks__snippet:hover {
+  border-left-color: var(--dohc-subtle);
+  color: var(--dohc-ink);
+}
+
+.dohc-backlinks__mark {
+  background: color-mix(in srgb, var(--dohc-accent) 22%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+  font-weight: 600;
+}

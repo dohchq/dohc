@@ -33,6 +33,28 @@ export interface MarkdownGraphDocument {
   truncated?: boolean;
 }
 
+// One mention of the target file inside a source document: the line that
+// contains the link, trimmed to a readable length, plus the [start, end)
+// character range WITHIN `text` that the link occupies (so the UI can
+// highlight it).
+export interface BacklinkSnippet {
+  text: string;
+  line: number;
+  highlightStart: number;
+  highlightEnd: number;
+}
+
+// Every source document that links to the target, with its mentions.
+export interface BacklinkSource {
+  sourcePath: string;
+  sourceTitle: string;
+  snippets: BacklinkSnippet[];
+}
+
+const MAX_BACKLINK_SOURCES = 500;
+const MAX_BACKLINK_SNIPPETS_PER_SOURCE = 20;
+const BACKLINK_SNIPPET_MAX_CHARS = 160;
+
 const MAX_GRAPH_FILES = 2000;
 const MAX_GRAPH_EDGES = 10000;
 const MAX_GRAPH_LINK_CANDIDATES = 20000;
@@ -199,11 +221,24 @@ function unescapeMarkdownDestination(raw: string): string {
   return target;
 }
 
-function extractMarkdownLinkHrefs(source: string, limit: number): string[] {
-  const hrefs: string[] = [];
+// One `[label](href)` occurrence with the character offsets of the whole
+// construct in `source`: `start` is the opening `[`, `end` is just past the
+// closing `)`. Backlink snippets highlight [start, end); the graph only needs
+// the href.
+interface MarkdownLinkSpan {
+  rawHref: string;
+  start: number;
+  end: number;
+}
+
+function extractMarkdownLinkSpans(
+  source: string,
+  limit: number,
+): MarkdownLinkSpan[] {
+  const spans: MarkdownLinkSpan[] = [];
   let index = 0;
 
-  while (hrefs.length < limit && index < source.length) {
+  while (spans.length < limit && index < source.length) {
     const labelStart = source.indexOf("[", index);
     if (labelStart === -1) break;
     if (labelStart > 0 && source[labelStart - 1] === "!") {
@@ -248,7 +283,11 @@ function extractMarkdownLinkHrefs(source: string, limit: number): string[] {
       }
       if (char === ")") {
         if (depth === 0) {
-          hrefs.push(source.slice(hrefStart, cursor));
+          spans.push({
+            rawHref: source.slice(hrefStart, cursor),
+            start: labelStart,
+            end: cursor + 1,
+          });
           index = cursor + 1;
           closed = true;
           break;
@@ -260,7 +299,11 @@ function extractMarkdownLinkHrefs(source: string, limit: number): string[] {
     if (!closed) index = labelEnd + 1;
   }
 
-  return hrefs;
+  return spans;
+}
+
+function extractMarkdownLinkHrefs(source: string, limit: number): string[] {
+  return extractMarkdownLinkSpans(source, limit).map((span) => span.rawHref);
 }
 
 function isLocalGraphTarget(raw: string): boolean {
@@ -520,6 +563,252 @@ export function buildMarkdownGraph(
   };
 }
 
+// Replaces every code character (fenced blocks, indented blocks, inline spans)
+// with a space of its own — same length, same newlines. Link scanning then
+// skips code exactly as the graph does (which STRIPS it), but character offsets
+// stay aligned with the original text so a match position maps straight back to
+// the source line for a snippet.
+function maskBlockCode(text: string): string {
+  const lines = text.match(/[^\n]*(?:\n|$)/g) ?? [];
+  let fence: { char: "`" | "~"; length: number } | null = null;
+  const blank = (value: string) => value.replace(/[^\n]/g, " ");
+
+  return lines
+    .map((line) => {
+      if (line === "") return line;
+      const hasNewline = line.endsWith("\n");
+      const body = hasNewline ? line.slice(0, -1) : line;
+      const output = () => blank(body) + (hasNewline ? "\n" : "");
+      // A trailing CR is part of the body's length but not its fence syntax.
+      const probe = body.endsWith("\r") ? body.slice(0, -1) : body;
+
+      if (fence) {
+        const close = probe.match(/^[ \t]{0,3}([`~]{3,})[ \t]*$/);
+        if (close?.[1]?.[0] === fence.char && close[1].length >= fence.length) {
+          fence = null;
+        }
+        return output();
+      }
+
+      const open = probe.match(/^[ \t]{0,3}([`~]{3,})/);
+      if (open?.[1]) {
+        fence = { char: open[1][0] as "`" | "~", length: open[1].length };
+        return output();
+      }
+
+      if (/^(?: {4}|\t)/.test(probe)) return output();
+      return line;
+    })
+    .join("");
+}
+
+function maskInlineCode(text: string): string {
+  let output = "";
+  let index = 0;
+
+  while (index < text.length) {
+    if (text[index] !== "`") {
+      output += text[index];
+      index += 1;
+      continue;
+    }
+
+    let length = 1;
+    while (text[index + length] === "`") length += 1;
+    const delimiter = "`".repeat(length);
+    const close = text.indexOf(delimiter, index + length);
+    if (close === -1) {
+      output += delimiter;
+      index += length;
+      continue;
+    }
+
+    // Blank the whole span but keep newlines so line extraction still works.
+    output += text.slice(index, close + length).replace(/[^\n]/g, " ");
+    index = close + length;
+  }
+
+  return output;
+}
+
+function maskCode(text: string): string {
+  return maskInlineCode(maskBlockCode(text));
+}
+
+interface RawMention {
+  kind: WorkspaceGraphEdgeKind;
+  target: string;
+  start: number;
+  end: number;
+}
+
+// Like extractMarkdownGraphLinks, but over the offset-preserving code MASK
+// (not the length-changing strip) so each mention carries its position in the
+// ORIGINAL text. Returned in document order.
+function extractMentionsWithPositions(text: string, limit: number): RawMention[] {
+  const masked = maskCode(text);
+  const mentions: RawMention[] = [];
+
+  for (const match of masked.matchAll(WIKILINK_RE)) {
+    if (mentions.length >= limit) break;
+    const raw = match[1]?.split("|")[0]?.trim();
+    if (raw && isLocalGraphTarget(raw)) {
+      const start = match.index ?? 0;
+      mentions.push({
+        kind: "wikilink",
+        target: raw,
+        start,
+        end: start + match[0].length,
+      });
+    }
+  }
+
+  for (const span of extractMarkdownLinkSpans(masked, limit)) {
+    if (mentions.length >= limit) break;
+    const href = markdownHref(span.rawHref);
+    if (href && isLocalGraphTarget(href)) {
+      mentions.push({
+        kind: "markdown",
+        target: href,
+        start: span.start,
+        end: span.end,
+      });
+    }
+  }
+
+  mentions.sort((a, b) => a.start - b.start || a.end - b.end);
+  return mentions;
+}
+
+// Windows a source line down to BACKLINK_SNIPPET_MAX_CHARS around the link,
+// adding ellipses when trimmed, and returns the highlight range within the
+// windowed text.
+function windowSnippet(
+  fullLine: string,
+  hStart: number,
+  hEnd: number,
+): { text: string; highlightStart: number; highlightEnd: number } {
+  const max = BACKLINK_SNIPPET_MAX_CHARS;
+  if (fullLine.length <= max) {
+    return { text: fullLine, highlightStart: hStart, highlightEnd: hEnd };
+  }
+
+  const linkLen = hEnd - hStart;
+  let start: number;
+  let end: number;
+  if (linkLen >= max) {
+    start = hStart;
+    end = hStart + max;
+  } else {
+    const context = Math.floor((max - linkLen) / 2);
+    start = hStart - context;
+    end = hEnd + (max - linkLen - context);
+    if (start < 0) {
+      end += -start;
+      start = 0;
+    }
+    if (end > fullLine.length) {
+      start -= end - fullLine.length;
+      end = fullLine.length;
+    }
+    start = Math.max(0, start);
+  }
+
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < fullLine.length ? "…" : "";
+  const text = prefix + fullLine.slice(start, end) + suffix;
+  const highlightStart = Math.min(prefix.length + (hStart - start), text.length);
+  const highlightEnd = Math.min(
+    prefix.length + (Math.min(end, hEnd) - start),
+    text.length,
+  );
+  return {
+    text,
+    highlightStart,
+    highlightEnd: Math.max(highlightStart, highlightEnd),
+  };
+}
+
+function buildBacklinkSnippet(
+  text: string,
+  matchStart: number,
+  matchEnd: number,
+): BacklinkSnippet {
+  let line = 1;
+  for (let i = 0; i < matchStart; i += 1) if (text[i] === "\n") line += 1;
+
+  const lineStart =
+    matchStart === 0 ? 0 : text.lastIndexOf("\n", matchStart - 1) + 1;
+  const newline = text.indexOf("\n", matchStart);
+  const lineEnd = newline === -1 ? text.length : newline;
+  const rawLine = text.slice(lineStart, lineEnd).replace(/\r$/, "");
+
+  // Trim leading indentation and trailing whitespace, shifting the highlight.
+  const leading = rawLine.length - rawLine.trimStart().length;
+  const trimmed = rawLine.trim();
+  const hStart = Math.max(0, matchStart - lineStart - leading);
+  const hEnd = Math.min(
+    trimmed.length,
+    Math.max(hStart, matchEnd - lineStart - leading),
+  );
+
+  const windowed = windowSnippet(trimmed, hStart, hEnd);
+  return { ...windowed, line };
+}
+
+// Inverts the graph for one file: every OTHER document whose links resolve to
+// `targetPath`, with a snippet per mention. Self-links (a doc linking to
+// itself) and unresolved links are excluded — the same rules the graph applies.
+// Pure over an in-memory document map so it is testable without any IPC/FS.
+export function computeBacklinks(
+  docs: MarkdownGraphDocument[],
+  targetPath: string,
+  options: { allPaths?: string[] } = {},
+): BacklinkSource[] {
+  const allPaths = [...(options.allPaths ?? docs.map((doc) => doc.path))]
+    .filter((path, index, paths) => paths.indexOf(path) === index)
+    .sort((a, b) => a.localeCompare(b));
+  const index = createPathIndex(allPaths);
+  const sortedDocs = [...docs]
+    .filter((doc) => isMarkdownGraphPath(doc.path) && doc.path !== targetPath)
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  const sources: BacklinkSource[] = [];
+  for (const doc of sortedDocs) {
+    if (sources.length >= MAX_BACKLINK_SOURCES) break;
+    const snippets: BacklinkSnippet[] = [];
+    const seen = new Set<string>();
+
+    for (const mention of extractMentionsWithPositions(
+      doc.text,
+      MAX_GRAPH_LINK_CANDIDATES,
+    )) {
+      if (snippets.length >= MAX_BACKLINK_SNIPPETS_PER_SOURCE) break;
+      const resolved = resolveLinkTarget(
+        doc.path,
+        mention.target,
+        mention.kind,
+        index,
+      );
+      if (resolved !== targetPath) continue;
+      const key = `${mention.start}\0${mention.end}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      snippets.push(buildBacklinkSnippet(doc.text, mention.start, mention.end));
+    }
+
+    if (snippets.length > 0) {
+      sources.push({
+        sourcePath: doc.path,
+        sourceTitle: titleFor(doc.path, doc.text),
+        snippets,
+      });
+    }
+  }
+
+  return sources;
+}
+
 async function readGraphText(
   rootPath: string,
   relativePath: string,
@@ -542,7 +831,16 @@ async function readGraphText(
   }
 }
 
-export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGraph> {
+// Loads every markdown file in the workspace (bounded by the same file/byte
+// caps the graph enforces) so both the graph and backlinks read from one place.
+// `graphPaths` keeps the FULL scanned set (all kinds) — link resolution indexes
+// against it so a markdown link to a non-markdown file still resolves.
+async function loadGraphDocuments(rootPath: string): Promise<{
+  docs: MarkdownGraphDocument[];
+  graphPaths: string[];
+  scannedFileCount: number;
+  omittedFileCount: number;
+}> {
   const listed = await listFiles(rootPath);
   const graphPaths = listed.files.map((file) => file.path).slice(0, MAX_GRAPH_FILES);
   const selected = graphPaths.filter((path) => isMarkdownGraphPath(path));
@@ -562,13 +860,36 @@ export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGra
       docs.push({ path, text: result.text, truncated: result.truncated });
     } catch {
       // The watcher may have observed a file that was moved or deleted by the
-      // time graph reads it. The graph is a view; the next refresh will pick it up.
+      // time we read it. This is a view; the next refresh will pick it up.
     }
   }
 
+  return {
+    docs,
+    graphPaths,
+    scannedFileCount: graphPaths.length,
+    omittedFileCount,
+  };
+}
+
+export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGraph> {
+  const { docs, graphPaths, scannedFileCount, omittedFileCount } =
+    await loadGraphDocuments(rootPath);
   return buildMarkdownGraph(docs, {
     allPaths: graphPaths,
     omittedFileCount,
-    scannedFileCount: graphPaths.length,
+    scannedFileCount,
   });
+}
+
+// Backlinks read the SAME graph documents and invert the edge derivation: for
+// the open file, find every OTHER file whose links resolve to it. Reuses the
+// graph's link extraction + resolution so a backlink and a graph edge always
+// agree on what points where.
+export async function readWorkspaceBacklinks(
+  rootPath: string,
+  targetPath: string,
+): Promise<BacklinkSource[]> {
+  const { docs, graphPaths } = await loadGraphDocuments(rootPath);
+  return computeBacklinks(docs, targetPath, { allPaths: graphPaths });
 }

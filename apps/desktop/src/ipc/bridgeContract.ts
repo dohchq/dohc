@@ -356,6 +356,37 @@ export const WorkspaceGraphResult = z.object({
 });
 export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
 
+// Backlinks ("Linked mentions"): the OPEN document's inbound links, derived
+// read-only in main from the same source graph. `path` is the open file; the
+// result lists every OTHER file that links to it with a highlighted snippet per
+// mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
+// here so this shared contract never imports the main-only fs module).
+export const GetBacklinksPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type GetBacklinksPayload = z.infer<typeof GetBacklinksPayload>;
+
+const BacklinkSnippet = z.object({
+  // A single source line, trimmed/windowed to ~160 chars (+ ellipses).
+  text: z.string().max(400),
+  line: z.number().int().positive(),
+  // [start, end) of the link within `text`; the UI marks this range.
+  highlightStart: z.number().int().nonnegative(),
+  highlightEnd: z.number().int().nonnegative(),
+});
+
+const BacklinkSource = z.object({
+  sourcePath: PATH_STRING,
+  sourceTitle: z.string().max(120),
+  snippets: z.array(BacklinkSnippet).max(20),
+});
+
+export const GetBacklinksResult = z.object({
+  sources: z.array(BacklinkSource).max(500),
+});
+export type GetBacklinksResult = z.infer<typeof GetBacklinksResult>;
+
 // Visible SQLite: the studio reads a snapshot (tables/columns/bounded rows),
 // edits rows in place, and imports a source file into a new database. The
 // on-disk .sqlite is canonical; raw bytes never CRDT-sync (edits flow as an
@@ -2157,6 +2188,7 @@ export interface DohcDesktopBridge {
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;
+  getBacklinks(payload: GetBacklinksPayload): Promise<GetBacklinksResult>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;
