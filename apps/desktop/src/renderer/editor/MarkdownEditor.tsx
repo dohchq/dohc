@@ -42,9 +42,17 @@ import {
   type SlashCommandState,
 } from "./slashCommands";
 import {
+  BlockMenu,
+  CLOSED_BLOCK_MENU_STATE,
+  copyBlockAsMarkdown,
+  deleteBlock,
+  duplicateBlock,
   insertBlockAfter as insertBlockAfterCore,
   makeBlockControlsPlugin,
-  selectBlock as selectBlockCore,
+  resolveBlockMenuState,
+  turnBlockInto,
+  type BlockMenuEntry,
+  type BlockMenuState,
 } from "./blockControls";
 import {
   makeCodeBlockChromePlugin,
@@ -180,11 +188,15 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [slashState, setSlashState] = useState<SlashCommandState>(
       CLOSED_SLASH_COMMAND_STATE,
     );
+    const [blockMenuState, setBlockMenuState] = useState<BlockMenuState>(
+      CLOSED_BLOCK_MENU_STATE,
+    );
     const [chromeReady, setChromeReady] = useState(false);
     const slashStateRef = useRef<SlashCommandState>(slashState);
+    const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
-    const blockSelectRef = useRef<(pos: number) => void>(() => {});
+    const blockMenuOpenRef = useRef<(pos: number, rect: DOMRect) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const dirtyTrackingReadyRef = useRef(false);
     const applyingPendingUndoRef = useRef(false);
@@ -199,6 +211,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useEffect(() => {
       slashStateRef.current = slashState;
     }, [slashState]);
+
+    useEffect(() => {
+      blockMenuStateRef.current = blockMenuState;
+    }, [blockMenuState]);
 
     useEffect(() => {
       const map = new Map<string, WikilinkFile>();
@@ -246,7 +262,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               }),
               makeBlockControlsPlugin({
                 onInsertRef: blockInsertRef,
-                onSelectRef: blockSelectRef,
+                onOpenMenuRef: blockMenuOpenRef,
               }),
               makeWikilinkPlugin(
                 () => knownFilesRef.current,
@@ -367,17 +383,43 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [editor, openSlashMenuAtPosition],
     );
 
-    const selectBlock = useCallback(
-      (pos: number) => {
-        selectBlockCore(editor, pos);
+    const openBlockMenu = useCallback((pos: number, rect: DOMRect) => {
+      setBlockMenuState(resolveBlockMenuState(pos, rect));
+    }, []);
+
+    const closeBlockMenu = useCallback(() => {
+      setBlockMenuState(CLOSED_BLOCK_MENU_STATE);
+    }, []);
+
+    const runBlockMenuAction = useCallback(
+      (entry: BlockMenuEntry) => {
+        const current = blockMenuStateRef.current;
+        if (!current.open) return;
+        const { pos } = current;
+        setBlockMenuState(CLOSED_BLOCK_MENU_STATE);
+        if (entry.kind === "turn-into") {
+          turnBlockInto(editor, pos, entry.id);
+          return;
+        }
+        switch (entry.id) {
+          case "duplicate":
+            duplicateBlock(editor, pos);
+            return;
+          case "delete":
+            deleteBlock(editor, pos);
+            return;
+          case "copy-markdown":
+            void copyBlockAsMarkdown(editor, pos);
+            return;
+        }
       },
       [editor],
     );
 
     useEffect(() => {
       blockInsertRef.current = insertBlockAfter;
-      blockSelectRef.current = selectBlock;
-    }, [insertBlockAfter, selectBlock]);
+      blockMenuOpenRef.current = openBlockMenu;
+    }, [insertBlockAfter, openBlockMenu]);
 
     const runSlashCommand = useCallback(
       (id: SlashCommandId) => {
@@ -504,6 +546,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   current.open ? { ...current, selected: index } : current,
                 )
               }
+            />
+            <BlockMenu
+              state={blockMenuState}
+              onSelect={runBlockMenuAction}
+              onClose={closeBlockMenu}
             />
             <WikilinkPicker
               state={pickerState}
