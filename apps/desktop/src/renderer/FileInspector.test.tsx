@@ -227,6 +227,45 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  it("surfaces a failed read-mode PageIdentity save instead of hiding it", async () => {
+    // Read mode hides the idle "Saved" chip, but PageIdentity stays editable and
+    // autosaves title/icon edits. A failed save must still surface — otherwise
+    // the optimistic title keeps showing while the write silently failed. A body
+    // over the WYSIWYG threshold opens in read mode without being truncated
+    // (truncated would make PageIdentity read-only and skip the save entirely).
+    const bigBody = `---\ntitle: Plan\n---\n\n${"# Section\n\nbody paragraph.\n\n".repeat(3000)}`;
+    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: bigBody, truncated: false });
+    bridgeMock.writeWorkspaceText.mockRejectedValueOnce(new Error("disk full"));
+
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="plan.md" />);
+
+    // Read mode: no editor, but the editable PageIdentity title is present.
+    await screen.findByTestId("page-identity");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    // No pending save yet, so the save-state chip is hidden in read mode.
+    expect(screen.queryByTestId("markdown-save-state")).toBeNull();
+
+    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    await user.click(title);
+    await user.type(title, "!");
+
+    // The autosave (800ms debounce) fails; the failure must become visible even
+    // though we never left read mode.
+    await waitFor(
+      () => {
+        const chip = screen.getByTestId("markdown-save-state");
+        expect(chip.textContent).toBe("Couldn't save");
+        expect(chip.getAttribute("data-state")).toBe("error");
+      },
+      { timeout: 3_000 },
+    );
+    // The optimistic title edit is still displayed alongside the failure.
+    expect(title.value).toContain("!");
+    view.unmount();
+  });
+
   it("does not expose properties editing for truncated markdown reads", async () => {
     const user = userEvent.setup();
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
