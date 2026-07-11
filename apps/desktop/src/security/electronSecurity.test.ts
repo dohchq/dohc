@@ -120,7 +120,11 @@ describe("window.open policy", () => {
     expect(isSafeExternalUrl("http://dohc.ai/docs")).toBe(true);
   });
 
-  it("never shells out non-http(s) schemes or junk", () => {
+  it("routes mailto targets through the external shell handler", () => {
+    expect(isSafeExternalUrl("mailto:hi@dohc.ai")).toBe(true);
+  });
+
+  it("never shells out non-http(s)/mailto schemes or junk", () => {
     expect(isSafeExternalUrl("file:///etc/passwd")).toBe(false);
     expect(isSafeExternalUrl("smb://share/x")).toBe(false);
     expect(isSafeExternalUrl("javascript:alert(1)")).toBe(false);
