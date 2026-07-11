@@ -104,8 +104,16 @@ async function shot(page: Page, name: string): Promise<void> {
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
-  await page.evaluate((value) => {
+  await page.evaluate(async (value) => {
     document.documentElement.setAttribute("data-theme", value);
+    // Force a style flush and wait two frames so the screenshot can't capture
+    // stale compositor tiles of the (heavy) document pane — under xvfb
+    // software rendering a blind timeout races the repaint and intermittently
+    // yields a light-themed editor inside dark chrome.
+    void getComputedStyle(document.body).backgroundColor;
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
   }, theme);
   await page.waitForTimeout(150);
 }
