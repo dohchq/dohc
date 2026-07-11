@@ -127,6 +127,29 @@ describe("callout header title staleness", () => {
     expect(liveTitle(editor)).toBe("User typed");
   });
 
+  it("keeps the focused title input across content inserted before the callout", () => {
+    // A collaborator/agent inserting text before a callout shifts its document
+    // position. The widget key must key off callout ORDINAL (not absolute pos),
+    // or the decoration remints — dropping the focused input and its
+    // uncommitted title WITHOUT a blur (the commit never fires).
+    const editor = makeEditor("intro\n\n> [!note] Title\n> body");
+    const input = titleInput(editor);
+    input.focus();
+    input.value = "Uncommitted edit";
+
+    // Insert text at the very start of the document, before the callout.
+    editor.view.dispatch(editor.state.tr.insertText("XYZ ", 1));
+
+    // Same input element (no remint) and the uncommitted edit survives.
+    const after = titleInput(editor);
+    expect(after).toBe(input);
+    expect(after.value).toBe("Uncommitted edit");
+
+    // The edit still commits on blur, proving the input stayed wired up.
+    after.blur();
+    expect(liveTitle(editor)).toBe("Uncommitted edit");
+  });
+
   it("Escape restores the current node title, not a stale closure snapshot", () => {
     const editor = makeEditor("> [!note] Original\n> body");
     let input = titleInput(editor);

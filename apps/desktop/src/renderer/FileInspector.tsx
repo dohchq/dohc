@@ -909,7 +909,12 @@ function MarkdownView(props: {
         onShare={onShareCurrentPath}
         actions={
           <>
-            {editing ? (
+            {/* Read mode hides the "Saved" idle chip, but PageIdentity stays
+                editable here and autosaves title/icon edits — so a pending or
+                failed save (saveState !== "saved") must surface even when not
+                `editing`, or a failed title/icon save is invisible while the
+                optimistic value keeps showing. */}
+            {editing || saveState !== "saved" ? (
               <span
                 data-testid="markdown-save-state"
                 data-state={saveState}

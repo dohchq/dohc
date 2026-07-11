@@ -214,8 +214,17 @@ function buildCalloutHeader(
 function buildCalloutChromeDecorations(doc: Node): DecorationSet {
   const decorations: Decoration[] = [];
 
+  // Ordinal (document order among callouts), NOT absolute pos, keys the widget.
+  // A collaborator/agent edit BEFORE a callout shifts its pos but not its
+  // ordinal, so keying on pos would remint the widget on every such edit —
+  // dropping a focused, uncommitted title input without a blur (the commit never
+  // fires). Ordinal stays stable through position mapping; only a change to the
+  // set/order of callouts remints, which is rare mid-title-edit.
+  let ordinal = 0;
+
   doc.descendants((node, pos) => {
     if (node.type.name !== "callout") return;
+    const index = ordinal++;
     const type = String(node.attrs.calloutType ?? "note");
     const fold = normalizeCalloutFoldAttr(node.attrs.fold);
     const title = String(node.attrs.title ?? "");
@@ -228,7 +237,7 @@ function buildCalloutChromeDecorations(doc: Node): DecorationSet {
         (view, getPos) => buildCalloutHeader(view, getPos, { type, fold, title }),
         {
           side: -1,
-          key: `callout-${pos}-${type}-${fold}`,
+          key: `callout-${index}-${type}-${fold}`,
           ignoreSelection: true,
           stopEvent: () => true,
         },
