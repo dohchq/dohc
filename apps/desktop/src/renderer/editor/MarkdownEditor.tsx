@@ -28,6 +28,8 @@ import {
   type ImagePasteContext,
 } from "./imagePaste";
 import { bridge } from "../bridge";
+import { FindReplaceBar } from "./FindReplaceBar";
+import { findReplaceExtension } from "./findReplace";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import {
   CLOSED_LINK_MENU_STATE,
@@ -161,6 +163,7 @@ const STATIC_EDITOR_EXTENSIONS = [
   TaskItem,
   TableKit,
   MARKDOWN_EXTENSION,
+  findReplaceExtension,
 ];
 
 function BubbleButton(props: {
@@ -532,6 +535,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           </div>
         ) : null}
         <EditorContent editor={editor} />
+        {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
           <BubbleMenu
             editor={editor}
