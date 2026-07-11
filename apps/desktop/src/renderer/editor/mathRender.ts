@@ -108,6 +108,11 @@ export function makeMathNodeView(
     let currentTex = String(initialNode.attrs.tex ?? "");
     let editing = false;
     let field: HTMLTextAreaElement | HTMLInputElement | null = null;
+    // The field's value at the moment editing began (or the last remote value
+    // adopted while the field was still untouched). The commit gate compares
+    // against THIS, not currentTex, so an opened-but-unedited field never
+    // clobbers a concurrent remote edit — see exitEditing / update.
+    let baseline = "";
 
     const paint = () => renderMathInto(preview, currentTex, displayMode);
 
@@ -118,7 +123,13 @@ export function makeMathNodeView(
       view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { tex: value }));
     };
 
-    // `nextValue === null` cancels (keep currentTex); otherwise commit the edit.
+    // `nextValue === null` cancels (keep currentTex); otherwise commit ONLY if
+    // the user actually changed the field (`value !== baseline`). Opening the
+    // source editor and clicking away with no local edit must not dispatch —
+    // otherwise a concurrent remote tex change (which advanced currentTex but
+    // not the untouched field) would be silently overwritten. When the user
+    // DID edit locally and a remote edit also landed, their text wins on
+    // commit: last-writer-wins.
     const exitEditing = (nextValue: string | null): void => {
       if (!editing) return;
       editing = false;
@@ -129,7 +140,7 @@ export function makeMathNodeView(
         const value = el.value;
         el.remove();
         preview.style.removeProperty("display");
-        if (nextValue !== null) commit(value);
+        if (nextValue !== null && value !== baseline) commit(value);
       }
     };
 
@@ -143,6 +154,7 @@ export function makeMathNodeView(
       if (el instanceof HTMLInputElement) el.type = "text";
       el.className = "dohc-math__source";
       el.value = currentTex;
+      baseline = currentTex;
       el.spellcheck = false;
       preview.style.display = "none";
       dom.appendChild(el);
@@ -187,7 +199,16 @@ export function makeMathNodeView(
       update(updated) {
         if (updated.type.name !== nodeName) return false;
         currentTex = String(updated.attrs.tex ?? "");
-        if (!editing) paint();
+        if (!editing) {
+          paint();
+        } else if (field && field.value === baseline) {
+          // A remote edit landed while the source field is open but still
+          // untouched: adopt the new tex into the field (and advance baseline)
+          // so blur won't commit a stale value over the remote change. Once the
+          // user has typed locally (value !== baseline) we leave their text be.
+          field.value = currentTex;
+          baseline = currentTex;
+        }
         return true;
       },
       // Selecting the node (click, arrow-into, or `/math` insert) opens the

@@ -12,9 +12,11 @@ import {
   makeMermaidPreviewPlugin,
   MermaidRenderScheduler,
   MERMAID_STARTER_SNIPPET,
+  reconcileMermaidEntries,
   renderMermaidDiagram,
   type MermaidRenderFn,
   type MermaidRenderResult,
+  type MermaidWidgetEntry,
 } from './mermaidRender'
 
 // --- pure `computeMermaidBlocks` / `isMermaidBlockCollapsed` over a
@@ -92,6 +94,56 @@ describe('isMermaidBlockCollapsed', () => {
     expect(isMermaidBlockCollapsed(block, 10)).toBe(false)
     expect(isMermaidBlockCollapsed(block, 20)).toBe(false)
     expect(isMermaidBlockCollapsed(block, 30)).toBe(false)
+  })
+})
+
+// --- `reconcileMermaidEntries`: the pure identity layer. A fence that only
+// shifts position (an edit above it) must keep its id — that's what lets
+// ProseMirror preserve the painted widget DOM instead of reminting an empty
+// canvas — while genuinely new/removed fences change the id set. ---
+
+describe('reconcileMermaidEntries', () => {
+  const entry = (id: string, pos: number, text = 'graph TD;A'): MermaidWidgetEntry => ({
+    id,
+    pos,
+    end: pos + text.length + 2,
+    text,
+  })
+  const blockAt = (pos: number, text = 'graph TD;A') => ({ pos, end: pos + text.length + 2, text })
+
+  it('keeps a fence id stable when an edit above merely shifts its position', () => {
+    const previous = [entry('m0', 4)]
+    // Three characters typed above the fence: block.pos 4 -> 7, mapped +3.
+    const blocks = [blockAt(7)]
+    const next = reconcileMermaidEntries(previous, blocks, (p) => p + 3, () => 'MINTED')
+    expect(next).toEqual([{ id: 'm0', pos: 7, end: 7 + 'graph TD;A'.length + 2, text: 'graph TD;A' }])
+  })
+
+  it('keeps the id (not the text) stable when the fence body itself changes', () => {
+    const previous = [entry('m0', 4, 'graph TD;A')]
+    // Editing inside the fence changes text/end but not the block start pos.
+    const blocks = [blockAt(4, 'graph TD;AB')]
+    const next = reconcileMermaidEntries(previous, blocks, (p) => p, () => 'MINTED')
+    expect(next[0].id).toBe('m0')
+    expect(next[0].text).toBe('graph TD;AB')
+  })
+
+  it('mints a fresh id for a newly-added fence and preserves the existing one', () => {
+    const previous = [entry('m0', 4)]
+    const blocks = [blockAt(4), blockAt(40)]
+    let seq = 1
+    const next = reconcileMermaidEntries(previous, blocks, (p) => p, () => `m${seq++}`)
+    expect(next.map((e) => e.id)).toEqual(['m0', 'm1'])
+  })
+
+  it('drops the entry for a deleted fence (its id is no longer active)', () => {
+    const previous = [entry('m0', 4), entry('m1', 40)]
+    // The second fence was deleted; the first is untouched, so only m0 survives
+    // and m1's id falls out of the active set (the plugin prunes its scheduler
+    // state).
+    const blocks = [blockAt(4)]
+    const next = reconcileMermaidEntries(previous, blocks, (p) => p, () => 'MINTED')
+    expect(next.map((e) => e.id)).toEqual(['m0'])
   })
 })
 
@@ -203,6 +255,26 @@ describe('MermaidRenderScheduler', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     expect(render).not.toHaveBeenCalled()
   })
+
+  it('prune() drops state for keys no longer active (deleted fences)', async () => {
+    const render = vi.fn(async (_id: string, source: string) => ({ svg: `<svg>${source}</svg>` }))
+    const scheduler = new MermaidRenderScheduler(render, () => {})
+    scheduler.schedule('m0', 'graph TD;A')
+    scheduler.schedule('m1', 'graph TD;B')
+
+    // m0's fence was deleted; only m1 remains active.
+    scheduler.prune(new Set(['m1']))
+    await vi.advanceTimersByTimeAsync(400)
+
+    // m0's pending debounce was cancelled; only m1 rendered.
+    expect(render).toHaveBeenCalledTimes(1)
+    expect(render).toHaveBeenCalledWith('dohc-mermaid-m1', 'graph TD;B')
+
+    // And m0's lastSource was cleared, so re-adding it re-renders from scratch.
+    scheduler.schedule('m0', 'graph TD;A')
+    await vi.advanceTimersByTimeAsync(400)
+    expect(render).toHaveBeenCalledWith('dohc-mermaid-m0', 'graph TD;A')
+  })
 })
 
 // --- `renderMermaidDiagram`: the lazy-import wrapper around the real
@@ -289,6 +361,35 @@ describe('makeMermaidPreviewPlugin — DOM wiring', () => {
     expect(render).toHaveBeenCalledWith(expect.stringContaining('dohc-mermaid-'), 'graph TD;\nA-->B')
     const canvas = previewContainer(editor).querySelector('.dohc-mermaid-preview-canvas')
     expect(canvas?.innerHTML).toContain('data-src="graph TD;\nA-->B"')
+  })
+
+  it('preserves the painted widget (same DOM, stable identity) across an edit above the fence', async () => {
+    vi.useFakeTimers()
+    const render = vi.fn(async (_id: string, source: string) => ({ svg: `<svg data-src="${source}"></svg>` }))
+    const editor = makeEditor('para\n\n```mermaid\ngraph TD;\nA-->B\n```', render)
+
+    await vi.advanceTimersByTimeAsync(400)
+
+    const widgetBefore = previewContainer(editor)
+    expect(widgetBefore.querySelector('.dohc-mermaid-preview-canvas')?.innerHTML).toContain(
+      'data-src="graph TD;\nA-->B"',
+    )
+    const renderCallsAfterPaint = render.mock.calls.length
+
+    // Type a character into the paragraph ABOVE the fence — this shifts the
+    // fence's doc position. Pre-fix, the position-derived key changed and PM
+    // destroyed the widget, leaving an empty canvas until a re-render.
+    editor.view.dispatch(editor.state.tr.insertText('X', 1))
+
+    const widgetAfter = previewContainer(editor)
+    // The SAME DOM node survives (identity preserved) …
+    expect(widgetAfter).toBe(widgetBefore)
+    // … so the painted diagram is still there with no re-render needed.
+    expect(widgetAfter.querySelector('.dohc-mermaid-preview-canvas')?.innerHTML).toContain(
+      'data-src="graph TD;\nA-->B"',
+    )
+    await vi.advanceTimersByTimeAsync(400)
+    expect(render.mock.calls.length).toBe(renderCallsAfterPaint)
   })
 
   it('shows a quiet error strip on parse failure, keeping the code editable', async () => {

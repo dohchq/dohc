@@ -25,7 +25,8 @@
 // inside `view.update`) so the replacement is folded into the same
 // transaction cycle instead of racing a second dispatch.
 
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state'
+import { ReplaceStep } from '@tiptap/pm/transform'
 import type { PMDocLike } from './inlineAtomPlugin'
 import { isCodeBlock, isCodeMark, type AutocompleteState } from './wikilinkPlugin'
 import { EMOJI_DATA, type EmojiEntry } from './emojiData'
@@ -114,10 +115,54 @@ export function detectCompleteEmojiShortcode(
   return found
 }
 
+/** PURE: did this batch of transactions insert text ending in a colon exactly
+ *  at `cursorPos` (the post-transaction selection head)? This is the signal
+ *  that the LOCAL user just typed the closing `:` of a shortcode, and it is
+ *  what gates the Slack-style auto-insert.
+ *
+ *  Without it, `appendTransaction` fires on ANY doc-changing transaction whose
+ *  cursor happens to sit right after a literal `:shortcode:` — most notably a
+ *  remote collaborator's edit (a y-sync transaction changes the doc while the
+ *  local selection is merely mapped in place), which would silently rewrite a
+ *  literal the user intentionally left in prose. A remote/unrelated edit does
+ *  not carry a ReplaceStep inserting the closing colon at the local cursor, so
+ *  it no longer triggers. */
+export function insertedClosingColonAtCursor(
+  transactions: readonly Transaction[],
+  cursorPos: number,
+): boolean {
+  for (let t = 0; t < transactions.length; t++) {
+    const tr = transactions[t]
+    if (!tr.docChanged) continue
+    for (let i = 0; i < tr.steps.length; i++) {
+      const step = tr.steps[i]
+      if (!(step instanceof ReplaceStep)) continue
+      const slice = step.slice
+      if (slice.size === 0) continue
+      const inserted = slice.content.textBetween(0, slice.content.size, '\n', '\n')
+      if (!inserted.endsWith(':')) continue
+      // Position just past the inserted content, in this step's output doc…
+      let end = step.from + slice.size
+      // …mapped through the rest of THIS transaction's steps…
+      end = tr.mapping.slice(i + 1).map(end)
+      // …then through every later transaction in the batch, landing in the
+      // same coordinate space as `cursorPos` (newState).
+      for (let k = t + 1; k < transactions.length; k++) {
+        end = transactions[k].mapping.map(end)
+      }
+      if (end === cursorPos) return true
+    }
+  }
+  return false
+}
+
 /** Build the emoji-trigger plugin.
  *  - `appendTransaction` handles the "typed the closing colon of a known
  *    shortcode" auto-insert, folded into the same transaction that typed
- *    the colon (no extra dispatch cycle).
+ *    the colon (no extra dispatch cycle). It only fires when the local user
+ *    actually typed that closing colon (see `insertedClosingColonAtCursor`),
+ *    never on remote/undo/other doc changes that leave the cursor after a
+ *    pre-existing literal shortcode.
  *  - `view.update` handles the open-picker notification, same pattern as
  *    makeMentionPlugin / makeWikilinkPlugin. */
 export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => void) {
@@ -137,6 +182,10 @@ export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => 
       if (!transactions.some((tr) => tr.docChanged)) return null
       const sel = newState.selection
       if (!sel.empty) return null
+      // Only auto-replace when the LOCAL user just typed the closing colon at
+      // the cursor — not on remote collab edits or other doc changes that
+      // happen to leave the cursor after a literal `:shortcode:`.
+      if (!insertedClosingColonAtCursor(transactions, sel.from)) return null
       const found = detectCompleteEmojiShortcode(
         newState.doc as unknown as PMDocLike,
         sel.from,
