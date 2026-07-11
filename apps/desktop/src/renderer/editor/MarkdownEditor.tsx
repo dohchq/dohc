@@ -637,13 +637,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           editor?.commands.focus(position);
         },
         getMarkdown() {
-          if (!editor) return value;
+          // `editor.markdown` is @tiptap/markdown's documented public accessor
+          // for the MarkdownManager (it's the same instance as the internal
+          // `editor.storage.markdown.manager`, just the stable surface).
+          if (!editor?.markdown) return value;
           // Escape literal `==` inside highlight marks before serializing so a
           // WYSIWYG highlight over text containing `==` saves as an unambiguous,
           // losslessly reversible `==a\=\=b==` (matches import-export.ts).
-          return editor.storage.markdown.manager.serialize(
-            escapeHighlightMarkdown(editor.getJSON()),
-          );
+          return editor.markdown.serialize(escapeHighlightMarkdown(editor.getJSON()));
         },
       }),
       [editor, value],

@@ -38,15 +38,34 @@ function findClosingWikilink(src: string): number {
   return -1
 }
 
+// A wikilink's `target`/`label` are delimited by `|` and closed by `]]`, so a
+// value that itself contains `\`, `]`, or `|` must be backslash-escaped when
+// serialized or it would re-parse as a truncated link (e.g. a mention labeled
+// `Plan ]] Draft` would close the wikilink early). escape/unescape are inverses
+// applied at renderMarkdown/parse time; the node attrs always hold the raw,
+// human-readable value.
+function escapeWikilinkPart(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/([\]|])/g, '\\$1')
+}
+
+function unescapeWikilinkPart(value: string): string {
+  return value.replace(/\\([\\\]|])/g, '$1')
+}
+
 function splitWikilinkInner(inner: string): [string, string | null] {
   for (let index = 0; index < inner.length; index += 1) {
     if (inner[index] === '\\') {
       index += 1
       continue
     }
-    if (inner[index] === '|') return [inner.slice(0, index), inner.slice(index + 1)]
+    if (inner[index] === '|') {
+      return [
+        unescapeWikilinkPart(inner.slice(0, index)),
+        unescapeWikilinkPart(inner.slice(index + 1)),
+      ]
+    }
   }
-  return [inner, null]
+  return [unescapeWikilinkPart(inner), null]
 }
 
 function renderMarkdownImage(attrs: {
@@ -284,7 +303,10 @@ const DohcWikilink = Node.create({
     name: 'wikilink',
     level: 'inline',
     start(src) {
-      return firstUnescapedIndex(src, /(^|[^\\])\[\[[^\]\n]+\]\]/)
+      // Inner run allows escaped chars (`\]`, `\|`, `\\`) so a wikilink whose
+      // label contains an escaped delimiter is still detected mid-line; the
+      // authoritative bounds come from findClosingWikilink in tokenize.
+      return firstUnescapedIndex(src, /(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/)
     },
     tokenize(src) {
       if (!src.startsWith('[[')) return undefined
@@ -303,9 +325,11 @@ const DohcWikilink = Node.create({
     }),
 
   renderMarkdown: (node) => {
-    const target = node.attrs?.target ?? ''
+    const target = escapeWikilinkPart(String(node.attrs?.target ?? ''))
     const label = node.attrs?.label
-    return label ? `[[${target}|${label}]]` : `[[${target}]]`
+    return label
+      ? `[[${target}|${escapeWikilinkPart(String(label))}]]`
+      : `[[${target}]]`
   },
 })
 
@@ -509,17 +533,19 @@ function findClosingHighlight(src: string): number {
   return -1
 }
 
-// Runs of `==` inside highlighted text are backslash-escaped per-`=` so the
-// inline tokenizer's `\`-skipping in findClosingHighlight never mistakes them
-// for the closing delimiter. The base markdown manager renders a mark's inner
-// text verbatim (only its opening/closing `==` delimiters come from
-// renderMarkdown), so this escaping has to be applied to the highlight-marked
-// text nodes before serialization — see escapeHighlightMarkdown below. Each
-// `\=` round-trips back through the base `escape` token (an escapedPunctuation
-// node whose renderMarkdown re-emits `\=`), so once escaped the text carries no
-// bare `==` and the transform is idempotent.
+// EVERY `=` inside highlighted text is backslash-escaped so the inline
+// tokenizer's `\`-skipping in findClosingHighlight never mistakes it for a
+// closing delimiter. Escaping only runs of `==` is not enough: a single `=`
+// sitting next to the closing `==` (e.g. the highlight body `a=`) would
+// serialize to `==a===`, whose first `==` scanned from the left closes the mark
+// one char early. The base markdown manager renders a mark's inner text
+// verbatim (only its opening/closing `==` delimiters come from renderMarkdown),
+// so this escaping has to be applied to the highlight-marked text nodes before
+// serialization — see escapeHighlightMarkdown below. Each `\=` round-trips back
+// through the base `escape` token (an escapedPunctuation node whose
+// renderMarkdown re-emits `\=`), so once escaped the text carries no bare `=`.
 function escapeHighlightBody(body: string): string {
-  return body.replace(/={2,}/g, (run) => run.replace(/=/g, '\\='))
+  return body.replace(/=/g, '\\=')
 }
 
 function hasHighlightMark(node: JSONContent): boolean {
@@ -614,6 +640,22 @@ function wrapLooseCalloutChildren(
 const CALLOUT_LAZY_BREAK_RE =
   /^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:```|~~~)|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:\*[ \t]*){3,}$|<[a-zA-Z!/])/
 
+// A code fence opener (```/~~~, up to 3 leading spaces, optional info string).
+// Returns the fence run so the closer can be length/char-matched.
+function calloutFenceOpener(line: string): string | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+  return match ? (match[1] ?? null) : null
+}
+
+// A fence closer: same character as the opener, at least as long, nothing but
+// trailing whitespace after it.
+function isCalloutFenceCloser(line: string, opener: string): boolean {
+  const match = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)
+  if (!match) return false
+  const fence = match[1] ?? ''
+  return fence[0] === opener[0] && fence.length >= opener.length
+}
+
 const DohcCallout = Node.create({
   name: 'callout',
   priority: 1000,
@@ -661,23 +703,52 @@ const DohcCallout = Node.create({
     tokenize(src, _tokens, helpers) {
       const lines = src.split('\n')
       let count = 0
-      // Track whether the previous consumed line left an open paragraph, so we
-      // only absorb lazy-continuation lines (mirroring CommonMark blockquotes).
-      let lastInnerBlank = true
+      // Track whether an open PARAGRAPH is currently continuable, so we only
+      // absorb blockquote-style lazy-continuation lines (mirroring CommonMark).
+      // A blank inner line, a heading/list/hr/html/nested-quote, or a fenced
+      // code block all close the paragraph — only then must an unquoted line NOT
+      // be pulled in. Tracking just "was the last line blank" wrongly absorbed
+      // text after a fence/heading whose (non-blank) line left no paragraph open.
+      let paragraphOpen = false
+      // Non-null while inside a `>`-quoted fenced code block (holds the opener
+      // run) so its content lines aren't mistaken for paragraph text.
+      let openFence: string | null = null
+      const applyInnerLine = (inner: string) => {
+        if (openFence !== null) {
+          if (isCalloutFenceCloser(inner, openFence)) openFence = null
+          paragraphOpen = false
+          return
+        }
+        const opener = calloutFenceOpener(inner)
+        if (opener !== null) {
+          openFence = opener
+          paragraphOpen = false
+        } else if (inner.trim() === '' || CALLOUT_LAZY_BREAK_RE.test(inner)) {
+          paragraphOpen = false
+        } else {
+          paragraphOpen = true
+        }
+      }
       while (count < lines.length) {
         const line = lines[count] ?? ''
         if (CALLOUT_LINE_RE.test(line)) {
-          lastInnerBlank = stripBlockquotePrefix(line).trim() === ''
+          if (count === 0) {
+            // The header line reads as paragraph text (a directly following
+            // unquoted line still lazily continues it, as before).
+            paragraphOpen = true
+          } else {
+            applyInnerLine(stripBlockquotePrefix(line))
+          }
           count += 1
           continue
         }
         if (
           count > 0 &&
-          !lastInnerBlank &&
+          paragraphOpen &&
           line.trim() !== '' &&
           !CALLOUT_LAZY_BREAK_RE.test(line)
         ) {
-          lastInnerBlank = false
+          // Lazy continuation of the open paragraph — it stays open.
           count += 1
           continue
         }

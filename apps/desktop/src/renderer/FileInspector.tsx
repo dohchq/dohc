@@ -560,9 +560,17 @@ function MarkdownView(props: {
   // unrelated re-renders (collab status flips, save-state ticks), and the
   // incremental document commits only the opening window up front, idle-
   // backfilling the rest — a 250KB doc opens in tens of ms, not ~575ms.
+  // Strip YAML frontmatter before rendering the read view: the title/icon it
+  // encodes is already surfaced by <PageIdentity> above the document, so the
+  // raw `---`/`title:`/`icon:` block must not also render as body content (the
+  // WYSIWYG editor uses the same `markdownEditorBody` split — keep read mode in
+  // lockstep so both show the document body, not its metadata).
   const renderedDocument = useMemo(
     () => (
-      <IncrementalMarkdownDocument body={savedBody} components={MARKDOWN_COMPONENTS} />
+      <IncrementalMarkdownDocument
+        body={markdownEditorBody(savedBody)}
+        components={MARKDOWN_COMPONENTS}
+      />
     ),
     [savedBody],
   );

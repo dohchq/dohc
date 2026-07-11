@@ -17,20 +17,13 @@ import {
   resolveActiveHeadingIndex,
   type OutlineHeading,
 } from "./outline";
-import {
-  countWordsAndCharacters,
-  createDebouncer,
-  EMPTY_WORD_CHAR_COUNT,
-  getDocText,
-  type WordCharCount,
-} from "./wordCount";
+import { useDebouncedWordCount } from "./wordCount";
 
 // How far below the viewport's top edge a heading must scroll before it's
 // considered "reached" — keeps the very top heading active for a beat
 // after the user starts scrolling, instead of flipping the instant a new
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
-const WORD_COUNT_DEBOUNCE_MS = 300;
 
 // Same convention theme.ts uses to install the CSS reduced-motion
 // resets: the OS-level media query OR the app's own reduce-motion setting
@@ -95,7 +88,7 @@ export type OutlinePanelProps = {
 export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
   const [headings, setHeadings] = useState<OutlineHeading[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [wordCount, setWordCount] = useState<WordCharCount>(EMPTY_WORD_CHAR_COUNT);
+  const wordCount = useDebouncedWordCount(editor);
 
   // extractOutline always returns a fresh array (even when the flattened
   // heading list is unchanged), so `headings` gets a new reference on every
@@ -112,30 +105,31 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
   // "active" without re-running the effect that owns the listener.
   const scheduleActiveUpdateRef = useRef<(() => void) | null>(null);
 
-  // Recompute the heading list synchronously (cheap: a handful of nodes)
-  // and the word count debounced (spec'd ~300ms) on every doc change.
+  // Recompute the heading list synchronously (cheap: a handful of nodes) on
+  // every doc change. The word count is handled by useDebouncedWordCount above.
   useEffect(() => {
     if (!editor) {
       setHeadings([]);
-      setWordCount(EMPTY_WORD_CHAR_COUNT);
       return;
     }
-    const recomputeHeadings = () => setHeadings(extractOutline(editor.state.doc));
-    const recomputeWordCount = () =>
-      setWordCount(countWordsAndCharacters(getDocText(editor.state.doc)));
-    const debouncer = createDebouncer(recomputeWordCount, WORD_COUNT_DEBOUNCE_MS);
+    const recomputeHeadings = () => {
+      const next = extractOutline(editor.state.doc);
+      // Keep the ref the scroll effect reads in lockstep with the rendered
+      // outline: the later `[headings]` effect also syncs it, but setting it
+      // here closes the window where a scroll during an editor change would
+      // resolve the active heading against the previous outline.
+      headingsRef.current = next;
+      setHeadings(next);
+    };
 
     recomputeHeadings();
-    recomputeWordCount();
 
     const onUpdate = () => {
       recomputeHeadings();
-      debouncer.schedule();
     };
     editor.on("update", onUpdate);
     return () => {
       editor.off("update", onUpdate);
-      debouncer.cancel();
     };
   }, [editor]);
 
@@ -167,7 +161,10 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
         try {
           return editor.view.coordsAtPos(h.pos).top - containerRect.top + scrollEl.scrollTop;
         } catch {
-          return 0;
+          // resolveActiveHeadingIndex assumes ascending tops; a `0` here would
+          // read as "already scrolled past" and override a correct earlier
+          // heading. Infinity can never be mistaken for "reached".
+          return Number.POSITIVE_INFINITY;
         }
       });
       setActiveIndex(
@@ -212,6 +209,7 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
                 className={`dohc-outline-item dohc-outline-item--level-${h.level}${
                   i === activeIndex ? " is-active" : ""
                 }`}
+                aria-current={i === activeIndex ? "true" : undefined}
                 onClick={() => scrollToHeading(editor, h)}
               >
                 {h.text}

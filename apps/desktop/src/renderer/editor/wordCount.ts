@@ -2,6 +2,9 @@
 // addition), plus a tiny generic debouncer used to throttle recompute
 // down from "every keystroke" to something cheap to run on transaction.
 
+import { useEffect, useState } from "react";
+import type { Editor } from "@tiptap/core";
+
 export type WordCharCount = { words: number; characters: number };
 
 export const EMPTY_WORD_CHAR_COUNT: WordCharCount = { words: 0, characters: 0 };
@@ -60,4 +63,34 @@ export function createDebouncer(
       timer = null;
     },
   };
+}
+
+// Spec'd cadence: recompute the counter ~300ms after the last keystroke.
+export const WORD_COUNT_DEBOUNCE_MS = 300;
+
+/** Recompute word/character counts on mount and (debounced) on every doc
+ *  change, cancelling the pending run on unmount. Shared by OutlinePanel and
+ *  WordCountBadge so the timing-sensitive subscribe/debounce/cleanup dance
+ *  lives in exactly one place. */
+export function useDebouncedWordCount(
+  editor: Editor | null,
+  debounceMs = WORD_COUNT_DEBOUNCE_MS,
+): WordCharCount {
+  const [count, setCount] = useState<WordCharCount>(EMPTY_WORD_CHAR_COUNT);
+  useEffect(() => {
+    if (!editor) {
+      setCount(EMPTY_WORD_CHAR_COUNT);
+      return;
+    }
+    const recompute = () => setCount(countWordsAndCharacters(getDocText(editor.state.doc)));
+    const debouncer = createDebouncer(recompute, debounceMs);
+    recompute();
+    const onUpdate = () => debouncer.schedule();
+    editor.on("update", onUpdate);
+    return () => {
+      editor.off("update", onUpdate);
+      debouncer.cancel();
+    };
+  }, [editor, debounceMs]);
+  return count;
 }

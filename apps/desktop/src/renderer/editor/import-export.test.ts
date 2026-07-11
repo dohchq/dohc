@@ -577,6 +577,9 @@ describe('desktop editor markdown round-trip', () => {
       ])
     // The concrete escaped form is unambiguous and reversible.
     expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==')
+    // A lone `=` adjacent to the closing delimiter must also be escaped, or the
+    // mark would close one char early (`==a=` → `==a===`).
+    expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===')
     for (const text of [
       'a==b',
       'a ==b== c',
@@ -584,6 +587,9 @@ describe('desktop editor markdown round-trip', () => {
       '==edge==',
       'trailing==',
       'x = y',
+      'a=',
+      '=lead',
+      'a=b=',
       'plain',
     ]) {
       const once = yDocToMarkdown(highlighted(text))
@@ -629,6 +635,28 @@ describe('desktop editor markdown round-trip', () => {
     expect(twice).toBe(once)
   })
 
+  it('escapes wikilink delimiters in a mention label so it round-trips', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          {
+            type: 'wikilink',
+            attrs: { target: 'notes/plan', label: 'Plan ]] Draft | v2' },
+          },
+        ],
+      },
+    ])
+    // `]` and `|` in the label are backslash-escaped so the closing `]]` and the
+    // target/label separator aren't matched early.
+    const once = yDocToMarkdown(doc)
+    expect(once).toBe('[[notes/plan|Plan \\]\\] Draft \\| v2]]')
+    // Re-parsing unescapes the label and re-serializing reproduces it verbatim
+    // (a truncated re-parse would drop the tail and diverge here).
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
   it('round-trips an empty $$$$ block', () => {
     const input = '$$$$'
     const once = expectStableMarkdownRoundTrip(input, ['$$$$'])
@@ -666,5 +694,41 @@ describe('desktop editor markdown round-trip', () => {
     const input = 'inline $$x$$ trailing stays literal'
     const once = expectStableMarkdownRoundTrip(input, ['$$x$$ trailing'])
     expect(once).toBe(input)
+  })
+
+  it('detects a mid-line wikilink whose label contains an escaped delimiter', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'See ' },
+          { type: 'wikilink', attrs: { target: 'notes/plan', label: 'Plan ]] Draft' } },
+          { type: 'text', text: ' here' },
+        ],
+      },
+    ])
+    const once = yDocToMarkdown(doc)
+    expect(once).toBe('See [[notes/plan|Plan \\]\\] Draft]] here')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('does not absorb text after a fenced code block inside a callout', () => {
+    const input = ['> [!note]', '> ```', '> code', '> ```', 'outside'].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    // `outside` is a plain top-level paragraph, not a lazy `>`-prefixed body line.
+    expect(once).toMatch(/^outside$/m)
+    expect(once).not.toContain('> outside')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('does not absorb text after a heading inside a callout', () => {
+    const input = ['> [!note]', '> # Section', 'outside'].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toMatch(/^outside$/m)
+    expect(once).not.toContain('> outside')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
   })
 })
