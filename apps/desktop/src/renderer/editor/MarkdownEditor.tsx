@@ -31,6 +31,13 @@ import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import { Bold, Code, Italic, Strikethrough } from "lucide-react";
 import type * as Y from "yjs";
 import { dohcMarkdownExtensions } from "./extensions";
+import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
+import {
+  handleImageDrop,
+  handleImagePaste,
+  type ImagePasteContext,
+} from "./imagePaste";
+import { bridge } from "../bridge";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import {
   makeWikilinkPlugin,
@@ -1006,8 +1013,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       pendingUndo,
       onPendingUndoConsumed,
       collaborationExtension,
-      workspaceId: _workspaceId,
-      path: _path,
+      workspaceId,
+      path,
     },
     ref,
   ) {
@@ -1030,6 +1037,30 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWikilinkRef = useRef<((target: string) => void) | null>(
       onOpenWikilink ?? null,
     );
+
+    // Refs (not props) so the editorProps closures below — created once with
+    // the editor — always resolve/write against the CURRENT document, even if
+    // the same editor instance is reused across a path change.
+    const imageContextRef = useRef<ImageSrcContext>({ workspaceId, docPath: path });
+    const pasteContextRef = useRef<ImagePasteContext>({
+      workspaceId,
+      docPath: path,
+      writeAsset: (relativePath, bytes) =>
+        bridge().writeWorkspaceAsset({
+          workspaceId: imageContextRef.current.workspaceId,
+          relativePath,
+          bytes,
+        }),
+    });
+
+    useEffect(() => {
+      imageContextRef.current = { workspaceId, docPath: path };
+      pasteContextRef.current = {
+        ...pasteContextRef.current,
+        workspaceId,
+        docPath: path,
+      };
+    }, [workspaceId, path]);
 
     useEffect(() => {
       slashStateRef.current = slashState;
@@ -1132,6 +1163,15 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
           },
+          // Render-time src resolution for workspace-relative images (canonical
+          // attr stays the original relative path).
+          nodeViews: {
+            image: makeImageNodeView(() => imageContextRef.current),
+          },
+          handlePaste: (view, event) =>
+            handleImagePaste(view, event, pasteContextRef.current),
+          handleDrop: (view, event) =>
+            handleImageDrop(view, event as DragEvent, pasteContextRef.current),
         },
         immediatelyRender: true,
         onUpdate() {

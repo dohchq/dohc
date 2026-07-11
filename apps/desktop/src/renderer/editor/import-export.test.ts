@@ -281,19 +281,33 @@ describe('desktop editor markdown round-trip', () => {
     )
   })
 
-  it('strips unsafe image protocols while preserving http and relative images', () => {
+  it('keeps a workspace-relative image byte-identical through the round-trip', () => {
+    const input = '![alt](assets/pic.png "t")'
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    // And a second pass is stable.
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
+  })
+
+  it('strips unsafe image protocols and escaping paths while preserving http and relative images', () => {
     expectStableMarkdownRoundTrip(
       [
         '![relative](assets/diagram.png)',
         '![remote](https://example.com/diagram.png)',
         '![bad](javascript:alert)',
         '![data](data:image/svg+xml;base64,PHN2Zz4=)',
+        '![parent](../secret/diagram.png)',
+        '![absolute](/etc/diagram.png)',
+        '![protocol-relative](//evil.example.com/diagram.png)',
       ].join('\n'),
       [
         '![relative](assets/diagram.png)',
         '![remote](https://example.com/diagram.png)',
         '![bad]()',
         '![data]()',
+        '![parent]()',
+        '![absolute]()',
+        '![protocol-relative]()',
       ],
     )
     expect(

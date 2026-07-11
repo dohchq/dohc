@@ -107,6 +107,43 @@ export async function writeWorkspaceText(
   await rename(temp, realTarget);
 }
 
+// Binary sibling of restoreWorkspaceText: writes image (or other asset) bytes
+// pasted/dropped into the editor next to the current document. Same validation,
+// parent-dir creation, and real-path containment as text writes — a renderer
+// can never write outside the workspace or follow a symlink out — plus a 20MB
+// cap so a giant paste can't wedge the main process.
+const MAX_ASSET_WRITE_BYTES = 20 * 1024 * 1024;
+
+export async function writeWorkspaceAsset(
+  rootPath: string,
+  relativePath: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  if (bytes.byteLength > MAX_ASSET_WRITE_BYTES) {
+    throw new Error(
+      `Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`,
+    );
+  }
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
+  }
+  const realRoot = await realpath(rootPath);
+  const absolute = join(rootPath, validated.normalized);
+  const parent = dirname(absolute);
+  if (!isInside(realRoot, await existingAncestor(parent))) {
+    throw new Error(`Asset path escapes workspace: ${relativePath}`);
+  }
+  await mkdir(parent, { recursive: true });
+  if (!isInside(realRoot, await realpath(parent))) {
+    throw new Error(`Asset path escapes workspace: ${relativePath}`);
+  }
+  const { rename, writeFile } = await import("node:fs/promises");
+  const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
+  await writeFile(temp, bytes);
+  await rename(temp, absolute);
+}
+
 export async function restoreWorkspaceText(
   rootPath: string,
   relativePath: string,

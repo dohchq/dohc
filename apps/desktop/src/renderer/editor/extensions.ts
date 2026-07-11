@@ -82,12 +82,27 @@ function escapeMarkdownLineBreaks(value: string): string {
 function sanitizeImageSrc(src: string): string {
   const trimmed = src.trim()
   if (trimmed.length === 0) return ''
-  const compactProtocol = /^[a-z][a-z\d+.-]*:/i.exec(
-    trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, ''),
-  )?.[0]
-  if (!compactProtocol) return trimmed
-  const protocol = compactProtocol.slice(0, -1).toLowerCase()
-  return protocol === 'http' || protocol === 'https' ? trimmed : ''
+  // Strip control chars/whitespace before sniffing so obfuscated schemes
+  // ("java\nscript:") can't slip a colon past the check.
+  const compact = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, '')
+  const compactProtocol = /^[a-z][a-z\d+.-]*:/i.exec(compact)?.[0]
+  if (compactProtocol) {
+    const protocol = compactProtocol.slice(0, -1).toLowerCase()
+    // Only remote http(s) images render; data:/javascript:/file:/every other
+    // scheme is dropped.
+    return protocol === 'http' || protocol === 'https' ? trimmed : ''
+  }
+  // Scheme-less: allow only a workspace-relative path. Backslashes are folded
+  // to '/' for the checks so a Windows-style traversal can't sneak through,
+  // but the ORIGINAL (lossless) src is what we return — agents edit the .md.
+  const forCheck = compact.replace(/\\/g, '/')
+  // Reject protocol-relative ("//host") and absolute ("/abs") — both escape
+  // the document's folder.
+  if (forCheck.startsWith('/')) return ''
+  // Reject parent traversal so a relative src can never climb out of the
+  // document's folder (or the workspace root).
+  if (/(^|\/)\.\.(\/|$)/.test(forCheck)) return ''
+  return trimmed
 }
 
 function escapedPunctuationValue(token: {
