@@ -1,5 +1,16 @@
 import { Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent } from '@tiptap/core'
+import { makeImageNodeView, type ImageSrcContext } from './imageSrc'
+import { makeMathNodeView } from './mathRender'
+
+// Per-editor storage for the image node view. `resolveContext` is set by the
+// desktop editor (MarkdownEditor's onBeforeCreate) to the live workspace +
+// document folder, so a render-time src can be rewritten to the privileged
+// dohc-file:// scheme. It stays null in non-desktop consumers (markdown
+// serialization, jsdom tests) — the node view then paints the raw stored path.
+export interface DohcImageStorage {
+  resolveContext: (() => ImageSrcContext | null) | null
+}
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -169,12 +180,25 @@ function imageTokenAttr(
   return String(value ?? '')
 }
 
-const DohcImage = Node.create({
+const DohcImage = Node.create<Record<string, never>, DohcImageStorage>({
   name: 'image',
   inline: true,
   group: 'inline',
   atom: true,
   draggable: true,
+
+  addStorage() {
+    return { resolveContext: null }
+  },
+
+  // TipTap 3.x ignores editorProps.nodeViews (the extension-manager node views
+  // overwrite it), so the render-time src resolver MUST be registered here.
+  // The context is read lazily from per-editor storage so the shared extension
+  // instance still resolves against whichever document each editor is showing.
+  addNodeView() {
+    const factory = makeImageNodeView(() => this.storage.resolveContext?.() ?? null)
+    return ({ node }) => factory(node)
+  },
 
   addAttributes() {
     return {
@@ -907,6 +931,14 @@ const DohcMathInline = Node.create({
   group: 'inline',
   atom: true,
 
+  // Registered here (not editorProps.nodeViews, which TipTap 3.x drops) so the
+  // KaTeX-rendering, click-to-edit node view actually mounts in the editor.
+  addNodeView() {
+    const factory = makeMathNodeView(false)
+    return ({ node, view, getPos }) =>
+      factory(node, view, () => (typeof getPos === 'function' ? getPos() : undefined))
+  },
+
   addAttributes() {
     return {
       tex: { default: '' },
@@ -963,6 +995,14 @@ const DohcMathBlock = Node.create({
   priority: 1000,
   group: 'block',
   atom: true,
+
+  // Registered here (not editorProps.nodeViews, which TipTap 3.x drops) so the
+  // KaTeX-rendering, click-to-edit node view actually mounts in the editor.
+  addNodeView() {
+    const factory = makeMathNodeView(true)
+    return ({ node, view, getPos }) =>
+      factory(node, view, () => (typeof getPos === 'function' ? getPos() : undefined))
+  },
 
   addAttributes() {
     return {

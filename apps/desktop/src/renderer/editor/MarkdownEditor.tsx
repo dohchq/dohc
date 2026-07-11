@@ -30,9 +30,12 @@ import {
 import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
-import { dohcMarkdownExtensions, escapeHighlightMarkdown } from "./extensions";
-import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
-import { makeMathNodeView } from "./mathRender";
+import {
+  dohcMarkdownExtensions,
+  escapeHighlightMarkdown,
+  type DohcImageStorage,
+} from "./extensions";
+import type { ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
   handleImagePaste,
@@ -459,17 +462,22 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         extensions,
         content: collabActive ? undefined : value,
         contentType: collabActive ? undefined : "markdown",
+        // Register the image node view's per-editor context BEFORE the
+        // ProseMirror view is built (createView reads the extension's storage),
+        // so workspace-relative image srcs resolve on the very first paint.
+        // Node views themselves are registered through their extensions'
+        // addNodeView (TipTap 3.x ignores editorProps.nodeViews).
+        onBeforeCreate({ editor }) {
+          const imageStorage = (editor.storage as unknown as Record<string, unknown>)
+            .image as DohcImageStorage | undefined;
+          if (imageStorage) {
+            imageStorage.resolveContext = () => imageContextRef.current;
+          }
+        },
         editorProps: {
           attributes: {
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
-          },
-          // Render-time src resolution for workspace-relative images (canonical
-          // attr stays the original relative path).
-          nodeViews: {
-            image: makeImageNodeView(() => imageContextRef.current),
-            mathInline: makeMathNodeView(false),
-            mathBlock: makeMathNodeView(true),
           },
           handlePaste: (view, event) =>
             handleImagePaste(view, event, pasteContextRef.current),
