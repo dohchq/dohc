@@ -1,10 +1,70 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
 import {
-  filterSlashCommands,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import * as Y from "yjs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Editor } from "@tiptap/core";
+import { StarterKit } from "@tiptap/starter-kit";
+import { Markdown } from "@tiptap/markdown";
+import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { dohcMarkdownExtensions } from "./extensions";
+import { MarkdownEditor } from "./MarkdownEditor";
+import {
   findEmptyListItemParagraph,
+  makeCodeBlockContinuationPlugin,
+} from "./codeBlockChrome";
+import {
+  CLOSED_SLASH_COMMAND_STATE,
+  filterSlashCommands,
   findSlashCommandMatch,
-} from "./MarkdownEditor";
+  runSlashCommand,
+  type SlashCommandState,
+} from "./slashCommands";
+
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [],
+  });
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      bottom: 0,
+      height: 0,
+      left: 0,
+      right: 0,
+      top: 0,
+      width: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    }),
+  });
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+    Number(setTimeout(() => callback(performance.now()), 16)),
+  );
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("MarkdownEditor slash commands", () => {
   it("detects a trailing slash command query inside plain text", () => {
@@ -30,6 +90,141 @@ describe("MarkdownEditor slash commands", () => {
     expect(filterSlashCommands("todo").map((item) => item.id)).toEqual([
       "task-list",
     ]);
+  });
+
+  it("lists the image command by label and by its aliases", () => {
+    expect(filterSlashCommands("image").map((item) => item.id)).toContain("image");
+    expect(filterSlashCommands("photo").map((item) => item.id)).toEqual(["image"]);
+    expect(filterSlashCommands("upload").map((item) => item.id)).toEqual(["image"]);
+  });
+});
+
+describe("MarkdownEditor slash command: image", () => {
+  function makeEditor(markdown: string): Editor {
+    return new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        Markdown.configure({ indentation: { style: "space", size: 2 } }),
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+  }
+
+  it("deletes the '/image' text and hands off to the picker trigger instead of inserting text", () => {
+    const editor = makeEditor("/image");
+    const setSlashState = vi.fn();
+    const insertImage = vi.fn();
+    // "/image" is 6 chars starting at doc pos 1 (inside the paragraph).
+    const state: SlashCommandState = {
+      open: true,
+      from: 1,
+      to: 7,
+      query: "image",
+      selected: 0,
+      x: 0,
+      y: 0,
+      maxHeight: 0,
+      placement: "below",
+    };
+
+    runSlashCommand(editor, "image", state, setSlashState, insertImage);
+
+    expect(setSlashState).toHaveBeenCalledWith(CLOSED_SLASH_COMMAND_STATE);
+    expect(editor.getText()).toBe("");
+    expect(insertImage).toHaveBeenCalledTimes(1);
+    expect(insertImage).toHaveBeenCalledWith(editor.view, 1);
+    editor.destroy();
+  });
+
+  it("does not touch the picker when insertImage isn't wired up (no-op, not a throw)", () => {
+    const editor = makeEditor("/image");
+    const setSlashState = vi.fn();
+    const state: SlashCommandState = {
+      open: true,
+      from: 1,
+      to: 7,
+      query: "image",
+      selected: 0,
+      x: 0,
+      y: 0,
+      maxHeight: 0,
+      placement: "below",
+    };
+
+    expect(() =>
+      runSlashCommand(editor, "image", state, setSlashState),
+    ).not.toThrow();
+    expect(editor.getText()).toBe("");
+    editor.destroy();
+  });
+});
+
+describe("MarkdownEditor code block continuation", () => {
+  function makeEditor(markdown: string): Editor {
+    return new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        Markdown.configure({ indentation: { style: "space", size: 2 } }),
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+  }
+
+  function pressAtEndOfCode(
+    editor: Editor,
+    init: KeyboardEventInit,
+  ): boolean {
+    const plugin = makeCodeBlockContinuationPlugin();
+    // End of the "code" text inside the leading code block: pos 1 + 4.
+    editor.commands.setTextSelection(5);
+    const handled = plugin.props.handleKeyDown?.call(
+      plugin,
+      editor.view,
+      new KeyboardEvent("keydown", init),
+    );
+    return handled === true;
+  }
+
+  it("ArrowDown at end of a code block with content after falls through to native navigation", () => {
+    const editor = makeEditor("```\ncode\n```\n\nSome text");
+    const before = editor.getJSON();
+
+    expect(pressAtEndOfCode(editor, { key: "ArrowDown" })).toBe(false);
+    // The doc must not be mutated by a pure navigation keypress.
+    expect(editor.getJSON()).toEqual(before);
+    editor.destroy();
+  });
+
+  it("ArrowDown at end of a terminal code block exits into a new paragraph", () => {
+    const editor = makeEditor("```\ncode\n```");
+    expect(editor.state.doc.childCount).toBe(1);
+
+    expect(pressAtEndOfCode(editor, { key: "ArrowDown" })).toBe(true);
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(editor.state.doc.child(1).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(1).content.size).toBe(0);
+    editor.destroy();
+  });
+
+  it("Cmd/Ctrl+Enter always inserts a paragraph below, even with content after", () => {
+    const editor = makeEditor("```\ncode\n```\n\nSome text");
+    expect(editor.state.doc.childCount).toBe(2);
+
+    expect(pressAtEndOfCode(editor, { key: "Enter", ctrlKey: true })).toBe(true);
+    expect(editor.state.doc.childCount).toBe(3);
+    expect(editor.state.doc.child(1).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(1).content.size).toBe(0);
+    editor.destroy();
   });
 });
 
@@ -58,5 +253,77 @@ describe("MarkdownEditor empty list item focus", () => {
     ol.innerHTML = "<li><p>Test</p></li>";
 
     expect(findEmptyListItemParagraph(ol.querySelector("li"))).toBeNull();
+  });
+});
+
+describe("MarkdownEditor history", () => {
+  it("undoes and redoes a local edit in collaboration mode", async () => {
+    const ydoc = new Y.Doc();
+    const user = userEvent.setup();
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/collaborative.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+
+      editor.focus();
+      await user.keyboard("collaborative edit");
+      expect(editor.textContent).toBe("collaborative edit");
+
+      fireEvent.keyDown(editor, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => expect(editor.textContent).toBe(""));
+
+      fireEvent.keyDown(editor, {
+        key: "y",
+        code: "KeyY",
+        ctrlKey: true,
+      });
+      await waitFor(() => expect(editor.textContent).toBe("collaborative edit"));
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
+  });
+
+  it("keeps local StarterKit undo working outside collaboration mode", async () => {
+    const user = userEvent.setup();
+    render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/local.md",
+        knownFiles: [],
+      }),
+    );
+
+    const editor = await screen.findByTestId("markdown-editor");
+    editor.focus();
+    await user.keyboard("local edit");
+    expect(editor.textContent).toBe("local edit");
+
+    fireEvent.keyDown(editor, {
+      key: "z",
+      code: "KeyZ",
+      ctrlKey: true,
+    });
+    await waitFor(() => expect(editor.textContent).toBe(""));
   });
 });

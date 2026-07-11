@@ -6,12 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
-  type Dispatch,
   type ReactNode,
-  type RefObject,
-  type SetStateAction,
 } from "react";
-import { Extension, type Editor } from "@tiptap/core";
+import { Extension } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -20,18 +17,37 @@ import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import { TrailingNode } from "@tiptap/extensions/trailing-node";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import type { EditorView } from "@tiptap/pm/view";
 import {
-  NodeSelection,
-  Plugin,
-  PluginKey,
-  TextSelection,
-  type EditorState,
-} from "@tiptap/pm/state";
-import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-import { Bold, Code, Italic, Strikethrough } from "lucide-react";
+  Bold,
+  Code,
+  Italic,
+  Strikethrough,
+  Underline as UnderlineIcon,
+} from "lucide-react";
 import type * as Y from "yjs";
 import { dohcMarkdownExtensions } from "./extensions";
+import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
+import {
+  handleImageDrop,
+  handleImagePaste,
+  pickAndInsertImages,
+  type ImagePasteContext,
+} from "./imagePaste";
+import { bridge } from "../bridge";
+import { FindReplaceBar } from "./FindReplaceBar";
+import { findReplaceExtension } from "./findReplace";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
+import { makeTableControlsPlugin } from "./tableControls";
+import {
+  CLOSED_LINK_MENU_STATE,
+  LinkBubbleButton,
+  LinkMenu,
+  makeLinkMenuExtension,
+  makeLinkMenuPlugin,
+  type LinkMenuState,
+} from "./linkMenu";
 import {
   makeWikilinkPlugin,
   type AutocompleteState,
@@ -43,6 +59,34 @@ import {
   resolveFloatingMenuPosition,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
+import {
+  CLOSED_SLASH_COMMAND_STATE,
+  makeSlashCommandPlugin,
+  runSlashCommand as runSlashCommandCore,
+  SlashCommandMenu,
+  type SlashCommandId,
+  type SlashCommandState,
+} from "./slashCommands";
+import {
+  BlockMenu,
+  CLOSED_BLOCK_MENU_STATE,
+  copyBlockAsMarkdown,
+  deleteBlock,
+  duplicateBlock,
+  insertBlockAfter as insertBlockAfterCore,
+  makeBlockControlsPlugin,
+  resolveBlockMenuState,
+  turnBlockInto,
+  TurnIntoMenu,
+  type BlockMenuEntry,
+  type BlockMenuState,
+} from "./blockControls";
+import {
+  makeCodeBlockChromePlugin,
+  makeCodeBlockContinuationPlugin,
+  makeEmptyListItemFocusPlugin,
+} from "./codeBlockChrome";
+import { makeCodeHighlightPlugin } from "./codeHighlight";
 
 export type MarkdownEditorHandle = {
   focus: () => void;
@@ -94,12 +138,19 @@ type MarkdownEditorInnerProps = MarkdownEditorProps & {
 
 const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
 
+// Link's default openOnClick calls window.open directly — a pure deny in
+// this app's security model (see electronSecurity.ts) — and linkOnPaste
+// would double up with linkMenu.tsx's own paste-over-selection handling.
+// Both are owned by linkMenu.tsx's plugin instead.
+const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  link: LINK_MARK_OPTIONS,
 });
 const MARKDOWN_EXTENSION = Markdown.configure({
   indentation: { style: "space", size: 2 },
@@ -124,856 +175,20 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
     return "Type '/' for commands";
   },
 });
+// TableKit ships column resizing but leaves it off by default — turned on
+// here so the grip/menu UI (tableControls.tsx) has resizing to coexist
+// with. Purely a runtime option: it does not change the schema TableKit
+// contributes, so import-export.ts's unconfigured TableKit (parsing only,
+// never rendered) stays in parity — see schema-parity.test.ts.
+const TABLE_KIT_EXTENSION = TableKit.configure({ table: { resizable: true } });
 const STATIC_EDITOR_EXTENSIONS = [
   ...dohcMarkdownExtensions,
   TaskList,
   TaskItem,
-  TableKit,
+  TABLE_KIT_EXTENSION,
   MARKDOWN_EXTENSION,
+  findReplaceExtension,
 ];
-
-type SlashCommandId =
-  | "wikilink"
-  | "heading-1"
-  | "heading-2"
-  | "heading-3"
-  | "bulleted-list"
-  | "numbered-list"
-  | "task-list"
-  | "quote"
-  | "code-block"
-  | "divider"
-  | "table";
-
-type SlashCommandItem = {
-  id: SlashCommandId;
-  label: string;
-  hint: string;
-  glyph: string;
-  aliases: string[];
-};
-
-type SlashCommandState =
-  | { open: false }
-  | {
-      open: true;
-      from: number;
-      to: number;
-      query: string;
-      selected: number;
-      x: number;
-      y: number;
-      maxHeight: number;
-      placement: FloatingMenuPlacement;
-    };
-
-const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false };
-
-const SLASH_COMMANDS: SlashCommandItem[] = [
-  {
-    id: "wikilink",
-    label: "Link",
-    hint: "Link another page",
-    glyph: "[[",
-    aliases: ["link", "page", "wiki", "wikilink"],
-  },
-  {
-    id: "heading-1",
-    label: "Heading 1",
-    hint: "Large section heading",
-    glyph: "H1",
-    aliases: ["h1", "heading", "title"],
-  },
-  {
-    id: "heading-2",
-    label: "Heading 2",
-    hint: "Medium section heading",
-    glyph: "H2",
-    aliases: ["h2", "subheading", "subtitle"],
-  },
-  {
-    id: "heading-3",
-    label: "Heading 3",
-    hint: "Small section heading",
-    glyph: "H3",
-    aliases: ["h3", "heading", "subheading"],
-  },
-  {
-    id: "bulleted-list",
-    label: "Bulleted list",
-    hint: "Start a simple list",
-    glyph: "-",
-    aliases: ["bullet", "bulleted", "list", "ul"],
-  },
-  {
-    id: "numbered-list",
-    label: "Numbered list",
-    hint: "Start an ordered list",
-    glyph: "1.",
-    aliases: ["number", "numbered", "ordered", "ol"],
-  },
-  {
-    id: "task-list",
-    label: "Todo list",
-    hint: "Track checkable work",
-    glyph: "[]",
-    aliases: ["todo", "task", "checklist", "checkbox"],
-  },
-  {
-    id: "quote",
-    label: "Quote",
-    hint: "Call out a thought",
-    glyph: ">",
-    aliases: ["blockquote", "quote"],
-  },
-  {
-    id: "code-block",
-    label: "Code block",
-    hint: "Write code or raw text",
-    glyph: "</>",
-    aliases: ["code", "fence", "pre"],
-  },
-  {
-    id: "divider",
-    label: "Divider",
-    hint: "Separate sections",
-    glyph: "-",
-    aliases: ["divider", "line", "rule", "separator", "hr"],
-  },
-  {
-    id: "table",
-    label: "Table",
-    hint: "Insert a simple grid",
-    glyph: "tbl",
-    aliases: ["table", "grid", "rows", "columns"],
-  },
-];
-
-const slashCommandKey = new PluginKey("dohc-slash-command");
-const blockControlsKey = new PluginKey("dohc-block-controls");
-const codeLanguageKey = new PluginKey("dohc-code-language");
-const codeBlockContinuationKey = new PluginKey("dohc-code-block-continuation");
-const emptyListItemFocusKey = new PluginKey("dohc-empty-list-item-focus");
-
-const CODE_LANGUAGE_OPTIONS = [
-  { value: "", label: "Plain text" },
-  { value: "typescript", label: "TypeScript" },
-  { value: "javascript", label: "JavaScript" },
-  { value: "tsx", label: "TSX" },
-  { value: "jsx", label: "JSX" },
-  { value: "python", label: "Python" },
-  { value: "bash", label: "Shell" },
-  { value: "json", label: "JSON" },
-  { value: "markdown", label: "Markdown" },
-  { value: "html", label: "HTML" },
-  { value: "css", label: "CSS" },
-  { value: "sql", label: "SQL" },
-  { value: "yaml", label: "YAML" },
-  { value: "go", label: "Go" },
-  { value: "rust", label: "Rust" },
-] as const;
-
-type DocDescendantNode = {
-  type: { name: string };
-  attrs: Record<string, unknown>;
-  textContent: string;
-  nodeSize: number;
-};
-
-type DocLike = {
-  descendants: (
-    cb: (node: DocDescendantNode, pos: number) => boolean | void,
-  ) => void;
-  nodeAt: (pos: number) => DocDescendantNode | null;
-};
-
-type TopLevelDocLike = {
-  forEach: (
-    cb: (
-      node: {
-        type: { name: string };
-        attrs?: Record<string, unknown>;
-        nodeSize: number;
-        textContent?: string;
-      },
-      offset: number,
-      index: number,
-    ) => void,
-  ) => void;
-};
-
-type SlashCommandChain = {
-  deleteRange: (range: { from: number; to: number }) => SlashCommandChain;
-  focus: () => SlashCommandChain;
-  insertContent: (content: unknown) => SlashCommandChain;
-  insertTable: (options: {
-    rows: number;
-    cols: number;
-    withHeaderRow: boolean;
-  }) => SlashCommandChain;
-  run: () => boolean;
-  setCodeBlock: (attrs?: { language?: string }) => SlashCommandChain;
-  setHorizontalRule: () => SlashCommandChain;
-  setTextSelection: (pos: number) => SlashCommandChain;
-  toggleBlockquote: () => SlashCommandChain;
-  toggleBulletList: () => SlashCommandChain;
-  toggleHeading: (attrs: { level: 1 | 2 | 3 }) => SlashCommandChain;
-  toggleOrderedList: () => SlashCommandChain;
-  toggleTaskList: () => SlashCommandChain;
-};
-
-export function filterSlashCommands(query: string): SlashCommandItem[] {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return SLASH_COMMANDS;
-  return SLASH_COMMANDS.filter((command) => {
-    if (command.label.toLowerCase().includes(normalized)) return true;
-    return command.aliases.some((alias) => alias.includes(normalized));
-  });
-}
-
-export function findSlashCommandMatch(
-  textBeforeCursor: string,
-): { slashOffset: number; query: string } | null {
-  const match = /(?:^|\s)\/([A-Za-z0-9_-]{0,40})$/.exec(textBeforeCursor);
-  if (!match) return null;
-  const matchedText = match[0] ?? "";
-  const slashOffset = match.index + matchedText.lastIndexOf("/");
-  return { slashOffset, query: match[1]?.toLowerCase() ?? "" };
-}
-
-function isCodeBlockNode(node: { type: { name: string } }): boolean {
-  return node.type.name === "code_block" || node.type.name === "codeBlock";
-}
-
-function isEditableEditor(editor: Editor | null | undefined): boolean {
-  if (!editor) return false;
-  if ((editor as { isEditable?: boolean }).isEditable === false) return false;
-  if ((editor.view as { editable?: boolean }).editable === false) return false;
-  return true;
-}
-
-function directElementChild(
-  parent: HTMLElement,
-  predicate: (element: HTMLElement) => boolean,
-): HTMLElement | null {
-  for (const child of parent.children) {
-    if (child instanceof HTMLElement && predicate(child)) return child;
-  }
-  return null;
-}
-
-export function findEmptyListItemParagraph(
-  target: EventTarget | null,
-): HTMLElement | null {
-  if (!(target instanceof HTMLElement)) return null;
-  const item = target.closest("li");
-  if (!item) return null;
-  const paragraph =
-    directElementChild(item, (child) => child.tagName === "P") ??
-    directElementChild(item, (child) => child.tagName === "DIV")?.querySelector(
-      ":scope > p",
-    );
-  if (!(paragraph instanceof HTMLElement)) return null;
-  const text = paragraph.textContent?.replace(/\u200b/g, "").trim() ?? "";
-  return text.length === 0 ? paragraph : null;
-}
-
-function focusEmptyListItemParagraph(
-  view: EditorView,
-  event: MouseEvent,
-): boolean {
-  if (
-    event.button !== 0 ||
-    event.altKey ||
-    event.ctrlKey ||
-    event.metaKey ||
-    event.shiftKey ||
-    view.editable === false
-  ) {
-    return false;
-  }
-  const paragraph = findEmptyListItemParagraph(event.target);
-  if (!paragraph || !view.dom.contains(paragraph)) return false;
-
-  const candidates: number[] = [];
-  for (const offset of [0, paragraph.childNodes.length]) {
-    try {
-      const pos = view.posAtDOM(paragraph, offset);
-      candidates.push(pos, pos + 1);
-    } catch {
-      // The DOM may be between ProseMirror-managed nodes during teardown.
-    }
-  }
-
-  for (const pos of candidates) {
-    if (pos < 0 || pos > view.state.doc.content.size) continue;
-    const $pos = view.state.doc.resolve(pos);
-    if (!$pos.parent.isTextblock) continue;
-    event.preventDefault();
-    view.dispatch(
-      view.state.tr
-        .setSelection(TextSelection.create(view.state.doc, pos))
-        .scrollIntoView(),
-    );
-    view.focus();
-    return true;
-  }
-  return false;
-}
-
-function readSlashCommandState(
-  view: EditorView,
-  previous: SlashCommandState,
-): SlashCommandState {
-  if ((view as { editable?: boolean }).editable === false) {
-    return CLOSED_SLASH_COMMAND_STATE;
-  }
-
-  const state = view.state as EditorState;
-  const selection = state.selection;
-  if (!selection.empty) return CLOSED_SLASH_COMMAND_STATE;
-
-  const $from = selection.$from;
-  if (!$from.parent.isTextblock) return CLOSED_SLASH_COMMAND_STATE;
-  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset);
-  const match = findSlashCommandMatch(textBeforeCursor);
-  if (!match) return CLOSED_SLASH_COMMAND_STATE;
-
-  const from = $from.start() + match.slashOffset;
-  const to = selection.from;
-  let x = 12;
-  let y = 40;
-  let maxHeight = FLOATING_MENU_MAX_HEIGHT;
-  let placement: FloatingMenuPlacement = "below";
-  try {
-    const coords = view.coordsAtPos(from);
-    const position = resolveFloatingMenuPosition({ cursorRect: coords });
-    x = position.x;
-    y = position.y;
-    maxHeight = position.maxHeight;
-    placement = position.placement;
-  } catch {
-    // Offscreen/jsdom editors cannot always resolve coordinates.
-  }
-
-  const query = match.query;
-  const selected = previous.open && previous.query === query ? previous.selected : 0;
-  const itemCount = filterSlashCommands(query).length;
-  return {
-    open: true,
-    from,
-    to,
-    query,
-    selected: itemCount ? Math.min(selected, itemCount - 1) : 0,
-    x,
-    y,
-    maxHeight,
-    placement,
-  };
-}
-
-function makeSlashCommandPlugin({
-  stateRef,
-  setState,
-  runCommandRef,
-}: {
-  stateRef: RefObject<SlashCommandState>;
-  setState: Dispatch<SetStateAction<SlashCommandState>>;
-  runCommandRef: RefObject<(id: SlashCommandId) => void>;
-}) {
-  const close = () => setState(CLOSED_SLASH_COMMAND_STATE);
-
-  const refresh = (view: EditorView) => {
-    const next = readSlashCommandState(view, stateRef.current);
-    setState(next);
-  };
-
-  return new Plugin({
-    key: slashCommandKey,
-    view(view) {
-      refresh(view);
-      return {
-        update(nextView) {
-          refresh(nextView);
-        },
-        destroy() {
-          close();
-        },
-      };
-    },
-    props: {
-      handleKeyDown(view, event) {
-        const slashState = stateRef.current;
-        if (!slashState.open) return false;
-
-        const items = filterSlashCommands(slashState.query);
-        if (event.key === "ArrowDown") {
-          event.preventDefault();
-          setState((current) =>
-            current.open
-              ? {
-                  ...current,
-                  selected: items.length ? (current.selected + 1) % items.length : 0,
-                }
-              : current,
-          );
-          return true;
-        }
-
-        if (event.key === "ArrowUp") {
-          event.preventDefault();
-          setState((current) =>
-            current.open
-              ? {
-                  ...current,
-                  selected: items.length
-                    ? (current.selected - 1 + items.length) % items.length
-                    : 0,
-                }
-              : current,
-          );
-          return true;
-        }
-
-        if (event.key === "Enter" || event.key === "Tab") {
-          const command = items[slashState.selected] ?? items[0];
-          if (!command) return false;
-          event.preventDefault();
-          runCommandRef.current(command.id);
-          return true;
-        }
-
-        if (event.key === "Escape") {
-          event.preventDefault();
-          close();
-          view.focus();
-          return true;
-        }
-
-        return false;
-      },
-    },
-  });
-}
-
-function stopEditorMouseEvent(event: Event) {
-  event.preventDefault();
-  event.stopPropagation();
-}
-
-function isBlockControlTarget(nodeName: string): boolean {
-  return [
-    "paragraph",
-    "heading",
-    "blockquote",
-    "bulletList",
-    "orderedList",
-    "codeBlock",
-    "code_block",
-    "horizontalRule",
-    "table",
-  ].includes(nodeName);
-}
-
-function buildBlockControlDecorations(
-  doc: unknown,
-  onInsertRef: RefObject<(pos: number) => void>,
-  onSelectRef: RefObject<(pos: number) => void>,
-): DecorationSet {
-  const decorations: Decoration[] = [];
-
-  (doc as TopLevelDocLike).forEach((node, offset, index) => {
-    if (!isBlockControlTarget(node.type.name)) return;
-
-    const pos = offset;
-    decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, {
-        class: "dohc-block-node",
-        "data-dohc-block-index": String(index),
-      }),
-    );
-    decorations.push(
-      Decoration.widget(
-        pos + 1,
-        () => {
-          const wrap = document.createElement("span");
-          wrap.className = "dohc-block-affordance";
-          wrap.setAttribute("contenteditable", "false");
-
-          const plus = document.createElement("button");
-          plus.type = "button";
-          plus.className = "dohc-block-gutter-btn dohc-block-plus";
-          plus.title = "insert block";
-          plus.setAttribute("aria-label", "insert block");
-          plus.addEventListener("mousedown", stopEditorMouseEvent);
-          plus.addEventListener("click", (event) => {
-            stopEditorMouseEvent(event);
-            onInsertRef.current(pos);
-          });
-
-          const handle = document.createElement("button");
-          handle.type = "button";
-          handle.className = "dohc-block-gutter-btn dohc-block-handle";
-          handle.title = "select block";
-          handle.setAttribute("aria-label", "select block");
-          handle.addEventListener("mousedown", stopEditorMouseEvent);
-          handle.addEventListener("click", (event) => {
-            stopEditorMouseEvent(event);
-            onSelectRef.current(pos);
-          });
-
-          wrap.append(plus, handle);
-          return wrap;
-        },
-        { side: -1, key: `dohc-block-controls-${pos}` },
-      ),
-    );
-  });
-
-  return DecorationSet.create(doc as never, decorations);
-}
-
-function makeBlockControlsPlugin({
-  onInsertRef,
-  onSelectRef,
-}: {
-  onInsertRef: RefObject<(pos: number) => void>;
-  onSelectRef: RefObject<(pos: number) => void>;
-}) {
-  return new Plugin({
-    key: blockControlsKey,
-    state: {
-      init(_, instance) {
-        return buildBlockControlDecorations(instance.doc, onInsertRef, onSelectRef);
-      },
-      apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        return buildBlockControlDecorations(tr.doc, onInsertRef, onSelectRef);
-      },
-    },
-    props: {
-      decorations(state) {
-        return blockControlsKey.getState(state) as DecorationSet | undefined;
-      },
-    },
-  });
-}
-
-function cleanCodeLanguage(value: string): string {
-  return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? "").slice(
-    0,
-    48,
-  );
-}
-
-function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean {
-  if (view.editable === false) return false;
-
-  const { state } = view;
-  const node = state.doc.nodeAt(blockPos);
-  const paragraphType = state.schema.nodes.paragraph;
-  if (!node || !paragraphType) return false;
-
-  const insertPos = blockPos + node.nodeSize;
-  const $insert = state.doc.resolve(insertPos);
-  let tr = state.tr;
-
-  if (
-    !(
-      $insert.nodeAfter?.type === paragraphType &&
-      $insert.nodeAfter.content.size === 0
-    )
-  ) {
-    if (
-      !$insert.parent.canReplaceWith(
-        $insert.index(),
-        $insert.index(),
-        paragraphType,
-      )
-    ) {
-      return false;
-    }
-    tr = tr.insert(insertPos, paragraphType.create());
-  }
-
-  const selectionPos = Math.min(insertPos + 1, tr.doc.content.size);
-  tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos)).scrollIntoView();
-  view.dispatch(tr);
-  view.focus();
-  return true;
-}
-
-function codeBlockAtSelection(state: EditorState): {
-  node: DocDescendantNode;
-  pos: number;
-} | null {
-  const { $from } = state.selection;
-  for (let depth = $from.depth; depth > 0; depth -= 1) {
-    const node = $from.node(depth);
-    if (!isCodeBlockNode(node)) continue;
-    return { node: node as unknown as DocDescendantNode, pos: $from.before(depth) };
-  }
-  return null;
-}
-
-function isSelectionAtEndOfCodeBlock(state: EditorState): boolean {
-  if (!state.selection.empty) return false;
-  const block = codeBlockAtSelection(state);
-  if (!block) return false;
-  return state.selection.$from.parentOffset >= block.node.textContent.length;
-}
-
-function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
-  const decorations: Decoration[] = [];
-
-  (doc as DocLike).descendants((node, pos) => {
-    if (!isCodeBlockNode(node)) return;
-
-    const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
-    decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, {
-        class: "dohc-code-block",
-      }),
-    );
-    decorations.push(
-      Decoration.widget(
-        pos,
-        (view, getPos) => {
-          const toolbar = document.createElement("div");
-          toolbar.className = "dohc-code-block-toolbar";
-          toolbar.setAttribute("contenteditable", "false");
-
-          const left = document.createElement("div");
-          left.className = "dohc-code-block-toolbar-left";
-
-          const dot = document.createElement("span");
-          dot.className = "dohc-code-block-dot";
-          dot.setAttribute("aria-hidden", "true");
-
-          const select = document.createElement("select");
-          select.className = "dohc-code-language-select";
-          select.setAttribute("aria-label", "code language");
-          select.disabled = view.editable === false;
-
-          const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
-            (option) => option.value === language,
-          );
-          const options = hasKnownLanguage
-            ? CODE_LANGUAGE_OPTIONS
-            : [{ value: language, label: language }, ...CODE_LANGUAGE_OPTIONS];
-          for (const option of options) {
-            const el = document.createElement("option");
-            el.value = option.value;
-            el.textContent = option.label;
-            select.appendChild(el);
-          }
-          select.value = language;
-
-          const commit = () => {
-            const blockPos = getPos();
-            if (blockPos === undefined) return;
-            const current = view.state.doc.nodeAt(blockPos);
-            if (!current || !isCodeBlockNode(current)) return;
-
-            const nextLanguage = cleanCodeLanguage(select.value);
-            const currentLanguage = cleanCodeLanguage(
-              String(current.attrs.language ?? ""),
-            );
-            select.value = nextLanguage;
-            if (nextLanguage === currentLanguage) return;
-
-            view.dispatch(
-              view.state.tr
-                .setNodeMarkup(blockPos, undefined, {
-                  ...current.attrs,
-                  language: nextLanguage,
-                })
-                .scrollIntoView(),
-            );
-          };
-
-          select.addEventListener("mousedown", (event) => event.stopPropagation());
-          select.addEventListener("click", (event) => event.stopPropagation());
-          select.addEventListener("keydown", (event) => {
-            event.stopPropagation();
-            if (event.key === "Escape") {
-              event.preventDefault();
-              select.value = language;
-              view.focus();
-            }
-          });
-          select.addEventListener("change", commit);
-
-          const copy = document.createElement("button");
-          copy.type = "button";
-          copy.className = "dohc-code-copy-btn";
-          copy.setAttribute("aria-label", "copy code");
-          copy.textContent = "copy";
-          copy.addEventListener("mousedown", stopEditorMouseEvent);
-          copy.addEventListener("click", (event) => {
-            stopEditorMouseEvent(event);
-            const write = navigator.clipboard?.writeText(node.textContent);
-            if (!write) return;
-            void write.then(() => {
-              copy.textContent = "copied";
-              window.setTimeout(() => {
-                copy.textContent = "copy";
-              }, 1200);
-            });
-          });
-
-          left.append(dot, select);
-          toolbar.append(left, copy);
-          return toolbar;
-        },
-        {
-          side: -1,
-          key: `code-lang-${pos}-${language}`,
-          ignoreSelection: true,
-          stopEvent: () => true,
-        },
-      ),
-    );
-    const nextNode = (doc as DocLike).nodeAt(pos + node.nodeSize);
-    if (!nextNode || !isCodeBlockNode(nextNode)) {
-      decorations.push(
-        Decoration.widget(
-          pos + node.nodeSize,
-          (view) => {
-            const wrap = document.createElement("div");
-            wrap.className = "dohc-code-block-continuation";
-            wrap.setAttribute("contenteditable", "false");
-
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "dohc-code-block-continue-btn";
-            button.setAttribute("aria-label", "add paragraph below code block");
-            button.disabled = view.editable === false;
-            button.textContent = "+";
-            button.addEventListener("mousedown", stopEditorMouseEvent);
-            button.addEventListener("click", (event) => {
-              stopEditorMouseEvent(event);
-              insertParagraphAfterBlock(view, pos);
-            });
-
-            wrap.append(button);
-            return wrap;
-          },
-          {
-            side: 1,
-            key: `code-continue-${pos}`,
-            ignoreSelection: true,
-            stopEvent: () => true,
-          },
-        ),
-      );
-    }
-  });
-
-  return DecorationSet.create(doc as never, decorations);
-}
-
-function makeCodeBlockChromePlugin() {
-  return new Plugin({
-    key: codeLanguageKey,
-    state: {
-      init(_, instance) {
-        return buildCodeLanguageDecorations(instance.doc);
-      },
-      apply(tr, old) {
-        if (!tr.docChanged && !tr.getMeta(codeLanguageKey)) {
-          return old.map(tr.mapping, tr.doc);
-        }
-        return buildCodeLanguageDecorations(tr.doc);
-      },
-    },
-    props: {
-      decorations(state) {
-        return codeLanguageKey.getState(state) as DecorationSet | undefined;
-      },
-    },
-  });
-}
-
-function makeCodeBlockContinuationPlugin() {
-  return new Plugin({
-    key: codeBlockContinuationKey,
-    props: {
-      handleKeyDown(view, event) {
-        const block = codeBlockAtSelection(view.state);
-        if (!block) return false;
-
-        const explicitExit =
-          event.key === "Enter" && (event.metaKey || event.ctrlKey);
-        const arrowExit =
-          event.key === "ArrowDown" && isSelectionAtEndOfCodeBlock(view.state);
-        if (!explicitExit && !arrowExit) return false;
-
-        event.preventDefault();
-        return insertParagraphAfterBlock(view, block.pos);
-      },
-    },
-  });
-}
-
-function makeEmptyListItemFocusPlugin() {
-  return new Plugin({
-    key: emptyListItemFocusKey,
-    props: {
-      handleDOMEvents: {
-        mousedown(view, event) {
-          return focusEmptyListItemParagraph(view, event);
-        },
-      },
-    },
-  });
-}
-
-function SlashCommandMenu({
-  state,
-  onSelect,
-  onHover,
-}: {
-  state: SlashCommandState;
-  onSelect: (id: SlashCommandId) => void;
-  onHover: (index: number) => void;
-}) {
-  if (!state.open) return null;
-  const items = filterSlashCommands(state.query);
-
-  return (
-    <div
-      className="dohc-slash-menu"
-      data-placement={state.placement}
-      style={{ left: state.x, top: state.y, maxHeight: state.maxHeight }}
-      role="listbox"
-      aria-label="slash commands"
-      onMouseDown={(event) => event.preventDefault()}
-    >
-      {items.length ? (
-        items.map((item, index) => (
-          <button
-            key={item.id}
-            type="button"
-            role="option"
-            aria-selected={index === state.selected}
-            className={`dohc-slash-menu__item${index === state.selected ? " is-selected" : ""}`}
-            onMouseEnter={() => onHover(index)}
-            onClick={() => onSelect(item.id)}
-          >
-            <span className="dohc-slash-menu__glyph">{item.glyph}</span>
-            <span className="dohc-slash-menu__copy">
-              <span className="dohc-slash-menu__label">{item.label}</span>
-              <span className="dohc-slash-menu__hint">{item.hint}</span>
-            </span>
-          </button>
-        ))
-      ) : (
-        <div className="dohc-slash-menu__empty">No commands</div>
-      )}
-    </div>
-  );
-}
 
 function BubbleButton(props: {
   label: string;
@@ -1006,8 +221,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       pendingUndo,
       onPendingUndoConsumed,
       collaborationExtension,
-      workspaceId: _workspaceId,
-      path: _path,
+      workspaceId,
+      path,
     },
     ref,
   ) {
@@ -1015,11 +230,19 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [slashState, setSlashState] = useState<SlashCommandState>(
       CLOSED_SLASH_COMMAND_STATE,
     );
+    const [blockMenuState, setBlockMenuState] = useState<BlockMenuState>(
+      CLOSED_BLOCK_MENU_STATE,
+    );
     const [chromeReady, setChromeReady] = useState(false);
+    const [linkMenuState, setLinkMenuState] = useState<LinkMenuState>(
+      CLOSED_LINK_MENU_STATE,
+    );
+    const linkMenuStateRef = useRef<LinkMenuState>(linkMenuState);
     const slashStateRef = useRef<SlashCommandState>(slashState);
+    const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
-    const blockSelectRef = useRef<(pos: number) => void>(() => {});
+    const blockMenuOpenRef = useRef<(pos: number, rect: DOMRect) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const dirtyTrackingReadyRef = useRef(false);
     const applyingPendingUndoRef = useRef(false);
@@ -1031,9 +254,41 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onOpenWikilink ?? null,
     );
 
+    // Refs (not props) so the editorProps closures below — created once with
+    // the editor — always resolve/write against the CURRENT document, even if
+    // the same editor instance is reused across a path change.
+    const imageContextRef = useRef<ImageSrcContext>({ workspaceId, docPath: path });
+    const pasteContextRef = useRef<ImagePasteContext>({
+      workspaceId,
+      docPath: path,
+      writeAsset: (relativePath, bytes) =>
+        bridge().writeWorkspaceAsset({
+          workspaceId: imageContextRef.current.workspaceId,
+          relativePath,
+          bytes,
+        }),
+    });
+
+    useEffect(() => {
+      imageContextRef.current = { workspaceId, docPath: path };
+      pasteContextRef.current = {
+        ...pasteContextRef.current,
+        workspaceId,
+        docPath: path,
+      };
+    }, [workspaceId, path]);
+
     useEffect(() => {
       slashStateRef.current = slashState;
     }, [slashState]);
+
+    useEffect(() => {
+      linkMenuStateRef.current = linkMenuState;
+    }, [linkMenuState]);
+
+    useEffect(() => {
+      blockMenuStateRef.current = blockMenuState;
+    }, [blockMenuState]);
 
     useEffect(() => {
       const map = new Map<string, WikilinkFile>();
@@ -1081,20 +336,30 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               }),
               makeBlockControlsPlugin({
                 onInsertRef: blockInsertRef,
-                onSelectRef: blockSelectRef,
+                onOpenMenuRef: blockMenuOpenRef,
               }),
               makeWikilinkPlugin(
                 () => knownFilesRef.current,
                 (state) => setAcState(state),
               ),
               wikilinkClickPlugin,
+              makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
               makeCodeBlockContinuationPlugin(),
+              makeCodeHighlightPlugin(),
               makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
+              makeTableControlsPlugin(),
             ];
           },
         }),
+      [],
+    );
+
+    // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
+    // linkMenu.tsx owns the shortcut logic; this is the one-line hookup.
+    const linkMenuExtension = useMemo(
+      () => makeLinkMenuExtension({ setState: setLinkMenuState }),
       [],
     );
 
@@ -1115,9 +380,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               ]
             : [TRAILING_NODE_EXTENSION]),
           dohcPlugins,
+          linkMenuExtension,
         ];
       },
-      [collab?.ydoc, collaborationExtension, dohcPlugins],
+      [collab?.ydoc, collaborationExtension, dohcPlugins, linkMenuExtension],
     );
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtension);
@@ -1132,6 +398,15 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
           },
+          // Render-time src resolution for workspace-relative images (canonical
+          // attr stays the original relative path).
+          nodeViews: {
+            image: makeImageNodeView(() => imageContextRef.current),
+          },
+          handlePaste: (view, event) =>
+            handleImagePaste(view, event, pasteContextRef.current),
+          handleDrop: (view, event) =>
+            handleImageDrop(view, event as DragEvent, pasteContextRef.current),
         },
         immediatelyRender: true,
         onUpdate() {
@@ -1197,100 +472,64 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
 
     const insertBlockAfter = useCallback(
       (pos: number) => {
-        const view = editor?.view;
-        if (!view || !isEditableEditor(editor)) return;
-
-        const { state } = view;
-        const node = state.doc.nodeAt(pos);
-        const paragraph = state.schema.nodes.paragraph;
-        if (!node || !paragraph) return;
-
-        const canReuseEmptyParagraph =
-          node.type.name === "paragraph" && node.textContent.length === 0;
-        const selectionPos = canReuseEmptyParagraph ? pos + 1 : pos + node.nodeSize + 1;
-        const tr = canReuseEmptyParagraph
-          ? state.tr
-          : state.tr.insert(pos + node.nodeSize, paragraph.create());
-        tr
-          .setSelection(TextSelection.near(tr.doc.resolve(selectionPos)))
-          .scrollIntoView();
-        view.dispatch(tr);
-        view.focus();
-        openSlashMenuAtPosition(selectionPos);
+        insertBlockAfterCore(editor, pos, openSlashMenuAtPosition);
       },
       [editor, openSlashMenuAtPosition],
     );
 
-    const selectBlock = useCallback(
-      (pos: number) => {
-        const view = editor?.view;
-        if (!view) return;
-        const node = view.state.doc.nodeAt(pos);
-        if (!node) return;
-        view.dispatch(
-          view.state.tr
-            .setSelection(NodeSelection.create(view.state.doc, pos))
-            .scrollIntoView(),
-        );
-        view.focus();
+    const openBlockMenu = useCallback((pos: number, rect: DOMRect) => {
+      setBlockMenuState(resolveBlockMenuState(pos, rect));
+    }, []);
+
+    const closeBlockMenu = useCallback(() => {
+      setBlockMenuState(CLOSED_BLOCK_MENU_STATE);
+    }, []);
+
+    const runBlockMenuAction = useCallback(
+      (entry: BlockMenuEntry) => {
+        const current = blockMenuStateRef.current;
+        if (!current.open) return;
+        const { pos } = current;
+        setBlockMenuState(CLOSED_BLOCK_MENU_STATE);
+        if (entry.kind === "turn-into") {
+          turnBlockInto(editor, pos, entry.id);
+          return;
+        }
+        switch (entry.id) {
+          case "duplicate":
+            duplicateBlock(editor, pos);
+            return;
+          case "delete":
+            deleteBlock(editor, pos);
+            return;
+          case "copy-markdown":
+            void copyBlockAsMarkdown(editor, pos);
+            return;
+        }
       },
       [editor],
     );
 
     useEffect(() => {
       blockInsertRef.current = insertBlockAfter;
-      blockSelectRef.current = selectBlock;
-    }, [insertBlockAfter, selectBlock]);
+      blockMenuOpenRef.current = openBlockMenu;
+    }, [insertBlockAfter, openBlockMenu]);
+
+    const insertImageAtSlash = useCallback((view: EditorView, pos: number) => {
+      pickAndInsertImages(view, pos, pasteContextRef.current);
+    }, []);
 
     const runSlashCommand = useCallback(
       (id: SlashCommandId) => {
-        const state = slashStateRef.current;
-        if (!state.open || !editor || !isEditableEditor(editor)) return;
-
-        const range = { from: state.from, to: state.to };
-        const chain = editor
-          .chain()
-          .focus()
-          .deleteRange(range) as unknown as SlashCommandChain;
-        setSlashState(CLOSED_SLASH_COMMAND_STATE);
-
-        switch (id) {
-          case "wikilink":
-            chain.insertContent("[[]]").setTextSelection(state.from + 2).run();
-            return;
-          case "heading-1":
-            chain.toggleHeading({ level: 1 }).run();
-            return;
-          case "heading-2":
-            chain.toggleHeading({ level: 2 }).run();
-            return;
-          case "heading-3":
-            chain.toggleHeading({ level: 3 }).run();
-            return;
-          case "bulleted-list":
-            chain.toggleBulletList().run();
-            return;
-          case "numbered-list":
-            chain.toggleOrderedList().run();
-            return;
-          case "task-list":
-            chain.toggleTaskList().run();
-            return;
-          case "quote":
-            chain.toggleBlockquote().run();
-            return;
-          case "code-block":
-            chain.setCodeBlock({ language: "" }).run();
-            return;
-          case "divider":
-            chain.setHorizontalRule().run();
-            return;
-          case "table":
-            chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
-            return;
-        }
+        runSlashCommandCore(
+          editor,
+          id,
+          slashStateRef.current,
+          setSlashState,
+          insertImageAtSlash,
+        );
       },
-      [editor],
+      [editor, insertImageAtSlash],
     );
 
     useEffect(() => {
@@ -1365,12 +604,15 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           </div>
         ) : null}
         <EditorContent editor={editor} />
+        {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
             shouldShow={({ editor: instance }) => !instance.state.selection.empty}
           >
+            <TurnIntoMenu editor={editor} />
+            <span className="dohc-bubble-menu__divider" aria-hidden="true" />
             <BubbleButton
               label="Bold"
               active={editor.isActive("bold")}
@@ -1386,6 +628,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               <Italic size={14} aria-hidden />
             </BubbleButton>
             <BubbleButton
+              label="Underline"
+              active={editor.isActive("underline")}
+              onClick={() => editor.chain().focus().toggleUnderline().run()}
+            >
+              <UnderlineIcon size={14} aria-hidden />
+            </BubbleButton>
+            <BubbleButton
               label="Strikethrough"
               active={editor.isActive("strike")}
               onClick={() => editor.chain().focus().toggleStrike().run()}
@@ -1399,6 +648,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             >
               <Code size={14} aria-hidden />
             </BubbleButton>
+            <LinkBubbleButton editor={editor} onOpen={setLinkMenuState} />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (
@@ -1412,11 +662,21 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 )
               }
             />
+            <BlockMenu
+              state={blockMenuState}
+              onSelect={runBlockMenuAction}
+              onClose={closeBlockMenu}
+            />
             <WikilinkPicker
               state={pickerState}
               files={knownFiles}
               view={pickerView}
               onDismiss={() => setAcState({ active: false })}
+            />
+            <LinkMenu
+              editor={editor}
+              state={linkMenuState}
+              onDismiss={() => setLinkMenuState(CLOSED_LINK_MENU_STATE)}
             />
           </>
         ) : null}

@@ -564,10 +564,34 @@ body {
   content: "⋮";
 }
 
+.dohc-block-handle {
+  cursor: grab;
+}
+
+.dohc-block-handle:active {
+  cursor: grabbing;
+}
+
 .dohc-block-gutter-btn:hover {
   border-color: var(--dohc-line);
   background: var(--dohc-panel-2);
   color: var(--dohc-ink);
+}
+
+.dohc-block-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  z-index: -1;
+  max-width: 640px;
+  padding: 6px 12px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 8px;
+  background: var(--dohc-panel);
+  color: var(--dohc-ink);
+  box-shadow: 0 8px 24px rgba(28, 27, 24, 0.18);
+  opacity: 0.92;
+  pointer-events: none;
 }
 
 .dohc-graph-edge {
@@ -875,8 +899,17 @@ body {
 
 .dohc-bubble-menu {
   display: inline-flex;
+  align-items: center;
   gap: 2px;
   padding: 4px;
+}
+
+.dohc-bubble-menu__divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0 2px;
+  background: var(--dohc-line);
 }
 
 .dohc-bubble-menu__button {
@@ -924,4 +957,619 @@ body {
   height: 6px;
   border-radius: 999px;
   background: var(--dohc-success);
+}
+
+/* ── code syntax highlighting ── */
+/* Decoration classes from codeHighlight.ts (lowlight/highlight.js). Palette
+ * stays inside the warm-paper + graphite system — no stock hljs theme, color
+ * only where it carries meaning. --dohc-success/--dohc-warning/--dohc-agent
+ * already flip per [data-theme='dark'] above, so these rules need no
+ * separate dark-mode block. */
+.dohc-notion-editor pre code .hljs-keyword,
+.dohc-notion-editor pre code .hljs-tag,
+.dohc-notion-editor pre code .hljs-name {
+  color: var(--dohc-ink);
+  font-weight: 600;
+}
+
+.dohc-notion-editor pre code .hljs-string,
+.dohc-notion-editor pre code .hljs-regexp {
+  color: var(--dohc-success);
+}
+
+.dohc-notion-editor pre code .hljs-comment {
+  /* muted, not subtle: comments are still code and must clear AA on the
+   * code-block background in both themes. */
+  color: var(--dohc-muted);
+  font-style: italic;
+}
+
+.dohc-notion-editor pre code .hljs-doctag {
+  font-style: normal;
+  font-weight: 600;
+}
+
+.dohc-notion-editor pre code .hljs-number,
+.dohc-notion-editor pre code .hljs-literal,
+.dohc-notion-editor pre code .hljs-symbol {
+  color: var(--dohc-warning);
+}
+
+.dohc-notion-editor pre code .hljs-title,
+.dohc-notion-editor pre code .hljs-built_in,
+.dohc-notion-editor pre code .hljs-type,
+.dohc-notion-editor pre code .hljs-selector-class,
+.dohc-notion-editor pre code .hljs-selector-id,
+.dohc-notion-editor pre code .hljs-section,
+.dohc-notion-editor pre code .hljs-link {
+  color: var(--dohc-agent);
+}
+
+.dohc-notion-editor pre code .hljs-attr,
+.dohc-notion-editor pre code .hljs-attribute,
+.dohc-notion-editor pre code .hljs-meta,
+.dohc-notion-editor pre code .hljs-bullet,
+.dohc-notion-editor pre code .hljs-punctuation {
+  color: var(--dohc-muted);
+}
+
+.dohc-notion-editor pre code .hljs-strong {
+  font-weight: 700;
+}
+
+.dohc-notion-editor pre code .hljs-emphasis {
+  font-style: italic;
+}
+
+/* ── link menu ── */
+
+.dohc-notion-editor a {
+  border-bottom: 1px solid color-mix(in srgb, var(--dohc-match) 45%, transparent);
+  color: var(--dohc-match);
+  text-decoration: none;
+}
+
+.dohc-notion-editor a:hover {
+  border-bottom-color: var(--dohc-match);
+}
+
+.dohc-link-menu {
+  position: fixed;
+  z-index: 70;
+  width: 340px;
+  padding: 6px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+[data-theme='dark'] .dohc-link-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-link-menu__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dohc-link-menu__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  padding: 6px 8px;
+  color: var(--dohc-ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.dohc-link-menu__input:focus {
+  border-color: var(--dohc-match);
+}
+
+.dohc-link-menu__button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-muted);
+  transition:
+    background-color 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-link-menu__button:hover:not(:disabled) {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-link-menu__button:disabled {
+  color: var(--dohc-subtle);
+  opacity: 0.5;
+}
+
+.dohc-link-menu__button--danger:hover:not(:disabled) {
+  color: var(--dohc-danger);
+}
+
+.dohc-link-menu__error {
+  margin-top: 5px;
+  padding: 0 2px;
+  color: var(--dohc-danger);
+  font-size: 11px;
+}
+
+/* ── find & replace ───────────────────────────────────────────────────
+ * Match highlighting reuses the SAME --dohc-match blue as the search
+ * panel's <mark> (SearchView.tsx) and the atom highlight above — one hue
+ * means "your match", everywhere. Non-active matches get a soft tint so
+ * the active one still reads as distinct; the active match gets the
+ * search panel's opaque-mark treatment (ink text, bold) so it's
+ * unmistakable while scanning a long document. */
+.dohc-find-match {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--dohc-match) 22%, transparent);
+}
+
+.dohc-find-match--active {
+  border-radius: 2px;
+  background: var(--dohc-match);
+  color: var(--dohc-ink);
+  font-weight: 600;
+}
+
+.dohc-find-replace {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 6px;
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+}
+
+[data-theme='dark'] .dohc-find-replace {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-find-replace__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dohc-find-replace__input {
+  width: 160px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  padding: 4px 7px;
+  color: var(--dohc-ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.dohc-find-replace__count {
+  min-width: 36px;
+  color: var(--dohc-subtle);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  text-align: center;
+}
+
+.dohc-find-replace__icon-btn {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-muted);
+  font-size: 11px;
+  font-weight: 600;
+  transition:
+    background-color 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-find-replace__icon-btn:hover:not(:disabled) {
+  border-color: var(--dohc-line);
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-find-replace__icon-btn:disabled {
+  opacity: 0.4;
+}
+
+.dohc-find-replace__icon-btn.is-active {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-accent);
+}
+
+.dohc-find-replace__text-btn {
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 8px;
+  color: var(--dohc-muted);
+  font-size: 11px;
+  transition:
+    background-color 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-find-replace__text-btn:hover:not(:disabled) {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-find-replace__text-btn:disabled {
+  opacity: 0.4;
+}
+
+/* ── block menu ── */
+
+.dohc-block-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 69;
+}
+
+.dohc-block-menu {
+  position: fixed;
+  z-index: 70;
+  width: 240px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.dohc-block-menu:focus {
+  outline: none;
+}
+
+[data-theme='dark'] .dohc-block-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-block-menu__section {
+  padding: 6px 8px 3px;
+  color: var(--dohc-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dohc-block-menu__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-ink);
+  text-align: left;
+}
+
+.dohc-block-menu__item.is-selected {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-block-menu__item.is-danger.is-selected,
+.dohc-block-menu__item.is-danger:hover {
+  color: var(--dohc-danger, #b3261e);
+}
+
+.dohc-block-menu__glyph {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.dohc-block-menu__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* ── table controls ──
+ * Row/column grips + the table menu (tableControls.tsx). Grips are
+ * decoration widgets nested one position inside their target cell — same
+ * "widget-inside-node, hover-revealed via an ancestor class" technique as
+ * the block gutter (.dohc-block-node / .dohc-block-affordance above), so
+ * `td`/`th` needs `position: relative` exactly like `.dohc-block-node`
+ * does. Nesting inside the cell (rather than a JS-measured overlay) is
+ * also what keeps a grip glued to its column/row while a resize drag is
+ * live — see the comment at the top of tableControls.tsx. */
+.dohc-notion-editor td,
+.dohc-notion-editor th {
+  position: relative;
+}
+
+.dohc-table-grip,
+.dohc-table-menu-btn {
+  position: absolute;
+  z-index: 4;
+  border: 0;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.dohc-table-node:hover .dohc-table-grip,
+.dohc-table-node:hover .dohc-table-menu-btn,
+.dohc-table-grip:focus-visible,
+.dohc-table-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.dohc-table-grip {
+  background: var(--dohc-line);
+  cursor: pointer;
+}
+
+.dohc-table-grip:hover {
+  background: var(--dohc-accent);
+}
+
+.dohc-table-grip--col {
+  top: 0;
+  left: 3px;
+  right: 3px;
+  height: 6px;
+  border-radius: 0 0 3px 3px;
+}
+
+.dohc-table-grip--row {
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  width: 6px;
+  border-radius: 0 3px 3px 0;
+}
+
+.dohc-table-menu-btn {
+  top: 2px;
+  right: 2px;
+  z-index: 5;
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--dohc-bg);
+  color: var(--dohc-subtle);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dohc-table-menu-btn::before {
+  content: "⋯";
+}
+
+.dohc-table-menu-btn:hover {
+  border-color: var(--dohc-line);
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+/* Grip menu (insert/delete row or column, toggle header, delete table) —
+ * same box treatment as .dohc-slash-menu, kept as its own rule set since
+ * that shared selector group lives earlier in the file. */
+.dohc-table-menu {
+  position: fixed;
+  z-index: 70;
+  width: 190px;
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 5px;
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+[data-theme='dark'] .dohc-table-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-table-menu__item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 6px 8px;
+  color: var(--dohc-ink);
+  text-align: left;
+  font-size: 12.5px;
+}
+
+.dohc-table-menu__item.is-selected,
+.dohc-table-menu__item:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-table-menu__item--danger {
+  color: var(--dohc-danger);
+}
+
+/* Column resizing (TableKit's `resizable: true`, turned on in
+ * MarkdownEditor.tsx) — prosemirror-tables renders `.column-resize-handle`
+ * itself; it ships unstyled, so the drag affordance needs a visible bar
+ * and the hovered column needs its cursor changed. */
+.dohc-notion-editor .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  z-index: 20;
+  width: 4px;
+  background: var(--dohc-match);
+  pointer-events: none;
+}
+
+.dohc-notion-editor .resize-cursor {
+  cursor: col-resize;
+}
+
+/* ── bubble menu turn-into dropdown ──
+ * Sits at the left of .dohc-bubble-menu (MarkdownEditor.tsx); the dropdown
+ * itself gets the same box treatment as .dohc-block-menu/.dohc-slash-menu. */
+
+.dohc-turn-into {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.dohc-turn-into__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 0 6px 0 8px;
+  color: var(--dohc-muted);
+  white-space: nowrap;
+  transition:
+    background-color 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-turn-into__trigger:hover,
+.dohc-turn-into__trigger[aria-expanded='true'] {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-turn-into__label {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dohc-turn-into-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 71;
+  width: 190px;
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 5px;
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.dohc-turn-into-menu:focus {
+  outline: none;
+}
+
+[data-theme='dark'] .dohc-turn-into-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-turn-into-menu__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-ink);
+  text-align: left;
+}
+
+.dohc-turn-into-menu__item.is-selected {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-turn-into-menu__glyph {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.dohc-turn-into-menu__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
 }

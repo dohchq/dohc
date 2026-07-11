@@ -281,19 +281,43 @@ describe('desktop editor markdown round-trip', () => {
     )
   })
 
-  it('strips unsafe image protocols while preserving http and relative images', () => {
+  it('keeps a workspace-relative image byte-identical through the round-trip', () => {
+    const input = '![alt](assets/pic.png "t")'
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    // And a second pass is stable.
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
+  })
+
+  it('round-trips a relative image path containing spaces via angle brackets', () => {
+    const input = '![alt](<my folder/pic 1.png>)'
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    // And a second pass is stable.
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
+  })
+
+  it('strips unsafe image protocols and escaping paths while preserving http and relative images', () => {
     expectStableMarkdownRoundTrip(
       [
         '![relative](assets/diagram.png)',
         '![remote](https://example.com/diagram.png)',
         '![bad](javascript:alert)',
+        '![case-variant](JavaScript:alert)',
         '![data](data:image/svg+xml;base64,PHN2Zz4=)',
+        '![parent](../secret/diagram.png)',
+        '![absolute](/etc/diagram.png)',
+        '![protocol-relative](//evil.example.com/diagram.png)',
       ].join('\n'),
       [
         '![relative](assets/diagram.png)',
         '![remote](https://example.com/diagram.png)',
         '![bad]()',
+        '![case-variant]()',
         '![data]()',
+        '![parent]()',
+        '![absolute]()',
+        '![protocol-relative]()',
       ],
     )
     expect(
@@ -311,6 +335,25 @@ describe('desktop editor markdown round-trip', () => {
         ]),
       ),
     ).toBe('![split]()')
+    // Backslash traversal (a Windows-style `..\secret\pic.png`) must be
+    // folded to '/' before the parent-escape check, or a naive prefix test
+    // lets it climb out of the document's folder. Driven through the node
+    // attrs directly so the raw backslashes reach the sanitizer verbatim.
+    expect(
+      yDocToMarkdown(
+        yDocFromBody([
+          {
+            type: 'paragraph',
+            content: [
+              {
+                type: 'image',
+                attrs: { alt: 'backslash', src: '..\\secret\\pic.png', title: null },
+              },
+            ],
+          },
+        ]),
+      ),
+    ).toBe('![backslash]()')
   })
 
   it('covers GFM tables, task lists, and strikethrough', () => {

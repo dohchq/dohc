@@ -60,14 +60,15 @@ export function decideNavigation(
 }
 
 // Gate for the EXPLICIT openExternalUrl IPC (the only path to the OS
-// browser): http(s) only, everything else (file:, javascript:, custom
-// schemes, unparseable) refused. window.open itself is a pure deny with no
-// side effects — renderer content must never be able to launch a browser
-// without going through this audited affordance.
+// browser/mail client): http(s) and mailto only — everything else (file:,
+// javascript:, custom schemes, unparseable) refused. mailto is allowlisted
+// alongside http(s) for the editor's link "Open" action; window.open itself
+// is a pure deny with no side effects — renderer content must never be able
+// to launch a browser/handler without going through this audited affordance.
 export function isSafeExternalUrl(targetUrl: string): boolean {
   try {
     const protocol = new URL(targetUrl).protocol;
-    return protocol === "https:" || protocol === "http:";
+    return protocol === "https:" || protocol === "http:" || protocol === "mailto:";
   } catch {
     return false;
   }
