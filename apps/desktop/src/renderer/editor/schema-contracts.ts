@@ -234,7 +234,7 @@ export const DOHC_V2_CONSTRUCTS = [
     },
     requiresPaidTiptap: false,
     phase1Scope: 'required',
-    note: 'GFM table semantics must survive, while alignment formatting may normalize.',
+    note: 'GFM table semantics must survive, including per-column alignment (the `align` cell attr round-trips losslessly to/from the `:---`/`:---:`/`---:` delimiter row); only cell padding whitespace normalizes.',
   },
   {
     name: 'image',

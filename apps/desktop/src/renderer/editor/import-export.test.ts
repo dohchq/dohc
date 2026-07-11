@@ -381,6 +381,24 @@ describe('desktop editor markdown round-trip', () => {
     )
   })
 
+  it('round-trips per-column GFM alignment (left/center/right) losslessly', () => {
+    // Phase 1 assumed per-column alignment was inexpressible; it is not. The
+    // `align` cell attr (set by tableControls' column grip menu) serializes to
+    // the delimiter row and parses back, so a mixed-alignment table — left
+    // (`:---`), center (`:---:`), right (`---:`), and default (`---`) — is
+    // byte-stable across the round-trip.
+    const once = expectStableMarkdownRoundTrip(
+      [
+        '| L | C | R | D |',
+        '| :--- | :---: | ---: | --- |',
+        '| a | b | c | d |',
+      ].join('\n'),
+      ['| :--- | :---: | ---: | --- |'],
+    )
+    expect(once).toContain('| L')
+    expect(once).toContain('| a')
+  })
+
   it('keeps Obsidian-style power-user syntax stable as text or custom nodes', () => {
     expectStableMarkdownRoundTrip(
       [

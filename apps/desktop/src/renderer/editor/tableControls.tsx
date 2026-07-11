@@ -4,25 +4,33 @@
 // already; this file is only the missing UI.
 //
 // GFM round-trip caveat (see AGENTS.md "text is the primitive"): markdown
-// tables cannot express merged cells or per-cell alignment, so there is
-// deliberately no merge/split/align UI here — only what survives a
-// markdown round-trip.
+// tables express per-COLUMN alignment via the delimiter row (`:---`, `:---:`,
+// `---:`) but NOT merged cells. So there is per-column alignment UI (the
+// column grip menu's Align left/center/right, applied to every cell in the
+// column) but deliberately no merge/split UI — only what survives a markdown
+// round-trip. Alignment lives on the standard `align` cell attr that
+// @tiptap/extension-table already serializes to / parses from the GFM
+// delimiter row, so the round-trip is lossless with no custom serializer.
 //
 // Grip placement: each grip is a ProseMirror decoration WIDGET nested
 // *inside* the relevant cell (first-row cell for a column grip,
-// first-cell-of-row for a row grip) rather than a JS-measured floating
-// overlay. That choice matters during a live column-resize drag:
-// prosemirror-tables mutates cell/col widths directly on the DOM
-// (`displayColumnWidth`, see prosemirror-tables' columnresizing.ts) without
-// dispatching a transaction until mouseup — the same trick it uses to
-// render its own `.column-resize-handle` widget nested inside the cell. A
-// widget that is a DOM descendant of the cell inherits the live-resized box
-// for free through ordinary CSS layout (`position: absolute` against the
-// cell's `position: relative`); a JS-measured overlay driven off
-// `docChanged`/ResizeObserver would visibly lag until the drag finishes.
-// This mirrors the block gutter (`blockControls` inline in
-// MarkdownEditor.tsx): a widget nested one position inside the target node,
-// hover-revealed via a `Decoration.node` class on an ancestor.
+// first-cell-of-row for a row grip) but rendered in the table's OUTER margin
+// via negative CSS offsets (a column grip floats above its column, a row grip
+// floats left of its row — Notion-style), so grip chrome never overlaps or
+// reflows cell text. Nesting the widget inside the cell (rather than a
+// JS-measured floating overlay) is what keeps each grip glued to its
+// column/row during a live column-resize drag: prosemirror-tables mutates
+// cell/col widths directly on the DOM (see prosemirror-tables'
+// columnresizing.ts) without dispatching a transaction until mouseup — the
+// same trick it uses to render its own `.column-resize-handle` widget nested
+// inside the cell. A widget that is a DOM descendant of the cell inherits the
+// live-resized box for free through ordinary CSS layout (`position: absolute`
+// against the cell's `position: relative`; the negative top/left offsets only
+// shift the grip into the margin — the edge it hugs still tracks the cell);
+// a JS-measured overlay driven off `docChanged`/ResizeObserver would visibly
+// lag until the drag finishes. This mirrors the block gutter (`blockControls`
+// inline in MarkdownEditor.tsx): a widget nested one position inside the
+// target node, hover-revealed via a `Decoration.node` class on an ancestor.
 
 import { Node as PMNode } from "@tiptap/pm/model";
 import {
@@ -89,10 +97,52 @@ function focusCell(view: EditorView, cellPos: number): void {
   view.dispatch(view.state.tr.setSelection(TextSelection.near($pos)));
 }
 
-function columnMenuItems(): GripMenuItem[] {
+// Per-column GFM alignment. The value is written to the standard `align`
+// cell attr (TableKit's tableCell/tableHeader) on EVERY cell in the column,
+// which @tiptap/extension-table serializes to the delimiter row (`:---`,
+// `:---:`, `---:`) and parses back losslessly — so this survives the markdown
+// round-trip with no custom serializer. Setting it on the whole column keeps
+// the delimiter deterministic and the on-screen CSS `text-align` consistent
+// across the column. Driven off a fresh colSelection rather than the current
+// selection, so it works no matter what is selected when the menu item runs.
+type CellAlign = "left" | "center" | "right";
+
+function setColumnAlign(view: EditorView, cellPos: number, align: CellAlign): void {
+  if (view.editable === false) return;
+  const { state } = view;
+  const $cell = state.doc.resolve(cellPos);
+  const selection = CellSelection.colSelection($cell);
+  let tr = state.tr;
+  selection.forEachCell((cell, pos) => {
+    tr = tr.setNodeMarkup(pos, undefined, { ...cell.attrs, align });
+  });
+  if (tr.docChanged) view.dispatch(tr);
+  view.focus();
+}
+
+function appendColumn(view: EditorView, lastColCellPos: number): void {
+  if (view.editable === false) return;
+  const $cell = view.state.doc.resolve(lastColCellPos);
+  view.dispatch(view.state.tr.setSelection(CellSelection.colSelection($cell)));
+  addColumnAfter(view.state, view.dispatch);
+  view.focus();
+}
+
+function appendRow(view: EditorView, lastRowCellPos: number): void {
+  if (view.editable === false) return;
+  const $cell = view.state.doc.resolve(lastRowCellPos);
+  view.dispatch(view.state.tr.setSelection(CellSelection.rowSelection($cell)));
+  addRowAfter(view.state, view.dispatch);
+  view.focus();
+}
+
+function columnMenuItems(cellPos: number): GripMenuItem[] {
   return [
     { label: "Insert column left", run: (view) => runTableCommand(view, addColumnBefore) },
     { label: "Insert column right", run: (view) => runTableCommand(view, addColumnAfter) },
+    { label: "Align left", run: (view) => setColumnAlign(view, cellPos, "left") },
+    { label: "Align center", run: (view) => setColumnAlign(view, cellPos, "center") },
+    { label: "Align right", run: (view) => setColumnAlign(view, cellPos, "right") },
     {
       label: "Delete column",
       destructive: true,
@@ -225,7 +275,7 @@ function buildColumnGrip(view: EditorView, cellPos: number, colIndex: number): H
   button.addEventListener("click", (event) => {
     stopEvent(event);
     selectColumn(view, cellPos);
-    openGripMenu(view, button, columnMenuItems());
+    openGripMenu(view, button, columnMenuItems(cellPos));
   });
   return button;
 }
@@ -260,6 +310,43 @@ function buildTableMenuButton(view: EditorView, cellPos: number): HTMLElement {
     stopEvent(event);
     focusCell(view, cellPos);
     openGripMenu(view, button, tableMenuItems());
+  });
+  return button;
+}
+
+// Notion-style append affordances: a "+" hugging the table's right edge
+// (append column) and one hugging the bottom edge (append row). Each is
+// anchored inside a corner cell (top-right for the column, bottom-left for
+// the row) so it tracks the live-resized table box the same way the grips
+// do, and floats into the outer margin via negative CSS offsets.
+function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTMLElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dohc-table-append dohc-table-append--col";
+  button.title = "Add column";
+  button.setAttribute("aria-label", "Add column");
+  button.setAttribute("contenteditable", "false");
+  button.disabled = view.editable === false;
+  button.addEventListener("mousedown", stopEvent);
+  button.addEventListener("click", (event) => {
+    stopEvent(event);
+    appendColumn(view, lastColCellPos);
+  });
+  return button;
+}
+
+function buildAppendRowButton(view: EditorView, lastRowCellPos: number): HTMLElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dohc-table-append dohc-table-append--row";
+  button.title = "Add row";
+  button.setAttribute("aria-label", "Add row");
+  button.setAttribute("contenteditable", "false");
+  button.disabled = view.editable === false;
+  button.addEventListener("mousedown", stopEvent);
+  button.addEventListener("click", (event) => {
+    stopEvent(event);
+    appendRow(view, lastRowCellPos);
   });
   return button;
 }
@@ -312,13 +399,25 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       );
     }
 
-    // Table menu affordance: anchored inside the top-right cell.
+    // Table menu affordance: anchored inside the top-left cell (the
+    // spreadsheet "select-all corner"), floated into the top-left margin.
+    const topLeftCellPos = tableStart + map.map[0];
+    decorations.push(
+      widgetDecoration(
+        topLeftCellPos + 1,
+        (view) => buildTableMenuButton(view, topLeftCellPos),
+        `dohc-table-menu-${pos}`,
+      ),
+    );
+
+    // Append-column "+": anchored inside the top-right cell, hugging the
+    // table's right edge.
     const topRightCellPos = tableStart + map.map[map.width - 1];
     decorations.push(
       widgetDecoration(
         topRightCellPos + 1,
-        (view) => buildTableMenuButton(view, topRightCellPos),
-        `dohc-table-menu-${pos}`,
+        (view) => buildAppendColumnButton(view, topRightCellPos),
+        `dohc-table-append-col-${pos}`,
       ),
     );
 
@@ -337,6 +436,17 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
         ),
       );
     }
+
+    // Append-row "+": anchored inside the bottom-left cell, hugging the
+    // table's bottom edge.
+    const bottomLeftCellPos = tableStart + map.map[(map.height - 1) * map.width];
+    decorations.push(
+      widgetDecoration(
+        bottomLeftCellPos + 1,
+        (view) => buildAppendRowButton(view, bottomLeftCellPos),
+        `dohc-table-append-row-${pos}`,
+      ),
+    );
 
     return false;
   });

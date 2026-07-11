@@ -43,13 +43,24 @@ function click(el: Element): void {
 // `editor.getJSON()`'s type is inferred from the registered extensions
 // (a deep NodeType/TextType union) and is awkward to destructure generically
 // in a test; a small structural type is simpler than fighting that union.
-type JsonNode = { type: string; content?: JsonNode[] };
+type JsonNode = {
+  type: string;
+  attrs?: { align?: string | null };
+  content?: JsonNode[];
+};
 
 function tableNode(editor: Editor): JsonNode {
   const json = editor.getJSON() as unknown as { content?: JsonNode[] };
   const table = json.content?.find((node) => node.type === "table");
   if (!table) throw new Error("no table in doc");
   return table;
+}
+
+// The align attr each cell in `colIndex` carries, top row to bottom.
+function columnAligns(editor: Editor, colIndex: number): (string | null)[] {
+  return (tableNode(editor).content ?? []).map(
+    (row) => row.content?.[colIndex]?.attrs?.align ?? null,
+  );
 }
 
 describe("table controls grips", () => {
@@ -162,6 +173,70 @@ describe("table controls grips", () => {
     expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
     const headerRow = tableNode(editor).content?.[0];
     expect(headerRow?.content).toHaveLength(2);
+  });
+
+  it("column grip menu aligns every cell in the column (center) via the `align` attr", () => {
+    editor = createTableEditor(3, 2);
+    expect(columnAligns(editor, 0)).toEqual([null, null, null]);
+
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Align center"));
+
+    // Whole column (header + both body cells) is centered; the other column
+    // is untouched.
+    expect(columnAligns(editor, 0)).toEqual(["center", "center", "center"]);
+    expect(columnAligns(editor, 1)).toEqual([null, null, null]);
+  });
+
+  it("column grip menu targets the clicked column (second column, right)", () => {
+    editor = createTableEditor(2, 3);
+    const secondGrip = editor.view.dom.querySelectorAll(
+      ".dohc-table-grip--col",
+    )[1] as HTMLElement;
+    click(secondGrip);
+    click(menuItemByLabel("Align right"));
+
+    expect(columnAligns(editor, 0)).toEqual([null, null]);
+    expect(columnAligns(editor, 1)).toEqual(["right", "right"]);
+    expect(columnAligns(editor, 2)).toEqual([null, null]);
+  });
+
+  it("re-aligning a column overwrites the previous alignment (center then left)", () => {
+    editor = createTableEditor(2, 2);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+
+    click(grip);
+    click(menuItemByLabel("Align center"));
+    expect(columnAligns(editor, 0)).toEqual(["center", "center"]);
+
+    click(grip);
+    click(menuItemByLabel("Align left"));
+    expect(columnAligns(editor, 0)).toEqual(["left", "left"]);
+  });
+
+  it("append-column button adds a column at the right edge", () => {
+    editor = createTableEditor(2, 2);
+    const appendCol = editor.view.dom.querySelector(
+      ".dohc-table-append--col",
+    ) as HTMLElement;
+    expect(appendCol).not.toBeNull();
+
+    click(appendCol);
+
+    expect(tableNode(editor).content?.[0]?.content).toHaveLength(3);
+  });
+
+  it("append-row button adds a row at the bottom edge", () => {
+    editor = createTableEditor(2, 2);
+    const appendRow = editor.view.dom.querySelector(
+      ".dohc-table-append--row",
+    ) as HTMLElement;
+    expect(appendRow).not.toBeNull();
+
+    click(appendRow);
+
+    expect(tableNode(editor).content).toHaveLength(3);
   });
 });
 
