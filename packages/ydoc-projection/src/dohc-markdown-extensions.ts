@@ -59,12 +59,24 @@ function renderMarkdownImage(attrs: {
       .replaceAll('[', '\\[')
       .replaceAll(']', '\\]'),
   )
-  const src = escapeMarkdownLineBreaks(
-    sanitizeImageSrc(String(attrs.src ?? ''))
-      .replaceAll('\\', '\\\\')
-      .replaceAll('(', '\\(')
-      .replaceAll(')', '\\)'),
-  )
+  const sanitizedSrc = sanitizeImageSrc(String(attrs.src ?? ''))
+  // A destination with spaces is only valid CommonMark inside angle
+  // brackets — without them the src would not re-parse and the round-trip
+  // would break. Line breaks are handled by escapeMarkdownLineBreaks (they
+  // become a literal "\n" sequence), so only inline whitespace matters here.
+  const src = /[ \t]/.test(sanitizedSrc)
+    ? `<${escapeMarkdownLineBreaks(
+        sanitizedSrc
+          .replaceAll('\\', '\\\\')
+          .replaceAll('<', '\\<')
+          .replaceAll('>', '\\>'),
+      )}>`
+    : escapeMarkdownLineBreaks(
+        sanitizedSrc
+          .replaceAll('\\', '\\\\')
+          .replaceAll('(', '\\(')
+          .replaceAll(')', '\\)'),
+      )
   const title = typeof attrs.title === 'string' && attrs.title.length > 0
     ? ` "${escapeMarkdownLineBreaks(
         attrs.title.replaceAll('\\', '\\\\').replaceAll('"', '\\"'),

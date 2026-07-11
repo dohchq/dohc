@@ -16,7 +16,10 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { dohcMarkdownExtensions } from "./extensions";
 import { MarkdownEditor } from "./MarkdownEditor";
-import { findEmptyListItemParagraph } from "./codeBlockChrome";
+import {
+  findEmptyListItemParagraph,
+  makeCodeBlockContinuationPlugin,
+} from "./codeBlockChrome";
 import {
   CLOSED_SLASH_COMMAND_STATE,
   filterSlashCommands,
@@ -157,6 +160,70 @@ describe("MarkdownEditor slash command: image", () => {
       runSlashCommand(editor, "image", state, setSlashState),
     ).not.toThrow();
     expect(editor.getText()).toBe("");
+    editor.destroy();
+  });
+});
+
+describe("MarkdownEditor code block continuation", () => {
+  function makeEditor(markdown: string): Editor {
+    return new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        Markdown.configure({ indentation: { style: "space", size: 2 } }),
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+  }
+
+  function pressAtEndOfCode(
+    editor: Editor,
+    init: KeyboardEventInit,
+  ): boolean {
+    const plugin = makeCodeBlockContinuationPlugin();
+    // End of the "code" text inside the leading code block: pos 1 + 4.
+    editor.commands.setTextSelection(5);
+    const handled = plugin.props.handleKeyDown?.call(
+      plugin,
+      editor.view,
+      new KeyboardEvent("keydown", init),
+    );
+    return handled === true;
+  }
+
+  it("ArrowDown at end of a code block with content after falls through to native navigation", () => {
+    const editor = makeEditor("```\ncode\n```\n\nSome text");
+    const before = editor.getJSON();
+
+    expect(pressAtEndOfCode(editor, { key: "ArrowDown" })).toBe(false);
+    // The doc must not be mutated by a pure navigation keypress.
+    expect(editor.getJSON()).toEqual(before);
+    editor.destroy();
+  });
+
+  it("ArrowDown at end of a terminal code block exits into a new paragraph", () => {
+    const editor = makeEditor("```\ncode\n```");
+    expect(editor.state.doc.childCount).toBe(1);
+
+    expect(pressAtEndOfCode(editor, { key: "ArrowDown" })).toBe(true);
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(editor.state.doc.child(1).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(1).content.size).toBe(0);
+    editor.destroy();
+  });
+
+  it("Cmd/Ctrl+Enter always inserts a paragraph below, even with content after", () => {
+    const editor = makeEditor("```\ncode\n```\n\nSome text");
+    expect(editor.state.doc.childCount).toBe(2);
+
+    expect(pressAtEndOfCode(editor, { key: "Enter", ctrlKey: true })).toBe(true);
+    expect(editor.state.doc.childCount).toBe(3);
+    expect(editor.state.doc.child(1).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(1).content.size).toBe(0);
     editor.destroy();
   });
 });

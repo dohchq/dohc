@@ -978,7 +978,9 @@ body {
 }
 
 .dohc-notion-editor pre code .hljs-comment {
-  color: var(--dohc-subtle);
+  /* muted, not subtle: comments are still code and must clear AA on the
+   * code-block background in both themes. */
+  color: var(--dohc-muted);
   font-style: italic;
 }
 

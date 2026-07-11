@@ -230,6 +230,14 @@ describe('hocuspocus markdown import/export', () => {
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
 
+  it('round-trips a relative image path containing spaces via angle brackets', () => {
+    const input = '![alt](<my folder/pic 1.png>)'
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    // And a second pass is stable.
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
+  })
+
   it('strips unsafe image protocols and escaping paths while preserving http and relative images', () => {
     expectStableMarkdownRoundTrip(
       [

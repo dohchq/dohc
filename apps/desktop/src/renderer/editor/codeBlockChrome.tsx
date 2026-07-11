@@ -351,6 +351,12 @@ export function makeCodeBlockChromePlugin() {
   });
 }
 
+function nodeFollowsBlock(state: EditorState, blockPos: number): boolean {
+  const node = state.doc.nodeAt(blockPos);
+  if (!node) return false;
+  return state.doc.resolve(blockPos + node.nodeSize).nodeAfter != null;
+}
+
 export function makeCodeBlockContinuationPlugin() {
   return new Plugin({
     key: codeBlockContinuationKey,
@@ -361,12 +367,19 @@ export function makeCodeBlockContinuationPlugin() {
 
         const explicitExit =
           event.key === "Enter" && (event.metaKey || event.ctrlKey);
+        // ArrowDown only takes over when the code block is the last child of
+        // its parent — otherwise native navigation must move into the
+        // following content instead of injecting a blank paragraph (which
+        // would dirty the doc on a pure navigation keypress).
         const arrowExit =
-          event.key === "ArrowDown" && isSelectionAtEndOfCodeBlock(view.state);
+          event.key === "ArrowDown" &&
+          isSelectionAtEndOfCodeBlock(view.state) &&
+          !nodeFollowsBlock(view.state, block.pos);
         if (!explicitExit && !arrowExit) return false;
 
+        if (!insertParagraphAfterBlock(view, block.pos)) return false;
         event.preventDefault();
-        return insertParagraphAfterBlock(view, block.pos);
+        return true;
       },
     },
   });
