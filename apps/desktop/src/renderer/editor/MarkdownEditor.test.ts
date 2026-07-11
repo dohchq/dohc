@@ -6,9 +6,11 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
+import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -325,5 +327,127 @@ describe("MarkdownEditor history", () => {
       ctrlKey: true,
     });
     await waitFor(() => expect(editor.textContent).toBe(""));
+  });
+});
+
+describe("MarkdownEditor remote carets", () => {
+  it("stays inert (no caret decoration) when collab has no awareness", async () => {
+    const ydoc = new Y.Doc();
+    const user = userEvent.setup();
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/no-awareness.md",
+        knownFiles: [],
+        // Same shape as today's only production caller (FileInspector's
+        // engine-mode branch): a live ydoc, but no awareness yet.
+        collab: { ydoc, status: "connected", peerCount: 0, synced: true },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      editor.focus();
+      await user.keyboard("solo in a shared doc");
+      expect(editor.textContent).toBe("solo in a shared doc");
+      expect(view.container.querySelector(".collaboration-carets__caret")).toBeNull();
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
+  });
+
+  it("renders a remote peer's caret once their synced cursor lands in awareness", async () => {
+    // Two mirror Y.Docs bridged both ways, the same shape as
+    // engineYDocProvider's main<->renderer echo-guarded relay: every local
+    // update on one side is applied to the other under a distinct origin so
+    // it never echoes back.
+    const docA = new Y.Doc();
+    const docB = new Y.Doc();
+    docA.clientID = 111;
+    docB.clientID = 222;
+    const bridge = (from: Y.Doc, to: Y.Doc): void => {
+      from.on("update", (update: Uint8Array, origin: unknown) => {
+        if (origin === "bridge") return;
+        Y.applyUpdate(to, update, "bridge");
+      });
+    };
+    bridge(docA, docB);
+    bridge(docB, docA);
+
+    const awarenessA = new Awareness(docA);
+    const awarenessB = new Awareness(docB);
+
+    const user = userEvent.setup();
+    const viewA = render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/collab-caret.md",
+        knownFiles: [],
+        collab: {
+          ydoc: docA,
+          status: "connected",
+          peerCount: 1,
+          synced: true,
+          awareness: awarenessA,
+        },
+      }),
+    );
+    const viewB = render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/collab-caret.md",
+        knownFiles: [],
+        collab: {
+          ydoc: docB,
+          status: "connected",
+          peerCount: 1,
+          synced: true,
+          awareness: awarenessB,
+        },
+      }),
+    );
+
+    try {
+      const editorA = await within(viewA.container).findByTestId("markdown-editor");
+      const editorB = await within(viewB.container).findByTestId("markdown-editor");
+
+      // B types, syncing content into A over the bridge (and, in the same
+      // pass, publishing B's own cursor position into awarenessB — the
+      // yCursorPlugin view listener that CollaborationCaret wires up).
+      editorB.focus();
+      await user.keyboard("hi from b");
+      await waitFor(() => expect(editorA.textContent).toBe("hi from b"));
+      await waitFor(() => expect(awarenessB.getLocalState()?.cursor).toBeDefined());
+
+      // A never sees B directly (no live presence transport in this test) —
+      // simulate the ephemeral relay hop docPresence.ts does: apply B's
+      // encoded awareness state into A's awareness under B's real clientID.
+      applyAwarenessUpdate(
+        awarenessA,
+        encodeAwarenessUpdate(awarenessB, [awarenessB.clientID]),
+        "test-relay",
+      );
+
+      await waitFor(() => {
+        const caret = viewA.container.querySelector(".collaboration-carets__caret");
+        expect(caret).not.toBeNull();
+      });
+      const label = viewA.container.querySelector(".collaboration-carets__label");
+      expect(label?.textContent).toMatch(/^Editor \d+$/);
+    } finally {
+      viewA.unmount();
+      viewB.unmount();
+      awarenessA.destroy();
+      awarenessB.destroy();
+      docA.destroy();
+      docB.destroy();
+    }
   });
 });
