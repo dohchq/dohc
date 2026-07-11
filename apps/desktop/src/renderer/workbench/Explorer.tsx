@@ -388,11 +388,22 @@ export function Explorer(props: ExplorerProps) {
     [props.files, props.folders, pending],
   );
 
-  const fileKindByPath = useMemo(() => {
-    const map = new Map<string, WorkspaceFileEntry["kind"]>();
-    for (const file of projected.files) map.set(file.path, file.kind);
+  const fileByPath = useMemo(() => {
+    const map = new Map<string, WorkspaceFileEntry>();
+    for (const file of projected.files) map.set(file.path, file);
     return map;
   }, [projected.files]);
+
+  // Same icon rule as TreeRow (a page icon when set, otherwise the kind glyph),
+  // driven by the memoized lookup so pinned rows don't rescan projected.files.
+  function fileGlyph(path: string) {
+    const file = fileByPath.get(path);
+    return file?.icon ? (
+      <PageIconGlyph icon={file.icon} />
+    ) : (
+      <FileKindIcon kind={file?.kind ?? "file"} />
+    );
+  }
 
   const expandedSet = useMemo(
     () => new Set(props.expandedFolders),
@@ -1208,7 +1219,7 @@ export function Explorer(props: ExplorerProps) {
                       >
                         <OpenEditorIcon
                           path={tab.path}
-                          kind={fileKindByPath.get(tab.path) ?? null}
+                          kind={fileByPath.get(tab.path)?.kind ?? null}
                         />
                         <span className="min-w-0 flex-1 truncate">{title}</span>
                         {dirty ? (
@@ -1325,16 +1336,7 @@ export function Explorer(props: ExplorerProps) {
                           {isFolderPath(path) ? (
                             <Folder size={13} aria-hidden className="shrink-0" />
                           ) : (
-                            (() => {
-                              const file = projected.files.find(
-                                (entry) => entry.path === path,
-                              );
-                              return file?.icon ? (
-                                <PageIconGlyph icon={file.icon} />
-                              ) : (
-                                <FileKindIcon kind={file?.kind ?? "file"} />
-                              );
-                            })()
+                            fileGlyph(path)
                           )}
                           <span className="truncate">{leafOf(path)}</span>
                         </button>

@@ -6,37 +6,11 @@
 // CSS-grid + position:sticky trick as the outline rail, mirrored to the
 // bottom edge instead of the top.
 
-import { useEffect, useState } from "react";
 import type { Editor } from "@tiptap/core";
-import {
-  countWordsAndCharacters,
-  createDebouncer,
-  EMPTY_WORD_CHAR_COUNT,
-  getDocText,
-  type WordCharCount,
-} from "./wordCount";
-
-const WORD_COUNT_DEBOUNCE_MS = 300;
+import { useDebouncedWordCount } from "./wordCount";
 
 export function WordCountBadge({ editor }: { editor: Editor | null }) {
-  const [count, setCount] = useState<WordCharCount>(EMPTY_WORD_CHAR_COUNT);
-
-  useEffect(() => {
-    if (!editor) {
-      setCount(EMPTY_WORD_CHAR_COUNT);
-      return;
-    }
-    const recompute = () => setCount(countWordsAndCharacters(getDocText(editor.state.doc)));
-    const debouncer = createDebouncer(recompute, WORD_COUNT_DEBOUNCE_MS);
-
-    recompute();
-    const onUpdate = () => debouncer.schedule();
-    editor.on("update", onUpdate);
-    return () => {
-      editor.off("update", onUpdate);
-      debouncer.cancel();
-    };
-  }, [editor]);
+  const count = useDebouncedWordCount(editor);
 
   if (!editor) return null;
 

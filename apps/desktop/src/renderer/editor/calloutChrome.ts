@@ -1,18 +1,6 @@
+import type { Node } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-
-type DocDescendantNode = {
-  type: { name: string };
-  attrs: Record<string, unknown>;
-  textContent: string;
-  nodeSize: number;
-};
-
-type DocLike = {
-  descendants: (
-    cb: (node: DocDescendantNode, pos: number) => boolean | void,
-  ) => void;
-};
 
 const calloutChromeKey = new PluginKey<DecorationSet>("dohc-callout-chrome");
 
@@ -111,6 +99,14 @@ function buildCalloutHeader(
   header.className = "dohc-callout-header";
   header.setAttribute("contenteditable", "false");
 
+  // Assigned once the title input + its commit logic exist below. The fold
+  // toggle calls this FIRST so an in-progress title edit is flushed before the
+  // header is reminted: the chevron's `mousedown` preventDefault keeps focus on
+  // the input (so it never blurs), and toggling fold changes the decoration key
+  // and remints the widget — which would drop the input (and its `getPos`)
+  // before the edit ever committed.
+  let commitFocusedTitle: () => void = () => {};
+
   const folded = attrs.fold === "-";
   const chevron = document.createElement("button");
   chevron.type = "button";
@@ -122,6 +118,7 @@ function buildCalloutHeader(
   chevron.addEventListener("mousedown", stopEditorMouseEvent);
   chevron.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
+    commitFocusedTitle();
     const callout = resolveCallout(view, getPos);
     if (!callout) return;
     updateCalloutAttr(view, getPos, {
@@ -196,6 +193,7 @@ function buildCalloutHeader(
     if (input.value === liveTitle) return;
     updateCalloutAttr(view, getPos, { title: input.value });
   };
+  commitFocusedTitle = commitTitle;
 
   input.addEventListener("focus", () => {
     focusTitle = liveCalloutTitle() ?? input.value;
@@ -213,10 +211,10 @@ function buildCalloutHeader(
   return header;
 }
 
-function buildCalloutChromeDecorations(doc: unknown): DecorationSet {
+function buildCalloutChromeDecorations(doc: Node): DecorationSet {
   const decorations: Decoration[] = [];
 
-  (doc as DocLike).descendants((node, pos) => {
+  doc.descendants((node, pos) => {
     if (node.type.name !== "callout") return;
     const type = String(node.attrs.calloutType ?? "note");
     const fold = normalizeCalloutFoldAttr(node.attrs.fold);
@@ -238,7 +236,7 @@ function buildCalloutChromeDecorations(doc: unknown): DecorationSet {
     );
   });
 
-  return DecorationSet.create(doc as never, decorations);
+  return DecorationSet.create(doc, decorations);
 }
 
 // After every view update, re-seed each callout title input from its live node

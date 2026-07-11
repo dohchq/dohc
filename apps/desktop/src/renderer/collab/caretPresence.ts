@@ -64,6 +64,22 @@ export function resolveCaretUser(awareness: Awareness): DocPresenceUser {
   return { name, color: caretColorForClientId(awareness.clientID) };
 }
 
+// A remote peer's `color` arrives from its own awareness state — untrusted
+// input we interpolate into an inline `style` attribute below. Constrain it to
+// a known palette entry or a strict `#rgb`/`#rrggbb` hex literal so a hostile
+// peer can't smuggle extra declarations (e.g. `red; position:fixed; inset:0`)
+// into the selection decoration's style. Anything else falls back to a palette
+// color.
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+export function safeCaretColor(color: unknown): string {
+  if (typeof color === "string") {
+    if ((CARET_PALETTE as readonly string[]).includes(color)) return color;
+    if (HEX_COLOR_RE.test(color)) return color;
+  }
+  return CARET_PALETTE[0];
+}
+
 // CollaborationCaret's default selectionRender (`@tiptap/y-tiptap`'s
 // defaultSelectionBuilder) bakes an alpha suffix onto the peer's hex color
 // and stamps a bare `ProseMirror-yjs-selection` class. We use the class name
@@ -75,6 +91,6 @@ export function caretSelectionRender(user: { color?: unknown }): {
   class: string;
   style: string;
 } {
-  const color = typeof user.color === "string" ? user.color : CARET_PALETTE[0];
+  const color = safeCaretColor(user.color);
   return { nodeName: "span", class: "collaboration-carets__selection", style: `color: ${color}` };
 }
