@@ -1,10 +1,59 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import * as Y from "yjs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   filterSlashCommands,
   findEmptyListItemParagraph,
   findSlashCommandMatch,
+  MarkdownEditor,
 } from "./MarkdownEditor";
+
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [],
+  });
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      bottom: 0,
+      height: 0,
+      left: 0,
+      right: 0,
+      top: 0,
+      width: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    }),
+  });
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+    Number(setTimeout(() => callback(performance.now()), 16)),
+  );
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("MarkdownEditor slash commands", () => {
   it("detects a trailing slash command query inside plain text", () => {
@@ -58,5 +107,77 @@ describe("MarkdownEditor empty list item focus", () => {
     ol.innerHTML = "<li><p>Test</p></li>";
 
     expect(findEmptyListItemParagraph(ol.querySelector("li"))).toBeNull();
+  });
+});
+
+describe("MarkdownEditor history", () => {
+  it("undoes and redoes a local edit in collaboration mode", async () => {
+    const ydoc = new Y.Doc();
+    const user = userEvent.setup();
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/collaborative.md",
+        knownFiles: [],
+        collab: {
+          ydoc,
+          status: "connected",
+          peerCount: 0,
+          synced: true,
+        },
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+
+      editor.focus();
+      await user.keyboard("collaborative edit");
+      expect(editor.textContent).toBe("collaborative edit");
+
+      fireEvent.keyDown(editor, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => expect(editor.textContent).toBe(""));
+
+      fireEvent.keyDown(editor, {
+        key: "y",
+        code: "KeyY",
+        ctrlKey: true,
+      });
+      await waitFor(() => expect(editor.textContent).toBe("collaborative edit"));
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
+  });
+
+  it("keeps local StarterKit undo working outside collaboration mode", async () => {
+    const user = userEvent.setup();
+    render(
+      createElement(MarkdownEditor, {
+        value: "",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/local.md",
+        knownFiles: [],
+      }),
+    );
+
+    const editor = await screen.findByTestId("markdown-editor");
+    editor.focus();
+    await user.keyboard("local edit");
+    expect(editor.textContent).toBe("local edit");
+
+    fireEvent.keyDown(editor, {
+      key: "z",
+      code: "KeyZ",
+      ctrlKey: true,
+    });
+    await waitFor(() => expect(editor.textContent).toBe(""));
   });
 });
