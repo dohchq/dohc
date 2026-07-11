@@ -189,88 +189,84 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(entries.filter((_, i) => i !== index));
   }
 
+  const isEmpty = entries.length === 0;
+
   return (
     <section
       data-testid="properties-panel"
-      className="border-b border-line bg-panel px-4 py-2"
+      className="dohc-page-properties"
       aria-label="Properties"
     >
-      {entries.length > 0 ? (
-        <div className="space-y-1">
-          {entries.map((entry, index) => {
-            const reserved = isReserved(entry.key);
-            const duplicate = duplicateKeySet(entries).has(entry.key.trim().toLowerCase());
-            return (
-              <div
-                key={index}
-                data-testid="property-row"
-                className="grid min-h-7 grid-cols-[minmax(5.5rem,0.9fr)_minmax(7rem,1.2fr)_1.75rem] items-center gap-1.5"
-              >
-                <input
-                  data-testid="property-key"
-                  aria-label={`Property ${index + 1} name`}
-                  value={entry.key}
-                  placeholder="Property"
-                  spellCheck={false}
-                  onChange={(event) => setKey(index, event.target.value)}
-                  onBlur={() => commit(entries)}
-                  className={`h-7 min-w-0 rounded-md border border-line bg-bg px-2 font-mono text-[12px] transition-colors placeholder:text-subtle focus:border-ink ${
-                    reserved || duplicate ? "text-danger" : "text-muted"
-                  }`}
-                />
-                {reserved ? (
-                  <span
-                    data-testid="property-reserved"
-                    className="truncate px-2 text-[11px] text-danger"
-                    title="Reserved names are managed by the document system."
-                  >
-                    reserved name
-                  </span>
-                ) : duplicate ? (
-                  <span
-                    data-testid="property-duplicate"
-                    className="truncate px-2 text-[11px] text-danger"
-                    title="Use a unique property name."
-                  >
-                    duplicate name
-                  </span>
-                ) : (
-                  <input
-                    data-testid="property-value"
-                    aria-label={`Property ${entry.key || index + 1} value`}
-                    value={entry.value}
-                    placeholder="Empty"
-                    spellCheck={false}
-                    onChange={(event) => setValue(index, event.target.value)}
-                    className="h-7 min-w-0 rounded-md border border-line bg-bg px-2 text-[13px] text-ink transition-colors placeholder:text-subtle focus:border-ink"
-                  />
-                )}
-                <button
-                  type="button"
-                  data-testid="property-remove"
-                  aria-label={`Remove property ${entry.key || index + 1}`}
-                  title="Remove property"
-                  onClick={() => remove(index)}
-                  className="grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+      <div className="dohc-page-properties__inner">
+        {entries.map((entry, index) => {
+          const reserved = isReserved(entry.key);
+          const duplicate = duplicateKeySet(entries).has(entry.key.trim().toLowerCase());
+          return (
+            <div key={index} data-testid="property-row" className="dohc-page-properties__row">
+              <input
+                data-testid="property-key"
+                aria-label={`Property ${index + 1} name`}
+                value={entry.key}
+                placeholder="Property"
+                spellCheck={false}
+                onChange={(event) => setKey(index, event.target.value)}
+                onBlur={() => commit(entries)}
+                className={`dohc-page-properties__key${
+                  reserved || duplicate ? " is-invalid" : ""
+                }`}
+              />
+              {reserved ? (
+                <span
+                  data-testid="property-reserved"
+                  className="dohc-page-properties__flag"
+                  title="Reserved names are managed by the document system."
                 >
-                  <X size={13} aria-hidden />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="m-0 text-[11px] text-subtle">No user properties.</p>
-      )}
-      <button
-        type="button"
-        data-testid="property-add"
-        onClick={() => setEntries((current) => [...current, { key: "", value: "" }])}
-        className="mt-2 flex h-7 w-full items-center gap-1.5 rounded-md border border-dashed border-line px-2 text-[12px] text-muted transition-colors hover:border-muted hover:bg-panel-2 hover:text-ink"
-      >
-        <Plus size={13} aria-hidden />
-        Add property
-      </button>
+                  reserved name
+                </span>
+              ) : duplicate ? (
+                <span
+                  data-testid="property-duplicate"
+                  className="dohc-page-properties__flag"
+                  title="Use a unique property name."
+                >
+                  duplicate name
+                </span>
+              ) : (
+                <input
+                  data-testid="property-value"
+                  aria-label={`Property ${entry.key || index + 1} value`}
+                  value={entry.value}
+                  placeholder="Empty"
+                  spellCheck={false}
+                  onChange={(event) => setValue(index, event.target.value)}
+                  className="dohc-page-properties__value"
+                />
+              )}
+              <button
+                type="button"
+                data-testid="property-remove"
+                aria-label={`Remove property ${entry.key || index + 1}`}
+                title="Remove property"
+                onClick={() => remove(index)}
+                className="dohc-page-properties__remove"
+              >
+                <X size={13} aria-hidden />
+              </button>
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          data-testid="property-add"
+          onClick={() => setEntries((current) => [...current, { key: "", value: "" }])}
+          className={`dohc-page-properties__add${
+            isEmpty ? " dohc-page-properties__add--empty" : ""
+          }`}
+        >
+          <Plus size={13} aria-hidden />
+          Add a property
+        </button>
+      </div>
     </section>
   );
 }

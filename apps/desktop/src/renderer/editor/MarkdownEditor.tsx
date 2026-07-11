@@ -97,7 +97,6 @@ import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import { OutlinePanel } from "./OutlinePanel";
-import { WordCountBadge } from "./WordCountBadge";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
@@ -699,7 +698,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         <div className="dohc-editor-surface">
           <EditorContent editor={editor} />
           <OutlinePanel editor={editor} containerRef={containerRef} />
-          <WordCountBadge editor={editor} />
         </div>
         {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
