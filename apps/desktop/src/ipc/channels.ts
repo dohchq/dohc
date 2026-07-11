@@ -434,6 +434,7 @@ export const CHANNELS = {
   moveWorkspacePath: "desktop:move-workspace-path",
   deleteWorkspacePath: "desktop:delete-workspace-path",
   exportWorkspaceZip: "desktop:export-workspace-zip",
+  exportDocumentFile: "desktop:export-document-file",
   showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
   importWorkspaceFiles: "desktop:import-workspace-files",

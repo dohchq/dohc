@@ -218,6 +218,38 @@ export const ExportWorkspaceZipResult = z.object({
 });
 export type ExportWorkspaceZipResult = z.infer<typeof ExportWorkspaceZipResult>;
 
+// Document export ("Copy as Markdown" ships purely through the renderer's own
+// clipboard call — no IPC needed). HTML/PDF export both land through this ONE
+// channel: the renderer always builds the same self-contained HTML (title +
+// rendered body + inline styles, no external assets); main either writes it
+// verbatim (`kind: "html"`) or renders it in a hidden offscreen window and
+// writes the resulting PDF bytes (`kind: "pdf"`). The output path — like
+// ExportWorkspaceZipPayload — comes from a MAIN-process save dialog outside
+// the workspace, since export is explicitly user-directed; null = cancelled.
+const EXPORT_DOCUMENT_SUGGESTED_NAME = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => !/[/\\\0]/.test(value), {
+    message: "suggested export name must not contain path separators",
+  });
+
+export const ExportDocumentFilePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  suggestedName: EXPORT_DOCUMENT_SUGGESTED_NAME,
+  // The rendered, self-contained HTML document — for a PDF export this is the
+  // source main prints, not the output bytes. Bounded generously; a document
+  // this large has no business round-tripping through IPC as a single string.
+  content: z.string().min(1).max(20 * 1024 * 1024),
+  kind: z.enum(["html", "pdf"]),
+});
+export type ExportDocumentFilePayload = z.infer<typeof ExportDocumentFilePayload>;
+
+export const ExportDocumentFileResult = z.object({
+  path: PATH_STRING.nullable(),
+});
+export type ExportDocumentFileResult = z.infer<typeof ExportDocumentFileResult>;
+
 // Explorer context menu: the renderer names WHAT was right-clicked, main
 // builds the native Menu from main-owned labels over the closed
 // EXPLORER_MENU_COMMANDS tuple (channels.ts) and resolves the SAME invoke
@@ -2132,6 +2164,11 @@ export interface DohcDesktopBridge {
   exportWorkspaceZip(
     payload: ExportWorkspaceZipPayload,
   ): Promise<ExportWorkspaceZipResult>;
+  // Document export ("Copy as Markdown" / "Export as HTML" / "Export as
+  // PDF" menu, ViewHeader). See the payload's comment for the kind split.
+  exportDocumentFile(
+    payload: ExportDocumentFilePayload,
+  ): Promise<ExportDocumentFileResult>;
   // Native explorer context menu; resolves with the chosen closed-tuple
   // command (validated in the preload via isExplorerMenuCommand) or null.
   showExplorerMenu(
