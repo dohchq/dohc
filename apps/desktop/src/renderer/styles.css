@@ -1008,6 +1008,8 @@ body {
 
 .dohc-notion-editor pre code .hljs-emphasis {
   font-style: italic;
+}
+
 /* ── link menu ── */
 
 .dohc-notion-editor a {
@@ -1304,4 +1306,152 @@ body {
   white-space: nowrap;
   font-size: 12.5px;
   font-weight: 500;
+}
+
+/* ── table controls ──
+ * Row/column grips + the table menu (tableControls.tsx). Grips are
+ * decoration widgets nested one position inside their target cell — same
+ * "widget-inside-node, hover-revealed via an ancestor class" technique as
+ * the block gutter (.dohc-block-node / .dohc-block-affordance above), so
+ * `td`/`th` needs `position: relative` exactly like `.dohc-block-node`
+ * does. Nesting inside the cell (rather than a JS-measured overlay) is
+ * also what keeps a grip glued to its column/row while a resize drag is
+ * live — see the comment at the top of tableControls.tsx. */
+.dohc-notion-editor td,
+.dohc-notion-editor th {
+  position: relative;
+}
+
+.dohc-table-grip,
+.dohc-table-menu-btn {
+  position: absolute;
+  z-index: 4;
+  border: 0;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.dohc-table-node:hover .dohc-table-grip,
+.dohc-table-node:hover .dohc-table-menu-btn,
+.dohc-table-grip:focus-visible,
+.dohc-table-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.dohc-table-grip {
+  background: var(--dohc-line);
+  cursor: pointer;
+}
+
+.dohc-table-grip:hover {
+  background: var(--dohc-accent);
+}
+
+.dohc-table-grip--col {
+  top: 0;
+  left: 3px;
+  right: 3px;
+  height: 6px;
+  border-radius: 0 0 3px 3px;
+}
+
+.dohc-table-grip--row {
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  width: 6px;
+  border-radius: 0 3px 3px 0;
+}
+
+.dohc-table-menu-btn {
+  top: 2px;
+  right: 2px;
+  z-index: 5;
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--dohc-bg);
+  color: var(--dohc-subtle);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dohc-table-menu-btn::before {
+  content: "⋯";
+}
+
+.dohc-table-menu-btn:hover {
+  border-color: var(--dohc-line);
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+/* Grip menu (insert/delete row or column, toggle header, delete table) —
+ * same box treatment as .dohc-slash-menu, kept as its own rule set since
+ * that shared selector group lives earlier in the file. */
+.dohc-table-menu {
+  position: fixed;
+  z-index: 70;
+  width: 190px;
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 5px;
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+[data-theme='dark'] .dohc-table-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-table-menu__item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 6px 8px;
+  color: var(--dohc-ink);
+  text-align: left;
+  font-size: 12.5px;
+}
+
+.dohc-table-menu__item.is-selected,
+.dohc-table-menu__item:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-table-menu__item--danger {
+  color: var(--dohc-danger);
+}
+
+/* Column resizing (TableKit's `resizable: true`, turned on in
+ * MarkdownEditor.tsx) — prosemirror-tables renders `.column-resize-handle`
+ * itself; it ships unstyled, so the drag affordance needs a visible bar
+ * and the hovered column needs its cursor changed. */
+.dohc-notion-editor .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  z-index: 20;
+  width: 4px;
+  background: var(--dohc-match);
+  pointer-events: none;
+}
+
+.dohc-notion-editor .resize-cursor {
+  cursor: col-resize;
 }
