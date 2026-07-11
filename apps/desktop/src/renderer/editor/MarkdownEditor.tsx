@@ -30,6 +30,14 @@ import {
 import { bridge } from "../bridge";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import {
+  CLOSED_LINK_MENU_STATE,
+  LinkBubbleButton,
+  LinkMenu,
+  makeLinkMenuExtension,
+  makeLinkMenuPlugin,
+  type LinkMenuState,
+} from "./linkMenu";
+import {
   makeWikilinkPlugin,
   type AutocompleteState,
   type WikilinkFile,
@@ -109,12 +117,19 @@ type MarkdownEditorInnerProps = MarkdownEditorProps & {
 
 const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
 
+// Link's default openOnClick calls window.open directly — a pure deny in
+// this app's security model (see electronSecurity.ts) — and linkOnPaste
+// would double up with linkMenu.tsx's own paste-over-selection handling.
+// Both are owned by linkMenu.tsx's plugin instead.
+const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  link: LINK_MARK_OPTIONS,
 });
 const MARKDOWN_EXTENSION = Markdown.configure({
   indentation: { style: "space", size: 2 },
@@ -188,6 +203,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       CLOSED_SLASH_COMMAND_STATE,
     );
     const [chromeReady, setChromeReady] = useState(false);
+    const [linkMenuState, setLinkMenuState] = useState<LinkMenuState>(
+      CLOSED_LINK_MENU_STATE,
+    );
+    const linkMenuStateRef = useRef<LinkMenuState>(linkMenuState);
     const slashStateRef = useRef<SlashCommandState>(slashState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
@@ -230,6 +249,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useEffect(() => {
       slashStateRef.current = slashState;
     }, [slashState]);
+
+    useEffect(() => {
+      linkMenuStateRef.current = linkMenuState;
+    }, [linkMenuState]);
 
     useEffect(() => {
       const map = new Map<string, WikilinkFile>();
@@ -284,6 +307,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 (state) => setAcState(state),
               ),
               wikilinkClickPlugin,
+              makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
               makeCodeBlockContinuationPlugin(),
               makeEmptyListItemFocusPlugin(),
@@ -291,6 +315,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             ];
           },
         }),
+      [],
+    );
+
+    // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
+    // linkMenu.tsx owns the shortcut logic; this is the one-line hookup.
+    const linkMenuExtension = useMemo(
+      () => makeLinkMenuExtension({ setState: setLinkMenuState }),
       [],
     );
 
@@ -311,9 +342,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               ]
             : [TRAILING_NODE_EXTENSION]),
           dohcPlugins,
+          linkMenuExtension,
         ];
       },
-      [collab?.ydoc, collaborationExtension, dohcPlugins],
+      [collab?.ydoc, collaborationExtension, dohcPlugins, linkMenuExtension],
     );
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtension);
@@ -532,6 +564,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             >
               <Code size={14} aria-hidden />
             </BubbleButton>
+            <LinkBubbleButton editor={editor} onOpen={setLinkMenuState} />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (
@@ -550,6 +583,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               files={knownFiles}
               view={pickerView}
               onDismiss={() => setAcState({ active: false })}
+            />
+            <LinkMenu
+              editor={editor}
+              state={linkMenuState}
+              onDismiss={() => setLinkMenuState(CLOSED_LINK_MENU_STATE)}
             />
           </>
         ) : null}
