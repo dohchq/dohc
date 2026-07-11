@@ -7,6 +7,7 @@ import type {
   McpConfigResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { SectionLabel } from "./ui/controls";
 
 type SessionSnapshot = NonNullable<AgentPanelSnapshotResult["session"]>;
 const AGENT_POLL_INTERVAL_MS = 300;
@@ -235,28 +236,34 @@ export function AgentPanelView(props: {
 
   return (
     <div data-testid="agent-panel" className="flex flex-1 flex-col gap-3 overflow-auto p-3">
-      <section className="rounded border border-line bg-panel p-3">
+      <section className="rounded-lg border border-line bg-panel p-3">
         <div className="mb-3 flex items-center gap-2">
           <Bot size={14} aria-hidden className="text-muted" />
           <h3 className="m-0 text-[13px] font-medium text-ink">Agent session</h3>
-          <span
-            data-testid="agent-panel-status"
-            data-state={session?.status ?? (runStatus?.activeRun ? "running" : "stopped")}
-            className="ml-auto text-[11px] capitalize text-subtle"
-          >
-            {status}
-          </span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <span
+              aria-hidden
+              className={`size-1.5 rounded-full ${activeAgent ? "bg-success" : "bg-line"}`}
+            />
+            <span
+              data-testid="agent-panel-status"
+              data-state={session?.status ?? (runStatus?.activeRun ? "running" : "stopped")}
+              className={`text-[11px] capitalize ${activeAgent ? "text-ink" : "text-subtle"}`}
+            >
+              {status}
+            </span>
+          </div>
         </div>
 
-        <div className="grid gap-2">
-          <label className="grid gap-1 text-[11px] text-subtle">
-            Driver
+        <div className="grid gap-3">
+          <label className="grid gap-1.5">
+            <SectionLabel>Driver</SectionLabel>
             <select
               data-testid="agent-driver-picker"
               value={selectedDriver}
               disabled={busy || activeAgent}
               onChange={(event) => setSelectedDriver(event.currentTarget.value)}
-              className="h-8 rounded border border-line bg-bg px-2 text-[12px] text-ink"
+              className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[13px] text-ink outline-none transition-colors focus:border-ink disabled:cursor-not-allowed disabled:opacity-60"
             >
               {(panel?.drivers ?? []).map((driver) => (
                 <option key={driver.id} value={driver.id}>
@@ -265,14 +272,14 @@ export function AgentPanelView(props: {
               ))}
             </select>
           </label>
-          <label className="grid gap-1 text-[11px] text-subtle">
-            Prompt
+          <label className="grid gap-1.5">
+            <SectionLabel>Prompt</SectionLabel>
             <textarea
               data-testid="agent-prompt-input"
               value={prompt}
               disabled={busy || activeAgent}
               onChange={(event) => setPrompt(event.currentTarget.value)}
-              className="min-h-20 resize-none rounded border border-line bg-bg p-2 text-[12px] leading-5 text-ink"
+              className="min-h-20 w-full resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-5 text-ink outline-none transition-colors placeholder:text-subtle focus:border-ink disabled:cursor-not-allowed disabled:opacity-60"
             />
           </label>
           <button
@@ -280,31 +287,40 @@ export function AgentPanelView(props: {
             data-testid="agent-run-toggle"
             disabled={!canToggleRun}
             onClick={activeSession ? stopSession : externalRun ? stopExternalRun : startSession}
-            className="inline-flex h-8 w-fit items-center gap-2 rounded border border-line bg-bg px-2 text-[12px] text-ink hover:bg-line/40 disabled:opacity-50"
+            className={
+              activeAgent
+                ? "inline-flex h-8 w-fit items-center gap-2 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50"
+                : "inline-flex h-9 w-fit items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
+            }
           >
             {activeAgent ? <Square size={13} aria-hidden /> : <Play size={13} aria-hidden />}
             {activeAgent ? "Stop" : "Start"}
           </button>
           {session?.runId || externalRun ? (
-            <div data-testid="agent-active-run" className="text-[12px] text-subtle">
+            <div data-testid="agent-active-run" className="font-mono text-[11px] text-subtle">
               {session ? `${session.driverName} · ${session.runId}` : `${externalRun?.agentId} · ${externalRun?.status}`}
             </div>
           ) : null}
         </div>
       </section>
 
-      <section className="rounded border border-line bg-panel p-3">
-        <h3 className="mb-2 mt-0 text-[13px] font-medium text-ink">Drivers</h3>
-        <div className="grid gap-1">
+      <section className="rounded-lg border border-line bg-panel p-3">
+        <h3 className="mb-2 mt-0 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+          Drivers
+        </h3>
+        <div className="grid gap-0.5">
           {(panel?.drivers ?? []).map((driver) => (
             <div
               key={driver.id}
               data-testid="agent-driver-row"
               data-driver-id={driver.id}
-              className="flex items-center justify-between rounded border border-line bg-bg px-2 py-1.5"
+              className="flex min-h-7 items-center justify-between gap-2 rounded-md px-1"
             >
-              <span className="text-[12px] text-ink">{driver.displayName}</span>
-              <span data-testid="agent-driver-state" className="text-[11px] text-subtle">
+              <span className="text-[13px] text-ink">{driver.displayName}</span>
+              <span
+                data-testid="agent-driver-state"
+                className={`font-mono text-[11px] ${driver.installed ? "text-subtle" : "text-warning"}`}
+              >
                 {driver.installed ? driver.version ?? "installed" : "not found"}
               </span>
             </div>
@@ -313,20 +329,22 @@ export function AgentPanelView(props: {
       </section>
 
       {session ? (
-        <section className="rounded border border-line bg-panel p-3">
-          <h3 className="mb-2 mt-0 text-[13px] font-medium text-ink">Stream</h3>
+        <section className="rounded-lg border border-line bg-panel p-3">
+          <h3 className="mb-2 mt-0 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            Stream
+          </h3>
           <div data-testid="agent-stream" className="grid gap-2">
             {session.messages.map((entry) => (
-              <div key={entry.id} className="rounded border border-line bg-bg p-2">
+              <div key={entry.id} className="rounded-md border border-line bg-bg p-2.5">
                 <div className="mb-1 text-[11px] capitalize text-subtle">{entry.role}</div>
-                <div className="whitespace-pre-wrap text-[12px] leading-5 text-ink">{entry.text}</div>
+                <div className="whitespace-pre-wrap text-[13px] leading-5 text-ink">{entry.text}</div>
               </div>
             ))}
             {session.items.map((item) => (
-              <div key={item.id} data-testid="agent-tool-card" className="rounded border border-line bg-bg p-2">
+              <div key={item.id} data-testid="agent-tool-card" className="rounded-md border border-line bg-bg p-2.5">
                 <div className="flex items-center gap-2">
-                  <span className="text-[12px] text-ink">{item.title}</span>
-                  <span className="ml-auto text-[11px] text-subtle">{item.status}</span>
+                  <span className="text-[13px] text-ink">{item.title}</span>
+                  <span className="ml-auto font-mono text-[11px] text-subtle">{item.status}</span>
                 </div>
                 {item.detail ? <div className="mt-1 text-[11px] text-subtle">{item.detail}</div> : null}
               </div>
@@ -344,20 +362,20 @@ export function AgentPanelView(props: {
         <section
           key={request.requestId}
           data-testid="agent-permission-request"
-          className="rounded border border-line bg-panel p-3"
+          className="rounded-lg border border-line bg-panel p-3"
         >
           <div className="mb-2 flex items-center gap-2">
-            <ShieldAlert size={14} aria-hidden className="text-muted" />
+            <ShieldAlert size={14} aria-hidden className="text-warning" />
             <h3 className="m-0 text-[13px] font-medium text-ink">{request.title}</h3>
           </div>
-          {request.detail ? <div className="mb-2 text-[12px] text-subtle">{request.detail}</div> : null}
+          {request.detail ? <div className="mb-2 text-[12px] text-muted">{request.detail}</div> : null}
           {request.locations && request.locations.length > 0 ? (
             <div
               data-testid="agent-permission-locations"
-              className="mb-2 grid gap-1 text-[11px] text-subtle"
+              className="mb-2 grid gap-1"
             >
               {request.locations.map((location) => (
-                <code key={location} className="rounded bg-bg px-1.5 py-0.5 text-ink">
+                <code key={location} className="rounded border border-line bg-bg px-1.5 py-0.5 font-mono text-[11px] text-ink">
                   {location}
                 </code>
               ))}
@@ -371,7 +389,7 @@ export function AgentPanelView(props: {
                 data-testid={`agent-permission-${option.kind}`}
                 disabled={busy}
                 onClick={() => answerPermission(request.requestId, permissionDecision(option.kind))}
-                className="inline-flex h-8 items-center gap-2 rounded border border-line bg-bg px-2 text-[12px] text-ink hover:bg-line/40 disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-2 rounded-lg border border-line bg-bg px-3 text-[13px] text-ink transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50"
               >
                 {option.kind.startsWith("allow") ? <Check size={13} aria-hidden /> : <X size={13} aria-hidden />}
                 {option.name}
@@ -381,23 +399,23 @@ export function AgentPanelView(props: {
         </section>
       ))}
 
-      <section className="rounded border border-line bg-panel p-3">
+      <section className="rounded-lg border border-line bg-panel p-3">
         <div className="mb-2 flex items-center gap-2">
-          <h3 className="m-0 text-[13px] font-medium text-ink">MCP</h3>
+          <h3 className="m-0 text-[10px] font-semibold uppercase tracking-wide text-subtle">MCP</h3>
           <button
             type="button"
             data-testid="agent-copy-mcp"
             aria-label="Copy MCP config"
             title="Copy MCP config"
             onClick={copyConfig}
-            className="ml-auto grid size-7 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+            className="ml-auto grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
           >
             <Copy size={13} aria-hidden />
           </button>
         </div>
         <pre
           data-testid="agent-mcp-config"
-          className="max-h-44 overflow-auto rounded bg-panel-2 p-2 text-[11px] text-muted"
+          className="max-h-56 overflow-auto rounded-lg border border-line bg-panel-2 p-3 font-mono text-[12px] leading-5 text-muted"
         >
           {configText || "Loading..."}
         </pre>

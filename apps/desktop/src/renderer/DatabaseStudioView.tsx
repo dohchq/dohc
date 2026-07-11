@@ -1,4 +1,5 @@
-import { ArrowDownAZ, ArrowUpAZ, Database, Search, Share2 } from "lucide-react";
+import { DohcMark } from "@dohc/brand";
+import { ArrowDown, ArrowUp, Database, Search, Share2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -255,9 +256,12 @@ export function DatabaseStudioView(props: {
         <Header path={path} onShare={onShare} />
         <div
           data-testid="view-database"
-          className="flex flex-1 items-center justify-center text-sm text-subtle"
+          className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
         >
-          {error ? "Couldn't read this database." : "Loading database…"}
+          <DohcMark size={28} className="text-line" />
+          <p className="text-sm text-muted">
+            {error ? "Couldn't read this database." : "Loading database…"}
+          </p>
         </div>
       </div>
     );
@@ -274,19 +278,21 @@ export function DatabaseStudioView(props: {
         data-testid="view-database"
       >
         <aside
-          className="flex min-h-0 flex-col border-r border-line bg-panel-2"
+          className="flex min-h-0 flex-col border-r border-line bg-panel"
           data-testid="db-table-list"
         >
-          <div className="border-b border-line px-3 py-2">
-            <div className="text-[11px] uppercase text-subtle">Tables</div>
+          <div className="border-b border-line px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              Tables
+            </div>
             <div className="mt-0.5 text-[12px] text-muted">
               {snapshot.tables.length} table
               {snapshot.tables.length === 1 ? "" : "s"} loaded
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-1">
             {snapshot.tables.length === 0 ? (
-              <span className="px-1 text-[12px] text-subtle">No tables</span>
+              <span className="px-2 text-[12px] text-subtle">No tables</span>
             ) : (
               snapshot.tables.map((table) => (
                 <button
@@ -294,13 +300,19 @@ export function DatabaseStudioView(props: {
                   type="button"
                   data-testid="db-table-tab"
                   onClick={() => selectTable(table.name)}
-                  className={`flex w-full items-center gap-2 rounded border px-2 py-1.5 text-left ${
+                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
                     active?.name === table.name
-                      ? "border-line bg-panel text-ink"
-                      : "border-transparent text-muted hover:border-line hover:bg-panel/60 hover:text-ink"
+                      ? "bg-line text-ink"
+                      : "text-muted hover:bg-panel-2 hover:text-ink"
                   }`}
                 >
-                  <Database size={13} aria-hidden className="shrink-0" />
+                  <Database
+                    size={13}
+                    aria-hidden
+                    className={`shrink-0 ${
+                      active?.name === table.name ? "text-ink" : "text-subtle"
+                    }`}
+                  />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px]">
                       {table.name}
@@ -322,7 +334,7 @@ export function DatabaseStudioView(props: {
           {error ? (
             <p
               data-testid="db-edit-error"
-              className="mb-2 mt-0 rounded border border-line bg-panel-2 px-2 py-1 text-[12px] text-danger"
+              className="mb-3 mt-0 rounded-md border border-line bg-panel-2 px-2.5 py-1.5 text-[12px] text-danger"
             >
               Couldn't apply the last change.
             </p>
@@ -332,12 +344,12 @@ export function DatabaseStudioView(props: {
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <h2 className="truncate text-[15px] font-semibold text-ink">
+                    <h2 className="truncate text-sm font-semibold text-ink">
                       {active.name}
                     </h2>
                     <span
                       data-testid="db-visible-row-count"
-                      className="rounded border border-line bg-panel-2 px-1.5 py-0.5 text-[11px] text-muted"
+                      className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] tabular-nums text-muted"
                     >
                       {visibleRows.length} of {activeRows.length} loaded rows
                     </span>
@@ -348,15 +360,16 @@ export function DatabaseStudioView(props: {
                       : `${editableRowCount} editable row${editableRowCount === 1 ? "" : "s"} by row key`}
                   </div>
                 </div>
-                <label className="flex w-full max-w-[320px] items-center gap-1.5 rounded border border-line bg-panel px-2 py-1 text-[12px] text-subtle focus-within:ring-1 focus-within:ring-accent">
-                  <Search size={13} aria-hidden />
+                <label className="flex w-full max-w-[320px] items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 py-1.5 text-subtle transition-colors focus-within:border-ink">
+                  <Search size={13} aria-hidden className="shrink-0" />
                   <span className="sr-only">Search loaded rows</span>
                   <input
+                    spellCheck={false}
                     data-testid="db-filter-input"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                     placeholder="Search loaded rows"
-                    className="min-w-0 flex-1 bg-transparent text-[12px] text-ink outline-none placeholder:text-subtle"
+                    className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
                   />
                 </label>
               </div>
@@ -368,17 +381,17 @@ export function DatabaseStudioView(props: {
                 {activeColumns.map((column) => (
                   <span
                     key={column.name}
-                    className="rounded border border-line bg-panel px-1.5 py-0.5"
+                    className="inline-flex items-center gap-1 rounded bg-panel-2 px-1.5 py-0.5"
                   >
                     <span className="text-ink">{column.name}</span>
-                    <span className="ml-1 text-subtle">
+                    <span className="font-mono text-subtle">
                       {column.type || "value"}
                     </span>
                     {column.primaryKey ? (
-                      <span className="ml-1 text-accent">pk</span>
+                      <span className="font-mono text-accent">pk</span>
                     ) : null}
                     {column.nullable === false ? (
-                      <span className="ml-1 text-subtle">required</span>
+                      <span className="font-mono text-subtle">required</span>
                     ) : null}
                   </span>
                 ))}
@@ -409,9 +422,10 @@ export function DatabaseStudioView(props: {
               />
             </>
           ) : (
-            <p className="text-[13px] text-subtle">
-              No tables in this database.
-            </p>
+            <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+              <DohcMark size={28} className="text-line" />
+              <p className="text-sm text-muted">No tables in this database.</p>
+            </div>
           )}
         </main>
       </div>
@@ -422,8 +436,8 @@ export function DatabaseStudioView(props: {
 function Header({ path, onShare }: { path: string; onShare?: () => void }) {
   return (
     <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
-      <Database size={13} aria-hidden />
-      <span className="font-mono text-ink">{path}</span>
+      <Database size={13} aria-hidden className="shrink-0 text-subtle" />
+      <span className="truncate font-mono text-ink">{path}</span>
       <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">
         database
       </span>
@@ -434,7 +448,7 @@ function Header({ path, onShare }: { path: string; onShare?: () => void }) {
           aria-label="Share file"
           title="Share file"
           onClick={onShare}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
         >
           <Share2 size={13} aria-hidden />
         </button>
@@ -463,59 +477,61 @@ function DatabaseGrid(props: {
   );
   return (
     <div
-      className="min-h-0 flex-1 overflow-auto rounded border border-line"
+      className="min-h-0 flex-1 overflow-auto rounded-lg border border-line"
       data-testid="db-table"
     >
-      <table className="w-full min-w-[640px] border-collapse text-left text-[12px]">
+      <table className="w-full min-w-[640px] border-collapse text-left text-[13px]">
         <thead>
           <tr>
-            <th className="sticky left-0 top-0 z-20 w-12 border-b border-r border-line bg-panel-2 px-2 py-1 text-right font-medium text-subtle">
+            <th className="sticky left-0 top-0 z-20 w-12 border-b border-r border-line bg-panel-2 px-2.5 py-1.5 text-right text-[11px] font-semibold tabular-nums text-subtle">
               #
             </th>
-            {table.columns.map((column) => (
-              <th
-                key={column.name}
-                aria-sort={
-                  props.sort?.column === column.name
-                    ? props.sort.direction === "asc"
-                      ? "ascending"
-                      : "descending"
-                    : "none"
-                }
-                className={`sticky top-0 z-10 border-b border-line bg-panel-2 px-2 py-1 font-medium text-ink ${
-                  numeric.has(column.name) ? "text-right" : ""
-                }`}
-              >
-                <button
-                  type="button"
-                  data-testid={`db-sort-${column.name}`}
-                  onClick={() => props.onSort(column.name)}
-                  className={`inline-flex max-w-full items-center gap-1 rounded px-1 py-0.5 hover:bg-line/50 ${
-                    numeric.has(column.name) ? "ml-auto" : ""
-                  }`}
+            {table.columns.map((column) => {
+              const isSorted = props.sort?.column === column.name;
+              return (
+                <th
+                  key={column.name}
+                  aria-sort={
+                    isSorted
+                      ? props.sort?.direction === "asc"
+                        ? "ascending"
+                        : "descending"
+                      : "none"
+                  }
+                  className={`sticky top-0 z-10 border-b border-line bg-panel-2 px-2.5 py-1.5 text-[13px] font-semibold ${
+                    isSorted ? "text-ink" : "text-muted"
+                  } ${numeric.has(column.name) ? "text-right" : ""}`}
                 >
-                  <span className="truncate">{column.name}</span>
-                  {props.sort?.column === column.name &&
-                  props.sort.direction === "desc" ? (
-                    <ArrowDownAZ
-                      size={12}
-                      aria-hidden
-                      className="shrink-0 text-accent"
-                    />
-                  ) : (
-                    <ArrowUpAZ
-                      size={12}
-                      aria-hidden
-                      className={`shrink-0 ${
-                        props.sort?.column === column.name
-                          ? "text-accent"
-                          : "text-subtle"
-                      }`}
-                    />
-                  )}
-                </button>
-              </th>
-            ))}
+                  <button
+                    type="button"
+                    data-testid={`db-sort-${column.name}`}
+                    onClick={() => props.onSort(column.name)}
+                    className={`inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-line/50 ${
+                      numeric.has(column.name) ? "ml-auto" : ""
+                    }`}
+                  >
+                    <span className="truncate">{column.name}</span>
+                    {isSorted && props.sort?.direction === "desc" ? (
+                      <ArrowDown
+                        size={12}
+                        strokeWidth={1.9}
+                        aria-hidden
+                        className="shrink-0 text-ink"
+                      />
+                    ) : (
+                      <ArrowUp
+                        size={12}
+                        strokeWidth={1.9}
+                        aria-hidden
+                        className={`shrink-0 ${
+                          isSorted ? "text-ink" : "text-subtle"
+                        }`}
+                      />
+                    )}
+                  </button>
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody className="[&>tr:last-child>td]:border-b-0">
@@ -523,7 +539,7 @@ function DatabaseGrid(props: {
             <tr>
               <td
                 colSpan={table.columns.length + 1}
-                className="px-3 py-8 text-center text-[12px] text-subtle"
+                className="px-3 py-10 text-center text-[13px] text-muted"
                 data-testid="db-empty-rows"
               >
                 No loaded rows match the current search.
@@ -538,9 +554,9 @@ function DatabaseGrid(props: {
               <tr
                 key={String(row.__dohc_rowid ?? `${rowLabel}-${sourceIndex}`)}
                 data-testid="db-row"
-                className="odd:bg-bg even:bg-panel/30"
+                className="bg-bg transition-colors hover:bg-panel-2"
               >
-                <td className="sticky left-0 z-10 border-b border-r border-line bg-inherit px-2 py-1 text-right tabular-nums text-subtle">
+                <td className="sticky left-0 z-10 border-b border-r border-line/60 bg-inherit px-2.5 py-1.5 text-right text-[11px] tabular-nums text-subtle">
                   {visibleIndex + 1}
                 </td>
                 {table.columns.map((column) => {
@@ -569,14 +585,15 @@ function DatabaseGrid(props: {
                             : String(row[column.name]),
                         );
                       }}
-                      className={`max-w-[280px] border-b border-line px-2 py-1 align-top ${
+                      className={`max-w-[280px] border-b border-line/60 px-2.5 py-1.5 align-top ${
                         numeric.has(column.name)
                           ? "text-right tabular-nums"
                           : ""
-                      } ${editable ? "cursor-text text-ink hover:bg-panel-2" : "text-muted"}`}
+                      } ${editable ? "cursor-text text-ink" : "text-muted"}`}
                     >
                       {isEditing ? (
                         <input
+                          spellCheck={false}
                           data-testid="db-cell-input"
                           autoFocus
                           value={props.draft}
@@ -586,7 +603,7 @@ function DatabaseGrid(props: {
                             if (e.key === "Enter") props.onCommit();
                             else if (e.key === "Escape") props.onCancel();
                           }}
-                          className="w-full bg-panel px-1 py-0.5 text-[12px] text-ink outline-none ring-1 ring-accent"
+                          className="w-full rounded border border-ink bg-bg px-1.5 py-0.5 text-[13px] text-ink outline-none"
                         />
                       ) : (
                         <span

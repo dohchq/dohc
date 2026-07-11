@@ -25,9 +25,16 @@ describe("markdown editor layout css", () => {
   });
 
   it("keeps typed markdown list input rules visibly list-like", () => {
-    const unordered = cssRule('.dohc-notion-editor ul:not([data-type="taskList"])');
+    // Task lists exist in two DOM shapes (TipTap data-type attrs and the
+    // markdown-parsed li[data-checked] form) — the selectors must exclude
+    // BOTH from bullet styling and style BOTH as task lists.
+    const unordered = cssRule(
+      '.dohc-notion-editor ul:not([data-type="taskList"]):not(:has(> li[data-checked]))',
+    );
     const ordered = cssRule('.dohc-notion-editor ol:not([data-type="taskList"])');
-    const taskList = cssRule('.dohc-notion-editor ul[data-type="taskList"]');
+    const taskList = cssRule(
+      '.dohc-notion-editor ul[data-type="taskList"],\n.dohc-notion-editor ul:has(> li[data-checked])',
+    );
     const listParagraph = cssRule(".dohc-notion-editor li > p");
 
     expect(unordered).toContain("list-style-type: disc;");

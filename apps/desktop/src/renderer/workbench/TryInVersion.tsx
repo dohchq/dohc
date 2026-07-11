@@ -30,7 +30,7 @@ export function TryInVersionBanner(props: {
         aria-hidden
         className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
       />
-      <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
+      <Bot size={13} aria-hidden className="shrink-0 text-agent" />
       <span className="shrink-0">An agent is trying:</span>
       <span
         data-testid="try-run-banner-task"
@@ -46,7 +46,7 @@ export function TryInVersionBanner(props: {
         type="button"
         data-testid="try-run-watch"
         onClick={props.onWatch}
-        className="ml-auto flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        className="ml-auto flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
         <Eye size={12} aria-hidden />
         Watch
@@ -56,9 +56,9 @@ export function TryInVersionBanner(props: {
 }
 
 const CARD_ACTION_CLASS =
-  "h-7 cursor-pointer rounded border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50";
 const CARD_PRIMARY_ACTION_CLASS =
-  "h-7 cursor-pointer rounded bg-ink px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50";
 
 function reviewHeading(state: TryInVersionRunState): string {
   if (state.runOutcome === "failed") return "The agent stopped before finishing";
@@ -192,7 +192,7 @@ export function TryInVersionReviewCard(props: {
       className="shrink-0 border-b border-line bg-panel px-3 py-2.5 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
     >
       <div className="flex items-start gap-2">
-        <Bot size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+        <Bot size={14} aria-hidden className="mt-0.5 shrink-0 text-agent" />
         <div className="min-w-0 flex-1">
           <h3 className="m-0 text-[13px] font-semibold text-ink">
             {reviewHeading(state)}
@@ -211,7 +211,7 @@ export function TryInVersionReviewCard(props: {
           title="Keep working in this version"
           disabled={busy !== null}
           onClick={() => void dismiss()}
-          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50"
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50"
         >
           <X size={13} aria-hidden />
         </button>

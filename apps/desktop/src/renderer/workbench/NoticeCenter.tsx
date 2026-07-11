@@ -32,8 +32,26 @@ type Notice = {
   // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
   onDismiss?: () => void;
+  // Agent notices carry when they happened; system notices are stateful
+  // ("cloud disconnected") and render no time.
+  timeMs?: number;
   Icon: typeof Bell;
 };
+
+// Coarse relative time for the notice ledger. Not live-ticking on purpose:
+// the list re-derives on every notice/state change, which is exactly when a
+// stale label would matter.
+function relativeTime(thenMs: number): string {
+  const deltaMinutes = Math.round((Date.now() - thenMs) / 60_000);
+  if (deltaMinutes < 1) return "just now";
+  if (deltaMinutes < 60) return `${deltaMinutes}m ago`;
+  const deltaHours = Math.round(deltaMinutes / 60);
+  if (deltaHours < 24) return `${deltaHours}h ago`;
+  return new Date(thenMs).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
 
 const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
   finished: CheckCircle2,
@@ -178,6 +196,7 @@ export function NoticeCenter(props: {
         tone: AGENT_NOTICE_TONE[notification.kind],
         title: notification.title,
         body: notification.body,
+        timeMs: notification.createdAtMs,
         Icon: AGENT_NOTICE_ICON[notification.kind],
         ...(props.onOpenAgentNotification
           ? { action: { label: "Open", onClick: () => props.onOpenAgentNotification?.(notification) } }
@@ -325,7 +344,7 @@ export function NoticeCenter(props: {
           ref={toastRef}
           data-testid="update-toast"
           role="status"
-          className="fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink shadow-sm"
+          className="dohc-popover dohc-pop-in fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
         >
           <span>{updateActionError ?? updateState.message}</span>
           {updateState.canInstall ? (
@@ -333,7 +352,7 @@ export function NoticeCenter(props: {
               type="button"
               disabled={installPending}
               onClick={() => void installUpdate()}
-              className="shrink-0 rounded bg-ink px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+              className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
             >
               {installPending ? "Restarting" : "Restart"}
             </button>
@@ -342,7 +361,7 @@ export function NoticeCenter(props: {
             type="button"
             aria-label="Dismiss update notice"
             onClick={() => setDismissedUpdateToastKey(readyUpdateKey)}
-            className="grid size-4 shrink-0 place-items-center rounded text-subtle hover:text-ink"
+            className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
           >
             <X size={12} aria-hidden />
           </button>
@@ -355,7 +374,7 @@ export function NoticeCenter(props: {
           data-testid="notice-center"
           role="dialog"
           aria-label="Notices"
-          className={`fixed right-3 z-20 flex w-[min(360px,calc(100vw-24px))] flex-col rounded-md border border-line bg-panel text-xs text-ink shadow-sm ${
+          className={`dohc-popover dohc-pop-in fixed right-3 z-20 flex w-[min(360px,calc(100vw-24px))] flex-col rounded-lg border border-line bg-panel text-xs text-ink ${
             updateToastVisible ? "bottom-20" : "bottom-9"
           }`}
         >
@@ -367,14 +386,14 @@ export function NoticeCenter(props: {
             {count > 0 ? (
               <span
                 data-testid="notice-center-count"
-                className="ml-auto rounded-full bg-ink px-1.5 text-[10px] font-semibold leading-4 text-bg"
+                className="ml-auto rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted"
               >
                 {count}
               </span>
             ) : null}
           </header>
           {count === 0 ? (
-            <div className="flex h-20 items-center gap-2 px-3 text-subtle">
+            <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
               <Check size={14} aria-hidden />
               All clear
             </div>
@@ -384,7 +403,7 @@ export function NoticeCenter(props: {
                 <li
                   key={notice.id}
                   data-testid={`notice-${notice.id}`}
-                  className="flex gap-2 border-b border-line px-3 py-2 last:border-b-0"
+                  className="dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0"
                 >
                   <notice.Icon
                     size={14}
@@ -404,7 +423,7 @@ export function NoticeCenter(props: {
                             notice.action?.onClick();
                             setOpen(false);
                           }}
-                          className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                          className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
                         >
                           {notice.action.label}
                         </button>
@@ -415,7 +434,7 @@ export function NoticeCenter(props: {
                           data-testid={`notice-${notice.id}-dismiss`}
                           aria-label="Dismiss notice"
                           onClick={() => notice.onDismiss?.()}
-                          className={`${notice.action ? "" : "ml-auto "}grid size-4 shrink-0 place-items-center rounded text-subtle hover:text-ink`}
+                          className={`${notice.action ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                         >
                           <X size={11} aria-hidden />
                         </button>
@@ -424,6 +443,11 @@ export function NoticeCenter(props: {
                     <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
                       {notice.body}
                     </p>
+                    {notice.timeMs ? (
+                      <time className="mt-1 block font-mono text-[10px] text-subtle">
+                        {relativeTime(notice.timeMs)}
+                      </time>
+                    ) : null}
                   </div>
                 </li>
               ))}
@@ -439,7 +463,7 @@ export function NoticeCenter(props: {
         aria-label={count > 0 ? `Notices (${count})` : "Notices"}
         title="Notices"
         onClick={() => setOpen((value) => !value)}
-        className="relative grid size-5 place-items-center rounded text-muted hover:bg-line/50 hover:text-ink"
+        className="relative grid size-5 place-items-center rounded-md text-muted transition-colors hover:bg-line/50 hover:text-ink"
       >
         <Bell size={13} aria-hidden />
         {count > 0 ? (

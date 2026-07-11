@@ -126,7 +126,7 @@ export function SwitchControl(props: {
         if (!props.disabled) props.onChange(!props.checked);
       }}
       className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${
-        props.checked ? "border-ink bg-ink" : "border-line bg-panel-2"
+        props.checked ? "border-accent bg-accent" : "border-line bg-panel-2"
       }`}
     >
       <span

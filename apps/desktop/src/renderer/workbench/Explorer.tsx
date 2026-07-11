@@ -227,7 +227,7 @@ const TreeRow = memo(function TreeRow(props: {
           : "bg-line/35 text-ink"
         : "";
   return (
-    <li role="none">
+    <li role="none" className="px-1">
       <button
         type="button"
         role="treeitem"
@@ -256,7 +256,7 @@ const TreeRow = memo(function TreeRow(props: {
         // Background style) — box-shadow/background only, NEVER `outline`:
         // the base outline-none nulls --tw-outline-style later in the same
         // cascade layer, which made an outline-based highlight unrenderable.
-        className={`relative flex h-7 w-full items-center gap-1.5 pr-2 text-left text-[13px] outline-none ${
+        className={`relative flex h-7 w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -997,6 +997,7 @@ export function Explorer(props: ExplorerProps) {
           <FileText size={13} aria-hidden className="shrink-0 text-muted" />
         )}
         <input
+          spellCheck={false}
           ref={editInputRef}
           type="text"
           data-testid="tree-edit-input"
@@ -1172,7 +1173,7 @@ export function Explorer(props: ExplorerProps) {
                       data-testid="open-editor-row"
                       data-path={tab.path}
                       data-active={active}
-                      className={`group flex h-7 items-center ${
+                      className={`group mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                         active ? "bg-line text-ink" : "text-muted hover:bg-line/50 hover:text-ink"
                       }`}
                     >

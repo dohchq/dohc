@@ -1,6 +1,7 @@
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { bridge } from "./bridge";
+import { PrimaryButton } from "./ui/controls";
 
 // The grant side of a relay share (PR 18): pick who gets it, create the
 // grant, hand back the copyable share code. The selection (a file, a folder,
@@ -70,16 +71,16 @@ export function RelayShareDialog(props: {
   return (
     <div
       data-testid="share-dialog"
-      className="flex w-105 flex-col gap-3 rounded-md border border-line bg-panel p-4 shadow-lg"
+      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
         <Share2 size={14} aria-hidden className="text-subtle" />
-        <h2 className="m-0 flex-1 text-sm font-semibold">Share</h2>
+        <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Share</h2>
         <button
           type="button"
           aria-label="Close"
           onClick={props.onClose}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
         >
           <X size={13} aria-hidden />
         </button>
@@ -112,18 +113,17 @@ export function RelayShareDialog(props: {
               }}
               placeholder="name@example.com"
               spellCheck={false}
-              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
-          <button
+          <PrimaryButton
             type="button"
             data-testid="share-create"
             disabled={!canSubmit}
             onClick={() => void createShare()}
-            className="rounded bg-accent px-3 py-2 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "Creating share…" : "Create share"}
-          </button>
+          </PrimaryButton>
         </>
       ) : (
         <>
@@ -135,7 +135,7 @@ export function RelayShareDialog(props: {
           <div className="flex items-start gap-2">
             <code
               data-testid="share-code"
-              className="min-w-0 flex-1 break-all rounded border border-line bg-panel-2 px-2 py-1.5 font-mono text-[11px] leading-snug text-ink"
+              className="min-w-0 flex-1 break-all rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11px] leading-snug text-ink"
             >
               {created.shareCode}
             </code>
@@ -143,7 +143,7 @@ export function RelayShareDialog(props: {
               type="button"
               data-testid="share-code-copy"
               onClick={() => void copyCode()}
-              className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel-2 px-2.5 py-1.5 text-xs text-muted hover:text-ink"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
             >
               {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
               {copied ? "Copied" : "Copy"}
@@ -156,7 +156,7 @@ export function RelayShareDialog(props: {
             type="button"
             data-testid="share-done"
             onClick={props.onClose}
-            className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+            className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
           >
             Done
           </button>

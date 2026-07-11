@@ -1,3 +1,4 @@
+import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
 import { Overlay } from "./Overlay";
@@ -75,49 +76,53 @@ export function CommandPalette(props: {
     <Overlay onClose={props.onClose}>
       <div
         data-testid={props.testId ?? "command-palette"}
-        className="w-130 max-w-[80vw] overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
+        className="dohc-popover w-135 max-w-[80vw] overflow-hidden rounded-xl border border-line bg-panel"
       >
-        <input
-          ref={inputRef}
-          type="text"
-          aria-label={props.ariaLabel ?? "Command"}
-          placeholder={props.placeholder ?? "Type a command…"}
-          value={query}
-          onChange={(event) => {
-            rendererMarks.mark("file-tree-search-input");
-            setQuery(event.target.value);
-            setSelectedIndex(0);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") props.onClose();
-            else if (event.key === "ArrowDown") {
-              event.preventDefault();
-              moveSelection(1);
-            } else if (event.key === "ArrowUp") {
-              event.preventDefault();
-              moveSelection(-1);
-            } else if (event.key === "Enter") runCommand(matches[selected]);
-          }}
-          // Intentional focus treatment (the input autofocuses on open): the
-          // bottom hairline shifts to ink instead of the global focus ring,
-          // whose top/sides the rounded popover would clip into a stray bar.
-          className="w-full border-b border-line bg-transparent px-4 py-3 text-sm text-ink outline-none placeholder:text-subtle focus:border-ink"
-        />
+        <div className="flex items-center gap-2.5 border-b border-line px-4">
+          <Search size={14} aria-hidden className="shrink-0 text-subtle" />
+          <input
+            spellCheck={false}
+            ref={inputRef}
+            type="text"
+            aria-label={props.ariaLabel ?? "Command"}
+            placeholder={props.placeholder ?? "Type a command…"}
+            value={query}
+            onChange={(event) => {
+              rendererMarks.mark("file-tree-search-input");
+              setQuery(event.target.value);
+              setSelectedIndex(0);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") props.onClose();
+              else if (event.key === "ArrowDown") {
+                event.preventDefault();
+                moveSelection(1);
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                moveSelection(-1);
+              } else if (event.key === "Enter") runCommand(matches[selected]);
+            }}
+            // Intentional focus treatment (the input autofocuses on open): no
+            // ring — the framing row and caret carry focus, and the global
+            // ring's top/sides would clip into the rounded popover.
+            className="w-full bg-transparent py-3.5 text-sm text-ink outline-none placeholder:text-subtle"
+          />
+        </div>
         <ul
           ref={listRef}
           role="listbox"
           aria-label="Commands"
-          className="m-0 max-h-72 list-none overflow-y-auto p-1"
+          className="m-0 max-h-72 list-none overflow-y-auto p-1.5"
         >
           {matches.length === 0 ? (
-            <li className="px-3 py-2 text-xs text-subtle">No matching commands</li>
+            <li className="px-3 py-2.5 text-xs text-subtle">No matching commands</li>
           ) : (
             matches.map((command, index) => (
               <li key={command.id} role="option" aria-selected={index === selected}>
                 <button
                   type="button"
                   onClick={() => runCommand(command)}
-                  className={`flex h-7 w-full items-center rounded px-3 text-left text-[13px] ${
+                  className={`flex h-8 w-full items-center rounded-md px-2.5 text-left text-[13px] transition-colors duration-75 ${
                     // Active row gets the stronger line-family tint (D-E5);
                     // panel-2 is reserved for hover only.
                     index === selected
@@ -131,6 +136,20 @@ export function CommandPalette(props: {
             ))
           )}
         </ul>
+        <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[10px] text-subtle">
+          <span className="flex items-center gap-1">
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">↑↓</kbd>
+            navigate
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">↵</kbd>
+            open
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">esc</kbd>
+            dismiss
+          </span>
+        </div>
       </div>
     </Overlay>
   );

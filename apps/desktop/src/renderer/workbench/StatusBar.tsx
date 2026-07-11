@@ -56,7 +56,7 @@ export function StatusBar(props: {
       <div className="flex items-center gap-3">
         <span
           data-testid="status-workspace"
-          className="max-w-44 truncate text-[11px] text-muted"
+          className="max-w-44 truncate font-mono text-[11px] text-subtle"
         >
           {props.workspaceName}
         </span>
@@ -75,7 +75,7 @@ export function StatusBar(props: {
         {props.agentActive ? (
           <span
             data-testid="agent-run-indicator"
-            className="flex items-center gap-1.5 text-[11px] text-muted"
+            className="flex items-center gap-1.5 text-[11px] text-agent"
           >
             <Bot size={12} aria-hidden />
             Agent running
@@ -104,7 +104,7 @@ export function StatusBar(props: {
         <button
           type="button"
           onClick={props.onConnectCloud}
-          className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
+          className="flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-ink"
         >
           <Cloud size={12} aria-hidden />
           Connect dohc Cloud
@@ -114,7 +114,7 @@ export function StatusBar(props: {
           data-testid="toggle-theme"
           aria-label="Toggle theme"
           onClick={props.onToggleTheme}
-          className="flex items-center text-muted hover:text-ink"
+          className="flex items-center text-muted transition-colors hover:text-ink"
         >
           <SunMoon size={13} aria-hidden />
         </button>
@@ -123,7 +123,7 @@ export function StatusBar(props: {
           data-testid="open-settings"
           aria-label="Settings"
           onClick={props.onOpenSettings}
-          className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
+          className="flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-ink"
         >
           <Settings size={12} aria-hidden />
           Settings

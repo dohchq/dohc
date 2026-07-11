@@ -496,11 +496,11 @@ function GraphMap(props: {
       onPointerCancel={endDrag}
       className={
         props.variant === "page"
-          ? "min-h-0 w-full flex-1 touch-none bg-bg"
-          : "h-96 w-full shrink-0 touch-none border-y border-line bg-bg"
+          ? "min-h-0 w-full flex-1 touch-none bg-panel"
+          : "h-96 w-full shrink-0 touch-none border-y border-line bg-panel"
       }
     >
-      <rect width={layout.width} height={layout.height} className="fill-bg" />
+      <rect width={layout.width} height={layout.height} className="fill-panel" />
       {edges.map((edge) => {
         const source = byPath.get(edge.source)!;
         const target = byPath.get(edge.target)!;
@@ -586,7 +586,7 @@ function GraphMap(props: {
                 x={node.x}
                 y={node.y + node.radius + (props.variant === "page" ? 18 : 17)}
                 textAnchor="middle"
-                stroke="var(--dohc-bg)"
+                stroke="var(--dohc-panel)"
                 strokeWidth={props.variant === "page" ? 4 : 3}
                 paintOrder="stroke"
                 data-active={active ? "true" : "false"}
@@ -676,19 +676,19 @@ export function GraphView(props: {
     >
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <GitFork size={13} aria-hidden className="text-subtle" />
-        <output data-testid="graph-doc-count" className="text-[11px] text-muted">
+        <output data-testid="graph-doc-count" className="font-mono text-[11px] text-muted">
           {graph.nodes.length} doc{graph.nodes.length === 1 ? "" : "s"}
         </output>
         <span aria-hidden className="text-subtle">
           ·
         </span>
-        <output data-testid="graph-link-count" className="text-[11px] text-muted">
+        <output data-testid="graph-link-count" className="font-mono text-[11px] text-muted">
           {graph.edges.length} link{graph.edges.length === 1 ? "" : "s"}
         </output>
         {notice ? (
           <span
             data-testid="graph-unresolved-count"
-            className="inline-flex items-center gap-1.5 text-[11px] text-subtle"
+            className="inline-flex items-center gap-1.5 font-mono text-[11px] text-subtle"
           >
             <Unlink size={12} aria-hidden />
             {notice}
@@ -699,7 +699,7 @@ export function GraphView(props: {
           aria-label="Refresh graph"
           title="Refresh graph"
           onClick={load}
-          className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          className="ml-auto grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
         >
           <RefreshCw size={13} aria-hidden />
         </button>
@@ -736,7 +736,7 @@ export function GraphView(props: {
           />
           {variant === "page" ? null : (
             <div className="flex min-h-0 flex-1 flex-col">
-              <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
                 {rows.map((node) => {
                   const active = node.path === props.activePath;
                   return (
@@ -747,15 +747,17 @@ export function GraphView(props: {
                       data-path={node.path}
                       data-active={active ? "true" : "false"}
                       onClick={() => props.onOpenPath(node.path)}
-                      className={`flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left hover:bg-line/40 ${
-                        active ? "bg-line/50 text-ink" : "text-muted"
+                      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
+                        active
+                          ? "bg-line text-ink"
+                          : "text-muted hover:bg-panel-2 hover:text-ink"
                       }`}
                     >
-                      <span className="grid size-6 shrink-0 place-items-center rounded border border-line bg-panel text-[10px] font-semibold text-subtle">
+                      <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 font-mono text-[10px] text-subtle">
                         {degree(node)}
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-xs text-ink">
+                        <span className="block truncate text-[13px] text-ink">
                           {node.title}
                         </span>
                         <span className="block truncate font-mono text-[10px] text-subtle">

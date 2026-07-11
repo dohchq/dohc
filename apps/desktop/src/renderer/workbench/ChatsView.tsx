@@ -153,7 +153,7 @@ function AgentBadge(props: { testIdPrefix: string }) {
   return (
     <span
       data-testid={`${props.testIdPrefix}-agent-badge`}
-      className="rounded border border-agent/40 px-1 font-mono text-[8.5px] text-agent"
+      className="rounded border border-agent/40 px-1 font-mono text-[10px] text-agent"
     >
       agent
     </span>
@@ -171,7 +171,7 @@ function AgentPresenceHint(props: {
       data-testid={props.testId}
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
-      className="inline-flex shrink-0 items-center gap-1 font-mono text-[9.5px] text-subtle"
+      className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-subtle"
     >
       <span
         aria-hidden
@@ -305,17 +305,17 @@ function RunChip(props: { run: ChatRunRecord }) {
           role="dialog"
           aria-label={`Run ${props.run.runId}`}
           data-testid="chats-run-popover"
-          className="absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left shadow-md"
+          className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
           <span className="grid gap-0.5">
-            <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Command</span>
+            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Command</span>
             <code data-testid="chats-run-command" className="break-words text-[11px] text-ink">
               {props.run.command}
             </code>
           </span>
           <span className="grid grid-cols-2 gap-2">
             <span className="grid gap-0.5">
-              <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Started</span>
+              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Started</span>
               <time
                 data-testid="chats-run-started"
                 dateTime={started.iso}
@@ -325,14 +325,14 @@ function RunChip(props: { run: ChatRunRecord }) {
               </time>
             </span>
             <span className="grid gap-0.5">
-              <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Exit code</span>
+              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Exit code</span>
               <span data-testid="chats-run-exit-code" className="font-mono text-[10px] text-muted">
                 {props.run.exitCode ?? "—"}
               </span>
             </span>
           </span>
           <span className="grid gap-0.5">
-            <span className="font-mono text-[9px] uppercase tracking-wide text-subtle">Log</span>
+            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Log</span>
             <span className="flex min-w-0 items-center gap-1.5">
               <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[10px] text-muted">
                 {props.run.logPath ?? "No log path"}
@@ -411,7 +411,7 @@ function PostCard(props: {
         <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
           <span
             data-testid="chats-post-author"
-            className={`text-[12.5px] font-medium ${isAgent ? "text-agent" : "text-ink"}`}
+            className={`text-[13px] font-medium ${isAgent ? "text-agent" : "text-ink"}`}
           >
             {message ? chatAuthorLabel(message) : "Unknown author"}
           </span>
@@ -467,7 +467,7 @@ function PostCard(props: {
         <span className="min-w-2 flex-1" />
         <span
           data-testid="chats-post-comment-count"
-          className="font-mono text-[10.5px] text-subtle"
+          className="font-mono text-[11px] text-subtle"
         >
           {commentCount} {commentCount === 1 ? "comment" : "comments"}
         </span>
@@ -482,7 +482,7 @@ function UnreadPill(props: { count: number; testId: string }) {
     <span
       data-testid={props.testId}
       aria-label={`${props.count} unread`}
-      className="min-w-4 shrink-0 rounded-full bg-ink px-1 text-center text-[9px] font-semibold leading-4 text-bg"
+      className="min-w-4 shrink-0 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
     >
       {props.count > 99 ? "99+" : props.count}
     </span>
@@ -574,7 +574,7 @@ function AddressedToMe(props: {
               type="button"
               data-testid="chats-addressed-item"
               onClick={() => props.onOpen?.(notification)}
-              className="flex w-full cursor-pointer items-start gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+              className="flex w-full cursor-pointer items-start gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
             >
               <Bot size={13} aria-hidden className="mt-0.5 shrink-0 text-accent" />
               <span className="min-w-0 flex-1">
@@ -1795,7 +1795,7 @@ export function ChatsView(props: {
         <button
           type="button"
           onClick={() => void refreshOverview()}
-          className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
         >
           Try again
         </button>
@@ -1827,7 +1827,7 @@ export function ChatsView(props: {
             value={dmRecipients}
             placeholder="To: email@example.com"
             onChange={(event) => setDmRecipients(event.target.value)}
-            className="h-7 w-full rounded border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+            className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
           />
           <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
             Separate several people with commas. They&apos;ll see the conversation on
@@ -1949,7 +1949,7 @@ export function ChatsView(props: {
                 title="Stop agent run"
                 disabled={dispatchActionBusy}
                 onClick={() => void stopThreadRun()}
-                className="inline-flex h-6 shrink-0 items-center gap-1 rounded border border-line px-1.5 font-mono text-[9.5px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
+                className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
               >
                 <Square size={8} fill="currentColor" aria-hidden />
                 Stop
@@ -2046,7 +2046,7 @@ export function ChatsView(props: {
                     <span
                       data-testid="chats-message-author"
                       data-author-kind={openingMessage.authorKind}
-                      className={`text-[12.5px] font-medium ${
+                      className={`text-[13px] font-medium ${
                         openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
                       }`}
                     >
@@ -2154,7 +2154,7 @@ export function ChatsView(props: {
                         data-author-kind={comment.authorKind}
                         className={`group flex flex-col transition-shadow ${
                           flashMessageId === comment.id
-                            ? "rounded-2xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+                            ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
                             : ""
                         }`}
                       >
@@ -2178,7 +2178,7 @@ export function ChatsView(props: {
                                 }
                               : undefined
                           }
-                          className={`w-fit max-w-[92%] rounded-2xl border border-line bg-panel-2 px-3.5 py-2 ${
+                          className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
                             isAgent ? "border-l-2" : ""
                           }`}
                         >
@@ -2186,7 +2186,7 @@ export function ChatsView(props: {
                             <span
                               data-testid="chats-message-author"
                               data-author-kind={comment.authorKind}
-                              className={`text-[12.5px] font-bold ${
+                              className={`text-[13px] font-semibold ${
                                 isAgent ? "text-agent" : "text-ink"
                               }`}
                             >
@@ -2196,7 +2196,7 @@ export function ChatsView(props: {
                           </div>
                           <p
                             data-testid="chats-message-body"
-                            className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[13.5px] leading-normal text-ink"
+                            className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
                           >
                             {mentionCandidates.length > 0 ? (
                               <MentionText
@@ -2233,7 +2233,7 @@ export function ChatsView(props: {
                             </div>
                           ) : null}
                         </div>
-                        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[10.5px] text-subtle">
+                        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
                           <MessageReactions
                             testIdPrefix="chats"
                             messageId={comment.id}
@@ -2600,7 +2600,7 @@ export function ChatsView(props: {
         />
         {agentChannel ? (
           <section data-testid="chats-my-agent-section" aria-label="My agent">
-            <p className="mb-0 mt-3 px-3 font-mono text-[10px] uppercase tracking-wide text-subtle">
+            <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
               My agent
             </p>
             <button
@@ -2608,7 +2608,7 @@ export function ChatsView(props: {
               data-testid="chats-my-agent"
               data-channel-id={agentChannel.id}
               onClick={() => void openChannel(agentChannel)}
-              className="flex w-full cursor-pointer items-center gap-1.5 border-b border-line px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+              className="flex w-full cursor-pointer items-center gap-1.5 border-b border-line px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
             >
               <span
                 data-testid="chats-my-agent-glyph"
@@ -2633,7 +2633,7 @@ export function ChatsView(props: {
         ) : null}
         <p
           data-testid="chats-channels-heading"
-          className="mb-0 mt-3 px-3 font-mono text-[10px] uppercase tracking-wide text-subtle"
+          className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle"
         >
           Channels
         </p>
@@ -2656,7 +2656,7 @@ export function ChatsView(props: {
                   data-channel-id={channel.id}
                   data-channel-slug={channel.slug}
                   onClick={() => void openChannel(channel)}
-                  className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
                 >
                   <Hash size={13} aria-hidden className="shrink-0 text-subtle" />
                   <span className="min-w-0 flex-1">
@@ -2697,7 +2697,7 @@ export function ChatsView(props: {
                     data-testid="chats-dm-item"
                     data-channel-id={dm.channelId}
                     onClick={() => void openDm(dm)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
                   >
                     <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
                     <span className="min-w-0 flex-1">
@@ -2728,7 +2728,7 @@ export function ChatsView(props: {
                     setDmDraft("");
                     setNav({ level: "dm-new" });
                   }}
-                  className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+                  className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
                 >
                   <Plus size={12} aria-hidden />
                   New message
@@ -2790,7 +2790,7 @@ export function ChatsView(props: {
                         : "Open in the file rail"
                     }
                     onClick={() => props.onOpenFileChat(thread)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
                   >
                     <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
                     <span className="min-w-0 flex-1">
@@ -2814,7 +2814,7 @@ export function ChatsView(props: {
             type="button"
             data-testid="chats-new-channel"
             onClick={() => setCreatingChannel("")}
-            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
           >
             <Plus size={12} aria-hidden />
             New channel
@@ -2843,7 +2843,7 @@ export function ChatsView(props: {
                   setCreatingChannel(null);
                 }
               }}
-              className="h-7 w-full rounded border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
             />
             <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
               Press Enter to create the channel.

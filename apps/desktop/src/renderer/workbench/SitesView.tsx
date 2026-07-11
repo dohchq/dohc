@@ -104,7 +104,7 @@ export function SitesView(props: {
     <div data-testid="sites-view" className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <Globe2 size={13} aria-hidden className="text-subtle" />
-        <output data-testid="sites-count" className="text-[11px] text-muted">
+        <output data-testid="sites-count" className="font-mono text-[11px] text-muted">
           {sites.length} site{sites.length === 1 ? "" : "s"}
         </output>
       </div>
@@ -124,7 +124,7 @@ export function SitesView(props: {
           <span className="text-xs text-muted">No sites</span>
         </div>
       ) : (
-        <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0">
+        <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">
           {sites.map((site) => {
             const diagnosticLabel = siteDiagnosticLabel(site);
             return (
@@ -134,9 +134,9 @@ export function SitesView(props: {
                   data-testid="sites-row"
                   data-root={site.root}
                   onClick={() => props.onOpenPath(siteTabPath(site.root))}
-                  className="flex w-full items-start gap-2 border-b border-line px-3 py-2.5 text-left hover:bg-line/40 focus:bg-line/50 focus:outline-none"
+                  className="flex w-full items-start gap-3 rounded-lg border border-line bg-panel p-3 text-left transition-colors hover:bg-panel-2"
                 >
-                  <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded border border-line bg-panel text-subtle">
+                  <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-line bg-bg text-subtle">
                     {site.packagePath ? (
                       <Box size={14} aria-hidden />
                     ) : (
@@ -171,7 +171,7 @@ export function SitesView(props: {
                     <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">
                       {site.root}
                     </span>
-                    <span className="mt-1 block truncate text-[11px] text-muted">
+                    <span className="mt-1.5 block truncate font-mono text-[11px] text-muted">
                       {siteMeta(site)}
                     </span>
                     {diagnosticLabel ? (

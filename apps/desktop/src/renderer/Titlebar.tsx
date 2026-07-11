@@ -1,3 +1,4 @@
+import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, Search } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
@@ -39,11 +40,9 @@ export function Titlebar(props: {
         paddingLeft: isMac ? 80 : "calc(env(titlebar-area-x, 0px) + 12px)",
       }}
     >
-      <span
-        aria-hidden
-        className="text-[13px] font-semibold tracking-tight text-ink"
-      >
-        dohc
+      <span aria-hidden className="flex items-center gap-1.5 text-ink">
+        <DohcMark size={14} className="shrink-0" />
+        <span className="text-[13px] font-semibold tracking-tight">dohc</span>
       </span>
 
       {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
@@ -65,7 +64,7 @@ export function Titlebar(props: {
             <ul
               role="listbox"
               aria-label="Workspaces"
-              className="absolute left-0 top-full z-20 mt-1 m-0 w-64 list-none rounded-md border border-line bg-panel p-1 shadow-sm"
+              className="dohc-popover dohc-pop-in absolute left-0 top-full z-20 mt-1 m-0 w-64 list-none rounded-lg border border-line bg-panel p-1"
             >
               {props.workspaces.map((candidate) => (
                 <li

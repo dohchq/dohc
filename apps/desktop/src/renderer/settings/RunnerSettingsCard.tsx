@@ -181,7 +181,7 @@ export function RunnerSettingsCard(props: {
           onChange={(event) => setCommandDraft(event.currentTarget.value)}
           onBlur={() => void commitDrafts()}
           onKeyDown={handleInputKeyDown}
-          className="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-[11px] text-ink outline-none placeholder:text-subtle focus:border-accent focus:ring-1 focus:ring-accent"
+          className="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-[11px] text-ink outline-none placeholder:text-subtle focus:border-ink"
         />
         <p className="m-0 mt-1.5 text-[10px] leading-relaxed text-subtle">
           The prompt is appended to this command when a run starts. Double quotes
@@ -222,6 +222,7 @@ export function RunnerSettingsCard(props: {
           </div>
           <div className="flex items-center gap-1.5">
             <input
+              spellCheck={false}
               id="runner-timeout"
               data-testid="runner-timeout-input"
               type="number"
@@ -233,7 +234,7 @@ export function RunnerSettingsCard(props: {
               onChange={(event) => setTimeoutDraft(event.currentTarget.value)}
               onBlur={() => void commitDrafts()}
               onKeyDown={handleInputKeyDown}
-              className="w-16 rounded-md border border-line bg-bg px-2 py-1.5 text-right text-[11px] text-ink outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+              className="w-16 rounded-md border border-line bg-bg px-2 py-1.5 text-right text-[11px] text-ink outline-none focus:border-ink"
             />
             <span className="text-[10px] text-subtle">min</span>
           </div>

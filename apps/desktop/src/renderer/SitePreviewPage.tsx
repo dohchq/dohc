@@ -283,7 +283,7 @@ export function SitePreviewPage(props: {
               data-testid={`site-preview-${mode}`}
               disabled={runningMode !== null}
               onClick={() => void start(mode)}
-              className="inline-flex h-7 items-center gap-1 rounded border border-line bg-panel-2 px-2 text-[11px] text-muted hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-line bg-transparent px-2.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-wait disabled:opacity-60"
             >
               {mode === "build" ? (
                 <Hammer size={12} aria-hidden />
@@ -307,7 +307,7 @@ export function SitePreviewPage(props: {
                   url.searchParams.set("t", String(Date.now()));
                   setPreview({ ...preview, url: url.href });
                 }}
-                className="grid size-7 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                className="grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
               >
                 <RefreshCcw size={13} aria-hidden />
               </button>
@@ -317,7 +317,7 @@ export function SitePreviewPage(props: {
                 aria-label="Stop preview"
                 title="Stop preview"
                 onClick={() => void stop()}
-                className="grid size-7 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                className="grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
               >
                 <Square size={13} aria-hidden />
               </button>
@@ -365,7 +365,11 @@ export function SitePreviewPage(props: {
             ) : (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-panel-2 px-3">
-                  <span data-testid="site-preview-mode" className="text-[11px] text-muted">
+                  <span
+                    aria-hidden
+                    className="size-1.5 shrink-0 rounded-full bg-success"
+                  />
+                  <span data-testid="site-preview-mode" className="text-[11px] text-success">
                     {modeLabel(preview.mode)} preview
                   </span>
                   <span className="truncate font-mono text-[11px] text-subtle">{preview.url}</span>
@@ -375,7 +379,7 @@ export function SitePreviewPage(props: {
                     aria-label="Open preview externally"
                     title="Open preview externally"
                     onClick={() => void bridge().openExternalUrl({ url: preview.url })}
-                    className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                    className="ml-auto grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
                   >
                     <ExternalLink size={12} aria-hidden />
                   </button>
@@ -395,7 +399,7 @@ export function SitePreviewPage(props: {
                   src={siteFrameUrl(preview.url)}
                   sandbox="allow-forms allow-same-origin allow-scripts"
                   referrerPolicy="no-referrer"
-                  className="min-h-0 flex-1 border-0 bg-white"
+                  className="min-h-0 flex-1 border-0 bg-bg"
                 />
                 {preview.logs.length > 0 ? (
                   <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
