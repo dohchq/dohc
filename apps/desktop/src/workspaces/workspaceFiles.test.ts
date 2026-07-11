@@ -4,7 +4,9 @@ import {
   mkdir,
   readdir,
   readFile,
+  stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -144,6 +146,46 @@ describe("listFiles", () => {
     const result = await listFiles(root);
     expect(result.files).toEqual([{ path: "real.md", kind: "file" }]);
     expect(result.folders).toEqual([]);
+  });
+
+  it("reuses a cached icon (skips re-reading the file) while mtime+size are unchanged", async () => {
+    const path = join(root, "plan.md");
+    const withRocket = "---\nicon: 🚀\n---\n\n# Plan\n";
+    const withNote = "---\nicon: 📝\n---\n\n# Plan\n";
+    // Both emoji are 4-byte UTF-8 sequences, so swapping them leaves the
+    // file's byte size unchanged — the only lever left to prove a cache hit
+    // (vs. a fresh read) is forcing mtime back to what the cache last saw.
+    expect(Buffer.byteLength(withNote, "utf8")).toBe(Buffer.byteLength(withRocket, "utf8"));
+
+    await writeFile(path, withRocket);
+    const first = await listFiles(root);
+    expect(first.files).toEqual([{ path: "plan.md", kind: "file", icon: "🚀" }]);
+
+    const original = await stat(path);
+    await writeFile(path, withNote);
+    // Restore the original mtime so size+mtime look identical to the cache
+    // even though the on-disk bytes changed underneath.
+    await utimes(path, original.atime, original.mtime);
+
+    const second = await listFiles(root);
+    expect(second.files).toEqual([{ path: "plan.md", kind: "file", icon: "🚀" }]);
+  });
+
+  it("invalidates the icon cache when a markdown file's mtime changes", async () => {
+    const path = join(root, "plan.md");
+    await writeFile(path, "---\nicon: 🚀\n---\n\n# Plan\n");
+    const first = await listFiles(root);
+    expect(first.files).toEqual([{ path: "plan.md", kind: "file", icon: "🚀" }]);
+
+    const before = await stat(path);
+    await writeFile(path, "---\nicon: 📝\n---\n\n# Plan\n");
+    // Force a strictly newer mtime regardless of filesystem timestamp
+    // resolution (some filesystems only tick every ~1s).
+    const bumped = new Date(before.mtime.getTime() + 1000);
+    await utimes(path, bumped, bumped);
+
+    const second = await listFiles(root);
+    expect(second.files).toEqual([{ path: "plan.md", kind: "file", icon: "📝" }]);
   });
 });
 

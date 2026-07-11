@@ -1651,22 +1651,47 @@ body {
  * Document outline rail + word count (OutlinePanel.tsx, WordCountBadge.tsx)
  *
  * Both float in the editor's margins WITHOUT taking part in the document's
- * own layout, so neither can ever shift the prose. The trick: turn
- * .dohc-tiptap-editor into a single-cell CSS grid and stack EditorContent,
- * the outline, and the word-count badge all in that one cell (grid items
- * can overlap on purpose). The outline/badge wrappers are height: 0 so
- * they never affect the grid row's size — EditorContent (the tall one)
- * is what actually sizes it — then position: sticky pins each wrapper to
- * the TOP (outline) or BOTTOM (word count) of the nearest scrolling
- * ancestor (FileInspector's overflow-auto pane), so they read as fixed
- * chrome even though the document under them keeps scrolling.
+ * own layout, so neither can ever shift the prose. The trick: turn a
+ * dedicated inner wrapper — .dohc-editor-surface, NOT .dohc-tiptap-editor
+ * itself — into a single-cell CSS grid and stack EditorContent, the
+ * outline, and the word-count badge all in that one cell (grid items can
+ * overlap on purpose). The outline/badge wrappers are height: 0 so they
+ * never affect the grid row's size — EditorContent (the tall one) is what
+ * actually sizes it — then position: sticky pins each wrapper to the TOP
+ * (outline) or BOTTOM (word count) of the nearest scrolling ancestor
+ * (FileInspector's overflow-auto pane), so they read as fixed chrome even
+ * though the document under them keeps scrolling.
  *
  * The outline additionally collapses below ~900px of inline size via a
  * native CSS container query — no JS width tracking needed for that.
+ * container-type establishes .dohc-editor-surface as a query container,
+ * which requires it to also become the CONTAINING BLOCK for every
+ * position: fixed (and absolute) descendant — that's CSS containment, not
+ * optional. .dohc-tiptap-editor is NOT a safe place for that: every
+ * editing popover (slash menu, @-mention/wikilink pickers, link menu,
+ * block menu) is a non-portaled position: fixed child of
+ * .dohc-tiptap-editor (see MarkdownEditor.tsx) computing its top/left from
+ * view.coordsAtPos(...) — VIEWPORT coordinates. If .dohc-tiptap-editor
+ * were the query container, those coordinates would resolve against the
+ * editor pane's box instead of the viewport, displacing every popover by
+ * the pane's offset from the window's top-left (sidebar width, header
+ * height). Scoping container-type to .dohc-editor-surface, and rendering
+ * the popovers as siblings of it (outside it) inside .dohc-tiptap-editor,
+ * keeps them structurally exempt: only EditorContent + OutlinePanel +
+ * WordCountBadge are its descendants (verified against the MarkdownEditor
+ * JSX — the popovers all render before the .dohc-editor-surface wrapper
+ * as siblings, and none of them are inside it). No layout-affecting
+ * container query needs to reach a fixed-position popover, so this loses
+ * nothing; a jsdom test cannot exercise CSS containment at all (it does no
+ * layout), so this constraint has to be enforced by DOM-structure
+ * discipline, not a test — verify manually by inspecting
+ * MarkdownEditor.tsx's returned JSX before touching this again.
  * --------------------------------------------------------------------- */
-.dohc-tiptap-editor {
+.dohc-editor-surface {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  min-height: 100%;
   container-type: inline-size;
   container-name: dohc-editor;
 }
@@ -2166,7 +2191,14 @@ body {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--dohc-callout-accent);
+  /* Label text needs to clear 4.5:1 (WCAG AA) on the 8%-tinted callout
+   * background in both themes. --dohc-callout-accent (esp. the default
+   * note/info blue) does not: ~3.4:1 light / ~3.7:1 dark. --dohc-ink does,
+   * comfortably, for every type in both themes (14.5–16:1) — see the
+   * per-type/theme contrast table in the phase-2 review notes. The accent
+   * stays on the icon, left bar, chevron, and hover fill, which are
+   * decorative/graphical (3:1 threshold) or non-text. */
+  color: var(--dohc-ink);
   font: inherit;
   font-size: 12px;
   font-weight: 600;

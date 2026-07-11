@@ -51,6 +51,15 @@ function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
   return Object.fromEntries(map.entries());
 }
 
+// Elements a keyboard user can land on inside the picker — used both to seed
+// focus on open and to loop Tab/Shift+Tab within the dialog.
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function getFocusable(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+}
+
 export function PageIdentity(props: PageIdentityProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
@@ -107,22 +116,50 @@ export function PageIdentity(props: PageIdentityProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [emojiInput, setEmojiInput] = useState("");
   const pickerRef = useRef<HTMLDivElement | null>(null);
+  // The icon/add-icon button is whichever one is currently rendered — they
+  // never render at once, so one ref safely tracks "the trigger" across an
+  // icon being set/cleared while the picker is open.
+  const iconTriggerRef = useRef<HTMLButtonElement | null>(null);
 
+  // role="dialog" implies focus moves inside on open and is constrained
+  // (trapped) to the picker while it's open, then returns to the trigger on
+  // close — otherwise a screen reader announces a dialog the user isn't
+  // actually inside, and a keyboard user who selects an emoji loses their
+  // place when the picker unmounts.
   useEffect(() => {
     if (!pickerOpen) return;
+    const container = pickerRef.current;
+    getFocusable(container ?? document.createElement("div"))[0]?.focus();
+
     function onPointerDown(event: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
         setPickerOpen(false);
       }
     }
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setPickerOpen(false);
+      if (event.key === "Escape") {
+        setPickerOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !pickerRef.current) return;
+      const focusable = getFocusable(pickerRef.current);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
+      iconTriggerRef.current?.focus();
     };
   }, [pickerOpen]);
 
@@ -145,6 +182,7 @@ export function PageIdentity(props: PageIdentityProps) {
         <div className="dohc-page-identity__icon-row">
           {icon ? (
             <button
+              ref={iconTriggerRef}
               type="button"
               data-testid="page-icon"
               aria-label="Change icon"
@@ -157,6 +195,7 @@ export function PageIdentity(props: PageIdentityProps) {
             </button>
           ) : !readOnly ? (
             <button
+              ref={iconTriggerRef}
               type="button"
               data-testid="page-icon-add"
               aria-label="Add icon"

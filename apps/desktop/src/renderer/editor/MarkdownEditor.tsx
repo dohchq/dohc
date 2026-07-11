@@ -662,7 +662,20 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             </span>
           </div>
         ) : null}
-        <EditorContent editor={editor} />
+        {/* .dohc-editor-surface — NOT .dohc-tiptap-editor — is the CSS
+         * container-query context for the outline/word-count grid trick.
+         * Every position: fixed popover below (slash menu, block menu,
+         * both wikilink/@-mention pickers, link menu) MUST stay a sibling
+         * of this wrapper, never a descendant: container-type makes an
+         * element the containing block for fixed descendants too, which
+         * would turn their view.coordsAtPos(...) viewport coordinates into
+         * editor-pane-relative ones. See the comment on .dohc-editor-surface
+         * in styles.css for the full mechanism. */}
+        <div className="dohc-editor-surface">
+          <EditorContent editor={editor} />
+          <OutlinePanel editor={editor} containerRef={containerRef} />
+          <WordCountBadge editor={editor} />
+        </div>
         {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
           <BubbleMenu
@@ -753,8 +766,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             />
           </>
         ) : null}
-        <OutlinePanel editor={editor} containerRef={containerRef} />
-        <WordCountBadge editor={editor} />
       </div>
     );
   },

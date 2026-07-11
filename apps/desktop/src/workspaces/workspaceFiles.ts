@@ -122,6 +122,55 @@ async function readMarkdownIcon(absolutePath: string): Promise<string | undefine
   }
 }
 
+// Icon cache: readMarkdownIcon does an open+read+close per markdown file, and
+// listFiles' walk awaits it serially for every .md/.markdown file it visits.
+// Without a cache, a full re-listing (e.g. after every save, via the
+// fs-watch -> refreshFiles path) re-pays that IO for the ENTIRE tree even
+// when nothing changed. Keyed by absolute path + (mtimeMs, size) — a plain
+// `stat` (one syscall) is enough to prove a file is unchanged and skip the
+// far more expensive open/read/close. Bounded so a huge/rarely-restarted
+// workspace can't grow this without limit; a simple insertion-order Map
+// doubles as an LRU (delete+re-set moves an entry to the "most recent" end).
+const MAX_ICON_CACHE_ENTRIES = 4000;
+type IconCacheEntry = { mtimeMs: number; size: number; icon: string | undefined };
+const iconCache = new Map<string, IconCacheEntry>();
+
+function rememberIcon(absolutePath: string, entry: IconCacheEntry): void {
+  iconCache.delete(absolutePath);
+  iconCache.set(absolutePath, entry);
+  if (iconCache.size > MAX_ICON_CACHE_ENTRIES) {
+    const oldest = iconCache.keys().next().value;
+    if (oldest !== undefined) iconCache.delete(oldest);
+  }
+}
+
+// Cache-checked wrapper around readMarkdownIcon. Never throws — a stat
+// failure (e.g. a TOCTOU delete mid-walk) is treated as "no icon", matching
+// readMarkdownIcon's own failure-tolerant contract.
+async function getCachedMarkdownIcon(absolutePath: string): Promise<string | undefined> {
+  let mtimeMs: number;
+  let size: number;
+  try {
+    const st = await stat(absolutePath);
+    // Round to whole milliseconds: some filesystems (observed via WSL bind
+    // mounts) return a `mtimeMs` that jitters by a fraction of a millisecond
+    // between two stats of a file whose timestamp was never touched, which
+    // would otherwise cause a spurious cache miss on every single listing.
+    mtimeMs = Math.round(st.mtimeMs);
+    size = st.size;
+  } catch {
+    return undefined;
+  }
+  const cached = iconCache.get(absolutePath);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    rememberIcon(absolutePath, cached); // refresh LRU recency
+    return cached.icon;
+  }
+  const icon = await readMarkdownIcon(absolutePath);
+  rememberIcon(absolutePath, { mtimeMs, size, icon });
+  return icon;
+}
+
 export async function listFiles(
   rootPath: string,
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
@@ -146,7 +195,7 @@ export async function listFiles(
         const kind = classifyPath(rel).kind;
         const entry: WorkspaceFileEntry = { path: rel, kind };
         if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
-          const icon = await readMarkdownIcon(join(dir, dirent.name));
+          const icon = await getCachedMarkdownIcon(join(dir, dirent.name));
           if (icon) entry.icon = icon;
         }
         entries.push(entry);

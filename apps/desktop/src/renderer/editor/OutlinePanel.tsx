@@ -10,7 +10,7 @@
 // measurement it does is figuring out which heading is "active" as the
 // user scrolls, which is inherently scroll-driven and can't be CSS-only.
 
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import {
   extractOutline,
@@ -31,6 +31,23 @@ import {
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
 const WORD_COUNT_DEBOUNCE_MS = 300;
+
+// Same convention theme.ts uses to install the CSS reduced-motion
+// resets: the OS-level media query OR the app's own reduce-motion setting
+// (mirrored onto <html data-reduce-motion>). scrollIntoView's `behavior`
+// is JS, not CSS, so it isn't covered by the `scroll-behavior: auto
+// !important` reset those install — an explicit "smooth" here must be
+// downgraded by hand.
+function prefersReducedMotion(): boolean {
+  const appSetting =
+    typeof document !== "undefined" &&
+    document.documentElement.dataset.reduceMotion === "true";
+  if (appSetting) return true;
+  return (
+    typeof window !== "undefined" &&
+    (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false)
+  );
+}
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   let node = el?.parentElement ?? null;
@@ -54,7 +71,10 @@ function scrollToHeading(editor: Editor, heading: OutlineHeading) {
     while (el && el.nodeType !== Node.ELEMENT_NODE) el = el.parentNode;
     const target = el as HTMLElement | null;
     if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "start",
+    });
     target.classList.add("dohc-outline-target-flash");
     window.setTimeout(() => target.classList.remove("dohc-outline-target-flash"), 900);
     if (editor.isEditable) {
@@ -76,6 +96,21 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
   const [headings, setHeadings] = useState<OutlineHeading[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [wordCount, setWordCount] = useState<WordCharCount>(EMPTY_WORD_CHAR_COUNT);
+
+  // extractOutline always returns a fresh array (even when the flattened
+  // heading list is unchanged), so `headings` gets a new reference on every
+  // editor `update` — i.e. every keystroke. The scroll-tracking effect below
+  // needs the CURRENT headings to resolve the active section, but it must
+  // not treat every keystroke as a reason to tear down and reattach its
+  // scroll listener (that forces a coordsAtPos layout read per heading on
+  // every keystroke — see the ref below). Reading through a ref, kept in
+  // sync here, decouples "know the current headings" from "the listener's
+  // dependency array".
+  const headingsRef = useRef<OutlineHeading[]>(headings);
+  // Set by the scroll-tracking effect below; re-invoked (never re-created)
+  // whenever headings change so a doc edit still refreshes which heading is
+  // "active" without re-running the effect that owns the listener.
+  const scheduleActiveUpdateRef = useRef<(() => void) | null>(null);
 
   // Recompute the heading list synchronously (cheap: a handful of nodes)
   // and the word count debounced (spec'd ~300ms) on every doc change.
@@ -104,20 +139,31 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
     };
   }, [editor]);
 
-  // Track scroll to resolve which section is active. Only wires up once
-  // there's something to track (≥ 1 heading) — the panel itself only
-  // renders at ≥ 2, but resolving early avoids a jump the moment a 2nd
-  // heading appears.
+  // Keep the ref in sync with the latest headings, and ask the scroll effect
+  // (if it's attached) to refresh the active heading — via the SAME
+  // rAF-coalesced scheduler the scroll listener uses, so a burst of
+  // keystrokes collapses into at most one geometry read per frame instead of
+  // one per keystroke.
   useEffect(() => {
-    if (!editor || headings.length === 0) return;
+    headingsRef.current = headings;
+    scheduleActiveUpdateRef.current?.();
+  }, [headings]);
+
+  // Track scroll to resolve which section is active. Attaches once per
+  // editor/containerRef (NOT per headings change — see headingsRef above),
+  // so editing the document never tears down and reattaches this listener.
+  useEffect(() => {
+    if (!editor) return;
     const scrollEl = findScrollParent(containerRef.current);
     if (!scrollEl) return;
 
     let frame = 0;
     const update = () => {
       frame = 0;
+      const currentHeadings = headingsRef.current;
+      if (currentHeadings.length === 0) return;
       const containerRect = scrollEl.getBoundingClientRect();
-      const tops = headings.map((h) => {
+      const tops = currentHeadings.map((h) => {
         try {
           return editor.view.coordsAtPos(h.pos).top - containerRect.top + scrollEl.scrollTop;
         } catch {
@@ -132,14 +178,16 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
       if (frame) return;
       frame = requestAnimationFrame(update);
     };
+    scheduleActiveUpdateRef.current = onScroll;
 
     update();
     scrollEl.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       scrollEl.removeEventListener("scroll", onScroll);
       if (frame) cancelAnimationFrame(frame);
+      scheduleActiveUpdateRef.current = null;
     };
-  }, [editor, headings, containerRef]);
+  }, [editor, containerRef]);
 
   if (!editor || headings.length < 2) return null;
 

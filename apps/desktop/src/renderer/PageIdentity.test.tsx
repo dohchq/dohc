@@ -133,6 +133,54 @@ describe("PageIdentity", () => {
       expect(screen.queryByTestId("page-icon-add")).toBeNull();
     });
 
+    it("moves focus into the picker when it opens", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
+
+      await user.click(screen.getByTestId("page-icon-add"));
+
+      expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
+    });
+
+    it("returns focus to the trigger button when Escape closes the picker", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
+
+      const trigger = screen.getByTestId("page-icon-add");
+      await user.click(trigger);
+      await user.keyboard("{Escape}");
+
+      expect(screen.queryByTestId("page-icon-picker")).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+
+    it("returns focus to the (now icon) trigger button after choosing an emoji", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
+
+      await user.click(screen.getByTestId("page-icon-add"));
+      await user.click(screen.getByLabelText("Use 🚀"));
+
+      expect(screen.queryByTestId("page-icon-picker")).toBeNull();
+      expect(document.activeElement).toBe(screen.getByTestId("page-icon"));
+    });
+
+    it("traps Tab focus within the open picker", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
+
+      await user.click(screen.getByTestId("page-icon-add"));
+
+      const picker = screen.getByTestId("page-icon-picker");
+      const focusable = picker.querySelectorAll("button, input");
+      const last = focusable[focusable.length - 1] as HTMLElement;
+      last.focus();
+
+      await user.tab();
+
+      expect(document.activeElement).toBe(focusable[0]);
+    });
+
     it("moves focus into the body on Enter", async () => {
       const user = userEvent.setup();
       const onEnterBody = vi.fn();
