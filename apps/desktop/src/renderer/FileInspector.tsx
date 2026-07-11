@@ -33,6 +33,7 @@ import { PageIdentity } from "./PageIdentity";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
+import { DocumentMenu } from "./DocumentMenu";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -821,6 +822,11 @@ function MarkdownView(props: {
               >
                 <SlidersHorizontal size={13} aria-hidden />
               </button>
+              <DocumentMenu
+                workspaceId={props.workspaceId}
+                suggestedName={filenameStem(props.path)}
+                getMarkdown={() => serializeDraftRef.current()}
+              />
             </>
           }
         />
@@ -923,6 +929,11 @@ function MarkdownView(props: {
             >
               {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
+            <DocumentMenu
+              workspaceId={props.workspaceId}
+              suggestedName={filenameStem(props.path)}
+              getMarkdown={() => serializeDraftRef.current()}
+            />
           </>
         }
       />

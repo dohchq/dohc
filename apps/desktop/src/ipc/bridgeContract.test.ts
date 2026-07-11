@@ -10,6 +10,8 @@ import {
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
+  ExportDocumentFilePayload,
+  ExportDocumentFileResult,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   ListFileChatsPayload,
@@ -917,5 +919,60 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
   it("honors an explicit smaller cap", () => {
     expect(presenceStateWithinCap({ a: "hello" }, 4)).toBe(false);
     expect(presenceStateWithinCap(true, PRESENCE_STATE_MAX_BYTES)).toBe(true);
+  });
+});
+
+describe("document export IPC contract", () => {
+  const validPayload = {
+    workspaceId: "ws-1",
+    suggestedName: "Project Plan",
+    content: "<!doctype html><html><body>hi</body></html>",
+    kind: "html" as const,
+  };
+
+  it("accepts a well-formed html export payload", () => {
+    expect(ExportDocumentFilePayload.parse(validPayload)).toEqual(validPayload);
+  });
+
+  it("accepts a well-formed pdf export payload", () => {
+    const payload = { ...validPayload, kind: "pdf" as const };
+    expect(ExportDocumentFilePayload.parse(payload)).toEqual(payload);
+  });
+
+  it("rejects a suggested name containing a path separator", () => {
+    expect(
+      ExportDocumentFilePayload.safeParse({
+        ...validPayload,
+        suggestedName: "../escape",
+      }).success,
+    ).toBe(false);
+    expect(
+      ExportDocumentFilePayload.safeParse({
+        ...validPayload,
+        suggestedName: "sub\\dir",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects an empty suggested name or content", () => {
+    expect(
+      ExportDocumentFilePayload.safeParse({ ...validPayload, suggestedName: "" }).success,
+    ).toBe(false);
+    expect(
+      ExportDocumentFilePayload.safeParse({ ...validPayload, content: "" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a kind outside the closed html/pdf set", () => {
+    expect(
+      ExportDocumentFilePayload.safeParse({ ...validPayload, kind: "docx" }).success,
+    ).toBe(false);
+  });
+
+  it("resolves a cancelled save dialog as a null path", () => {
+    expect(ExportDocumentFileResult.parse({ path: null })).toEqual({ path: null });
+    expect(ExportDocumentFileResult.parse({ path: "/tmp/out.html" })).toEqual({
+      path: "/tmp/out.html",
+    });
   });
 });

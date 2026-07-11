@@ -31,6 +31,8 @@ import {
   DeleteWorkspacePathResult,
   ExportWorkspaceZipPayload,
   ExportWorkspaceZipResult,
+  ExportDocumentFilePayload,
+  ExportDocumentFileResult,
   ShowExplorerMenuPayload,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuPayload,
@@ -215,6 +217,7 @@ import {
 import { initialUpdateState } from "./updates/updateMachine";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { buildMenuTemplate } from "./window/applicationMenu";
+import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowSitePreviewOrigin,
   navigationPolicy,
@@ -2426,6 +2429,47 @@ function registerIpcHandlers(): void {
       await writeFile(target, buildStoreZip(entries));
     }
     return ExportWorkspaceZipResult.parse({ path: target });
+  });
+
+  // "Copy as Markdown" / "Export as HTML" / "Export as PDF" (ViewHeader's
+  // document menu). The renderer always sends the same self-contained HTML
+  // (documentExport.ts); this handler only decides where the bytes land
+  // (.html verbatim, .pdf via the hidden offscreen window) — see
+  // documentPdfExport.ts for the "only one export in flight" guard.
+  ipcMain.handle(CHANNELS.exportDocumentFile, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ExportDocumentFilePayload.parse(payload);
+    // workspaceId authorizes the CALLER (a real, currently-open workspace) —
+    // the save target itself is intentionally outside any workspace, same as
+    // exportWorkspaceZip above.
+    requireWorkspace(input.workspaceId);
+
+    const extension = input.kind === "pdf" ? "pdf" : "html";
+    const testSave = process.env.DOHC_TEST_SAVE_PATH;
+    let target: string | null;
+    if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testSave) {
+      target = testSave;
+    } else {
+      const result = await dialog.showSaveDialog({
+        title: input.kind === "pdf" ? "Export as PDF" : "Export as HTML",
+        defaultPath: `${input.suggestedName}.${extension}`,
+        filters: [
+          input.kind === "pdf"
+            ? { name: "PDF document", extensions: ["pdf"] }
+            : { name: "HTML document", extensions: ["html"] },
+        ],
+      });
+      target = result.canceled ? null : (result.filePath ?? null);
+    }
+    if (target !== null) {
+      const { writeFile } = await import("node:fs/promises");
+      if (input.kind === "pdf") {
+        await writeFile(target, await renderHtmlToPdf(input.content));
+      } else {
+        await writeFile(target, input.content, "utf8");
+      }
+    }
+    return ExportDocumentFileResult.parse({ path: target });
   });
 
   // Native explorer context menu over the CLOSED EXPLORER_MENU_COMMANDS set:

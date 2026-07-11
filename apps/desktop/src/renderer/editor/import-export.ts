@@ -1,5 +1,6 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
-import { getSchema } from '@tiptap/core'
+import { getHTMLFromFragment, getSchema } from '@tiptap/core'
+import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
@@ -120,6 +121,19 @@ export function getDohcYDocPlainText(doc: Y.Doc): Y.Text | null {
 
 export function getDohcProseMirrorSchema() {
   return schema
+}
+
+// Renders BODY markdown (post-frontmatter — split a full document string
+// with parseFrontmatter first) to HTML through the SAME schema/extensions
+// the editor and Y.Doc conversions use, so custom nodes (wikilinks,
+// callouts, highlight marks, task lists) render via their own renderHTML —
+// never a generic/lossy fallback. Used by the document export menu
+// (documentExport.ts). Needs a DOM (`document` global): true in the
+// renderer and under vitest's jsdom environment, never in the main process.
+export function markdownBodyToHtml(body: string): string {
+  const json = markdownManager.parse(body)
+  const node = ProseMirrorNode.fromJSON(schema, json)
+  return getHTMLFromFragment(node.content, schema)
 }
 
 function yDocBodyToMarkdown(doc: Y.Doc): string {
