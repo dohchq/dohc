@@ -260,7 +260,10 @@ body {
 .dohc-notion-editor {
   box-sizing: border-box;
   min-height: 100%;
-  padding: 40px 56px 120px;
+  /* Top matter (PageIdentity + inline properties) supplies the space above
+   * the body now, so this only needs a small settle gap — not the old 40px
+   * chasm that stacked under the title. */
+  padding: 6px 56px 120px;
   color: var(--dohc-ink);
   cursor: text;
   font-size: 15px;
@@ -275,6 +278,18 @@ body {
   max-width: var(--dohc-editor-measure);
   margin-left: auto;
   margin-right: auto;
+}
+
+/* The document opens flush to the editor's top padding and ends flush to its
+ * bottom, regardless of which block leads/trails — a heading's space-before
+ * (e.g. h2's 30px) must not compound with the 40px pad into a lopsided gap.
+ * Zeroing the first block's top margin also keeps the title→body rhythm set by
+ * the padding above rather than a stacked opening h1/h2 margin. */
+.dohc-notion-editor > :first-child {
+  margin-top: 0;
+}
+.dohc-notion-editor > :last-child {
+  margin-bottom: 0;
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -305,7 +320,7 @@ body {
 /* Heading margins use `auto` inline margins so they stay in the centered
  * column (the shorthand would otherwise beat the `> *` centering rule). */
 .dohc-notion-editor h1 {
-  margin: 8px auto 18px;
+  margin: 32px auto 12px;
   font-size: 31px;
   font-weight: 700;
   letter-spacing: -0.021em;
@@ -473,13 +488,36 @@ body {
 
 /* Tables: quiet grid, tinted header band, rounded frame — data that reads
  * like part of the document, not an embedded spreadsheet. */
+/* No `overflow: hidden` here: the row/column grips float into the table's
+ * outer margin (negative offsets, see the table-controls block below) and
+ * would be clipped by it. The rounded frame is instead preserved by rounding
+ * the four corner cells to match the table's own rounded border. */
 .dohc-notion-editor table {
   border-collapse: separate;
   border-spacing: 0;
   width: 100%;
   border: 1px solid var(--dohc-line);
   border-radius: 8px;
-  overflow: hidden;
+}
+
+.dohc-notion-editor tr:first-child > th:first-child,
+.dohc-notion-editor tr:first-child > td:first-child {
+  border-top-left-radius: 7px;
+}
+
+.dohc-notion-editor tr:first-child > th:last-child,
+.dohc-notion-editor tr:first-child > td:last-child {
+  border-top-right-radius: 7px;
+}
+
+.dohc-notion-editor tr:last-child > th:first-child,
+.dohc-notion-editor tr:last-child > td:first-child {
+  border-bottom-left-radius: 7px;
+}
+
+.dohc-notion-editor tr:last-child > th:last-child,
+.dohc-notion-editor tr:last-child > td:last-child {
+  border-bottom-right-radius: 7px;
 }
 
 .dohc-notion-editor th,
@@ -522,6 +560,48 @@ body {
   pointer-events: none;
 }
 
+/* Inline images (DohcImage is an inline atom) — cap to the reading measure,
+ * keep aspect ratio, and round the corners to match the paper's other framed
+ * blocks. The atom gets no default selected-state paint (prosemirror-view's
+ * base stylesheet isn't loaded), so its selection outline is defined here. */
+.dohc-notion-editor .dohc-editor-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  vertical-align: middle;
+}
+
+.dohc-notion-editor .dohc-editor-image.ProseMirror-selectednode {
+  outline: 2px solid var(--dohc-accent);
+  outline-offset: 2px;
+}
+
+/* Gapcursor (the caret shown between/around block nodes and atoms) also ships
+ * unstyled without prosemirror-gapcursor's base CSS — theme it to warm ink so
+ * navigating past an image or code block shows a visible insertion point. */
+.dohc-notion-editor .ProseMirror-gapcursor {
+  display: none;
+  position: relative;
+  pointer-events: none;
+}
+.dohc-notion-editor .ProseMirror-gapcursor::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 24px;
+  border-top: 1px solid var(--dohc-ink);
+  animation: dohc-gapcursor-blink 1.1s steps(2, start) infinite;
+}
+.dohc-notion-editor.ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
+@keyframes dohc-gapcursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
 .dohc-block-node {
   position: relative;
 }
@@ -554,6 +634,11 @@ body {
   color: var(--dohc-subtle);
   font-size: 13px;
   line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 100ms ease-out,
+    border-color 100ms ease-out,
+    color 100ms ease-out;
 }
 
 .dohc-block-plus::before {
@@ -574,7 +659,7 @@ body {
 
 .dohc-block-gutter-btn:hover {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -718,7 +803,7 @@ body {
 .dohc-code-copy-btn,
 .dohc-code-block-continue-btn {
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--dohc-muted);
   font: inherit;
@@ -732,7 +817,7 @@ body {
 .dohc-code-copy-btn:hover,
 .dohc-code-block-continue-btn:hover {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -796,9 +881,15 @@ body {
   padding: 6px 7px;
 }
 
+/* Selected/hover fill across the whole editor menu family is --dohc-line, NOT
+ * --dohc-panel-2: these menus paint on a --dohc-panel surface, and in dark
+ * panel-2 (#181715) is DARKER than panel (#1b1d1a) — a keyboard-selected row
+ * would recede into a barely-visible well. --dohc-line (#2a2925) is lighter
+ * than panel, so selection reads clearly in both themes, and it matches the
+ * canonical list-row recipe (docs/brand/ui-language.md: active `bg-line`). */
 .dohc-slash-menu__item.is-selected,
 .dohc-wikilink-picker__item.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-slash-menu__glyph {
@@ -895,6 +986,11 @@ body {
   color: var(--dohc-match);
   font-family: var(--font-mono);
   font-size: 13px;
+  /* A little horizontal breathing room so the tint doesn't hug the glyphs —
+   * matches the padded wikilink pill; clone keeps it intact across wraps. */
+  padding: 0 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .dohc-bubble-menu {
@@ -927,12 +1023,12 @@ body {
 }
 
 .dohc-bubble-menu__button:hover {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
 .dohc-bubble-menu__button.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-accent);
 }
 
@@ -1092,7 +1188,7 @@ body {
 }
 
 .dohc-link-menu__button:hover:not(:disabled) {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1198,7 +1294,7 @@ body {
 
 .dohc-find-replace__icon-btn:hover:not(:disabled) {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1207,7 +1303,7 @@ body {
 }
 
 .dohc-find-replace__icon-btn.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-accent);
 }
 
@@ -1224,7 +1320,7 @@ body {
 }
 
 .dohc-find-replace__text-btn:hover:not(:disabled) {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1289,7 +1385,7 @@ body {
 }
 
 .dohc-block-menu__item.is-selected {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-block-menu__item.is-danger.is-selected,
@@ -1320,21 +1416,28 @@ body {
 }
 
 /* ── table controls ──
- * Row/column grips + the table menu (tableControls.tsx). Grips are
- * decoration widgets nested one position inside their target cell — same
- * "widget-inside-node, hover-revealed via an ancestor class" technique as
- * the block gutter (.dohc-block-node / .dohc-block-affordance above), so
- * `td`/`th` needs `position: relative` exactly like `.dohc-block-node`
- * does. Nesting inside the cell (rather than a JS-measured overlay) is
- * also what keeps a grip glued to its column/row while a resize drag is
- * live — see the comment at the top of tableControls.tsx. */
+ * Row/column grips, the table menu, and the append "+" buttons
+ * (tableControls.tsx). Each is a decoration widget nested one position inside
+ * its target cell — same "widget-inside-node, hover-revealed via an ancestor
+ * class" technique as the block gutter (.dohc-block-node /
+ * .dohc-block-affordance above), so `td`/`th` needs `position: relative`
+ * exactly like `.dohc-block-node` does. The chrome is then pushed into the
+ * table's OUTER margin with negative offsets so it never overlaps cell text,
+ * while staying a DOM descendant of the cell — which is what keeps every grip
+ * glued to its column/row while a resize drag is live (see the comment at the
+ * top of tableControls.tsx). */
 .dohc-notion-editor td,
 .dohc-notion-editor th {
   position: relative;
 }
 
+/* Grips, the table menu, and the append "+" buttons all float in the table's
+ * OUTER margin (negative offsets), so none of them overlap or reflow cell
+ * text. They share the hover-reveal treatment: shown when the table is
+ * hovered or the control itself is keyboard-focused. */
 .dohc-table-grip,
-.dohc-table-menu-btn {
+.dohc-table-menu-btn,
+.dohc-table-append {
   position: absolute;
   z-index: 4;
   border: 0;
@@ -1345,61 +1448,102 @@ body {
 
 .dohc-table-node:hover .dohc-table-grip,
 .dohc-table-node:hover .dohc-table-menu-btn,
+.dohc-table-node:hover .dohc-table-append,
 .dohc-table-grip:focus-visible,
-.dohc-table-menu-btn:focus-visible {
+.dohc-table-menu-btn:focus-visible,
+.dohc-table-append:focus-visible {
   opacity: 1;
 }
 
 .dohc-table-grip {
   background: var(--dohc-line);
+  border-radius: 999px;
   cursor: pointer;
 }
 
-.dohc-table-grip:hover {
+.dohc-table-grip:hover,
+.dohc-table-grip:focus-visible {
   background: var(--dohc-accent);
 }
 
+/* Column grip: a pill floating just ABOVE its column, spanning the column
+ * width. Negative `top` lifts it into the margin over the table's top edge;
+ * `left`/`right` keep it glued to the (live-resized) column box. */
 .dohc-table-grip--col {
-  top: 0;
-  left: 3px;
-  right: 3px;
-  height: 6px;
-  border-radius: 0 0 3px 3px;
+  top: -11px;
+  left: 1px;
+  right: 1px;
+  height: 7px;
 }
 
+/* Row grip: a pill floating just LEFT of its row, spanning the row height. */
 .dohc-table-grip--row {
-  top: 3px;
-  bottom: 3px;
-  left: 0;
-  width: 6px;
-  border-radius: 0 3px 3px 0;
+  top: 1px;
+  bottom: 1px;
+  left: -11px;
+  width: 7px;
 }
 
-.dohc-table-menu-btn {
-  top: 2px;
-  right: 2px;
-  z-index: 5;
+/* Corner chips — the table menu (⋯) and the append "+" buttons. */
+.dohc-table-menu-btn,
+.dohc-table-append {
   display: inline-grid;
+  place-items: center;
   width: 16px;
   height: 16px;
-  place-items: center;
   border: 1px solid transparent;
   border-radius: 4px;
   background: var(--dohc-bg);
   color: var(--dohc-subtle);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
+}
+
+.dohc-table-menu-btn:hover,
+.dohc-table-menu-btn:focus-visible,
+.dohc-table-append:hover,
+.dohc-table-append:focus-visible {
+  border-color: var(--dohc-line);
+  /* --dohc-line, not --dohc-panel-2: matches the menu-family unification (see
+   * the note above .dohc-slash-menu__item) — panel-2 is darker than the panel
+   * surface in dark mode and would make the hovered chip nearly invisible. */
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
+}
+
+/* Table menu: the top-left outer corner (the spreadsheet "select-all"
+ * corner where the row and column strips meet). */
+.dohc-table-menu-btn {
+  top: -12px;
+  left: -12px;
+  z-index: 5;
 }
 
 .dohc-table-menu-btn::before {
   content: "⋯";
 }
 
-.dohc-table-menu-btn:hover {
-  border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
-  color: var(--dohc-ink);
+.dohc-table-append::before {
+  content: "+";
+}
+
+/* Append column: hugs the table's right edge, spanning the anchor cell. */
+.dohc-table-append--col {
+  top: 1px;
+  bottom: 1px;
+  right: -12px;
+  width: 16px;
+  height: auto;
+}
+
+/* Append row: hugs the table's bottom edge under the first column. */
+.dohc-table-append--row {
+  bottom: -12px;
+  left: 1px;
+  right: 1px;
+  width: auto;
+  height: 16px;
 }
 
 /* Grip menu (insert/delete row or column, toggle header, delete table) —
@@ -1450,8 +1594,12 @@ body {
 
 /* Column resizing (TableKit's `resizable: true`, turned on in
  * MarkdownEditor.tsx) — prosemirror-tables renders `.column-resize-handle`
- * itself; it ships unstyled, so the drag affordance needs a visible bar
- * and the hovered column needs its cursor changed. */
+ * itself; it ships unstyled, so the drag affordance needs a visible bar and
+ * the hovered column needs its cursor changed. The handle widget appears only
+ * when the boundary is active (hover within `handleWidth` px, or dragging), so
+ * it is inherently hover-revealed; the accent bar makes it read as a grabbable
+ * edge. `pointer-events: none` is intentional — prosemirror-tables detects the
+ * drag from a coordinate check on the cell's mousemove, not from the widget. */
 .dohc-notion-editor .column-resize-handle {
   position: absolute;
   top: 0;
@@ -1459,11 +1607,20 @@ body {
   bottom: 0;
   z-index: 20;
   width: 4px;
-  background: var(--dohc-match);
+  background: var(--dohc-accent);
   pointer-events: none;
 }
 
-.dohc-notion-editor .resize-cursor {
+/* prosemirror-tables toggles `.resize-cursor` on `view.dom` — the SAME element
+ * that carries `.dohc-notion-editor` (both come from the editor's `attributes`
+ * prop) — whenever a resize boundary is active (hover AND drag). So the cursor
+ * rule must be a COMPOUND selector on that element (and its cells, which would
+ * otherwise inherit the editor's `cursor: text`), NOT a descendant selector:
+ * there is no `.resize-cursor` descendant, which is exactly why the cursor
+ * never changed before. */
+.dohc-notion-editor.resize-cursor,
+.dohc-notion-editor.resize-cursor td,
+.dohc-notion-editor.resize-cursor th {
   cursor: col-resize;
 }
 
@@ -1494,7 +1651,7 @@ body {
 
 .dohc-turn-into__trigger:hover,
 .dohc-turn-into__trigger[aria-expanded='true'] {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
@@ -1549,7 +1706,7 @@ body {
 }
 
 .dohc-turn-into-menu__item.is-selected {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-turn-into-menu__glyph {
@@ -1648,19 +1805,20 @@ body {
 }
 
 /* ---------------------------------------------------------------------
- * Document outline rail + word count (OutlinePanel.tsx, WordCountBadge.tsx)
+ * Document outline rail (OutlinePanel.tsx) — its footer also carries the
+ * quiet word count (there is no floating word-count badge; the count lives
+ * where the document's structure does).
  *
- * Both float in the editor's margins WITHOUT taking part in the document's
- * own layout, so neither can ever shift the prose. The trick: turn a
- * dedicated inner wrapper — .dohc-editor-surface, NOT .dohc-tiptap-editor
- * itself — into a single-cell CSS grid and stack EditorContent, the
- * outline, and the word-count badge all in that one cell (grid items can
- * overlap on purpose). The outline/badge wrappers are height: 0 so they
- * never affect the grid row's size — EditorContent (the tall one) is what
- * actually sizes it — then position: sticky pins each wrapper to the TOP
- * (outline) or BOTTOM (word count) of the nearest scrolling ancestor
- * (FileInspector's overflow-auto pane), so they read as fixed chrome even
- * though the document under them keeps scrolling.
+ * The outline floats in the editor's right margin WITHOUT taking part in
+ * the document's own layout, so it can never shift the prose. The trick:
+ * turn a dedicated inner wrapper — .dohc-editor-surface, NOT
+ * .dohc-tiptap-editor itself — into a single-cell CSS grid and stack
+ * EditorContent and the outline in that one cell (grid items can overlap
+ * on purpose). The outline wrapper is height: 0 so it never affects the
+ * grid row's size — EditorContent (the tall one) is what actually sizes
+ * it — then position: sticky pins it to the TOP of the nearest scrolling
+ * ancestor (FileInspector's overflow-auto pane), so it reads as fixed
+ * chrome even though the document under it keeps scrolling.
  *
  * The outline additionally collapses below ~900px of inline size via a
  * native CSS container query — no JS width tracking needed for that.
@@ -1677,8 +1835,8 @@ body {
  * the pane's offset from the window's top-left (sidebar width, header
  * height). Scoping container-type to .dohc-editor-surface, and rendering
  * the popovers as siblings of it (outside it) inside .dohc-tiptap-editor,
- * keeps them structurally exempt: only EditorContent + OutlinePanel +
- * WordCountBadge are its descendants (verified against the MarkdownEditor
+ * keeps them structurally exempt: only EditorContent + OutlinePanel are
+ * its descendants (verified against the MarkdownEditor
  * JSX — the popovers all render before the .dohc-editor-surface wrapper
  * as siblings, and none of them are inside it). No layout-affecting
  * container query needs to reach a fixed-position popover, so this loses
@@ -1863,48 +2021,7 @@ body {
   animation: dohc-outline-target-flash 900ms ease-out;
 }
 
-/* Independent of the outline: a quiet words/characters line, hover-reveal
- * over the WHOLE editor area — like the block gutter — not just the badge
- * itself (it's invisible+non-interactive until then, so hovering only the
- * badge's own footprint would be unreachable). */
-.dohc-word-count-badge {
-  position: sticky;
-  bottom: 14px;
-  grid-row: 1;
-  grid-column: 1;
-  align-self: end;
-  justify-self: end;
-  height: 0;
-  margin-right: 18px;
-  overflow: visible;
-  z-index: 3;
-}
-
-.dohc-word-count-badge-text {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  overflow: hidden;
-  padding: 4px 10px;
-  border: 1px solid var(--dohc-line);
-  border-radius: 999px;
-  background: var(--dohc-panel);
-  color: var(--dohc-subtle);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  opacity: 0;
-  transition: opacity 120ms ease;
-  pointer-events: none;
-}
-
-.dohc-tiptap-editor:hover .dohc-word-count-badge-text {
-  opacity: 1;
-}
-
-[data-theme='dark'] .dohc-outline-panel,
-[data-theme='dark'] .dohc-word-count-badge-text {
+[data-theme='dark'] .dohc-outline-panel {
   border-color: color-mix(in srgb, var(--dohc-line) 80%, transparent);
 }
 
@@ -1920,7 +2037,7 @@ body {
 .dohc-page-identity {
   box-sizing: border-box;
   width: 100%;
-  padding: 28px 56px 0;
+  padding: 20px 56px 0;
   background: var(--dohc-bg);
 }
 
@@ -1931,8 +2048,8 @@ body {
 
 .dohc-page-identity__icon-row {
   position: relative;
-  min-height: 22px;
-  margin-bottom: 6px;
+  min-height: 20px;
+  margin-bottom: 4px;
 }
 
 .dohc-page-identity__icon {
@@ -2081,6 +2198,152 @@ body {
 
 [data-theme='dark'] .dohc-page-identity__picker {
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+}
+
+
+/* ===========================================================================
+ * Inline document properties — Notion-style rows in the document flow, sitting
+ * directly under the title (below PageIdentity, above the body) and aligned to
+ * the same reading measure. Quiet by design: a small mono key on the left, the
+ * value on the right, borderless inputs that read as text until hovered/focused,
+ * and a whisper "Add a property" affordance. No box, no divider — the brand
+ * prefers whitespace over chrome. Both data modes (local body frontmatter and
+ * the engine Y.Map) render through this exact surface.
+ * ========================================================================= */
+.dohc-page-properties {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 56px 0;
+  background: var(--dohc-bg);
+}
+
+.dohc-page-properties__inner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.dohc-page-properties__row {
+  display: grid;
+  grid-template-columns: minmax(88px, 168px) minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border-radius: 6px;
+}
+
+.dohc-page-properties__key,
+.dohc-page-properties__value {
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  padding: 3px 6px;
+  outline: none;
+  transition:
+    background-color 100ms ease-out,
+    box-shadow 100ms ease-out;
+}
+
+.dohc-page-properties__key {
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.dohc-page-properties__value {
+  color: var(--dohc-ink);
+  font-size: 13px;
+}
+
+.dohc-page-properties__key::placeholder,
+.dohc-page-properties__value::placeholder {
+  color: var(--dohc-subtle);
+}
+
+.dohc-page-properties__key.is-invalid {
+  color: var(--dohc-danger);
+}
+
+.dohc-page-properties__key:hover,
+.dohc-page-properties__value:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-page-properties__key:focus,
+.dohc-page-properties__value:focus {
+  background: var(--dohc-panel-2);
+  box-shadow: inset 0 0 0 1px var(--dohc-line);
+}
+
+/* Reserved/duplicate-name notice sits where the value would — same column,
+ * quiet danger text, never an input the user can commit a bad value into. */
+.dohc-page-properties__flag {
+  overflow: hidden;
+  padding: 0 6px;
+  color: var(--dohc-danger);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.dohc-page-properties__remove {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 100ms ease-out,
+    color 100ms ease-out,
+    background-color 100ms ease-out;
+}
+
+.dohc-page-properties__row:hover .dohc-page-properties__remove,
+.dohc-page-properties__remove:focus-visible {
+  opacity: 1;
+}
+
+.dohc-page-properties__remove:hover {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-danger);
+}
+
+.dohc-page-properties__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  padding: 4px 6px;
+  color: var(--dohc-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 100ms ease-out,
+    opacity 100ms ease-out;
+}
+
+.dohc-page-properties__add:hover {
+  color: var(--dohc-muted);
+}
+
+/* Empty document: the add row is the ONLY thing here, so keep it a whisper —
+ * revealed when the pointer is over the top-matter zone, like the "Add icon"
+ * affordance — instead of stamping chrome on every property-less page. */
+.dohc-page-properties__add--empty {
+  opacity: 0;
+}
+
+.dohc-page-topmatter:hover .dohc-page-properties__add--empty,
+.dohc-page-properties__add--empty:focus-visible {
+  opacity: 1;
 }
 
 
@@ -2513,7 +2776,7 @@ mark.dohc-highlight,
 }
 
 .dohc-emoji-picker__item.is-active {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 .dohc-emoji-picker__item-glyph {
@@ -2595,7 +2858,7 @@ mark.dohc-highlight,
 }
 
 .dohc-document-menu-item.is-selected {
-  background: var(--dohc-panel-2);
+  background: var(--dohc-line);
 }
 
 /* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled

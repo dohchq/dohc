@@ -30,9 +30,12 @@ import {
 import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
-import { dohcMarkdownExtensions, escapeHighlightMarkdown } from "./extensions";
-import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
-import { makeMathNodeView } from "./mathRender";
+import {
+  dohcMarkdownExtensions,
+  escapeHighlightMarkdown,
+  type DohcImageStorage,
+} from "./extensions";
+import type { ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
   handleImagePaste,
@@ -97,7 +100,6 @@ import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import { OutlinePanel } from "./OutlinePanel";
-import { WordCountBadge } from "./WordCountBadge";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
@@ -176,13 +178,20 @@ const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
 // would double up with linkMenu.tsx's own paste-over-selection handling.
 // Both are owned by linkMenu.tsx's plugin instead.
 const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
+// Dropcursor defaults to a thin `currentColor` line (width 1). Paint it in the
+// brand accent at 2px so the "this is where the drop lands" indicator reads
+// clearly against warm paper and charcoal alike — the inline style resolves the
+// CSS variable against the editor's cascade.
+const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const MARKDOWN_EXTENSION = Markdown.configure({
@@ -453,17 +462,21 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         extensions,
         content: collabActive ? undefined : value,
         contentType: collabActive ? undefined : "markdown",
+        // Register the image node view's per-editor context BEFORE the
+        // ProseMirror view is built (createView reads the extension's storage),
+        // so workspace-relative image srcs resolve on the very first paint.
+        // Node views themselves are registered through their extensions'
+        // addNodeView (TipTap 3.x ignores editorProps.nodeViews).
+        onBeforeCreate({ editor }) {
+          const imageStorage = editor.storage.image as DohcImageStorage | undefined;
+          if (imageStorage) {
+            imageStorage.resolveContext = () => imageContextRef.current;
+          }
+        },
         editorProps: {
           attributes: {
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
-          },
-          // Render-time src resolution for workspace-relative images (canonical
-          // attr stays the original relative path).
-          nodeViews: {
-            image: makeImageNodeView(() => imageContextRef.current),
-            mathInline: makeMathNodeView(false),
-            mathBlock: makeMathNodeView(true),
           },
           handlePaste: (view, event) =>
             handleImagePaste(view, event, pasteContextRef.current),
@@ -699,7 +712,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         <div className="dohc-editor-surface">
           <EditorContent editor={editor} />
           <OutlinePanel editor={editor} containerRef={containerRef} />
-          <WordCountBadge editor={editor} />
         </div>
         {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (

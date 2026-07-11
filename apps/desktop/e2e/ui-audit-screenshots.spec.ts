@@ -104,8 +104,16 @@ async function shot(page: Page, name: string): Promise<void> {
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
-  await page.evaluate((value) => {
+  await page.evaluate(async (value) => {
     document.documentElement.setAttribute("data-theme", value);
+    // Force a style flush and wait two frames so the screenshot can't capture
+    // stale compositor tiles of the (heavy) document pane — under xvfb
+    // software rendering a blind timeout races the repaint and intermittently
+    // yields a light-themed editor inside dark chrome.
+    void getComputedStyle(document.body).backgroundColor;
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
   }, theme);
   await page.waitForTimeout(150);
 }
@@ -279,8 +287,8 @@ test("@ui-audit capture baseline screenshots", async () => {
     }
     await page.keyboard.press("Escape");
 
-    // 20 — properties panel open on the document. Clicking the ACTIVE rail
-    // item toggles the panel closed, so only click when the tree is hidden.
+    // 20 — inline properties under the title. They render in the document
+    // flow now (no toggle), so just open the doc and capture.
     if (!(await explorerRow(page, "notes").isVisible().catch(() => false))) {
       await page.getByTestId("activity-explorer").click();
     }
@@ -289,9 +297,13 @@ test("@ui-audit capture baseline screenshots", async () => {
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
     });
-    const propsToggle = page.getByTestId("markdown-properties-toggle");
-    if (await propsToggle.isVisible().catch(() => false)) {
-      await propsToggle.click();
+    if (
+      await page
+        .getByTestId("properties-panel")
+        .waitFor({ state: "visible", timeout: 5_000 })
+        .then(() => true)
+        .catch(() => false)
+    ) {
       await page.waitForTimeout(500);
       await shot(page, "20-properties-panel-light");
     }

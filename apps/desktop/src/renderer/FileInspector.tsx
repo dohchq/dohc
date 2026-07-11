@@ -4,7 +4,6 @@ import {
   Music,
   Plus,
   Share2,
-  SlidersHorizontal,
   Table,
   Trash2,
 } from "lucide-react";
@@ -325,8 +324,10 @@ function ViewHeader(props: {
 
 function PropertiesFallback() {
   return (
-    <div className="border-b border-line bg-panel px-4 py-2 text-[11px] text-subtle">
-      Loading properties...
+    <div className="dohc-page-properties">
+      <div className="dohc-page-properties__inner text-[11px] text-subtle">
+        Loading properties...
+      </div>
     </div>
   );
 }
@@ -500,7 +501,6 @@ function MarkdownView(props: {
   const [savedBody, setSavedBody] = useState(props.body);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
-  const [propertiesOpen, setPropertiesOpen] = useState(false);
   const editorPendingUndo = useMemo(
     () =>
       props.pendingUndo
@@ -532,7 +532,12 @@ function MarkdownView(props: {
   const editing = mode !== "read";
 
   serializeDraftRef.current = () => {
-    if (mode === "wysiwyg" && !propertiesOpen) {
+    // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
+    // PropertiesPanel own the frontmatter (both write frontmatter through
+    // latestDraft.current). Merge the live editor body over that frontmatter so
+    // a save never emits the stale mount-time body. Source mode edits the full
+    // markdown directly in the textarea, so latestDraft.current is canonical.
+    if (mode === "wysiwyg") {
       const body = wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(draft);
       return mergeMarkdownEditorBody(latestDraft.current, body);
     }
@@ -640,12 +645,7 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!readOnly) return;
     setMode("read");
-    setPropertiesOpen(false);
   }, [readOnly]);
-
-  useEffect(() => {
-    if (props.truncated && !engine.available) setPropertiesOpen(false);
-  }, [props.truncated, engine.available]);
 
   // Performance measure: MarkdownView only mounts once the document body is
   // loaded, so this post-commit effect brackets click → IPC read → markdown
@@ -658,9 +658,13 @@ function MarkdownView(props: {
   }, [props.path]);
 
   // External changes (agent edits, sync pulls) flow into the open document
-  // only while NOT editing — mid-edit, the user's draft wins until saved.
+  // only while NOT editing AND with no unsaved draft — mid-edit, the user's
+  // draft wins until saved. Read mode now edits frontmatter inline (title/icon
+  // via PageIdentity, properties via PropertiesPanel) without switching to an
+  // "editing" mode, so a pending property save must be guarded here too or an
+  // external refresh mid-edit would clobber the unsaved change.
   useEffect(() => {
-    if (!editing) {
+    if (!editing && !unsavedDraft.current) {
       setDraft(props.body);
       setSavedBody(props.body);
       latestDraft.current = props.body;
@@ -726,9 +730,6 @@ function MarkdownView(props: {
         : serializeDraftRef.current();
     latestDraft.current = current;
     setDraft(current);
-    if (next !== "source" && propertiesOpen && !engine.available) {
-      setPropertiesOpen(false);
-    }
     setMode(next);
   }
 
@@ -743,15 +744,6 @@ function MarkdownView(props: {
       return;
     }
     switchMode("wysiwyg");
-  }
-
-  function togglePropertiesPanel() {
-    const opening = !propertiesOpen;
-    if (opening && props.truncated && !engine.available) return;
-    if (opening && mode !== "source" && !engine.available) {
-      switchMode("source");
-    }
-    setPropertiesOpen(opening);
   }
 
   useEffect(() => {
@@ -851,20 +843,6 @@ function MarkdownView(props: {
               >
                 {engine.saveState === "saved" ? "Saved" : "Saving…"}
               </span>
-              <button
-                type="button"
-                data-testid="markdown-properties-toggle"
-                aria-label="Toggle properties"
-                title="Toggle properties"
-                onClick={togglePropertiesPanel}
-                className={`grid size-6 place-items-center rounded-md transition-colors ${
-                  propertiesOpen
-                    ? "bg-line/60 text-ink"
-                    : "text-subtle hover:bg-line/50 hover:text-ink"
-                }`}
-              >
-                <SlidersHorizontal size={13} aria-hidden />
-              </button>
               <DocumentMenu
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
@@ -873,21 +851,23 @@ function MarkdownView(props: {
             </>
           }
         />
-        {propertiesOpen ? (
-          <Suspense fallback={<PropertiesFallback />}>
-            <LazyPropertiesPanel ydoc={engine.doc} />
-          </Suspense>
-        ) : null}
         {props.truncatedNotice}
         <div
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
-          <PageIdentity
-            ydoc={engine.doc}
-            filenameStem={filenameStem(props.path)}
-            onEnterBody={() => wysiwygRef.current?.focus("start")}
-          />
+          {/* Title + inline properties are one top-matter zone (hovering it
+              reveals the quiet "Add a property" affordance on empty docs). */}
+          <div className="dohc-page-topmatter">
+            <PageIdentity
+              ydoc={engine.doc}
+              filenameStem={filenameStem(props.path)}
+              onEnterBody={() => wysiwygRef.current?.focus("start")}
+            />
+            <Suspense fallback={<PropertiesFallback />}>
+              <LazyPropertiesPanel ydoc={engine.doc} />
+            </Suspense>
+          </div>
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-xs text-subtle">
@@ -945,22 +925,6 @@ function MarkdownView(props: {
                 {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
               </span>
             ) : null}
-            {!props.truncated ? (
-              <button
-                type="button"
-                data-testid="markdown-properties-toggle"
-                aria-label="Toggle properties"
-                title="Toggle properties"
-                onClick={togglePropertiesPanel}
-                className={`grid size-6 place-items-center rounded-md transition-colors ${
-                  propertiesOpen
-                    ? "bg-line/60 text-ink"
-                    : "text-subtle hover:bg-line/50 hover:text-ink"
-                }`}
-              >
-                <SlidersHorizontal size={13} aria-hidden />
-              </button>
-            ) : null}
             <button
               type="button"
               data-testid="markdown-edit-toggle"
@@ -980,7 +944,7 @@ function MarkdownView(props: {
             {/* A truncated doc only loaded a bounded prefix into
                 serializeDraftRef — copying/exporting it would silently emit a
                 partial document. Hide the menu until the full file is loaded
-                (same gate as the properties toggle above). */}
+                (same gate as the inline properties below). */}
             {!props.truncated ? (
               <DocumentMenu
                 workspaceId={props.workspaceId}
@@ -991,14 +955,6 @@ function MarkdownView(props: {
           </>
         }
       />
-      {propertiesOpen && !props.truncated ? (
-        <Suspense fallback={<PropertiesFallback />}>
-          <LazyPropertiesPanel
-            body={latestDraft.current}
-            onChange={onPropertiesDraft}
-          />
-        </Suspense>
-      ) : null}
       {props.truncatedNotice}
       {mode === "source" ? (
         <textarea
@@ -1023,13 +979,20 @@ function MarkdownView(props: {
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
-          <PageIdentity
-            body={draft}
-            onChange={onPropertiesDraft}
-            filenameStem={filenameStem(props.path)}
-            readOnly={readOnly}
-            onEnterBody={() => wysiwygRef.current?.focus("start")}
-          />
+          <div className="dohc-page-topmatter">
+            <PageIdentity
+              body={draft}
+              onChange={onPropertiesDraft}
+              filenameStem={filenameStem(props.path)}
+              readOnly={readOnly}
+              onEnterBody={() => wysiwygRef.current?.focus("start")}
+            />
+            {!readOnly ? (
+              <Suspense fallback={<PropertiesFallback />}>
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+              </Suspense>
+            ) : null}
+          </div>
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-xs text-subtle">
@@ -1057,12 +1020,19 @@ function MarkdownView(props: {
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto"
         >
-          <PageIdentity
-            body={draft}
-            onChange={onPropertiesDraft}
-            filenameStem={filenameStem(props.path)}
-            readOnly={readOnly}
-          />
+          <div className="dohc-page-topmatter">
+            <PageIdentity
+              body={draft}
+              onChange={onPropertiesDraft}
+              filenameStem={filenameStem(props.path)}
+              readOnly={readOnly}
+            />
+            {!readOnly ? (
+              <Suspense fallback={<PropertiesFallback />}>
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+              </Suspense>
+            ) : null}
+          </div>
           <div className="dohc-readable-text p-6 text-[15px]">{renderedDocument}</div>
           {backlinks}
         </div>
