@@ -38,6 +38,13 @@ const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 // it's on the allowlist below or the whole input is refused.
 const EXPLICIT_SCHEME_RE = /^[a-z][a-z\d+.-]*:/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// `localhost:3000` / `example.com:8080` — a hostname followed by a numeric
+// port reads as a `scheme:` to EXPLICIT_SCHEME_RE, so without this it would
+// fall through to `null` instead of getting the usual https:// prefix.
+// Restricted to `localhost` or a dotted host so declared schemes with numeric
+// tails (`tel:1234`) aren't misread as host:port.
+const HOST_PORT_RE =
+  /^(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d+(?:[/?#].*)?$/i;
 
 /** Validates + normalizes user-entered link text. Returns the safe,
  *  absolute URL string, or null if the input isn't a usable http(s)/mailto
@@ -48,11 +55,13 @@ export function normalizeLinkUrl(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed || /\s/.test(trimmed)) return null;
 
-  const candidate = EXPLICIT_SCHEME_RE.test(trimmed)
-    ? trimmed
-    : EMAIL_RE.test(trimmed)
-      ? `mailto:${trimmed}`
-      : `https://${trimmed}`;
+  const candidate = HOST_PORT_RE.test(trimmed)
+    ? `https://${trimmed}`
+    : EXPLICIT_SCHEME_RE.test(trimmed)
+      ? trimmed
+      : EMAIL_RE.test(trimmed)
+        ? `mailto:${trimmed}`
+        : `https://${trimmed}`;
 
   try {
     const url = new URL(candidate);

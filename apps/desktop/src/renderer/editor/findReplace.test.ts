@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@tiptap/pm/state";
+import { DecorationSet } from "@tiptap/pm/view";
 import { getDohcProseMirrorSchema } from "./import-export";
 import type { PMDocLike, PMNodeLike } from "./inlineAtomPlugin";
 import {
@@ -7,7 +8,9 @@ import {
   buildReplaceAllTransaction,
   CLOSED_FIND_REPLACE_STATE,
   computeMatches,
+  findReplaceKey,
   findReplaceReducer,
+  makeFindReplacePlugin,
   nextMatchIndex,
   prevMatchIndex,
   type FindReplaceState,
@@ -179,7 +182,7 @@ describe("findReplaceReducer", () => {
     expect(synced.matches[synced.activeIndex]?.from).toBe(secondMatchFrom);
   });
 
-  it("sync falls back to the first match when the active one disappears", () => {
+  it("sync advances forward when the active match disappears (e.g. after Replace)", () => {
     const opened = findReplaceReducer(
       CLOSED_FIND_REPLACE_STATE,
       { type: "open", replace: false, query: "at" },
@@ -188,11 +191,15 @@ describe("findReplaceReducer", () => {
     const onSecond = findReplaceReducer(opened, { type: "next" }, doc);
     expect(onSecond.activeIndex).toBe(1);
 
-    // The "sat" occurrence (the active match) is gone; only "cat" and "mat" remain.
+    // The "sat" occurrence (the active match) is gone; only "cat" (before the
+    // old position) and "mat" (after it) remain. Forward progression should
+    // land on "mat" — the nearest match at/after where we were — not snap
+    // back to "cat" at the top of the doc.
     const editedDoc = fakeDoc([{ text: "the cat ran on the mat", pos: 1 }]);
     const synced = findReplaceReducer(onSecond, { type: "sync" }, editedDoc);
     expect(synced.matches).toHaveLength(2);
-    expect(synced.activeIndex).toBe(0);
+    expect(synced.activeIndex).toBe(1);
+    expect(synced.matches[synced.activeIndex]?.from).toBe(21);
   });
 });
 
@@ -244,5 +251,47 @@ describe("buildReplaceActiveTransaction / buildReplaceAllTransaction", () => {
     const { tr, count } = buildReplaceAllTransaction(state, { matches: [], replacement: "x" });
     expect(count).toBe(0);
     expect(tr.doc.textContent).toBe(state.doc.textContent);
+  });
+});
+
+// The reducer/transaction-builder suites above test the pure pieces in
+// isolation; this exercises the REAL registered plugin end-to-end so the
+// meta-action wiring, the docChanged→auto-sync branch in apply(), and
+// buildFindDecorations can't silently regress.
+describe("makeFindReplacePlugin (registered plugin, real EditorState)", () => {
+  const schema = getDohcProseMirrorSchema();
+
+  function openState(query: string) {
+    const plugin = makeFindReplacePlugin();
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", null, schema.text("the cat sat on the mat")),
+    ]);
+    let state = EditorState.create({ schema, doc, plugins: [plugin] });
+    state = state.apply(
+      state.tr.setMeta(findReplaceKey, { type: "open", replace: false, query }),
+    );
+    return { plugin, state };
+  }
+
+  it("open meta populates plugin state and renders a decoration per match", () => {
+    const { plugin, state } = openState("the");
+    const find = findReplaceKey.getState(state);
+    expect(find?.open).toBe(true);
+    expect(find?.matches).toHaveLength(2);
+
+    const decos = plugin.props.decorations?.call(plugin, state);
+    expect(decos).toBeInstanceOf(DecorationSet);
+    expect((decos as DecorationSet).find()).toHaveLength(2);
+  });
+
+  it("a doc-changing transaction WITHOUT find meta auto-syncs matches", () => {
+    const { state } = openState("the");
+    expect(findReplaceKey.getState(state)?.matches).toHaveLength(2);
+
+    // Insert another "the " at the start of the paragraph text — no find
+    // meta on this transaction, so only the plugin's docChanged branch can
+    // pick it up.
+    const next = state.apply(state.tr.insertText("the ", 1));
+    expect(findReplaceKey.getState(next)?.matches).toHaveLength(3);
   });
 });
