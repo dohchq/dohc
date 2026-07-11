@@ -18,13 +18,21 @@ import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import { TrailingNode } from "@tiptap/extensions/trailing-node";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-import { Bold, Code, Italic, Strikethrough } from "lucide-react";
+import type { EditorView } from "@tiptap/pm/view";
+import {
+  Bold,
+  Code,
+  Italic,
+  Strikethrough,
+  Underline as UnderlineIcon,
+} from "lucide-react";
 import type * as Y from "yjs";
 import { dohcMarkdownExtensions } from "./extensions";
 import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
   handleImagePaste,
+  pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
 import { bridge } from "../bridge";
@@ -69,6 +77,7 @@ import {
   makeBlockControlsPlugin,
   resolveBlockMenuState,
   turnBlockInto,
+  TurnIntoMenu,
   type BlockMenuEntry,
   type BlockMenuState,
 } from "./blockControls";
@@ -506,11 +515,21 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       blockMenuOpenRef.current = openBlockMenu;
     }, [insertBlockAfter, openBlockMenu]);
 
+    const insertImageAtSlash = useCallback((view: EditorView, pos: number) => {
+      pickAndInsertImages(view, pos, pasteContextRef.current);
+    }, []);
+
     const runSlashCommand = useCallback(
       (id: SlashCommandId) => {
-        runSlashCommandCore(editor, id, slashStateRef.current, setSlashState);
+        runSlashCommandCore(
+          editor,
+          id,
+          slashStateRef.current,
+          setSlashState,
+          insertImageAtSlash,
+        );
       },
-      [editor],
+      [editor, insertImageAtSlash],
     );
 
     useEffect(() => {
@@ -592,6 +611,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             className="dohc-bubble-menu"
             shouldShow={({ editor: instance }) => !instance.state.selection.empty}
           >
+            <TurnIntoMenu editor={editor} />
+            <span className="dohc-bubble-menu__divider" aria-hidden="true" />
             <BubbleButton
               label="Bold"
               active={editor.isActive("bold")}
@@ -605,6 +626,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               onClick={() => editor.chain().focus().toggleItalic().run()}
             >
               <Italic size={14} aria-hidden />
+            </BubbleButton>
+            <BubbleButton
+              label="Underline"
+              active={editor.isActive("underline")}
+              onClick={() => editor.chain().focus().toggleUnderline().run()}
+            >
+              <UnderlineIcon size={14} aria-hidden />
             </BubbleButton>
             <BubbleButton
               label="Strikethrough"

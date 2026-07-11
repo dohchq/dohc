@@ -19,7 +19,8 @@ export type SlashCommandId =
   | "quote"
   | "code-block"
   | "divider"
-  | "table";
+  | "table"
+  | "image";
 
 export type SlashCommandItem = {
   id: SlashCommandId;
@@ -122,6 +123,13 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     hint: "Insert a simple grid",
     glyph: "tbl",
     aliases: ["table", "grid", "rows", "columns"],
+  },
+  {
+    id: "image",
+    label: "Image",
+    hint: "Upload a picture",
+    glyph: "img",
+    aliases: ["image", "img", "picture", "photo", "upload"],
   },
 ];
 
@@ -359,6 +367,13 @@ export function runSlashCommand(
   id: SlashCommandId,
   state: SlashCommandState,
   setSlashState: Dispatch<SetStateAction<SlashCommandState>>,
+  // `/image` doesn't insert text like the other commands — it opens a native
+  // file picker and, once files are chosen, writes+inserts them the same way
+  // paste/drop do. That pathway lives in imagePaste.ts and needs the current
+  // document's workspace context, which this module doesn't know about — so
+  // MarkdownEditor.tsx threads it in as a callback, the same way it threads
+  // `openSlashMenuAtPosition` into `insertBlockAfter`.
+  insertImage?: (view: EditorView, pos: number) => void,
 ): void {
   if (!state.open || !editor || !isEditableEditor(editor)) return;
 
@@ -402,6 +417,10 @@ export function runSlashCommand(
       return;
     case "table":
       chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+      return;
+    case "image":
+      chain.run();
+      insertImage?.(editor.view, state.from);
       return;
   }
 }

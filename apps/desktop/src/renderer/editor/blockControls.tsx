@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/core";
 import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { Node as ProseMirrorNode, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
+import { ChevronDown } from "lucide-react";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
@@ -307,7 +308,10 @@ export type BlockMenuState =
 
 export const CLOSED_BLOCK_MENU_STATE: BlockMenuState = { open: false };
 
-const TURN_INTO_ENTRIES: BlockMenuEntry[] = [
+// Exported so the bubble menu's turn-into dropdown (below) can share the
+// exact same entry list/order/labels the block context menu uses, instead of
+// keeping a second copy that could drift.
+export const TURN_INTO_ENTRIES: BlockMenuEntry[] = [
   { kind: "turn-into", id: "paragraph", label: "Text", glyph: "¶" },
   { kind: "turn-into", id: "heading-1", label: "Heading 1", glyph: "H1" },
   { kind: "turn-into", id: "heading-2", label: "Heading 2", glyph: "H2" },
@@ -429,6 +433,39 @@ export function turnBlockInto(
 }
 
 /**
+ * The top-level block position (the same "pos" the block gutter/context menu
+ * operate on) containing the current selection, or null when there isn't one
+ * (e.g. no editor, or a selection somehow at doc depth). `$from.before(1)` is
+ * the position just before the depth-1 ancestor regardless of how deep the
+ * selection actually sits (list item, table cell, ...), matching the "act on
+ * the enclosing top-level block" semantics the block menu already has.
+ */
+export function topLevelBlockPos(editor: Editor | null): number | null {
+  const view = editor?.view;
+  if (!view) return null;
+  const { $from } = view.state.selection;
+  if ($from.depth < 1) return null;
+  return $from.before(1);
+}
+
+/**
+ * Which turn-into entry describes the block the selection currently sits in
+ * — drives the bubble menu's turn-into button label/highlight. Mirrors the
+ * same node-type checks `isBlockControlTarget` and `turnBlockInto` use.
+ */
+export function activeTurnIntoId(editor: Editor | null): BlockMenuTurnIntoId {
+  if (!editor) return "paragraph";
+  if (editor.isActive("heading", { level: 1 })) return "heading-1";
+  if (editor.isActive("heading", { level: 2 })) return "heading-2";
+  if (editor.isActive("heading", { level: 3 })) return "heading-3";
+  if (editor.isActive("bulletList")) return "bulleted-list";
+  if (editor.isActive("orderedList")) return "numbered-list";
+  if (editor.isActive("taskList")) return "task-list";
+  if (editor.isActive("blockquote")) return "quote";
+  return "paragraph";
+}
+
+/**
  * Serialize a single block node to markdown via the editor's markdown storage.
  * Wraps the node in a minimal `doc` so the manager serializes it the same way
  * `editor.getMarkdown()` serializes the whole document.
@@ -547,5 +584,122 @@ export function BlockMenu({
         ))}
       </div>
     </>
+  );
+}
+
+// ── bubble menu turn-into dropdown ─────────────────────────────────────────
+
+/**
+ * Compact "current block type" button + dropdown at the left of the bubble
+ * menu (MarkdownEditor.tsx). Reuses TURN_INTO_ENTRIES/turnBlockInto —
+ * exactly the block context menu's "Turn into" section — so the labels,
+ * order, and conversion behavior stay identical between the two entry
+ * points; only the trigger and layout differ.
+ */
+export function TurnIntoMenu({ editor }: { editor: Editor }) {
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  const activeId = activeTurnIntoId(editor);
+  const activeIndex = TURN_INTO_ENTRIES.findIndex((entry) => entry.id === activeId);
+  const activeEntry = TURN_INTO_ENTRIES[activeIndex] ?? TURN_INTO_ENTRIES[0]!;
+
+  useEffect(() => {
+    if (!open) return;
+    setSelected(activeIndex >= 0 ? activeIndex : 0);
+    menuRef.current?.focus();
+    // Only reset when the dropdown opens, not on every editor selection tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (containerRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    }
+    window.addEventListener("mousedown", onPointerDown, true);
+    return () => window.removeEventListener("mousedown", onPointerDown, true);
+  }, [open]);
+
+  if (!isEditableEditor(editor)) return null;
+
+  const move = (delta: number) =>
+    setSelected(
+      (current) =>
+        (current + delta + TURN_INTO_ENTRIES.length) % TURN_INTO_ENTRIES.length,
+    );
+
+  const select = (entry: BlockMenuEntry) => {
+    setOpen(false);
+    const pos = topLevelBlockPos(editor);
+    if (pos == null || entry.kind !== "turn-into") return;
+    turnBlockInto(editor, pos, entry.id);
+  };
+
+  return (
+    <div className="dohc-turn-into" ref={containerRef}>
+      <button
+        type="button"
+        className="dohc-turn-into__trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="Turn into"
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "Enter") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <span className="dohc-turn-into__label">{activeEntry.label}</span>
+        <ChevronDown size={12} aria-hidden />
+      </button>
+      {open ? (
+        <div
+          ref={menuRef}
+          className="dohc-turn-into-menu"
+          role="listbox"
+          aria-label="turn into"
+          tabIndex={-1}
+          onMouseDown={(event) => event.preventDefault()}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              move(1);
+            } else if (event.key === "ArrowUp") {
+              event.preventDefault();
+              move(-1);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              select(TURN_INTO_ENTRIES[selected] ?? TURN_INTO_ENTRIES[0]!);
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              setOpen(false);
+            }
+          }}
+        >
+          {TURN_INTO_ENTRIES.map((entry, index) => (
+            <button
+              key={entry.id}
+              type="button"
+              role="option"
+              aria-selected={index === selected}
+              className={`dohc-turn-into-menu__item${
+                index === selected ? " is-selected" : ""
+              }`}
+              onMouseEnter={() => setSelected(index)}
+              onClick={() => select(entry)}
+            >
+              <span className="dohc-turn-into-menu__glyph">{entry.glyph}</span>
+              <span className="dohc-turn-into-menu__label">{entry.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
