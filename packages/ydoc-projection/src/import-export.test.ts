@@ -380,4 +380,251 @@ describe('hocuspocus markdown import/export', () => {
     // proving the extension consumed the query fence while deferring plain ones.
     expect(out).toContain('```dohc-query')
   })
+
+  it('round-trips Obsidian callouts across every core type, fold flag, and title state', () => {
+    const once = expectStableMarkdownRoundTrip(
+      [
+        '> [!note] Titled note',
+        '> note body',
+        '',
+        '> [!tip]',
+        '> untitled tip body',
+        '',
+        '> [!info]+ Explicitly open',
+        '> info body',
+        '',
+        '> [!warning]- Folded warning',
+        '> hidden until expanded',
+        '',
+        '> [!danger] Danger zone',
+        '> danger body',
+        '',
+        '> [!quote] A quote callout',
+        '> quoted body',
+      ].join('\n'),
+      [
+        '> [!note] Titled note',
+        '> [!tip]',
+        '> [!info]+ Explicitly open',
+        '> [!warning]- Folded warning',
+        '> [!danger] Danger zone',
+        '> [!quote] A quote callout',
+        '> hidden until expanded',
+      ],
+    )
+    expect(once).toContain('> untitled tip body')
+  })
+
+  it('preserves unknown callout types verbatim instead of dropping them', () => {
+    expectStableMarkdownRoundTrip(
+      ['> [!custom-thing]- Secret label', '> body text'].join('\n'),
+      ['> [!custom-thing]- Secret label', '> body text'],
+    )
+  })
+
+  it('preserves callout titles that contain brackets', () => {
+    expectStableMarkdownRoundTrip(
+      ['> [!note] Title with ] bracket', '> body'].join('\n'),
+      ['> [!note] Title with ] bracket'],
+    )
+  })
+
+  it('round-trips callouts that contain lists and code blocks', () => {
+    expectStableMarkdownRoundTrip(
+      [
+        '> [!info] With blocks',
+        '> - first',
+        '> - second',
+        '>',
+        '> ```ts',
+        '> const x = 1',
+        '> ```',
+      ].join('\n'),
+      [
+        '> [!info] With blocks',
+        '> - first',
+        '> - second',
+        '> ```ts',
+        '> const x = 1',
+        '> ```',
+      ],
+    )
+  })
+
+  it('leaves a plain blockquote (no callout header) as an ordinary blockquote', () => {
+    const once = expectStableMarkdownRoundTrip(
+      ['> just a quote', '> second line'].join('\n'),
+      ['> just a quote', '> second line'],
+    )
+    expect(once).not.toContain('[!')
+  })
+
+  it('round-trips ==highlight== including adjacent and nested marks', () => {
+    const once = expectStableMarkdownRoundTrip(
+      'Plain ==highlighted== then ==one== ==two== adjacent, plus **==bold highlight==** and ==**inner bold**==.',
+      ['==highlighted==', '==one==', '==two=='],
+    )
+    expect(once).toContain('bold highlight')
+    expect(once).toContain('inner bold')
+  })
+
+  it('does not fire highlight on stray or spaced equals', () => {
+    expectStableMarkdownRoundTrip(
+      'Prose a == b stays literal and a lone = sign too.',
+      ['a == b stays literal'],
+    )
+  })
+
+  it('round-trips a callout nested inside a list item without dropping it', () => {
+    const input = ['- item', '  > [!note] In list', '  > body'].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('keeps a list item and a following callout distinct (nested callout survives)', () => {
+    const input = [
+      '- item',
+      '  > [!note] In list',
+      '  > body',
+      '',
+      '- second',
+    ].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    // The blank line between tight list items normalizes away, but the nested
+    // callout and both list items survive, and the result is idempotent.
+    expect(once).toContain('> [!note] In list')
+    expect(once).toContain('> body')
+    expect(once).toContain('- item')
+    expect(once).toContain('- second')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('emits a title-only callout without a stray trailing > line', () => {
+    expect(yDocToMarkdown(markdownToYDoc('> [!note] Just a title'))).toBe(
+      '> [!note] Just a title',
+    )
+    expect(yDocToMarkdown(markdownToYDoc('> [!tip]'))).toBe('> [!tip]')
+    expect(yDocToMarkdown(markdownToYDoc('> [!warning]- Folded title'))).toBe(
+      '> [!warning]- Folded title',
+    )
+  })
+
+  it('absorbs a lazy-continuation line into the callout instead of reflowing it out', () => {
+    const input = ['> [!note] Title', '> first line', 'lazy continuation'].join(
+      '\n',
+    )
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    // First pass normalizes the lazy line to a `>`-prefixed body line inside the
+    // callout (rather than reflowing it into a separate paragraph)...
+    expect(once).toBe(
+      ['> [!note] Title', '> first line', '> lazy continuation'].join('\n'),
+    )
+    // ...and the normalized form is byte-stable thereafter.
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('losslessly round-trips a highlight applied over text containing ==', () => {
+    const highlighted = (text: string): Y.Doc =>
+      yDocFromBody([
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text, marks: [{ type: 'highlight' }] }],
+        },
+      ])
+    // The concrete escaped form is unambiguous and reversible.
+    expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==')
+    // A lone `=` adjacent to the closing delimiter must also be escaped, or the
+    // mark would close one char early (`==a=` → `==a===`).
+    expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===')
+    for (const text of [
+      'a==b',
+      'a ==b== c',
+      'a==b==c',
+      '==edge==',
+      'trailing==',
+      'x = y',
+      'a=',
+      '=lead',
+      'a=b=',
+      'plain',
+    ]) {
+      const once = yDocToMarkdown(highlighted(text))
+      const twice = yDocToMarkdown(markdownToYDoc(once))
+      expect(twice, `text=${JSON.stringify(text)}`).toBe(once)
+      // The highlight is preserved as a single `==...==` span, never split.
+      expect(once.startsWith('=='), `text=${JSON.stringify(text)}`).toBe(true)
+      expect(once.endsWith('=='), `text=${JSON.stringify(text)}`).toBe(true)
+    }
+  })
+
+  it('keeps adversarial raw == sequences literal and byte-stable', () => {
+    for (const input of ['==a ==b== c==', 'a ==b==c== d', '==x==y==z==']) {
+      const once = yDocToMarkdown(markdownToYDoc(input))
+      expect(once, `input=${JSON.stringify(input)}`).toBe(input)
+      const twice = yDocToMarkdown(markdownToYDoc(once))
+      expect(twice, `input=${JSON.stringify(input)}`).toBe(once)
+    }
+  })
+
+  it('escapes wikilink delimiters in a mention label so it round-trips', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          {
+            type: 'wikilink',
+            attrs: { target: 'notes/plan', label: 'Plan ]] Draft | v2' },
+          },
+        ],
+      },
+    ])
+    // `]` and `|` in the label are backslash-escaped so the closing `]]` and the
+    // target/label separator aren't matched early.
+    const once = yDocToMarkdown(doc)
+    expect(once).toBe('[[notes/plan|Plan \\]\\] Draft \\| v2]]')
+    // Re-parsing unescapes the label and re-serializing reproduces it verbatim
+    // (a truncated re-parse would drop the tail and diverge here).
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('detects a mid-line wikilink whose label contains an escaped delimiter', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'See ' },
+          { type: 'wikilink', attrs: { target: 'notes/plan', label: 'Plan ]] Draft' } },
+          { type: 'text', text: ' here' },
+        ],
+      },
+    ])
+    const once = yDocToMarkdown(doc)
+    expect(once).toBe('See [[notes/plan|Plan \\]\\] Draft]] here')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('does not absorb text after a fenced code block inside a callout', () => {
+    const input = ['> [!note]', '> ```', '> code', '> ```', 'outside'].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    // `outside` is a plain top-level paragraph, not a lazy `>`-prefixed body line.
+    expect(once).toMatch(/^outside$/m)
+    expect(once).not.toContain('> outside')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('does not absorb text after a heading inside a callout', () => {
+    const input = ['> [!note]', '> # Section', 'outside'].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toMatch(/^outside$/m)
+    expect(once).not.toContain('> outside')
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
 })

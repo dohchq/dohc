@@ -69,6 +69,108 @@ function fitWithinNameMax(name: string, prefix: string): string {
     .replace(/\uFFFD+$/, "");
 }
 
+// Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
+// short scalar near the top (id, title, icon priority order), so a small
+// bounded read covers it without ever loading a whole document.
+const MARKDOWN_ICON_HEAD_BYTES = 1024;
+
+// Minimal, dependency-free scan for `icon:` inside a leading `--- ... ---`
+// frontmatter block. Intentionally NOT a full YAML parse: the buffer may be
+// truncated mid-document, and we only want one short scalar. Exported for
+// unit testing. Returns undefined when there is no leading frontmatter, the
+// block closes before an icon, or the value is empty/comment-only.
+export function extractFrontmatterIcon(head: string): string | undefined {
+  const lines = head.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return undefined;
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (line.trim() === "---") return undefined; // block closed, no icon
+    const match = /^icon:[ \t]*(.*)$/.exec(line);
+    if (!match) continue;
+    let value = (match[1] ?? "").trim();
+    if (!value || value.startsWith("#")) return undefined;
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    } else {
+      // Strip a trailing inline comment on an unquoted scalar.
+      const comment = value.indexOf(" #");
+      if (comment !== -1) value = value.slice(0, comment).trim();
+    }
+    return value.slice(0, 64) || undefined;
+  }
+  return undefined;
+}
+
+// Best-effort, failure-tolerant read of a markdown file's icon: this runs for
+// every markdown file on every listing, so it must never throw or read the
+// whole file.
+async function readMarkdownIcon(absolutePath: string): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(absolutePath, "r");
+    const buffer = Buffer.alloc(MARKDOWN_ICON_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, MARKDOWN_ICON_HEAD_BYTES, 0);
+    return extractFrontmatterIcon(buffer.subarray(0, bytesRead).toString("utf8"));
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+// Icon cache: readMarkdownIcon does an open+read+close per markdown file, and
+// listFiles' walk awaits it serially for every .md/.markdown file it visits.
+// Without a cache, a full re-listing (e.g. after every save, via the
+// fs-watch -> refreshFiles path) re-pays that IO for the ENTIRE tree even
+// when nothing changed. Keyed by absolute path + (mtimeMs, size) — a plain
+// `stat` (one syscall) is enough to prove a file is unchanged and skip the
+// far more expensive open/read/close. Bounded so a huge/rarely-restarted
+// workspace can't grow this without limit; a simple insertion-order Map
+// doubles as an LRU (delete+re-set moves an entry to the "most recent" end).
+const MAX_ICON_CACHE_ENTRIES = 4000;
+type IconCacheEntry = { mtimeMs: number; size: number; icon: string | undefined };
+const iconCache = new Map<string, IconCacheEntry>();
+
+function rememberIcon(absolutePath: string, entry: IconCacheEntry): void {
+  iconCache.delete(absolutePath);
+  iconCache.set(absolutePath, entry);
+  if (iconCache.size > MAX_ICON_CACHE_ENTRIES) {
+    const oldest = iconCache.keys().next().value;
+    if (oldest !== undefined) iconCache.delete(oldest);
+  }
+}
+
+// Cache-checked wrapper around readMarkdownIcon. Never throws — a stat
+// failure (e.g. a TOCTOU delete mid-walk) is treated as "no icon", matching
+// readMarkdownIcon's own failure-tolerant contract.
+async function getCachedMarkdownIcon(absolutePath: string): Promise<string | undefined> {
+  let mtimeMs: number;
+  let size: number;
+  try {
+    const st = await stat(absolutePath);
+    // Round to whole milliseconds: some filesystems (observed via WSL bind
+    // mounts) return a `mtimeMs` that jitters by a fraction of a millisecond
+    // between two stats of a file whose timestamp was never touched, which
+    // would otherwise cause a spurious cache miss on every single listing.
+    mtimeMs = Math.round(st.mtimeMs);
+    size = st.size;
+  } catch {
+    return undefined;
+  }
+  const cached = iconCache.get(absolutePath);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    rememberIcon(absolutePath, cached); // refresh LRU recency
+    return cached.icon;
+  }
+  const icon = await readMarkdownIcon(absolutePath);
+  rememberIcon(absolutePath, { mtimeMs, size, icon });
+  return icon;
+}
+
 export async function listFiles(
   rootPath: string,
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
@@ -90,7 +192,13 @@ export async function listFiles(
           await walk(join(dir, dirent.name), rel);
         }
       } else if (dirent.isFile()) {
-        entries.push({ path: rel, kind: classifyPath(rel).kind });
+        const kind = classifyPath(rel).kind;
+        const entry: WorkspaceFileEntry = { path: rel, kind };
+        if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
+          const icon = await getCachedMarkdownIcon(join(dir, dirent.name));
+          if (icon) entry.icon = icon;
+        }
+        entries.push(entry);
       }
     }
   }

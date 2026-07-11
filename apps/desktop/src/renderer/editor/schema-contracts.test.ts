@@ -31,6 +31,8 @@ describe('dohc v2 schema contracts', () => {
       'inlineAtom',
       'formula',
       'queryBlock',
+      'callout',
+      'highlight',
       'math',
       'htmlAtom',
       'frontmatter',

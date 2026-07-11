@@ -1573,3 +1573,669 @@ body {
   font-size: 12.5px;
   font-weight: 500;
 }
+
+/*
+ * Remote collaboration carets (editor/MarkdownEditor.tsx + collab/caretPresence.ts).
+ *
+ * @tiptap/extension-collaboration-caret's default cursor render emits
+ * `.collaboration-carets__caret` (a <span>) wrapping `.collaboration-carets__label`
+ * (a <div>), with the peer's color set inline as `border-color` / `background-color`
+ * respectively — CSS below only owns width/shape/timing, never the color (that's
+ * the stable per-clientId palette in caretPresence.ts). The remote selection tint
+ * uses a custom selectionRender (caretSelectionRender) that emits
+ * `.collaboration-carets__selection` with only `color` set inline, so opacity stays
+ * centralized here instead of being baked into a per-peer hex string.
+ *
+ * Both class trees are widget/inline decorations from `@tiptap/y-tiptap`'s
+ * yCursorPlugin: a fresh DOM node whenever a peer's cursor lands on a new position,
+ * which is what drives the "flash on change" — the CSS below just times the fade
+ * and lets the label re-appear on hover since the caret line itself stays
+ * pointer-events:none (so it never blocks clicking/selecting the text under it).
+ */
+@keyframes dohc-caret-label-fade {
+  0% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.dohc-notion-editor .collaboration-carets__caret {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 1.5px solid transparent;
+  border-right: 1.5px solid transparent;
+  word-break: normal;
+  pointer-events: none;
+}
+
+.dohc-notion-editor .collaboration-carets__label {
+  position: absolute;
+  top: -1.35em;
+  left: -1px;
+  z-index: 20;
+  padding: 1px 6px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: auto;
+  animation: dohc-caret-label-fade 2.6s ease-out forwards;
+}
+
+.dohc-notion-editor .collaboration-carets__label:hover {
+  animation: none;
+  opacity: 1;
+}
+
+.dohc-notion-editor .collaboration-carets__selection {
+  background-color: currentColor;
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+[data-theme='dark'] .dohc-notion-editor .collaboration-carets__selection {
+  opacity: 0.28;
+}
+
+/* ---------------------------------------------------------------------
+ * Document outline rail + word count (OutlinePanel.tsx, WordCountBadge.tsx)
+ *
+ * Both float in the editor's margins WITHOUT taking part in the document's
+ * own layout, so neither can ever shift the prose. The trick: turn a
+ * dedicated inner wrapper — .dohc-editor-surface, NOT .dohc-tiptap-editor
+ * itself — into a single-cell CSS grid and stack EditorContent, the
+ * outline, and the word-count badge all in that one cell (grid items can
+ * overlap on purpose). The outline/badge wrappers are height: 0 so they
+ * never affect the grid row's size — EditorContent (the tall one) is what
+ * actually sizes it — then position: sticky pins each wrapper to the TOP
+ * (outline) or BOTTOM (word count) of the nearest scrolling ancestor
+ * (FileInspector's overflow-auto pane), so they read as fixed chrome even
+ * though the document under them keeps scrolling.
+ *
+ * The outline additionally collapses below ~900px of inline size via a
+ * native CSS container query — no JS width tracking needed for that.
+ * container-type establishes .dohc-editor-surface as a query container,
+ * which requires it to also become the CONTAINING BLOCK for every
+ * position: fixed (and absolute) descendant — that's CSS containment, not
+ * optional. .dohc-tiptap-editor is NOT a safe place for that: every
+ * editing popover (slash menu, @-mention/wikilink pickers, link menu,
+ * block menu) is a non-portaled position: fixed child of
+ * .dohc-tiptap-editor (see MarkdownEditor.tsx) computing its top/left from
+ * view.coordsAtPos(...) — VIEWPORT coordinates. If .dohc-tiptap-editor
+ * were the query container, those coordinates would resolve against the
+ * editor pane's box instead of the viewport, displacing every popover by
+ * the pane's offset from the window's top-left (sidebar width, header
+ * height). Scoping container-type to .dohc-editor-surface, and rendering
+ * the popovers as siblings of it (outside it) inside .dohc-tiptap-editor,
+ * keeps them structurally exempt: only EditorContent + OutlinePanel +
+ * WordCountBadge are its descendants (verified against the MarkdownEditor
+ * JSX — the popovers all render before the .dohc-editor-surface wrapper
+ * as siblings, and none of them are inside it). No layout-affecting
+ * container query needs to reach a fixed-position popover, so this loses
+ * nothing; a jsdom test cannot exercise CSS containment at all (it does no
+ * layout), so this constraint has to be enforced by DOM-structure
+ * discipline, not a test — verify manually by inspecting
+ * MarkdownEditor.tsx's returned JSX before touching this again.
+ * --------------------------------------------------------------------- */
+.dohc-editor-surface {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  min-height: 100%;
+  container-type: inline-size;
+  container-name: dohc-editor;
+}
+
+.dohc-outline {
+  position: sticky;
+  top: 44px;
+  grid-row: 1;
+  grid-column: 1;
+  align-self: start;
+  justify-self: end;
+  height: 0;
+  margin-right: 18px;
+  overflow: visible;
+  z-index: 3;
+}
+
+@container dohc-editor (max-width: 900px) {
+  .dohc-outline {
+    display: none;
+  }
+}
+
+.dohc-outline-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 2px;
+}
+
+.dohc-outline-rail-mark {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--dohc-line);
+  transition: background-color 120ms ease-out;
+}
+
+.dohc-outline-rail-mark--level-1 {
+  width: 18px;
+}
+.dohc-outline-rail-mark--level-2 {
+  width: 14px;
+}
+.dohc-outline-rail-mark--level-3 {
+  width: 11px;
+}
+.dohc-outline-rail-mark--level-4 {
+  width: 9px;
+}
+.dohc-outline-rail-mark--level-5 {
+  width: 7px;
+}
+.dohc-outline-rail-mark--level-6 {
+  width: 6px;
+}
+
+.dohc-outline-rail-mark.is-active {
+  background: var(--dohc-accent);
+}
+
+.dohc-outline:hover .dohc-outline-rail-mark,
+.dohc-outline:focus-within .dohc-outline-rail-mark {
+  background: var(--dohc-subtle);
+}
+
+.dohc-outline:hover .dohc-outline-rail-mark.is-active,
+.dohc-outline:focus-within .dohc-outline-rail-mark.is-active {
+  background: var(--dohc-accent);
+}
+
+/* Sits to the LEFT of the rail (right: 100% of the rail's own box) so it
+ * expands into the editor's margin rather than off the window edge. */
+.dohc-outline-panel {
+  position: absolute;
+  top: -10px;
+  right: 100%;
+  margin-right: 10px;
+  width: 216px;
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--dohc-line);
+  background: var(--dohc-panel);
+  padding: 10px;
+  opacity: 0;
+  transform: translateY(2px);
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.dohc-outline:hover .dohc-outline-panel,
+.dohc-outline:focus-within .dohc-outline-panel {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.dohc-outline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.dohc-outline-item {
+  overflow: hidden;
+  width: 100%;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-muted);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.dohc-outline-item--level-2 {
+  padding-left: 16px;
+}
+.dohc-outline-item--level-3 {
+  padding-left: 26px;
+}
+.dohc-outline-item--level-4,
+.dohc-outline-item--level-5,
+.dohc-outline-item--level-6 {
+  padding-left: 36px;
+  font-size: 12px;
+}
+
+.dohc-outline-item:hover {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-outline-item.is-active {
+  color: var(--dohc-ink);
+  font-weight: 600;
+}
+
+.dohc-outline-wordcount {
+  border-top: 1px solid var(--dohc-line);
+  padding-top: 8px;
+  color: var(--dohc-subtle);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* A brief warm-ink wash on the heading the outline just scrolled to —
+ * "briefly focuses it" without stealing keyboard focus in read-only mode. */
+@keyframes dohc-outline-target-flash {
+  from {
+    background: var(--dohc-selection);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.dohc-outline-target-flash {
+  border-radius: 4px;
+  animation: dohc-outline-target-flash 900ms ease-out;
+}
+
+/* Independent of the outline: a quiet words/characters line, hover-reveal
+ * over the WHOLE editor area — like the block gutter — not just the badge
+ * itself (it's invisible+non-interactive until then, so hovering only the
+ * badge's own footprint would be unreachable). */
+.dohc-word-count-badge {
+  position: sticky;
+  bottom: 14px;
+  grid-row: 1;
+  grid-column: 1;
+  align-self: end;
+  justify-self: end;
+  height: 0;
+  margin-right: 18px;
+  overflow: visible;
+  z-index: 3;
+}
+
+.dohc-word-count-badge-text {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  padding: 4px 10px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 999px;
+  background: var(--dohc-panel);
+  color: var(--dohc-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.dohc-tiptap-editor:hover .dohc-word-count-badge-text {
+  opacity: 1;
+}
+
+[data-theme='dark'] .dohc-outline-panel,
+[data-theme='dark'] .dohc-word-count-badge-text {
+  border-color: color-mix(in srgb, var(--dohc-line) 80%, transparent);
+}
+
+
+/* ===========================================================================
+ * Page identity — Notion-style title + emoji icon above the document body.
+ * A serif page title on warm paper, an emoji icon that reveals a quiet "Add
+ * icon" affordance on hover, and a small self-contained picker. This is a
+ * sibling of the ProseMirror surface (never part of the doc), aligned to the
+ * shared editor reading measure. Colors ride the theme tokens so both light
+ * and dark come for free; the dark block only deepens the picker shadow.
+ * ========================================================================= */
+.dohc-page-identity {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 28px 56px 0;
+  background: var(--dohc-bg);
+}
+
+.dohc-page-identity__inner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.dohc-page-identity__icon-row {
+  position: relative;
+  min-height: 22px;
+  margin-bottom: 6px;
+}
+
+.dohc-page-identity__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  padding: 2px 6px;
+  font-size: 46px;
+  line-height: 1.1;
+  cursor: pointer;
+}
+
+.dohc-page-identity__icon:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-page-identity__add-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 3px 6px;
+  color: var(--dohc-subtle);
+  font-size: 12.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-page-identity:hover .dohc-page-identity__add-icon,
+.dohc-page-identity__add-icon:focus-visible {
+  opacity: 1;
+}
+
+.dohc-page-identity__add-icon:hover {
+  color: var(--dohc-muted);
+}
+
+.dohc-page-identity__title {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--dohc-ink);
+  font-family: var(--font-serif);
+  font-size: 2em;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  outline: none;
+}
+
+.dohc-page-identity__title::placeholder {
+  color: var(--dohc-subtle);
+  font-weight: 600;
+}
+
+.dohc-page-identity__title:read-only {
+  cursor: default;
+}
+
+.dohc-page-identity__picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 264px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
+}
+
+.dohc-page-identity__picker-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
+  max-height: 172px;
+  overflow-y: auto;
+}
+
+.dohc-page-identity__picker-emoji {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 2px 0;
+  font-size: 17px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.dohc-page-identity__picker-emoji:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-page-identity__picker-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  border-top: 1px solid var(--dohc-line);
+  padding-top: 8px;
+}
+
+.dohc-page-identity__picker-field {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  padding: 4px 8px;
+  color: var(--dohc-ink);
+  font-size: 13px;
+  outline: none;
+}
+
+.dohc-page-identity__picker-field:focus {
+  border-color: var(--dohc-ink);
+}
+
+.dohc-page-identity__picker-remove {
+  flex-shrink: 0;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 10px;
+  color: var(--dohc-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dohc-page-identity__picker-remove:hover {
+  color: var(--dohc-ink);
+  background: var(--dohc-panel-2);
+}
+
+[data-theme='dark'] .dohc-page-identity__picker {
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+}
+
+
+/* ===================================================================== *
+ * Obsidian callouts + ==highlight== mark (editor v2 schema additions).
+ * Warm-paper tinted boxes: a low-opacity tint of the type's semantic token
+ * over the page, plus a 3px left bar in the solid token color. The accent is
+ * exposed as a per-type custom property so one rule set covers all types and
+ * both themes (tokens re-resolve under [data-theme='dark']). Unknown callout
+ * types inherit the default (note) accent while keeping their type string.
+ * ===================================================================== */
+
+.dohc-callout {
+  /* Default + unknown types render with note styling. */
+  --dohc-callout-accent: var(--dohc-match);
+  position: relative;
+  margin: 14px 0;
+  border: 1px solid color-mix(in srgb, var(--dohc-callout-accent) 26%, var(--dohc-line));
+  border-left: 3px solid var(--dohc-callout-accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dohc-callout-accent) 8%, var(--dohc-bg));
+}
+
+.dohc-callout[data-callout-type="tip"] {
+  --dohc-callout-accent: var(--dohc-success);
+}
+.dohc-callout[data-callout-type="info"] {
+  --dohc-callout-accent: var(--dohc-match);
+}
+.dohc-callout[data-callout-type="warning"] {
+  --dohc-callout-accent: var(--dohc-warning);
+}
+.dohc-callout[data-callout-type="danger"] {
+  --dohc-callout-accent: var(--dohc-danger);
+}
+.dohc-callout[data-callout-type="quote"] {
+  --dohc-callout-accent: var(--dohc-muted);
+}
+
+.dohc-callout-body {
+  padding: 6px 12px 8px;
+}
+
+.dohc-callout-body > *:first-child {
+  margin-top: 0;
+}
+.dohc-callout-body > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Folded: keep only the header row; body content stays in the document. */
+.dohc-callout[data-fold="-"] .dohc-callout-body > *:not(.dohc-callout-header) {
+  display: none;
+}
+.dohc-callout[data-fold="-"] .dohc-callout-body {
+  padding-bottom: 6px;
+}
+
+.dohc-callout-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  user-select: none;
+}
+
+.dohc-callout-fold {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-callout-accent);
+  cursor: pointer;
+  transition: background-color 100ms ease-out;
+}
+.dohc-callout-fold:hover {
+  background: color-mix(in srgb, var(--dohc-callout-accent) 16%, transparent);
+}
+
+.dohc-callout-chevron {
+  width: 14px;
+  height: 14px;
+  /* Base glyph points right (folded). Open state rotates it to point down. */
+  transform: rotate(90deg);
+  transition: transform 140ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.dohc-callout[data-fold="-"] .dohc-callout-chevron {
+  transform: rotate(0deg);
+}
+
+.dohc-callout-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--dohc-callout-accent);
+}
+.dohc-callout-icon-svg {
+  width: 16px;
+  height: 16px;
+}
+
+.dohc-callout-type-select {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  /* Label text needs to clear 4.5:1 (WCAG AA) on the 8%-tinted callout
+   * background in both themes. --dohc-callout-accent (esp. the default
+   * note/info blue) does not: ~3.4:1 light / ~3.7:1 dark. --dohc-ink does,
+   * comfortably, for every type in both themes (14.5–16:1) — see the
+   * per-type/theme contrast table in the phase-2 review notes. The accent
+   * stays on the icon, left bar, chevron, and hover fill, which are
+   * decorative/graphical (3:1 threshold) or non-text. */
+  color: var(--dohc-ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+.dohc-callout-type-select:hover {
+  background: color-mix(in srgb, var(--dohc-callout-accent) 12%, transparent);
+}
+
+.dohc-callout-title-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dohc-ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+.dohc-callout-title-input::placeholder {
+  color: var(--dohc-subtle);
+  font-weight: 500;
+}
+.dohc-callout-title-input:focus {
+  outline: none;
+}
+
+/* Highlight mark: soft warning-family tint with ink text (warm-paper
+ * calibrated), legible in both themes. */
+mark.dohc-highlight,
+.dohc-highlight {
+  background: color-mix(in srgb, var(--dohc-warning) 30%, transparent);
+  color: var(--dohc-ink);
+  border-radius: 3px;
+  padding: 0 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}

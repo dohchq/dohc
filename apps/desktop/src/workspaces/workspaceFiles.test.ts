@@ -4,7 +4,9 @@ import {
   mkdir,
   readdir,
   readFile,
+  stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,6 +17,7 @@ import {
   createFile,
   createFolder,
   deletePath,
+  extractFrontmatterIcon,
   importDroppedPaths,
   listFiles,
   movePath,
@@ -66,6 +69,25 @@ describe("createFile", () => {
   });
 });
 
+describe("extractFrontmatterIcon", () => {
+  it("reads a plain icon scalar from a leading frontmatter block", () => {
+    expect(
+      extractFrontmatterIcon("---\nid: n1\ntitle: Plan\nicon: 🚀\n---\n# Body\n"),
+    ).toBe("🚀");
+  });
+
+  it("strips surrounding quotes and inline comments", () => {
+    expect(extractFrontmatterIcon('---\nicon: "📄"\n---\n')).toBe("📄");
+    expect(extractFrontmatterIcon("---\nicon: 📝 # my note\n---\n")).toBe("📝");
+  });
+
+  it("returns undefined without frontmatter, before an icon, or when empty", () => {
+    expect(extractFrontmatterIcon("# No frontmatter\nicon: 🚀\n")).toBeUndefined();
+    expect(extractFrontmatterIcon("---\ntitle: Plan\n---\nicon: 🚀\n")).toBeUndefined();
+    expect(extractFrontmatterIcon("---\nicon:\n---\n")).toBeUndefined();
+  });
+});
+
 describe("listFiles", () => {
   it("lists files and folders but skips internal directories", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
@@ -79,6 +101,19 @@ describe("listFiles", () => {
       { path: "wallet.sqlite", kind: "database" },
     ]);
     expect(result.folders).toEqual(["notes"]);
+  });
+
+  it("surfaces a markdown page's icon frontmatter for the tree glyph", async () => {
+    await writeFile(
+      join(root, "plan.md"),
+      "---\nid: n1\ntitle: Plan\nicon: 🚀\n---\n\n# Plan\n",
+    );
+    await writeFile(join(root, "plain.md"), "# No frontmatter\n");
+    const result = await listFiles(root);
+    expect(result.files).toEqual([
+      { path: "plain.md", kind: "file" },
+      { path: "plan.md", kind: "file", icon: "🚀" },
+    ]);
   });
 
   it("returns EMPTY folders so the tree can render them", async () => {
@@ -111,6 +146,46 @@ describe("listFiles", () => {
     const result = await listFiles(root);
     expect(result.files).toEqual([{ path: "real.md", kind: "file" }]);
     expect(result.folders).toEqual([]);
+  });
+
+  it("reuses a cached icon (skips re-reading the file) while mtime+size are unchanged", async () => {
+    const path = join(root, "plan.md");
+    const withRocket = "---\nicon: 🚀\n---\n\n# Plan\n";
+    const withNote = "---\nicon: 📝\n---\n\n# Plan\n";
+    // Both emoji are 4-byte UTF-8 sequences, so swapping them leaves the
+    // file's byte size unchanged — the only lever left to prove a cache hit
+    // (vs. a fresh read) is forcing mtime back to what the cache last saw.
+    expect(Buffer.byteLength(withNote, "utf8")).toBe(Buffer.byteLength(withRocket, "utf8"));
+
+    await writeFile(path, withRocket);
+    const first = await listFiles(root);
+    expect(first.files).toEqual([{ path: "plan.md", kind: "file", icon: "🚀" }]);
+
+    const original = await stat(path);
+    await writeFile(path, withNote);
+    // Restore the original mtime so size+mtime look identical to the cache
+    // even though the on-disk bytes changed underneath.
+    await utimes(path, original.atime, original.mtime);
+
+    const second = await listFiles(root);
+    expect(second.files).toEqual([{ path: "plan.md", kind: "file", icon: "🚀" }]);
+  });
+
+  it("invalidates the icon cache when a markdown file's mtime changes", async () => {
+    const path = join(root, "plan.md");
+    await writeFile(path, "---\nicon: 🚀\n---\n\n# Plan\n");
+    const first = await listFiles(root);
+    expect(first.files).toEqual([{ path: "plan.md", kind: "file", icon: "🚀" }]);
+
+    const before = await stat(path);
+    await writeFile(path, "---\nicon: 📝\n---\n\n# Plan\n");
+    // Force a strictly newer mtime regardless of filesystem timestamp
+    // resolution (some filesystems only tick every ~1s).
+    const bumped = new Date(before.mtime.getTime() + 1000);
+    await utimes(path, bumped, bumped);
+
+    const second = await listFiles(root);
+    expect(second.files).toEqual([{ path: "plan.md", kind: "file", icon: "📝" }]);
   });
 });
 

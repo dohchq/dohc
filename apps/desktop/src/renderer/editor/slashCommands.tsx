@@ -17,6 +17,8 @@ export type SlashCommandId =
   | "numbered-list"
   | "task-list"
   | "quote"
+  | "callout"
+  | "toggle"
   | "code-block"
   | "divider"
   | "table"
@@ -102,6 +104,29 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     hint: "Call out a thought",
     glyph: ">",
     aliases: ["blockquote", "quote"],
+  },
+  {
+    id: "callout",
+    label: "Callout",
+    hint: "Highlighted info box",
+    glyph: "!",
+    aliases: [
+      "callout",
+      "note",
+      "tip",
+      "info",
+      "warning",
+      "danger",
+      "admonition",
+      "aside",
+    ],
+  },
+  {
+    id: "toggle",
+    label: "Toggle",
+    hint: "Collapsible callout",
+    glyph: "▸",
+    aliases: ["toggle", "fold", "collapse", "details", "accordion"],
   },
   {
     id: "code-block",
@@ -362,6 +387,21 @@ export function SlashCommandMenu({
   );
 }
 
+// The callout command matches several type-named aliases (see its `aliases`).
+// When the query is one of the concrete callout types, insert that type; every
+// other alias ("callout"/"admonition"/"aside") falls back to a plain note.
+const CALLOUT_TYPE_BY_ALIAS: Record<string, string> = {
+  note: "note",
+  tip: "tip",
+  info: "info",
+  warning: "warning",
+  danger: "danger",
+};
+
+function calloutTypeForQuery(query: string): string {
+  return CALLOUT_TYPE_BY_ALIAS[query.trim().toLowerCase()] ?? "note";
+}
+
 export function runSlashCommand(
   editor: Editor | null,
   id: SlashCommandId,
@@ -408,6 +448,27 @@ export function runSlashCommand(
       return;
     case "quote":
       chain.toggleBlockquote().run();
+      return;
+    case "callout":
+      chain
+        .insertContent({
+          type: "callout",
+          // A type-specific alias (`/warning`, `/info`, …) inserts that type
+          // directly instead of always defaulting to a note the user then has
+          // to switch by hand.
+          attrs: { calloutType: calloutTypeForQuery(state.query), title: "", fold: "" },
+          content: [{ type: "paragraph" }],
+        })
+        .run();
+      return;
+    case "toggle":
+      chain
+        .insertContent({
+          type: "callout",
+          attrs: { calloutType: "note", title: "", fold: "-" },
+          content: [{ type: "paragraph" }],
+        })
+        .run();
       return;
     case "code-block":
       chain.setCodeBlock({ language: "" }).run();

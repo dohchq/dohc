@@ -20,10 +20,12 @@ describe('desktop editor schema parity with hocuspocus', () => {
       'inlineAtom',
       'formula',
       'queryBlock',
+      'callout',
       'taskList',
       'taskItem',
     ]) {
       expect(schema.nodes[node]).toBeDefined()
     }
+    expect(schema.marks.highlight).toBeDefined()
   })
 })

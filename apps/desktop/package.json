@@ -67,6 +67,7 @@
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@tiptap/core": "^3.23.6",
     "@tiptap/extension-collaboration": "3.23.6",
+    "@tiptap/extension-collaboration-caret": "3.23.6",
     "@tiptap/extension-list": "3.23.6",
     "@tiptap/extension-table": "^3.23.6",
     "@tiptap/extensions": "3.23.6",

@@ -1,4 +1,5 @@
-import { Node } from '@tiptap/core'
+import { Mark, Node, markInputRule } from '@tiptap/core'
+import type { JSONContent } from '@tiptap/core'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -37,15 +38,34 @@ function findClosingWikilink(src: string): number {
   return -1
 }
 
+// A wikilink's `target`/`label` are delimited by `|` and closed by `]]`, so a
+// value that itself contains `\`, `]`, or `|` must be backslash-escaped when
+// serialized or it would re-parse as a truncated link (e.g. a mention labeled
+// `Plan ]] Draft` would close the wikilink early). escape/unescape are inverses
+// applied at renderMarkdown/parse time; the node attrs always hold the raw,
+// human-readable value.
+function escapeWikilinkPart(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/([\]|])/g, '\\$1')
+}
+
+function unescapeWikilinkPart(value: string): string {
+  return value.replace(/\\([\\\]|])/g, '$1')
+}
+
 function splitWikilinkInner(inner: string): [string, string | null] {
   for (let index = 0; index < inner.length; index += 1) {
     if (inner[index] === '\\') {
       index += 1
       continue
     }
-    if (inner[index] === '|') return [inner.slice(0, index), inner.slice(index + 1)]
+    if (inner[index] === '|') {
+      return [
+        unescapeWikilinkPart(inner.slice(0, index)),
+        unescapeWikilinkPart(inner.slice(index + 1)),
+      ]
+    }
   }
-  return [inner, null]
+  return [unescapeWikilinkPart(inner), null]
 }
 
 function renderMarkdownImage(attrs: {
@@ -283,7 +303,10 @@ const DohcWikilink = Node.create({
     name: 'wikilink',
     level: 'inline',
     start(src) {
-      return firstUnescapedIndex(src, /(^|[^\\])\[\[[^\]\n]+\]\]/)
+      // Inner run allows escaped chars (`\]`, `\|`, `\\`) so a wikilink whose
+      // label contains an escaped delimiter is still detected mid-line; the
+      // authoritative bounds come from findClosingWikilink in tokenize.
+      return firstUnescapedIndex(src, /(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/)
     },
     tokenize(src) {
       if (!src.startsWith('[[')) return undefined
@@ -302,9 +325,11 @@ const DohcWikilink = Node.create({
     }),
 
   renderMarkdown: (node) => {
-    const target = node.attrs?.target ?? ''
+    const target = escapeWikilinkPart(String(node.attrs?.target ?? ''))
     const label = node.attrs?.label
-    return label ? `[[${target}|${label}]]` : `[[${target}]]`
+    return label
+      ? `[[${target}|${escapeWikilinkPart(String(label))}]]`
+      : `[[${target}]]`
   },
 })
 
@@ -475,6 +500,379 @@ const DohcQueryBlock = Node.create({
   },
 })
 
+// Obsidian callout syntax: a blockquote whose first line is `[!type]` with an
+// optional fold flag (`-` folded, `+` open) and an optional title, e.g.
+// `> [!note]- My title`. Unknown callout types are preserved verbatim (styled
+// like a note but keeping the original type string) so nothing is ever dropped.
+const DEFAULT_CALLOUT_TYPE = 'note'
+const CALLOUT_HEADER_RE = /^\[!([^\]\n]+)\]([+-]?)[ \t]*(.*)$/
+const CALLOUT_LINE_RE = /^ {0,3}>/
+
+function stripBlockquotePrefix(line: string): string {
+  return line.replace(/^ {0,3}> ?/, '')
+}
+
+function normalizeCalloutFold(value: unknown): '' | '-' | '+' {
+  return value === '-' || value === '+' ? value : ''
+}
+
+function calloutTitleForMarkdown(value: unknown): string {
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+}
+
+function findClosingHighlight(src: string): number {
+  for (let index = 2; index < src.length - 1; index += 1) {
+    if (src[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (src[index] === '=' && src[index + 1] === '=') return index
+  }
+  return -1
+}
+
+// EVERY `=` inside highlighted text is backslash-escaped so the inline
+// tokenizer's `\`-skipping in findClosingHighlight never mistakes it for a
+// closing delimiter. Escaping only runs of `==` is not enough: a single `=`
+// sitting next to the closing `==` (e.g. the highlight body `a=`) would
+// serialize to `==a===`, whose first `==` scanned from the left closes the mark
+// one char early. The base markdown manager renders a mark's inner text
+// verbatim (only its opening/closing `==` delimiters come from renderMarkdown),
+// so this escaping has to be applied to the highlight-marked text nodes before
+// serialization — see escapeHighlightMarkdown below. Each `\=` round-trips back
+// through the base `escape` token (an escapedPunctuation node whose
+// renderMarkdown re-emits `\=`), so once escaped the text carries no bare `=`.
+function escapeHighlightBody(body: string): string {
+  return body.replace(/=/g, '\\=')
+}
+
+function hasHighlightMark(node: JSONContent): boolean {
+  return (node.marks ?? []).some((mark) => mark.type === 'highlight')
+}
+
+// Escape literal `==` inside every highlight-marked text node so a highlight
+// applied over text containing `==` (only reachable via the toggle command,
+// which wraps an arbitrary selection) serializes to an unambiguous, losslessly
+// reversible `==a\=\=b==` instead of the ambiguous `==a==b==`. Returns a fresh
+// tree; the input JSON is not mutated.
+export function escapeHighlightMarkdown(node: JSONContent): JSONContent {
+  const next: JSONContent = { ...node }
+  if (typeof node.text === 'string' && hasHighlightMark(node)) {
+    next.text = escapeHighlightBody(node.text)
+  }
+  if (Array.isArray(node.content)) {
+    next.content = node.content.map(escapeHighlightMarkdown)
+  }
+  return next
+}
+
+// A `\=` inside a highlight must round-trip as a literal `=` in a plain text
+// node — NOT as an escapedPunctuation atom, because the base manager closes and
+// reopens marks around every inline atom, which would split the `==...==` span.
+// We therefore decode `\=` to this private-use placeholder before tokenizing
+// (so marked sees ordinary text, and no bare `==` can re-fire the highlight
+// rule), then restore it to `=` in the parsed text nodes.
+const HIGHLIGHT_EQUALS_PLACEHOLDER = '\uE010'
+
+function restoreHighlightPlaceholders(nodes: JSONContent[]): JSONContent[] {
+  return nodes.map((node) => {
+    const next: JSONContent = { ...node }
+    if (typeof node.text === 'string' && node.text.includes(HIGHLIGHT_EQUALS_PLACEHOLDER)) {
+      next.text = node.text.split(HIGHLIGHT_EQUALS_PLACEHOLDER).join('=')
+    }
+    if (Array.isArray(node.content)) {
+      next.content = restoreHighlightPlaceholders(node.content)
+    }
+    return next
+  })
+}
+
+// Inline (non-block) node types this pipeline can emit. Loose inline children
+// under a `block+` callout (e.g. a callout nested in a tight list item, where
+// marked yields inline text tokens instead of a paragraph) must be wrapped in a
+// paragraph or the projection drops them.
+const INLINE_CALLOUT_CHILD_TYPES = new Set([
+  'text',
+  'hardBreak',
+  'image',
+  'escapedPunctuation',
+  'wikilink',
+  'inlineAtom',
+  'formula',
+])
+
+type CalloutParseHelpers = {
+  createNode: (
+    type: string,
+    attrs?: Record<string, unknown>,
+    content?: JSONContent[],
+  ) => JSONContent
+}
+
+function wrapLooseCalloutChildren(
+  children: JSONContent[],
+  helpers: CalloutParseHelpers,
+): JSONContent[] {
+  const result: JSONContent[] = []
+  let run: JSONContent[] = []
+  const flush = () => {
+    if (run.length > 0) {
+      result.push(helpers.createNode('paragraph', {}, run))
+      run = []
+    }
+  }
+  for (const child of children) {
+    if (typeof child?.type === 'string' && INLINE_CALLOUT_CHILD_TYPES.has(child.type)) {
+      run.push(child)
+    } else {
+      flush()
+      result.push(child)
+    }
+  }
+  flush()
+  return result
+}
+
+// A line that begins a new block construct, so it must NOT be absorbed as a
+// blockquote-style lazy-continuation line of the callout's trailing paragraph.
+const CALLOUT_LAZY_BREAK_RE =
+  /^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:```|~~~)|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:\*[ \t]*){3,}$|<[a-zA-Z!/])/
+
+// A code fence opener (```/~~~, up to 3 leading spaces, optional info string).
+// Returns the fence run so the closer can be length/char-matched.
+function calloutFenceOpener(line: string): string | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+  return match ? (match[1] ?? null) : null
+}
+
+// A fence closer: same character as the opener, at least as long, nothing but
+// trailing whitespace after it.
+function isCalloutFenceCloser(line: string, opener: string): boolean {
+  const match = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)
+  if (!match) return false
+  const fence = match[1] ?? ''
+  return fence[0] === opener[0] && fence.length >= opener.length
+}
+
+const DohcCallout = Node.create({
+  name: 'callout',
+  priority: 1000,
+  group: 'block',
+  content: 'block+',
+  defining: true,
+
+  addAttributes() {
+    return {
+      calloutType: { default: DEFAULT_CALLOUT_TYPE },
+      title: { default: '' },
+      fold: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'div[data-dohc-callout]' }]
+  },
+
+  renderHTML({ node }) {
+    return [
+      'div',
+      {
+        class: 'dohc-callout',
+        'data-dohc-callout': '',
+        'data-callout-type': String(node.attrs.calloutType ?? DEFAULT_CALLOUT_TYPE),
+        'data-fold': normalizeCalloutFold(node.attrs.fold),
+        'data-callout-title': String(node.attrs.title ?? ''),
+      },
+      ['div', { class: 'dohc-callout-body' }, 0],
+    ]
+  },
+
+  // Block-level tokenizer so plain blockquotes (no `[!type]` first line) fall
+  // through to the built-in blockquote tokenizer untouched — we only claim the
+  // block when the header line matches, otherwise we return undefined.
+  markdownTokenizer: {
+    name: 'callout',
+    level: 'block',
+    start(src) {
+      const match = /(?:^|\n)( {0,3}>\s?\[!)/.exec(src)
+      if (!match) return -1
+      return match.index === 0 ? 0 : match.index + 1
+    },
+    tokenize(src, _tokens, helpers) {
+      const lines = src.split('\n')
+      let count = 0
+      // Track whether an open PARAGRAPH is currently continuable, so we only
+      // absorb blockquote-style lazy-continuation lines (mirroring CommonMark).
+      // A blank inner line, a heading/list/hr/html/nested-quote, or a fenced
+      // code block all close the paragraph — only then must an unquoted line NOT
+      // be pulled in. Tracking just "was the last line blank" wrongly absorbed
+      // text after a fence/heading whose (non-blank) line left no paragraph open.
+      let paragraphOpen = false
+      // Non-null while inside a `>`-quoted fenced code block (holds the opener
+      // run) so its content lines aren't mistaken for paragraph text.
+      let openFence: string | null = null
+      const applyInnerLine = (inner: string) => {
+        if (openFence !== null) {
+          if (isCalloutFenceCloser(inner, openFence)) openFence = null
+          paragraphOpen = false
+          return
+        }
+        const opener = calloutFenceOpener(inner)
+        if (opener !== null) {
+          openFence = opener
+          paragraphOpen = false
+        } else if (inner.trim() === '' || CALLOUT_LAZY_BREAK_RE.test(inner)) {
+          paragraphOpen = false
+        } else {
+          paragraphOpen = true
+        }
+      }
+      while (count < lines.length) {
+        const line = lines[count] ?? ''
+        if (CALLOUT_LINE_RE.test(line)) {
+          if (count === 0) {
+            // The header line reads as paragraph text (a directly following
+            // unquoted line still lazily continues it, as before).
+            paragraphOpen = true
+          } else {
+            applyInnerLine(stripBlockquotePrefix(line))
+          }
+          count += 1
+          continue
+        }
+        if (
+          count > 0 &&
+          paragraphOpen &&
+          line.trim() !== '' &&
+          !CALLOUT_LAZY_BREAK_RE.test(line)
+        ) {
+          // Lazy continuation of the open paragraph — it stays open.
+          count += 1
+          continue
+        }
+        break
+      }
+      if (count === 0) return undefined
+      const consumed = lines.slice(0, count)
+      const inner = consumed.map(stripBlockquotePrefix)
+      const header = CALLOUT_HEADER_RE.exec(inner[0] ?? '')
+      if (!header) return undefined
+      const [, calloutType = '', fold = '', title = ''] = header
+      const body = inner.slice(1).join('\n')
+      return {
+        type: 'callout',
+        raw: consumed.join('\n'),
+        calloutType: calloutType.trim() || DEFAULT_CALLOUT_TYPE,
+        fold: normalizeCalloutFold(fold),
+        title: title.trim(),
+        tokens: body.trim() ? helpers.blockTokens(body) : [],
+      }
+    },
+  },
+
+  parseMarkdown: (token, helpers) => {
+    const parsed = token.tokens?.length ? helpers.parseChildren(token.tokens) : []
+    const children = wrapLooseCalloutChildren(parsed, helpers)
+    return helpers.createNode(
+      'callout',
+      {
+        calloutType: token.calloutType ?? DEFAULT_CALLOUT_TYPE,
+        title: token.title ?? '',
+        fold: normalizeCalloutFold(token.fold),
+      },
+      children.length > 0 ? children : [helpers.createNode('paragraph', {}, [])],
+    )
+  },
+
+  renderMarkdown: (node, helpers) => {
+    const calloutType = String(node.attrs?.calloutType ?? DEFAULT_CALLOUT_TYPE)
+    const fold = normalizeCalloutFold(node.attrs?.fold)
+    const title = calloutTitleForMarkdown(node.attrs?.title)
+    const header = `[!${calloutType}]${fold}${title ? ` ${title}` : ''}`
+    const prefix = '>'
+    const content = node.content ?? []
+    const rendered = content.map((child, index) =>
+      helpers.renderChild
+        ? helpers.renderChild(child, index)
+        : helpers.renderChildren([child]),
+    )
+    // A callout whose only content is an empty paragraph (e.g. a title-only
+    // callout) has no body: emit just the header instead of a stray `>` line.
+    if (!rendered.some((block) => block.trim() !== '')) {
+      return `${prefix} ${header}`
+    }
+    const blocks = rendered.map((block) =>
+      block
+        .split('\n')
+        .map((line) => (line.trim() === '' ? prefix : `${prefix} ${line}`))
+        .join('\n'),
+    )
+    return `${prefix} ${header}\n${blocks.join(`\n${prefix}\n`)}`
+  },
+})
+
+// Obsidian/extended-CommonMark `==highlight==`. The base parser has no `==`
+// rule, so we register a custom inline tokenizer (mirroring the wikilink hook)
+// that requires flanking non-space characters so stray `=` and `a == b` never
+// fire, and round-trips nested marks like `**==x==**`.
+const DohcHighlight = Mark.create({
+  name: 'highlight',
+
+  parseHTML() {
+    return [{ tag: 'mark' }, { tag: 'span[data-dohc-highlight]' }]
+  },
+
+  renderHTML() {
+    return ['mark', { class: 'dohc-highlight', 'data-dohc-highlight': '' }, 0]
+  },
+
+  addInputRules() {
+    return [
+      markInputRule({
+        find: /(?:^|\s)(==(?!\s)((?:[^=]+))==)$/,
+        type: this.type,
+      }),
+    ]
+  },
+
+  addKeyboardShortcuts() {
+    return {
+      'Mod-Shift-h': () => this.editor.commands.toggleMark(this.name),
+    }
+  },
+
+  markdownTokenizer: {
+    name: 'highlight',
+    level: 'inline',
+    start(src) {
+      return firstUnescapedIndex(src, /(^|[^\\=])==(?!\s)(?!=)/)
+    },
+    tokenize(src, _tokens, helpers) {
+      if (!src.startsWith('==')) return undefined
+      if (src.length < 5) return undefined
+      if (/\s/.test(src[2] ?? '')) return undefined
+      const closing = findClosingHighlight(src)
+      if (closing === -1) return undefined
+      if (/\s/.test(src[closing - 1] ?? '')) return undefined
+      const raw = src.slice(0, closing + 2)
+      const inner = raw.slice(2, -2)
+      if (!inner) return undefined
+      const decoded = inner.replace(/\\=/g, HIGHLIGHT_EQUALS_PLACEHOLDER)
+      return { type: 'highlight', raw, tokens: helpers.inlineTokens(decoded) }
+    },
+  },
+
+  parseMarkdown: (token, helpers) =>
+    helpers.applyMark(
+      'highlight',
+      restoreHighlightPlaceholders(helpers.parseInline(token.tokens ?? [])),
+    ),
+
+  renderMarkdown: (node, helpers) => `==${helpers.renderChildren(node.content ?? [])}==`,
+})
+
 export const dohcMarkdownExtensions = [
   DohcImage,
   DohcEscapedPunctuation,
@@ -482,4 +880,6 @@ export const dohcMarkdownExtensions = [
   DohcInlineAtom,
   DohcFormula,
   DohcQueryBlock,
+  DohcCallout,
+  DohcHighlight,
 ]

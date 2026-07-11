@@ -96,7 +96,25 @@ type EditingState =
   | { mode: "create"; kind: "file" | "folder"; parentPath: string }
   | { mode: "rename"; path: string; isFolder: boolean };
 
-type VisibleRow = FlatRow & { kind: WorkspaceFileEntry["kind"] | null };
+type VisibleRow = FlatRow & {
+  kind: WorkspaceFileEntry["kind"] | null;
+  // The page's `icon` frontmatter emoji, shown in place of the file glyph.
+  icon?: string;
+};
+
+// A page emoji stands in for the generic file glyph when the file's
+// frontmatter carries one (Notion-style). Sized to sit on the same baseline
+// as the 13px lucide glyphs it replaces.
+function PageIconGlyph({ icon }: { icon: string }) {
+  return (
+    <span
+      aria-hidden
+      className="grid size-[13px] shrink-0 place-items-center text-[12px] leading-none"
+    >
+      {icon}
+    </span>
+  );
+}
 
 type DropPreview = {
   targetPath: string | null;
@@ -296,7 +314,11 @@ const TreeRow = memo(function TreeRow(props: {
         ) : (
           <>
             <span aria-hidden className="w-3 shrink-0" />
-            <FileKindIcon kind={row.kind ?? "file"} />
+            {row.icon ? (
+              <PageIconGlyph icon={row.icon} />
+            ) : (
+              <FileKindIcon kind={row.kind ?? "file"} />
+            )}
           </>
         )}
         <span className="min-w-0 flex-1 truncate">{leafOf(row.fullPath)}</span>
@@ -366,11 +388,22 @@ export function Explorer(props: ExplorerProps) {
     [props.files, props.folders, pending],
   );
 
-  const fileKindByPath = useMemo(() => {
-    const map = new Map<string, WorkspaceFileEntry["kind"]>();
-    for (const file of projected.files) map.set(file.path, file.kind);
+  const fileByPath = useMemo(() => {
+    const map = new Map<string, WorkspaceFileEntry>();
+    for (const file of projected.files) map.set(file.path, file);
     return map;
   }, [projected.files]);
+
+  // Same icon rule as TreeRow (a page icon when set, otherwise the kind glyph),
+  // driven by the memoized lookup so pinned rows don't rescan projected.files.
+  function fileGlyph(path: string) {
+    const file = fileByPath.get(path);
+    return file?.icon ? (
+      <PageIconGlyph icon={file.icon} />
+    ) : (
+      <FileKindIcon kind={file?.kind ?? "file"} />
+    );
+  }
 
   const expandedSet = useMemo(
     () => new Set(props.expandedFolders),
@@ -395,6 +428,7 @@ export function Explorer(props: ExplorerProps) {
           depth,
           parentPath,
           kind: child.file?.kind ?? null,
+          ...(child.file?.icon ? { icon: child.file.icon } : {}),
         });
         if (isFolder && isExpanded) walk(child, depth + 1, child.fullPath);
       }
@@ -1185,7 +1219,7 @@ export function Explorer(props: ExplorerProps) {
                       >
                         <OpenEditorIcon
                           path={tab.path}
-                          kind={fileKindByPath.get(tab.path) ?? null}
+                          kind={fileByPath.get(tab.path)?.kind ?? null}
                         />
                         <span className="min-w-0 flex-1 truncate">{title}</span>
                         {dirty ? (
@@ -1302,12 +1336,7 @@ export function Explorer(props: ExplorerProps) {
                           {isFolderPath(path) ? (
                             <Folder size={13} aria-hidden className="shrink-0" />
                           ) : (
-                            <FileKindIcon
-                              kind={
-                                projected.files.find((file) => file.path === path)?.kind ??
-                                "file"
-                              }
-                            />
+                            fileGlyph(path)
                           )}
                           <span className="truncate">{leafOf(path)}</span>
                         </button>
