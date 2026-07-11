@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { IconButton, PrimaryButton } from "./ui/controls";
 
 // "Open a share" (PR 18): the receive side of an external share grant.
 // Paste the code someone sent you, pick an empty folder, and a READ-ONLY
@@ -91,19 +92,18 @@ export function OpenSharedView(props: {
   return (
     <div
       data-testid="open-shared-view"
-      className="flex w-105 flex-col gap-3 rounded-lg border border-line bg-panel p-5"
+      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
-        <button
-          type="button"
+        <IconButton
           aria-label="Back"
           disabled={opening}
           onClick={props.onBack}
-          className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:opacity-50"
+          className="shrink-0"
         >
           <ArrowLeft size={13} aria-hidden />
-        </button>
-        <h2 className="m-0 text-sm font-semibold">Open a share</h2>
+        </IconButton>
+        <h2 className="m-0 text-sm font-semibold text-ink">Open a share</h2>
       </div>
 
       {gate.kind === "checking" ? (
@@ -116,7 +116,7 @@ export function OpenSharedView(props: {
             Shares are addressed to your dohc Cloud account — sign in first, then
             paste the code you received.
           </p>
-          <CloudLogin onConnected={checkSession} />
+          <CloudLogin onConnected={checkSession} embedded />
         </>
       ) : null}
 
@@ -135,7 +135,7 @@ export function OpenSharedView(props: {
               onChange={(event) => setCode(event.currentTarget.value)}
               placeholder="dohc-share:…"
               spellCheck={false}
-              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 font-mono text-xs text-ink outline-none focus:border-accent"
+              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
           <div className="flex flex-col gap-1">
@@ -150,22 +150,21 @@ export function OpenSharedView(props: {
                 type="button"
                 data-testid="open-share-choose-folder"
                 onClick={() => void chooseFolder()}
-                className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted hover:text-ink"
+                className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted transition-colors hover:text-ink"
               >
                 <FolderOpen size={13} aria-hidden />
                 Choose folder
               </button>
             </div>
           </div>
-          <button
+          <PrimaryButton
             type="button"
             data-testid="open-share-start"
             disabled={!canOpen}
             onClick={() => void open()}
-            className="rounded bg-accent px-3 py-2 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
           >
             {opening ? "Opening the share…" : "Open share"}
-          </button>
+          </PrimaryButton>
           {error ? (
             <p data-testid="open-share-error" role="alert" className="m-0 text-xs text-danger">
               {error}

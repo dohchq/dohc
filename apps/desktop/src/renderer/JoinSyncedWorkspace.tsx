@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { IconButton, PrimaryButton } from "./ui/controls";
 
 // "Join a synced workspace" (0P-C): the second-machine half of multi-machine
 // sync. Paste the code copied from the machine that already has the
@@ -109,7 +110,7 @@ export function JoinSyncedWorkspace(props: {
   return (
     <div
       data-testid="join-synced-workspace"
-      className="flex w-105 flex-col gap-3 rounded-lg border border-line bg-panel p-5"
+      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
         {warning === null ? (
@@ -118,17 +119,16 @@ export function JoinSyncedWorkspace(props: {
           // the workspace was durably created, so "back as if nothing
           // happened" would strand an invisible registration — the only
           // honest affordance left is "Open workspace" below.
-          <button
-            type="button"
+          <IconButton
             aria-label="Back"
             disabled={joining}
             onClick={props.onBack}
-            className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:opacity-50"
+            className="shrink-0"
           >
             <ArrowLeft size={13} aria-hidden />
-          </button>
+          </IconButton>
         ) : null}
-        <h2 className="m-0 text-sm font-semibold">Join a synced workspace</h2>
+        <h2 className="m-0 text-sm font-semibold text-ink">Join a synced workspace</h2>
       </div>
 
       {gate.kind === "checking" ? (
@@ -141,7 +141,7 @@ export function JoinSyncedWorkspace(props: {
             The workspace you're joining belongs to your dohc Cloud account —
             sign in first, then paste the code from your other machine.
           </p>
-          <CloudLogin onConnected={checkSession} />
+          <CloudLogin onConnected={checkSession} embedded />
         </>
       ) : null}
 
@@ -159,7 +159,7 @@ export function JoinSyncedWorkspace(props: {
               onChange={(event) => setCode(event.currentTarget.value)}
               placeholder="dohc-sync:…"
               spellCheck={false}
-              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 font-mono text-xs text-ink outline-none focus:border-accent"
+              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
           <div className="flex flex-col gap-1">
@@ -174,22 +174,21 @@ export function JoinSyncedWorkspace(props: {
                 type="button"
                 data-testid="join-choose-folder"
                 onClick={() => void chooseFolder()}
-                className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted hover:text-ink"
+                className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted transition-colors hover:text-ink"
               >
                 <FolderOpen size={13} aria-hidden />
                 Choose folder
               </button>
             </div>
           </div>
-          <button
+          <PrimaryButton
             type="button"
             data-testid="join-workspace-start"
             disabled={!canJoin}
             onClick={() => void join()}
-            className="rounded bg-accent px-3 py-2 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
           >
             {joining ? "Bringing your workspace over…" : "Join workspace"}
-          </button>
+          </PrimaryButton>
           {joining ? (
             <p className="m-0 text-xs text-subtle" role="status">
               Downloading files, history, and chats. This can take a moment for
@@ -216,7 +215,7 @@ export function JoinSyncedWorkspace(props: {
             onClick={() => {
               if (joinedRef.current) props.onWorkspaceReady(joinedRef.current);
             }}
-            className="rounded bg-accent px-3 py-2 text-sm font-medium text-bg hover:opacity-90"
+            className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
           >
             Open workspace
           </button>

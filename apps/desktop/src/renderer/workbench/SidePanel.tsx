@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { SectionLabel } from "../ui/controls";
 import { clampSidebarWidth } from "./workbenchState";
 
 // The workbench's collapsible, resizable side panel. The host unmounts it
@@ -28,9 +29,7 @@ export function SidePanel(props: {
       {/* h-9: ONE header band height across panel, tab strip, and history
           rail — all three bottom hairlines land on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-          {props.title}
-        </span>
+        <SectionLabel>{props.title}</SectionLabel>
         <span className="ml-auto flex items-center gap-0.5">{props.actions}</span>
       </header>
       <div className="flex min-h-0 flex-1 flex-col">{props.children}</div>

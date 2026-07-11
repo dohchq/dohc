@@ -310,7 +310,7 @@ export function LinkedChatsPanel(props: {
         <button
           type="button"
           onClick={() => void refreshThreads()}
-          className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
         >
           Try again
         </button>
@@ -341,7 +341,7 @@ export function LinkedChatsPanel(props: {
                   data-testid="linked-chat-open"
                   data-thread-id={thread.id}
                   onClick={() => void openThread(thread)}
-                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
                 >
                   <span className="block truncate text-[12px] font-medium text-ink">
                     {thread.title}
@@ -366,7 +366,7 @@ export function LinkedChatsPanel(props: {
             type="button"
             data-testid="linked-chat-new"
             onClick={() => setCreating(basename(filePath))}
-            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
           >
             <MessageSquare size={12} aria-hidden />
             New chat
@@ -382,6 +382,7 @@ export function LinkedChatsPanel(props: {
               Chat title
             </label>
             <input
+              spellCheck={false}
               id="linked-chat-new-title"
               data-testid="linked-chat-new-title"
               autoFocus
@@ -395,7 +396,7 @@ export function LinkedChatsPanel(props: {
                   setCreating(null);
                 }
               }}
-              className="h-7 w-full rounded border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
             />
             <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
               Press Enter to start the chat.

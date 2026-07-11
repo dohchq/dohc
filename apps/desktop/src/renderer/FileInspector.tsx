@@ -30,6 +30,7 @@ import type {
 } from "./editor/MarkdownEditor";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
+import { IconButton, SectionLabel } from "./ui/controls";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -272,24 +273,29 @@ function ViewHeader(props: {
   onShare?: () => void;
   actions?: React.ReactNode;
 }) {
+  // Breadcrumb weighting: the folder path recedes, the file name carries ink.
+  const slash = props.path.lastIndexOf("/");
+  const dir = slash >= 0 ? props.path.slice(0, slash + 1) : "";
+  const leaf = slash >= 0 ? props.path.slice(slash + 1) : props.path;
   return (
     <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
       {props.icon}
-      <span className="font-mono text-ink">{props.path}</span>
-      <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">
-        {props.label}
+      <span className="min-w-0 truncate font-mono">
+        {dir ? <span className="text-subtle">{dir}</span> : null}
+        <span className="font-medium text-ink">{leaf}</span>
       </span>
+      <SectionLabel className="ml-auto shrink-0">
+        {props.label}
+      </SectionLabel>
       {props.onShare ? (
-        <button
-          type="button"
+        <IconButton
           data-testid="file-share"
           aria-label="Share file"
           title="Share file"
           onClick={props.onShare}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
         >
           <Share2 size={13} aria-hidden />
-        </button>
+        </IconButton>
       ) : null}
       {props.actions}
     </header>
@@ -771,7 +777,7 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-save-state"
                 data-state={engine.saveState}
-                className="text-[11px] text-subtle"
+                className="font-mono text-[11px] text-subtle"
               >
                 {engine.saveState === "saved" ? "Saved" : "Saving…"}
               </span>
@@ -781,7 +787,7 @@ function MarkdownView(props: {
                 aria-label="Toggle properties"
                 title="Toggle properties"
                 onClick={togglePropertiesPanel}
-                className={`grid size-6 place-items-center rounded ${
+                className={`grid size-6 place-items-center rounded-md transition-colors ${
                   propertiesOpen
                     ? "bg-line/60 text-ink"
                     : "text-subtle hover:bg-line/50 hover:text-ink"
@@ -848,7 +854,7 @@ function MarkdownView(props: {
               <span
                 data-testid="markdown-save-state"
                 data-state={saveState}
-                className={`text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
+                className={`font-mono text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
               >
                 {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
               </span>
@@ -860,7 +866,7 @@ function MarkdownView(props: {
                 aria-label="Toggle properties"
                 title="Toggle properties"
                 onClick={togglePropertiesPanel}
-                className={`grid size-6 place-items-center rounded ${
+                className={`grid size-6 place-items-center rounded-md transition-colors ${
                   propertiesOpen
                     ? "bg-line/60 text-ink"
                     : "text-subtle hover:bg-line/50 hover:text-ink"
@@ -881,7 +887,7 @@ function MarkdownView(props: {
                 }
                 toggleEditorMode();
               }}
-              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
               {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
@@ -1105,7 +1111,7 @@ function CsvView({
         <span
           data-testid="csv-save-state"
           data-state={draft.saveState}
-          className={`mr-auto text-[11px] ${draft.saveState === "error" ? "text-danger" : "text-subtle"}`}
+          className={`mr-auto font-mono text-[11px] ${draft.saveState === "error" ? "text-danger" : "text-subtle"}`}
         >
           {truncated
             ? "Read-only"
@@ -1212,19 +1218,23 @@ function CsvView({
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-4">
-          <table className="w-full border-collapse text-[13px]">
+          {/* Same table voice as the document editor: rounded frame, tinted
+              header band, quiet inner hairlines, whisper row hover. */}
+          <table className="w-full border-separate border-spacing-0 overflow-hidden rounded-lg border border-line text-[13px]">
             <thead>
               <tr>
                 {!truncated ? (
                   <th
                     aria-label="Row actions"
-                    className="w-9 border border-line bg-panel-2 px-1 py-1"
+                    className="w-9 bg-panel px-1 py-1.5"
                   />
                 ) : null}
                 {Array.from({ length: columnCount }, (_, i) => (
                   <th
                     key={i}
-                    className="border border-line bg-panel-2 px-2 py-1 text-left font-medium"
+                    className={`bg-panel px-2.5 py-1.5 text-left text-[12px] font-semibold text-muted ${
+                      i > 0 || !truncated ? "border-l border-line" : ""
+                    }`}
                   >
                     <div className="flex items-center gap-1">
                       <input
@@ -1242,7 +1252,7 @@ function CsvView({
                           aria-label={`Delete column ${i + 1}`}
                           title="Delete column"
                           onClick={() => deleteColumn(i)}
-                          className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/60 hover:text-danger"
+                          className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-line/60 hover:text-danger"
                         >
                           <Trash2 size={11} aria-hidden />
                         </button>
@@ -1254,23 +1264,28 @@ function CsvView({
             </thead>
             <tbody>
               {previewRows.map((row, r) => (
-                <tr key={r}>
+                <tr key={r} className="group transition-colors hover:bg-panel-2/60">
                   {!truncated ? (
-                    <td className="border border-line bg-panel px-1 py-1 text-center">
+                    <td className="border-t border-line px-1 py-1 text-center">
                       <button
                         type="button"
                         data-testid="csv-delete-row"
                         aria-label={`Delete row ${r + 1}`}
                         title="Delete row"
                         onClick={() => deleteRow(r + 1)}
-                        className="grid size-5 place-items-center rounded text-subtle hover:bg-line/60 hover:text-danger"
+                        className="grid size-5 place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-line/60 hover:text-danger focus:opacity-100 group-hover:opacity-100"
                       >
                         <Trash2 size={11} aria-hidden />
                       </button>
                     </td>
                   ) : null}
                   {Array.from({ length: columnCount }, (_, c) => (
-                    <td key={c} className="border border-line px-2 py-1">
+                    <td
+                      key={c}
+                      className={`border-t border-line px-2.5 py-1.5 ${
+                        c > 0 || !truncated ? "border-l" : ""
+                      }`}
+                    >
                       <input
                         data-testid="csv-cell"
                         aria-label={`Row ${r + 1} column ${c + 1}`}

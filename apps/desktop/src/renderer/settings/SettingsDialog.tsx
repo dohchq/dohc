@@ -393,7 +393,7 @@ export function SettingsDialog(props: {
       return (
         <div
           data-testid="settings-empty-search"
-          className="flex h-40 items-center justify-center rounded border border-dashed border-line text-sm text-muted"
+          className="flex h-40 items-center justify-center rounded-lg border border-dashed border-line text-sm text-muted"
         >
           {`No settings match "${query}".`}
         </div>
@@ -529,7 +529,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={props.onOpenCloud}
-                className="rounded bg-accent px-3 py-1 text-xs text-bg disabled:opacity-50"
+                className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
                 disabled={!props.onOpenCloud}
               >
                 Open Cloud
@@ -596,7 +596,7 @@ export function SettingsDialog(props: {
               title="Open settings"
               description="The command palette, app menu, Activity Bar, Status Bar, and accelerator all route here."
             >
-              <kbd className="rounded bg-panel-2 px-2 py-1 text-[11px] text-ink">
+              <kbd className="rounded border border-line bg-bg px-1.5 py-0.5 font-mono text-[11px] text-subtle">
                 Ctrl/Cmd + ,
               </kbd>
             </SettingRow>
@@ -642,7 +642,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={() => void resetUserSettings()}
-                className="rounded border border-line px-3 py-1 text-xs text-muted hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
               >
                 Reset user
               </button>
@@ -656,7 +656,7 @@ export function SettingsDialog(props: {
               <button
                 type="button"
                 onClick={() => void resetWorkspaceSettings()}
-                className="rounded border border-line px-3 py-1 text-xs text-muted hover:bg-panel-2 hover:text-ink"
+                className="rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
               >
                 Reset workspace
               </button>
@@ -672,7 +672,7 @@ export function SettingsDialog(props: {
               description="Settings in the Workspace scope apply only to this registered local folder."
               testId="settings-row-current-workspace"
             >
-              <code className="max-w-sm truncate rounded bg-panel-2 px-2 py-1 text-xs text-ink">
+              <code className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
                 {props.workspacePath}
               </code>
             </SettingRow>
@@ -733,7 +733,7 @@ export function SettingsDialog(props: {
                     data-testid="check-updates-button"
                     disabled={updateBusy !== null || updateState?.canCheck === false}
                     onClick={() => void checkForUpdates()}
-                    className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
                   >
                     <RefreshCw size={12} aria-hidden />
                     {updateBusy === "check" ? "Checking" : "Check"}
@@ -743,7 +743,7 @@ export function SettingsDialog(props: {
                     data-testid="install-update-button"
                     disabled={updateBusy !== null || updateState?.canInstall !== true}
                     onClick={() => void installUpdate()}
-                    className="h-7 shrink-0 rounded bg-ink px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+                    className="h-7 shrink-0 rounded-md bg-accent px-2 text-[11px] font-semibold text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
                     {updateBusy === "install" ? "Restarting" : "Restart"}
                   </button>
@@ -751,13 +751,13 @@ export function SettingsDialog(props: {
                 <dl className="m-0 grid grid-cols-2 gap-2 text-[11px] text-muted">
                   <div>
                     <dt className="text-subtle">Version</dt>
-                    <dd data-testid="desktop-updates-version" className="m-0 text-ink">
+                    <dd data-testid="desktop-updates-version" className="m-0 font-mono text-ink">
                       {updateState?.currentVersion ?? "unknown"}
                     </dd>
                   </div>
                   <div>
                     <dt className="text-subtle">Channel</dt>
-                    <dd data-testid="desktop-updates-channel" className="m-0 text-ink">
+                    <dd data-testid="desktop-updates-channel" className="m-0 font-mono text-ink">
                       {updateState?.channel ?? "unknown"}
                     </dd>
                   </div>
@@ -780,7 +780,7 @@ export function SettingsDialog(props: {
       tabIndex={-1}
       data-testid="settings-dialog"
       data-active-section={activeSection}
-      className="flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-lg border border-line bg-bg shadow-2xl"
+      className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg"
     >
       <aside
         data-testid="settings-sidebar"
@@ -800,15 +800,15 @@ export function SettingsDialog(props: {
               data-testid={`settings-nav-${section.id}`}
               aria-current={activeSection === section.id ? "page" : undefined}
               onClick={() => setActiveSection(section.id)}
-              className={`flex items-center gap-2 rounded-md px-2 py-2 text-left text-[12px] ${
+              className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
                 activeSection === section.id
-                  ? "bg-bg text-ink"
+                  ? "bg-line text-ink"
                   : "text-muted hover:bg-panel-2 hover:text-ink"
               }`}
             >
               <section.Icon size={15} aria-hidden />
               <span className="min-w-0 flex-1 truncate">{section.label}</span>
-              <span className="text-[10px] text-subtle">{section.scope}</span>
+              <span className="font-mono text-[10px] text-subtle">{section.scope}</span>
             </button>
           ))}
         </nav>
@@ -823,11 +823,12 @@ export function SettingsDialog(props: {
               className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle"
             />
             <input
+              spellCheck={false}
               data-testid="settings-search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search settings"
-              className="h-8 w-full rounded-md border border-line bg-panel pl-8 pr-3 text-[12px] text-ink outline-none placeholder:text-subtle focus:border-ink"
+              className="h-8 w-full rounded-md border border-line bg-bg pl-8 pr-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
           </div>
           <StatusPill state={saveState} />
@@ -836,7 +837,7 @@ export function SettingsDialog(props: {
             type="button"
             aria-label="Close settings"
             onClick={props.onClose}
-            className="grid size-8 place-items-center rounded-md text-muted hover:bg-panel-2 hover:text-ink"
+            className="grid size-8 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
           >
             <X size={16} aria-hidden />
           </button>
@@ -851,7 +852,7 @@ export function SettingsDialog(props: {
                 setActiveSection(event.target.value);
               }
             }}
-            className="h-8 w-full rounded border border-line bg-panel px-2 text-xs text-ink"
+            className="h-8 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink"
           >
             {visibleSections.map((section) => (
               <option key={section.id} value={section.id}>
@@ -877,15 +878,13 @@ export function SettingsDialog(props: {
         ) : null}
 
         <section className="min-h-0 flex-1 overflow-auto px-6 py-5 max-[720px]:px-4">
-          <div className="mb-5 flex items-end justify-between gap-4">
-            <div>
-              <h3 className="m-0 text-base font-semibold text-ink">
-                {activeMeta.label}
-              </h3>
-              <p className="m-0 mt-1 text-[11px] text-subtle">
-                Scope: {activeMeta.scope}
-              </p>
-            </div>
+          <div className="mb-5 flex items-center gap-2.5">
+            <h3 className="m-0 text-sm font-semibold text-ink">
+              {activeMeta.label}
+            </h3>
+            <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-subtle">
+              {activeMeta.scope}
+            </span>
           </div>
           {renderSection()}
         </section>

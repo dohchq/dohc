@@ -87,14 +87,17 @@ export function SharedByMeList() {
     );
   }
   return (
-    <ul className="m-0 flex list-none flex-col gap-1.5 p-0" data-testid="shared-by-me-list">
+    <ul
+      className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
+      data-testid="shared-by-me-list"
+    >
       {load.shares.map((share) => (
         <li
           key={share.shareId}
           data-testid="shared-by-me-row"
           data-share-id={share.shareId}
           data-revoked={share.revokedAtMs !== null || undefined}
-          className="flex items-center gap-2 rounded border border-line bg-panel-2 px-2.5 py-1.5"
+          className="flex items-center gap-2 bg-panel px-2.5 py-2"
         >
           <div className="min-w-0 flex-1">
             <div className="truncate font-mono text-[11px] text-ink">
@@ -112,7 +115,7 @@ export function SharedByMeList() {
                 type="button"
                 data-testid="shared-by-me-copy"
                 onClick={() => void copyCode(share)}
-                className="flex shrink-0 items-center gap-1 rounded border border-line bg-panel px-2 py-1 text-[11px] text-muted hover:text-ink"
+                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
               >
                 {copiedShareId === share.shareId ? (
                   <Check size={11} aria-hidden />
@@ -126,7 +129,7 @@ export function SharedByMeList() {
                 data-testid="shared-by-me-revoke"
                 disabled={busyShareId === share.shareId}
                 onClick={() => void revoke(share.shareId)}
-                className="shrink-0 rounded border border-line bg-panel px-2 py-1 text-[11px] text-muted hover:text-danger disabled:opacity-50"
+                className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:text-danger disabled:opacity-50"
               >
                 {busyShareId === share.shareId ? "Ending…" : "End share"}
               </button>

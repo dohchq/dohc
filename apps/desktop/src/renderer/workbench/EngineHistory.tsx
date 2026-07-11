@@ -166,6 +166,9 @@ function MomentRow(props: {
 }) {
   const { moment } = props;
   const recordedAt = formatRecordedAt(moment.recordedAtMs);
+  // Agent-authored moments speak in the olive attribution voice; everything
+  // else is a neutral origin in ink.
+  const isAgent = moment.agentAuthorName !== undefined;
   return (
     <button
       type="button"
@@ -202,15 +205,22 @@ function MomentRow(props: {
           <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
         )}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] font-medium text-ink">
+          <span
+            className={`block truncate text-[13px] text-ink ${
+              props.nested ? "font-mono" : "font-medium"
+            }`}
+          >
             {props.nested ? moment.path : engineMomentSummary(moment)}
           </span>
-          <span className="block truncate text-[10px] text-subtle">
+          <span className="mt-0.5 block truncate text-[11px] text-subtle">
             {props.nested ? (
               engineOperationLabel(moment)
             ) : (
               <>
-                <span data-testid="engine-moment-source">
+                <span
+                  data-testid="engine-moment-source"
+                  className={isAgent ? "text-agent" : "text-muted"}
+                >
                   {engineMomentSourceLabel(moment)}
                 </span>
                 {" · "}
@@ -218,6 +228,7 @@ function MomentRow(props: {
                   data-testid="engine-moment-recorded-at"
                   dateTime={recordedAt.iso}
                   title={recordedAt.iso}
+                  className="font-mono"
                 >
                   {recordedAt.label}
                 </time>
@@ -258,13 +269,16 @@ function GroupRow(props: {
             <ChevronRight size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
           )}
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12px] font-medium text-ink">
+            <span className="block truncate text-[13px] font-medium text-ink">
               {group.summary}
             </span>
-            <span className="block truncate text-[10px] text-subtle">
+            <span className="mt-0.5 block truncate text-[11px] text-subtle">
               {agentAuthorName !== undefined ? (
                 <>
-                  <span data-testid="engine-moment-group-source">
+                  <span
+                    data-testid="engine-moment-group-source"
+                    className="text-agent"
+                  >
                     {chatAuthorLabel({
                       authorKind: "agent",
                       authorDisplayName: agentAuthorName,
@@ -273,11 +287,17 @@ function GroupRow(props: {
                   {" · "}
                 </>
               ) : null}
-              <time dateTime={recordedAt.iso} title={recordedAt.iso}>
+              <time
+                dateTime={recordedAt.iso}
+                title={recordedAt.iso}
+                className="font-mono"
+              >
                 {recordedAt.label}
               </time>
               {" · "}
-              {group.moments.length} file{group.moments.length === 1 ? "" : "s"}
+              <span className="font-mono">
+                {group.moments.length} file{group.moments.length === 1 ? "" : "s"}
+              </span>
             </span>
           </span>
         </span>
@@ -322,9 +342,9 @@ export function EngineHistoryView(props: {
 
   if (props.moments.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-        <span className="text-xs text-muted">No changes yet</span>
-        <span className="text-[11px] text-subtle">
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
+        <span className="text-sm text-muted">No changes yet</span>
+        <span className="max-w-xs text-[11px] leading-5 text-subtle">
           Edits — yours or your agent's — show up here as a timeline you can
           review.
         </span>
@@ -335,7 +355,7 @@ export function EngineHistoryView(props: {
   return (
     <>
       <div className="shrink-0 border-b border-line bg-panel-2 px-2 py-2">
-        <label className="flex h-7 min-w-0 items-center gap-1.5 rounded border border-line bg-bg px-2 text-[11px] text-muted">
+        <label className="flex h-7 min-w-0 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-[11px] text-muted focus-within:border-ink">
           <Search size={12} aria-hidden className="shrink-0 text-subtle" />
           <input
             type="search"
@@ -344,7 +364,7 @@ export function EngineHistoryView(props: {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search history"
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-ink outline-none placeholder:text-subtle"
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
           />
           {query.length > 0 ? (
             <button
@@ -352,7 +372,7 @@ export function EngineHistoryView(props: {
               aria-label="Clear history search"
               title="Clear history search"
               onClick={() => setQuery("")}
-              className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+              className="grid size-5 shrink-0 place-items-center rounded-md text-subtle hover:bg-line/50 hover:text-ink"
             >
               <X size={12} aria-hidden />
             </button>

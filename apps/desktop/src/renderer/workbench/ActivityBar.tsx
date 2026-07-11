@@ -60,8 +60,10 @@ function RailButton(props: {
       aria-label={props.label}
       aria-current={props.active ? "page" : undefined}
       onClick={props.onClick}
-      className={`relative grid size-9 place-items-center rounded-md ${
-        props.active ? "text-ink" : "text-subtle hover:bg-line/50 hover:text-ink"
+      className={`relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
+        props.active
+          ? "bg-line/60 text-ink"
+          : "text-subtle hover:bg-line/50 hover:text-ink"
       }`}
     >
       {props.active ? (

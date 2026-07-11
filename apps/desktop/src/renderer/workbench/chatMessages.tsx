@@ -333,7 +333,7 @@ export function MessageReactions(props: {
           role="group"
           data-testid={`${props.testIdPrefix}-reaction-picker`}
           aria-label="Choose a reaction"
-          className="absolute bottom-full left-0 z-10 mb-1 flex gap-0.5 rounded-md border border-line bg-bg p-1 shadow-md"
+          className="dohc-popover dohc-pop-in absolute bottom-full left-0 z-10 mb-1 flex gap-0.5 rounded-lg border border-line bg-panel p-1"
         >
           {choices.map((emoji) => {
             const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
@@ -421,7 +421,7 @@ export function ChatMessageList(props: {
                 </span>
                 <p
                   data-testid={`${props.testIdPrefix}-message-body`}
-                  className="mb-0 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
+                  className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
                 >
                   {candidates.length > 0 ? (
                     <MentionText
@@ -494,7 +494,7 @@ export function ChatComposer(props: {
             props.onEscape();
           }
         }}
-        className="min-w-0 flex-1 resize-none rounded border border-line bg-bg px-2 py-1.5 text-[12px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
       />
       <button
         type="submit"
@@ -502,7 +502,7 @@ export function ChatComposer(props: {
         aria-label={props.sendLabel}
         title={props.sendLabel}
         disabled={props.sending || props.value.trim().length === 0}
-        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded bg-ink text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-accent text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Send size={13} aria-hidden />
       </button>

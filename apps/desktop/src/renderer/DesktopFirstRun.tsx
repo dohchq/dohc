@@ -1,3 +1,4 @@
+import { DohcMark } from "@dohc/brand";
 import { Cloud, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { bridge } from "./bridge";
@@ -5,6 +6,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { OpenSharedView } from "./OpenSharedView";
 import { Titlebar } from "./Titlebar";
+import { PrimaryButton } from "./ui/controls";
 
 // First launch is a working tool, not a marketing page: pick where your
 // files live, create the folder, start working. No account exists here —
@@ -67,9 +69,12 @@ export function DesktopFirstRun(props: {
       {/* The first-run window is frameless too — without the drag strip it
           could not be moved at all. */}
       <Titlebar />
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6">
-      <div className="flex flex-col items-center gap-1">
-        <h1 className="m-0 text-2xl font-semibold tracking-tight">dohc</h1>
+      <div className="dohc-paper-grid flex min-h-0 flex-1 flex-col items-center justify-center gap-7">
+      <div className="flex flex-col items-center gap-2.5">
+        <DohcMark size={34} className="text-ink" />
+        <h1 className="m-0 font-serif text-[26px] font-medium tracking-tight">
+          dohc
+        </h1>
         <p className="m-0 text-sm text-muted">Your workspace is a folder.</p>
       </div>
 
@@ -84,7 +89,7 @@ export function DesktopFirstRun(props: {
           onBack={() => setOpeningShare(false)}
         />
       ) : (
-      <div className="flex w-105 flex-col gap-3 rounded-lg border border-line bg-panel p-5">
+      <div className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-6">
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium uppercase tracking-wide text-subtle">
             Workspace location
@@ -92,7 +97,7 @@ export function DesktopFirstRun(props: {
           <div className="flex items-start justify-between gap-2">
             {/* The whole point of this screen is where files live: never
                 truncate the path. */}
-            <code className="break-all font-mono text-[13px] leading-snug text-ink">
+            <code className="select-text cursor-text break-all font-mono text-[13px] leading-snug text-ink">
               {root ?? "…"}
             </code>
             <button
@@ -106,19 +111,18 @@ export function DesktopFirstRun(props: {
           </div>
         </div>
 
-        <button
+        <PrimaryButton
           type="button"
           disabled={!root || creating}
           onClick={() => void createWorkspace()}
-          className="rounded bg-accent px-3 py-2 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
         >
           {creating ? "Creating…" : "Create workspace"}
-        </button>
+        </PrimaryButton>
 
         <button
           type="button"
           onClick={() => void openExisting()}
-          className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
         >
           Open an existing folder as a workspace
         </button>
@@ -127,7 +131,7 @@ export function DesktopFirstRun(props: {
           type="button"
           data-testid="first-run-join-synced"
           onClick={() => setJoining(true)}
-          className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
         >
           Join a synced workspace from another machine
         </button>
@@ -136,7 +140,7 @@ export function DesktopFirstRun(props: {
           type="button"
           data-testid="first-run-open-share"
           onClick={() => setOpeningShare(true)}
-          className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
         >
           Open a share someone sent you
         </button>

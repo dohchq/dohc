@@ -13,6 +13,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
+import { SectionLabel } from "../ui/controls";
 import { UnifiedDiffLines, buildUnifiedDiffLines } from "./unifiedDiff";
 
 // Named versions surface (PR 0M-4, workspace-engine alpha). Product
@@ -48,7 +49,7 @@ function versionName(
 }
 
 const MENU_ITEM_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
+  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
 
 // Compact version selector for the editor chrome: shows the active version,
 // switches on click, creates inline, and opens compare / merge.
@@ -276,7 +277,7 @@ export function VersionMenu(props: {
         title={`You're working in the ${activeName} version`}
         disabled={busy !== null}
         onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
-        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-60"
+        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-60"
       >
         <Layers size={13} aria-hidden className="shrink-0" />
         <span data-testid="version-menu-active" className="min-w-0 truncate">
@@ -301,7 +302,7 @@ export function VersionMenu(props: {
             aria-label="Versions"
             data-testid="version-menu"
             onKeyDown={onMenuKeyDown}
-            className="absolute right-0 top-full z-30 mt-1 w-64 rounded border border-line bg-panel p-1 shadow-lg"
+            className="dohc-popover dohc-pop-in absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-line bg-panel p-1"
           >
             <div className="px-2 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-subtle">
               Versions
@@ -322,9 +323,17 @@ export function VersionMenu(props: {
                   className={MENU_ITEM_CLASS}
                 >
                   <span className="grid w-4 shrink-0 place-items-center">
-                    {isActive ? <Check size={13} aria-hidden /> : null}
+                    {isActive ? (
+                      <Check size={13} aria-hidden className="text-accent" />
+                    ) : null}
                   </span>
-                  <span className="min-w-0 flex-1 truncate">{version.name}</span>
+                  <span
+                    className={`min-w-0 flex-1 truncate ${
+                      isActive ? "text-ink" : ""
+                    }`}
+                  >
+                    {version.name}
+                  </span>
                 </button>
               );
             })}
@@ -409,9 +418,9 @@ export function VersionMenu(props: {
                       setInlineError(null);
                     }
                   }}
-                  className="h-7 w-full rounded border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                  className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
                 />
-                <p className="mb-0 mt-1 text-[10px] leading-4 text-subtle">
+                <p className="mb-0 mt-1 text-[11px] leading-4 text-subtle">
                   {busy === "create"
                     ? "Creating…"
                     : "Press Enter to create and start working in it."}
@@ -467,7 +476,7 @@ export function VersionMenu(props: {
                 {inlineError}
               </p>
             ) : (
-              <p className="mb-0 mt-1 px-2 pb-1 text-[10px] leading-4 text-subtle">
+              <p className="mb-0 mt-1 px-2 pb-1 text-[11px] leading-4 text-subtle">
                 Versions cover text files during the alpha.
               </p>
             )}
@@ -482,7 +491,7 @@ export function VersionMenu(props: {
             role="dialog"
             aria-modal="true"
             aria-labelledby="version-switch-save-title"
-            className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
+            className="dohc-elevated w-[min(420px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
           >
             <h3
               id="version-switch-save-title"
@@ -504,7 +513,7 @@ export function VersionMenu(props: {
                 type="button"
                 data-testid="version-switch-save-cancel"
                 onClick={() => setPendingSwitch(null)}
-                className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
               >
                 Cancel
               </button>
@@ -517,7 +526,7 @@ export function VersionMenu(props: {
                   setPendingSwitch(null);
                   if (target) void performSwitch(target);
                 }}
-                className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
+                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
                 Save and switch
               </button>
@@ -646,7 +655,7 @@ export function TryTaskDialog(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="try-task-title"
-        className="w-[min(460px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
+        className="dohc-elevated w-[min(460px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
       >
         <h3 id="try-task-title" className="m-0 text-sm font-semibold text-ink">
           Try it in a version
@@ -679,7 +688,7 @@ export function TryTaskDialog(props: {
               void start();
             }
           }}
-          className="mt-1 w-full resize-none rounded border border-line bg-bg px-2 py-1.5 text-[12px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+          className="mt-1 w-full resize-none rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
         />
         <p
           data-testid="try-task-helper"
@@ -706,7 +715,7 @@ export function TryTaskDialog(props: {
             data-testid="try-task-cancel"
             disabled={busy}
             onClick={props.onClose}
-            className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
           >
             Cancel
           </button>
@@ -715,7 +724,7 @@ export function TryTaskDialog(props: {
             data-testid="try-task-start"
             disabled={busy || helper.status === "checking" || task.trim().length === 0}
             onClick={() => void start()}
-            className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+            className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
           >
             {busy ? "Starting…" : "Start"}
           </button>
@@ -821,7 +830,7 @@ export function VersionMergeDialog(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="version-merge-title"
-        className="flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded border border-line bg-panel shadow-xl"
+        className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
       >
         <header className="border-b border-line px-4 py-3">
           <h3 id="version-merge-title" className="m-0 text-sm font-semibold text-ink">
@@ -917,7 +926,7 @@ export function VersionMergeDialog(props: {
                 type="button"
                 data-testid="version-merge-cancel"
                 onClick={finish}
-                className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
               >
                 Cancel
               </button>
@@ -926,7 +935,7 @@ export function VersionMergeDialog(props: {
                 data-testid="version-merge-confirm"
                 autoFocus
                 onClick={() => void runMerge()}
-                className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
+                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
                 Merge into Main
               </button>
@@ -937,7 +946,7 @@ export function VersionMergeDialog(props: {
               data-testid="version-merge-done"
               disabled={!canCloseExplicitly}
               onClick={finish}
-              className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               {stage.stage === "conflicts" ? "Finish later" : "Done"}
             </button>
@@ -954,7 +963,7 @@ function ConflictSidePane(props: {
   missingNote: string;
 }) {
   return (
-    <div className="flex min-w-0 flex-col overflow-hidden rounded border border-line">
+    <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line">
       <div className="border-b border-line bg-panel-2 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-subtle">
         {props.heading}
       </div>
@@ -1058,7 +1067,7 @@ function ConflictResolver(props: {
       data-testid="version-conflict"
       data-conflict-path={conflict.path}
       aria-label={`Conflict in ${conflict.path}`}
-      className="rounded border border-line bg-bg p-2"
+      className="rounded-lg border border-line bg-bg p-2"
     >
       <div className="flex items-center gap-1.5 pb-2">
         {isBinary ? (
@@ -1073,7 +1082,7 @@ function ConflictResolver(props: {
       {isBinary ? (
         <div
           data-testid="version-conflict-binary"
-          className="mb-2 rounded border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
+          className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
         >
           Binary file. {labels.currentHeading}:{" "}
           {conflict.currentBinary ? `${conflict.currentBinary.byteLength} bytes` : "no copy"};{" "}
@@ -1095,7 +1104,7 @@ function ConflictResolver(props: {
             data-testid="version-conflict-keep-current"
             disabled={busy}
             onClick={() => void resolve({ kind: "keep-current" })}
-            className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
           >
             {labels.keepCurrent}
           </button>
@@ -1113,7 +1122,7 @@ function ConflictResolver(props: {
             data-testid="version-conflict-keep-incoming"
             disabled={busy}
             onClick={() => void resolve({ kind: "keep-incoming" })}
-            className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
           >
             {labels.keepIncoming}
           </button>
@@ -1127,7 +1136,7 @@ function ConflictResolver(props: {
           onClick={() =>
             setCombined(conflict.incomingText ?? conflict.currentText ?? "")
           }
-          className="mt-2 h-7 cursor-pointer rounded px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+          className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
         >
           Combine by hand instead…
         </button>
@@ -1146,14 +1155,14 @@ function ConflictResolver(props: {
             disabled={busy}
             rows={6}
             onChange={(event) => setCombined(event.target.value)}
-            className="w-full resize-y rounded border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+            className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
           />
           <div className="flex justify-end gap-2">
             <button
               type="button"
               disabled={busy}
               onClick={() => setCombined(null)}
-              className="h-7 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
             >
               Cancel
             </button>
@@ -1162,7 +1171,7 @@ function ConflictResolver(props: {
               data-testid="version-conflict-apply-combined"
               disabled={busy}
               onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
-              className="h-7 cursor-pointer rounded bg-ink px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+              className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
             >
               Use this combined copy
             </button>
@@ -1240,9 +1249,7 @@ export function VersionComparePage(props: {
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
         <div className="min-w-0 flex-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
-            Compare
-          </span>
+          <SectionLabel>Compare</SectionLabel>
           <h2 className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink">
             {state.status === "ready"
               ? `${state.versionName} compared with Main`
@@ -1267,7 +1274,7 @@ export function VersionComparePage(props: {
           title="Refresh comparison"
           disabled={state.status === "loading"}
           onClick={() => setRefreshNonce((nonce) => nonce + 1)}
-          className="grid size-7 shrink-0 cursor-pointer place-items-center rounded border border-line text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+          className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md border border-line text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
         >
           <RefreshCw size={13} aria-hidden />
         </button>
@@ -1299,7 +1306,7 @@ export function VersionComparePage(props: {
                 key={file.path}
                 data-testid="version-compare-file"
                 data-compare-path={file.path}
-                className="overflow-hidden rounded border border-line bg-bg shadow-sm"
+                className="overflow-hidden rounded-lg border border-line bg-bg"
               >
                 <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
                   {file.protected ? (
@@ -1431,7 +1438,7 @@ export function ConflictReviewDialog(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="conflict-review-title"
-        className="flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded border border-line bg-panel shadow-xl"
+        className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
       >
         <header className="border-b border-line px-4 py-3">
           <h3 id="conflict-review-title" className="m-0 text-sm font-semibold text-ink">
@@ -1492,7 +1499,7 @@ export function ConflictReviewDialog(props: {
             type="button"
             data-testid="conflict-review-done"
             onClick={props.onClose}
-            className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
           >
             {conflicts.length > 0 ? "Finish later" : "Done"}
           </button>

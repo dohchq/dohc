@@ -2,6 +2,7 @@ import { Check, Cloud, Copy, ExternalLink, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
+import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
 type PassphrasePurpose = "enable" | "protect" | "unlock";
@@ -22,6 +23,9 @@ export function CloudLogin(props: {
   // Fired when a device-flow login completes inside this panel (the join
   // surface re-checks its own gate on it).
   onConnected?: () => void;
+  // Nested inside another elevated card (join/open-shared signed-out gates):
+  // drop this panel's own frame so cards never stack elevation.
+  embedded?: boolean;
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [codeCopied, setCodeCopied] = useState(false);
@@ -221,10 +225,14 @@ export function CloudLogin(props: {
   return (
     <div
       data-testid="cloud-sync-panel"
-      className="w-105 max-w-[80vw] rounded-lg border border-line bg-panel p-4 shadow-lg"
+      className={
+        props.embedded
+          ? "w-full"
+          : "dohc-elevated w-105 max-w-[80vw] rounded-xl border border-line bg-panel p-5"
+      }
     >
-      <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold">
-        <Cloud size={14} aria-hidden />
+      <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
+        <Cloud size={14} aria-hidden className="text-subtle" />
         dohc Cloud
       </h2>
 
@@ -246,31 +254,32 @@ export function CloudLogin(props: {
           <label className="mt-3 block text-[11px] font-medium text-subtle">
             Cloud server URL
             <input
+              spellCheck={false}
               data-testid="cloud-server-url"
               value={serverUrl}
               onChange={(event) => setServerUrl(event.currentTarget.value)}
               placeholder="http://localhost:1786"
-              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
           <label className="mt-2 block text-[11px] font-medium text-subtle">
             Sync relay URL
             <input
+              spellCheck={false}
               data-testid="cloud-relay-url"
               value={relayUrl}
               onChange={(event) => setRelayUrl(event.currentTarget.value)}
               placeholder="http://localhost:1788"
-              className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
-          <button
-            type="button"
+          <PrimaryButton
             data-testid="cloud-connect-start"
             onClick={() => void connect()}
-            className="mt-3 rounded bg-accent px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90"
+            className="mt-3"
           >
             Connect
-          </button>
+          </PrimaryButton>
         </>
       ) : null}
 
@@ -285,15 +294,14 @@ export function CloudLogin(props: {
           >
             {phase.userCode}
           </p>
-          <button
-            type="button"
+          <PrimaryButton
             data-testid="cloud-open-browser"
             onClick={() => void bridge().openExternalUrl({ url: phase.verificationUri })}
-            className="flex items-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90"
+            className="flex items-center gap-1.5"
           >
             <ExternalLink size={12} aria-hidden />
             Open browser
-          </button>
+          </PrimaryButton>
           <p className="mb-0 mt-2 text-[11px] text-subtle">
             Waiting for approval — this updates by itself.
           </p>
@@ -318,7 +326,7 @@ export function CloudLogin(props: {
                 {syncCode ? (
                   <div
                     data-testid="cloud-sync-code-block"
-                    className="mt-3 rounded border border-line bg-panel-2 p-2.5"
+                    className="mt-3 rounded-lg border border-line bg-panel-2 p-3"
                   >
                     <p className="m-0 text-[11px] font-semibold text-ink">
                       Add this workspace on another machine
@@ -330,7 +338,7 @@ export function CloudLogin(props: {
                     <div className="mt-2 flex items-center gap-2">
                       <code
                         data-testid="cloud-sync-code"
-                        className="min-w-0 flex-1 truncate rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink"
+                        className="min-w-0 flex-1 truncate rounded-md border border-line bg-bg px-2.5 py-1 font-mono text-[11px] text-ink"
                         title={syncCode}
                       >
                         {syncCode}
@@ -339,7 +347,7 @@ export function CloudLogin(props: {
                         type="button"
                         data-testid="cloud-copy-sync-code"
                         onClick={() => void copySyncCode()}
-                        className="flex shrink-0 items-center gap-1 rounded border border-line px-2 py-1 text-[11px] text-muted hover:text-ink"
+                        className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-transparent px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
                       >
                         {codeCopied ? (
                           <Check size={11} aria-hidden />
@@ -352,7 +360,7 @@ export function CloudLogin(props: {
                   </div>
                 ) : null}
                 {workspaceSecretState === "protected-key-present" ? (
-                  <button
+                  <SecondaryButton
                     type="button"
                     data-testid="cloud-protect-secrets"
                     disabled={
@@ -362,15 +370,15 @@ export function CloudLogin(props: {
                         passphrase.length === 0)
                     }
                     onClick={() => startSecretPassphrase("protect")}
-                    className="mt-3 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+                    className="mt-3"
                   >
                     {syncBusy && passphrasePurpose === "protect"
                       ? "Protecting…"
                       : "Protect sync with a passphrase"}
-                  </button>
+                  </SecondaryButton>
                 ) : null}
                 {workspaceSecretState === "protected-key-missing" ? (
-                  <button
+                  <SecondaryButton
                     type="button"
                     data-testid="cloud-unlock-secrets"
                     disabled={
@@ -380,25 +388,25 @@ export function CloudLogin(props: {
                         passphrase.length === 0)
                     }
                     onClick={() => startSecretPassphrase("unlock")}
-                    className="mt-3 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+                    className="mt-3"
                   >
                     {syncBusy && passphrasePurpose === "unlock"
                       ? "Unlocking…"
                       : "Unlock protected files"}
-                  </button>
+                  </SecondaryButton>
                 ) : null}
               </>
             ) : (
               <>
-                <button
+                <PrimaryButton
                   type="button"
                   data-testid="cloud-enable-sync"
                   disabled={syncBusy || (needsPassphrase && passphrase.length === 0)}
                   onClick={() => void enableSync()}
-                  className="mt-3 rounded bg-accent px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50"
+                  className="mt-3"
                 >
                   {syncBusy ? "Enabling sync…" : "Sync this workspace"}
-                </button>
+                </PrimaryButton>
               </>
             )
           ) : null}
@@ -406,11 +414,12 @@ export function CloudLogin(props: {
             <label className="mt-3 block text-[11px] font-medium text-subtle">
               Passphrase
               <input
+                spellCheck={false}
                 data-testid="cloud-sync-passphrase"
                 value={passphrase}
                 type="password"
                 onChange={(event) => setPassphrase(event.currentTarget.value)}
-                className="mt-1 w-full rounded border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink outline-none focus:border-accent"
+                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
               />
             </label>
           ) : null}
@@ -419,15 +428,14 @@ export function CloudLogin(props: {
               {syncError}
             </p>
           ) : null}
-          <button
-            type="button"
+          <SecondaryButton
             data-testid="cloud-disconnect"
             onClick={() => void disconnect()}
-            className="mt-3 flex items-center gap-1.5 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+            className="mt-3 flex items-center gap-1.5"
           >
             <LogOut size={12} aria-hidden />
             Disconnect
-          </button>
+          </SecondaryButton>
         </div>
       ) : null}
     </div>

@@ -243,7 +243,7 @@ export function EditorTabs(props: {
             data-testid="tabs-overflow-menu"
             role="menu"
             aria-label="Open tabs"
-            className="absolute right-1 top-full z-20 mt-1 max-h-72 w-60 overflow-y-auto rounded-md border border-line bg-panel py-1 shadow-sm"
+            className="dohc-popover dohc-pop-in absolute right-1 top-full z-20 mt-1 max-h-72 w-60 overflow-y-auto rounded-lg border border-line bg-panel py-1"
           >
             {props.tabs.map((tab) => (
               <button

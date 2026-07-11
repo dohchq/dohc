@@ -59,7 +59,7 @@ export function PresenceFaces(props: {
         return (
           <span
             key={peer.userId}
-            className="-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[9px] font-semibold first:ml-0"
+            className="-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[10px] font-semibold first:ml-0"
             style={{
               backgroundColor: `hsl(${hue} 45% 88%)`,
               color: `hsl(${hue} 45% 30%)`,
@@ -72,7 +72,7 @@ export function PresenceFaces(props: {
       })}
       {overflow > 0 ? (
         <span
-          className="-ml-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-bg bg-paper px-1 text-[9px] font-semibold text-subtle"
+          className="-ml-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-bg bg-panel px-1 text-[10px] font-semibold text-subtle"
           aria-hidden="true"
         >
           +{overflow}

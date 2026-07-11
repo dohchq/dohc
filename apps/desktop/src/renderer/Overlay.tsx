@@ -7,10 +7,12 @@ export function Overlay(props: { onClose: () => void; children: ReactNode }) {
   return (
     <div
       data-dohc-modal="true"
-      className="fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-black/20 p-4 pt-24"
+      className="fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-black/20 p-4 pt-24 backdrop-blur-[1.5px]"
       onClick={props.onClose}
     >
-      <div onClick={(event) => event.stopPropagation()}>{props.children}</div>
+      <div className="dohc-pop-in" onClick={(event) => event.stopPropagation()}>
+        {props.children}
+      </div>
     </div>
   );
 }

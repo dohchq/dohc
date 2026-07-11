@@ -4,6 +4,7 @@ import {
   ChevronRight,
   MessageSquare,
   Regex,
+  Search,
   SearchX,
   SlidersHorizontal,
   WholeWord,
@@ -11,6 +12,7 @@ import {
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SearchResultsEventEntry } from "../../ipc/channels";
 import { rendererMarks } from "../../performance/rendererMarks";
+import { SectionLabel } from "../ui/controls";
 import {
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
@@ -93,7 +95,7 @@ const FileGroup = memo(function FileGroup(props: {
         onClick={() => props.onToggle(group.path)}
         // h-7 at 13px: the workbench list rhythm (Explorer rows, palette
         // rows) — Search must not read denser than the tree one click away.
-        className="flex h-7 w-full items-center gap-1 rounded px-1.5 text-left text-[13px] text-ink hover:bg-line/50"
+        className="flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-line/50"
       >
         {props.collapsed ? (
           <ChevronRight size={12} aria-hidden className="shrink-0 text-subtle" />
@@ -106,13 +108,16 @@ const FileGroup = memo(function FileGroup(props: {
             Chat
           </span>
         ) : null}
-        <span className="truncate font-medium">{groupTitle}</span>
+        {/* File paths speak in the mono metadata voice; chat titles are prose. */}
+        <span className={`truncate ${chatEntry ? "font-medium" : "font-mono"}`}>
+          {groupTitle}
+        </span>
         {!chatEntry && dirnameOf(group.path) ? (
-          <span className="truncate text-[11px] text-subtle">{dirnameOf(group.path)}</span>
+          <span className="truncate font-mono text-[11px] text-subtle">{dirnameOf(group.path)}</span>
         ) : null}
         <span
           data-testid="search-group-count"
-          className="ml-auto rounded-full bg-line px-1.5 text-[10px] font-semibold leading-4 text-muted"
+          className="ml-auto rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted"
         >
           {group.entries.length}
         </span>
@@ -130,9 +135,9 @@ const FileGroup = memo(function FileGroup(props: {
                 onClick={() => props.onOpen(group.path, entry.line, entry.column, entry)}
                 // py-[4px] around the leading-5 preview = a 28px line box,
                 // matching the h-7 workbench row pitch.
-                className={`block w-full rounded py-[4px] pl-6 pr-2 text-left ${
+                className={`block w-full rounded-md py-[4px] pl-6 pr-2 text-left transition-colors duration-75 ${
                   index === props.selectedEntryIndex
-                    ? "bg-line"
+                    ? "bg-line text-ink"
                     : "hover:bg-panel-2"
                 }`}
               >
@@ -146,7 +151,7 @@ const FileGroup = memo(function FileGroup(props: {
                 type="button"
                 data-testid="search-show-more"
                 onClick={() => props.onShowAll(group.path)}
-                className="flex h-7 w-full items-center rounded pl-6 pr-2 text-left text-[11px] text-subtle hover:bg-panel-2 hover:text-ink"
+                className="flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[11px] text-subtle transition-colors hover:bg-panel-2 hover:text-ink"
               >
                 Show {hidden} more match{hidden === 1 ? "" : "es"}
               </button>
@@ -173,13 +178,12 @@ function ToggleButton(props: {
       aria-label={props.label}
       aria-pressed={props.pressed}
       onClick={props.onToggle}
-      // Pressed must survive a glance, not read as a momentary hover: a
-      // match-blue tinted fill + 1px match border (VS Code's
-      // inputOption.activeBackground/activeBorder idiom) — a toggled-on
-      // filter silently changes every search, so its on-state has to pop.
-      className={`grid size-5.5 shrink-0 place-items-center rounded ${
+      // Pressed reads as the list-row "active" fill (bg-line + ink), calm and
+      // legible at a glance — not a loud tint. Color in Search is reserved for
+      // the match highlight; a toggled-on filter earns weight, not hue.
+      className={`grid size-5.5 shrink-0 place-items-center rounded-md transition-colors duration-75 ${
         props.pressed
-          ? "border border-match bg-match/15 text-ink"
+          ? "bg-line text-ink"
           : "text-subtle hover:bg-line/50 hover:text-ink"
       }`}
     >
@@ -361,7 +365,7 @@ export function SearchView(props: {
       className="flex min-h-0 flex-1 flex-col"
     >
       <div className="flex flex-col gap-1.5 border-b border-line px-2 py-2">
-        <div className="flex items-center gap-1 rounded border border-line bg-bg px-1.5 py-1 focus-within:border-ink">
+        <div className="flex items-center gap-1 rounded-md border border-line bg-bg px-1.5 py-1 transition-colors focus-within:border-ink">
           <input
             ref={inputRef}
             type="text"
@@ -416,9 +420,9 @@ export function SearchView(props: {
           // which excludes. The nested <label> carries the accessible name.
           <div className="flex flex-col gap-1.5">
             <label className="flex flex-col gap-0.5">
-              <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              <SectionLabel className="px-0.5">
                 Files to include
-              </span>
+              </SectionLabel>
               <input
                 type="text"
                 data-testid="search-include"
@@ -434,9 +438,9 @@ export function SearchView(props: {
               />
             </label>
             <label className="flex flex-col gap-0.5">
-              <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              <SectionLabel className="px-0.5">
                 Files to exclude
-              </span>
+              </SectionLabel>
               <input
                 type="text"
                 data-testid="search-exclude"
@@ -485,23 +489,28 @@ export function SearchView(props: {
       ) : null}
 
       {model.status === "idle" ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-          <span className="text-xs text-muted">Search this workspace</span>
-          <span className="text-[11px] text-subtle">
-            Full-text results stream in as you type. Toggle case, whole word,
-            regex, and file filters above.
-          </span>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+          <Search size={20} aria-hidden strokeWidth={1.9} className="text-line" />
+          <div className="flex flex-col gap-1">
+            <span className="text-sm text-muted">Search this workspace</span>
+            <span className="text-[11px] leading-relaxed text-subtle">
+              Full-text results stream in as you type. Toggle case, whole word,
+              regex, and file filters above.
+            </span>
+          </div>
         </div>
       ) : model.status === "complete" && model.totalMatches === 0 ? (
         <div
           data-testid="search-empty-state"
-          className="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 text-center"
+          className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
         >
-          <SearchX size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs text-muted">No results found</span>
-          <span className="text-[11px] text-subtle">
-            Check the spelling, loosen a filter, or try a regex.
-          </span>
+          <SearchX size={20} aria-hidden strokeWidth={1.9} className="text-line" />
+          <div className="flex flex-col gap-1">
+            <span className="text-sm text-muted">No results found</span>
+            <span className="text-[11px] leading-relaxed text-subtle">
+              Check the spelling, loosen a filter, or try a regex.
+            </span>
+          </div>
         </div>
       ) : (
         <ul
@@ -538,7 +547,7 @@ export function SearchView(props: {
                 type="button"
                 data-testid="search-show-more-files"
                 onClick={() => setGroupWindow((current) => current + GROUP_WINDOW_STEP)}
-                className="flex h-7 w-full items-center rounded px-1.5 text-left text-[11px] text-subtle hover:bg-panel-2 hover:text-ink"
+                className="flex h-7 w-full items-center rounded-md px-1.5 text-left text-[11px] text-subtle transition-colors hover:bg-panel-2 hover:text-ink"
               >
                 Show {hiddenGroupCount} more file{hiddenGroupCount === 1 ? "" : "s"}
               </button>

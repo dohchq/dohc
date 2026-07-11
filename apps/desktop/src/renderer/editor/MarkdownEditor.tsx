@@ -28,7 +28,7 @@ import {
   type EditorState,
 } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-import { Bold, Code, Italic } from "lucide-react";
+import { Bold, Code, Italic, Strikethrough } from "lucide-react";
 import type * as Y from "yjs";
 import { dohcMarkdownExtensions } from "./extensions";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
@@ -110,7 +110,9 @@ const TRAILING_NODE_EXTENSION = TrailingNode.configure({
 });
 const PLACEHOLDER_EXTENSION = Placeholder.configure({
   includeChildren: true,
-  showOnlyCurrent: false,
+  // Only the block the cursor is in shows its hint — with `false`, every
+  // empty paragraph in the document stamps "Type '/' for commands" at once.
+  showOnlyCurrent: true,
   placeholder: ({ node }) => {
     if (
       node.type.name === "tableCell" ||
@@ -1382,6 +1384,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               onClick={() => editor.chain().focus().toggleItalic().run()}
             >
               <Italic size={14} aria-hidden />
+            </BubbleButton>
+            <BubbleButton
+              label="Strikethrough"
+              active={editor.isActive("strike")}
+              onClick={() => editor.chain().focus().toggleStrike().run()}
+            >
+              <Strikethrough size={14} aria-hidden />
             </BubbleButton>
             <BubbleButton
               label="Code"

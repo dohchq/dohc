@@ -37,6 +37,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import { DohcMark } from "@dohc/brand";
 import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -59,6 +60,7 @@ import {
 } from "./settings/settingsRegistry";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
+import { SectionLabel } from "./ui/controls";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
@@ -459,9 +461,7 @@ function EngineMomentDiffPage({
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
         <div className="min-w-0 flex-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
-            History diff
-          </span>
+          <SectionLabel>History diff</SectionLabel>
           <h2 className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink">
             {canOpenFile ? (
               <button
@@ -637,7 +637,7 @@ function EngineMomentDiffPage({
                 type="button"
                 data-testid="engine-diff-confirm-restore"
                 onClick={() => void restoreFile()}
-                className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
+                className="h-8 cursor-pointer rounded bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
                 Restore
               </button>
@@ -2308,29 +2308,30 @@ export function DesktopWorkspaceShell(props: {
                   : { onSharePath: (path: string) => setShareTarget({ path }) })}
               />
             ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+              <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+                <DohcMark size={30} className="text-line" />
                 <span className="text-sm text-muted">
                   Select a file, or create one
                 </span>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setNewFileOpen(true)}
-                    className="font-mono text-xs text-subtle hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
                   >
                     Ctrl N · new file
                   </button>
                   <button
                     type="button"
                     onClick={() => setPaletteOpen(true)}
-                    className="font-mono text-xs text-subtle hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
                   >
                     Ctrl K · commands
                   </button>
                   <button
                     type="button"
                     onClick={() => setQuickOpenOpen(true)}
-                    className="font-mono text-xs text-subtle hover:text-ink"
+                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
                   >
                     Ctrl P · go to file
                   </button>

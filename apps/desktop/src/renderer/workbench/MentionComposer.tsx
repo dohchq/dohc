@@ -156,7 +156,7 @@ export function MentionComposer(props: {
           data-testid={`${props.testIdPrefix}-mention-menu`}
           role="listbox"
           aria-label="Mention a person or agent"
-          className="absolute bottom-full left-2 z-20 mb-1 max-h-48 w-64 overflow-y-auto rounded-md border border-line bg-panel py-1 text-xs shadow-sm"
+          className="dohc-popover dohc-pop-in absolute bottom-full left-2 z-20 mb-1 max-h-48 w-64 overflow-y-auto rounded-lg border border-line bg-panel py-1 text-xs"
         >
           {matches.map((candidate, index) => (
             <li key={candidate.id} role="presentation">
@@ -225,7 +225,7 @@ export function MentionComposer(props: {
           );
         }}
         onBlur={() => setMenuOpen(false)}
-        className="min-w-0 flex-1 resize-none rounded border border-line bg-bg px-2 py-1.5 text-[12px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
       />
       <button
         type="button"
@@ -244,7 +244,7 @@ export function MentionComposer(props: {
           props.onChange(next);
           openMenuFromCaret();
         }}
-        className="grid size-8 shrink-0 place-items-center rounded border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
+        className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
       >
         <span aria-hidden className="text-[13px] font-semibold">
           @
@@ -258,7 +258,7 @@ export function MentionComposer(props: {
         disabled={
           props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
         }
-        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded bg-ink text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-accent text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Send size={13} aria-hidden />
       </button>

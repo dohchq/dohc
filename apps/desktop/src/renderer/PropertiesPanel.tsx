@@ -214,8 +214,8 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   onChange={(event) => setKey(index, event.target.value)}
                   onBlur={() => commit(entries)}
-                  className={`h-7 min-w-0 rounded border border-line bg-bg px-2 font-mono text-[12px] outline-none focus:border-muted ${
-                    reserved || duplicate ? "text-danger" : "text-ink"
+                  className={`h-7 min-w-0 rounded-md border border-line bg-bg px-2 font-mono text-[12px] transition-colors placeholder:text-subtle focus:border-ink ${
+                    reserved || duplicate ? "text-danger" : "text-muted"
                   }`}
                 />
                 {reserved ? (
@@ -242,7 +242,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                     placeholder="Empty"
                     spellCheck={false}
                     onChange={(event) => setValue(index, event.target.value)}
-                    className="h-7 min-w-0 rounded border border-line bg-bg px-2 text-[12px] text-ink outline-none focus:border-muted"
+                    className="h-7 min-w-0 rounded-md border border-line bg-bg px-2 text-[13px] text-ink transition-colors placeholder:text-subtle focus:border-ink"
                   />
                 )}
                 <button
@@ -251,7 +251,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   aria-label={`Remove property ${entry.key || index + 1}`}
                   title="Remove property"
                   onClick={() => remove(index)}
-                  className="grid size-7 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  className="grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
                 >
                   <X size={13} aria-hidden />
                 </button>
@@ -266,7 +266,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         type="button"
         data-testid="property-add"
         onClick={() => setEntries((current) => [...current, { key: "", value: "" }])}
-        className="mt-2 flex h-7 items-center gap-1.5 rounded px-1.5 text-[12px] text-muted hover:bg-line/50 hover:text-ink"
+        className="mt-2 flex h-7 w-full items-center gap-1.5 rounded-md border border-dashed border-line px-2 text-[12px] text-muted transition-colors hover:border-muted hover:bg-panel-2 hover:text-ink"
       >
         <Plus size={13} aria-hidden />
         Add property

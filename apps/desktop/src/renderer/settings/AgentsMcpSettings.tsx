@@ -183,7 +183,7 @@ export function AgentsMcpSettings(props: {
         description="The local folder exposed to this workspace-scoped MCP server."
         testId="settings-row-workspace-path"
       >
-        <code className="max-w-sm truncate rounded bg-panel-2 px-2 py-1 text-xs text-ink">
+        <code className="max-w-sm truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
           {workspacePath}
         </code>
       </SettingRow>
@@ -206,8 +206,10 @@ export function AgentsMcpSettings(props: {
           aria-pressed={enabled}
           disabled={busy}
           onClick={() => void toggle()}
-          className={`rounded px-3 py-1 text-xs ${
-            enabled ? "bg-panel-2 text-ink" : "bg-accent text-bg"
+          className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${
+            enabled
+              ? "border border-line bg-transparent text-muted hover:bg-panel-2 hover:text-ink"
+              : "bg-accent text-bg hover:opacity-90"
           } disabled:opacity-50`}
         >
           {enabled ? "Disable" : "Enable"}
@@ -223,7 +225,7 @@ export function AgentsMcpSettings(props: {
           <button
             type="button"
             onClick={retryRefresh}
-            className="rounded border border-line px-2 py-1 text-muted hover:bg-panel-2 hover:text-ink"
+            className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-panel-2 hover:text-ink"
           >
             Retry
           </button>
@@ -237,7 +239,7 @@ export function AgentsMcpSettings(props: {
             type="button"
             disabled={!config}
             onClick={() => void copyConfig()}
-            className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
             {copied ? "Copied" : "Copy"}
@@ -253,7 +255,7 @@ export function AgentsMcpSettings(props: {
         ) : null}
         <pre
           data-testid="mcp-config-snippet"
-          className="m-0 max-h-56 overflow-auto rounded bg-panel-2 p-3 text-[11px] leading-relaxed text-ink"
+          className="m-0 max-h-56 overflow-auto rounded-md border border-line bg-panel-2 p-3 font-mono text-[11px] leading-relaxed text-ink"
         >
           {config ? configSnippet(config) : "..."}
         </pre>
@@ -265,7 +267,7 @@ export function AgentsMcpSettings(props: {
         </h3>
         <ul className="m-0 grid list-none gap-1 p-0">
           {USAGE_EXAMPLES.map((example) => (
-            <li key={example} className="rounded bg-panel-2 px-2 py-1 text-[12px] text-muted">
+            <li key={example} className="rounded-md bg-panel-2 px-2.5 py-1.5 text-[12px] text-muted">
               {example}
             </li>
           ))}
