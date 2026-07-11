@@ -27,6 +27,8 @@ import {
   Underline as UnderlineIcon,
 } from "lucide-react";
 import type * as Y from "yjs";
+import type { Awareness } from "y-protocols/awareness";
+import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
 import { dohcMarkdownExtensions } from "./extensions";
 import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
 import {
@@ -99,6 +101,12 @@ export type MarkdownEditorCollab = {
   status: "disabled" | "connecting" | "connected" | "disconnected";
   peerCount: number;
   synced: boolean;
+  // The Awareness bound to `ydoc` (docPresence.ts's bindDocPresence), if the
+  // caller has one — wires up CollaborationCaret for live remote carets.
+  // Optional and additive: undefined means "no presence yet" (today's only
+  // caller, FileInspector's engine-mode branch, doesn't pass one) and the
+  // editor renders exactly as it did before, presence indicator included.
+  awareness?: Awareness;
 };
 
 export type MarkdownEditorPendingUndo = {
@@ -121,20 +129,36 @@ export type MarkdownEditorProps = {
 };
 
 type CollaborationExtension = typeof import("@tiptap/extension-collaboration").Collaboration;
+type CollaborationCaretExtension =
+  typeof import("@tiptap/extension-collaboration-caret").CollaborationCaret;
 
-let collaborationExtensionPromise: Promise<CollaborationExtension> | null = null;
+// Both extensions bind to the same ydoc/awareness pair and are only ever
+// used together, so they load as one lazy bundle — a caller with an
+// `awareness` never waits on a second dynamic import, and a caller without
+// one still pays for exactly the bytes it did before (CollaborationCaret is
+// tiny, and it's simply never configured into the extensions array below).
+type CollaborationExtensions = {
+  Collaboration: CollaborationExtension;
+  CollaborationCaret: CollaborationCaretExtension;
+};
 
-async function loadCollaborationExtension(): Promise<CollaborationExtension> {
-  if (!collaborationExtensionPromise) {
-    collaborationExtensionPromise = import("@tiptap/extension-collaboration").then(
-      (mod) => mod.Collaboration,
-    );
+let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
+
+async function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
+  if (!collaborationExtensionsPromise) {
+    collaborationExtensionsPromise = Promise.all([
+      import("@tiptap/extension-collaboration"),
+      import("@tiptap/extension-collaboration-caret"),
+    ]).then(([collaboration, collaborationCaret]) => ({
+      Collaboration: collaboration.Collaboration,
+      CollaborationCaret: collaborationCaret.CollaborationCaret,
+    }));
   }
-  return collaborationExtensionPromise;
+  return collaborationExtensionsPromise;
 }
 
 type MarkdownEditorInnerProps = MarkdownEditorProps & {
-  collaborationExtension: CollaborationExtension | null;
+  collaborationExtensions: CollaborationExtensions | null;
 };
 
 const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
@@ -221,7 +245,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       collab,
       pendingUndo,
       onPendingUndoConsumed,
-      collaborationExtension,
+      collaborationExtensions,
       workspaceId,
       path,
     },
@@ -371,27 +395,43 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const extensions = useMemo(
       () => {
         const collabYDoc = collab?.ydoc ?? null;
-        const isCollab = Boolean(collabYDoc && collaborationExtension);
+        const awareness = collab?.awareness ?? null;
+        const isCollab = Boolean(collabYDoc && collaborationExtensions);
         return [
           isCollab ? COLLAB_STARTER_KIT : LOCAL_STARTER_KIT,
           ...STATIC_EDITOR_EXTENSIONS,
           ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
           ...(isCollab
             ? [
-                collaborationExtension!.configure({
+                collaborationExtensions!.Collaboration.configure({
                   document: collabYDoc,
                   field: "body",
                 }),
+                // Additive: only wired when the caller hands us an Awareness
+                // bound to this same ydoc (docPresence.ts's bindDocPresence).
+                // No awareness (today's only caller, or a peer that dropped
+                // off the presence channel) means no carets, never a crash —
+                // the calm "N editing" indicator above the editor is
+                // unaffected either way.
+                ...(awareness
+                  ? [
+                      collaborationExtensions!.CollaborationCaret.configure({
+                        provider: { awareness },
+                        user: resolveCaretUser(awareness),
+                        selectionRender: caretSelectionRender,
+                      }),
+                    ]
+                  : []),
               ]
             : [TRAILING_NODE_EXTENSION]),
           dohcPlugins,
           linkMenuExtension,
         ];
       },
-      [collab?.ydoc, collaborationExtension, dohcPlugins, linkMenuExtension],
+      [collab?.ydoc, collab?.awareness, collaborationExtensions, dohcPlugins, linkMenuExtension],
     );
 
-    const collabActive = Boolean(collab?.ydoc && collaborationExtension);
+    const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
 
     const editor = useEditor(
       {
@@ -705,20 +745,20 @@ const MarkdownEditorCollabLoader = forwardRef<
   MarkdownEditorHandle,
   MarkdownEditorProps
 >(function MarkdownEditorCollabLoader(props, ref) {
-  const [collaborationExtension, setCollaborationExtension] =
-    useState<CollaborationExtension | null>(null);
+  const [collaborationExtensions, setCollaborationExtensions] =
+    useState<CollaborationExtensions | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void loadCollaborationExtension().then((extension) => {
-      if (!cancelled) setCollaborationExtension(extension);
+    void loadCollaborationExtensions().then((extensions) => {
+      if (!cancelled) setCollaborationExtensions(extensions);
     });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  if (!collaborationExtension) {
+  if (!collaborationExtensions) {
     return (
       <div
         className="dohc-tiptap-editor flex h-full items-center justify-center text-xs text-subtle"
@@ -733,7 +773,7 @@ const MarkdownEditorCollabLoader = forwardRef<
     <MarkdownEditorInner
       {...props}
       ref={ref}
-      collaborationExtension={collaborationExtension}
+      collaborationExtensions={collaborationExtensions}
     />
   );
 });
@@ -743,6 +783,6 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     if (props.collab?.ydoc) {
       return <MarkdownEditorCollabLoader {...props} ref={ref} />;
     }
-    return <MarkdownEditorInner {...props} ref={ref} collaborationExtension={null} />;
+    return <MarkdownEditorInner {...props} ref={ref} collaborationExtensions={null} />;
   },
 );

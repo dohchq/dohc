@@ -1573,3 +1573,76 @@ body {
   font-size: 12.5px;
   font-weight: 500;
 }
+
+/*
+ * Remote collaboration carets (editor/MarkdownEditor.tsx + collab/caretPresence.ts).
+ *
+ * @tiptap/extension-collaboration-caret's default cursor render emits
+ * `.collaboration-carets__caret` (a <span>) wrapping `.collaboration-carets__label`
+ * (a <div>), with the peer's color set inline as `border-color` / `background-color`
+ * respectively — CSS below only owns width/shape/timing, never the color (that's
+ * the stable per-clientId palette in caretPresence.ts). The remote selection tint
+ * uses a custom selectionRender (caretSelectionRender) that emits
+ * `.collaboration-carets__selection` with only `color` set inline, so opacity stays
+ * centralized here instead of being baked into a per-peer hex string.
+ *
+ * Both class trees are widget/inline decorations from `@tiptap/y-tiptap`'s
+ * yCursorPlugin: a fresh DOM node whenever a peer's cursor lands on a new position,
+ * which is what drives the "flash on change" — the CSS below just times the fade
+ * and lets the label re-appear on hover since the caret line itself stays
+ * pointer-events:none (so it never blocks clicking/selecting the text under it).
+ */
+@keyframes dohc-caret-label-fade {
+  0% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.dohc-notion-editor .collaboration-carets__caret {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 1.5px solid transparent;
+  border-right: 1.5px solid transparent;
+  word-break: normal;
+  pointer-events: none;
+}
+
+.dohc-notion-editor .collaboration-carets__label {
+  position: absolute;
+  top: -1.35em;
+  left: -1px;
+  z-index: 20;
+  padding: 1px 6px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: auto;
+  animation: dohc-caret-label-fade 2.6s ease-out forwards;
+}
+
+.dohc-notion-editor .collaboration-carets__label:hover {
+  animation: none;
+  opacity: 1;
+}
+
+.dohc-notion-editor .collaboration-carets__selection {
+  background-color: currentColor;
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+[data-theme='dark'] .dohc-notion-editor .collaboration-carets__selection {
+  opacity: 0.28;
+}
