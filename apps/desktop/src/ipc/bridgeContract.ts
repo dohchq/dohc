@@ -293,6 +293,29 @@ export const WriteWorkspaceTextPayload = z.object({
 });
 export type WriteWorkspaceTextPayload = z.infer<typeof WriteWorkspaceTextPayload>;
 
+// Image bytes pasted/dropped into the editor cross IPC as a raw Uint8Array
+// (structured clone). z.custom (not z.instanceof) keeps the inferred type a
+// plain `Uint8Array` and enforces the same 20MB bound the main-process writer
+// re-checks. Bounded like the text write path so a huge paste can't stream
+// unbounded bytes through IPC.
+const WRITE_ASSET_MAX_BYTES = 20 * 1024 * 1024;
+const WORKSPACE_ASSET_BYTES = z.custom<Uint8Array>(
+  (value) =>
+    value instanceof Uint8Array &&
+    value.byteLength > 0 &&
+    value.byteLength <= WRITE_ASSET_MAX_BYTES,
+  "Asset bytes are not a Uint8Array within the 20MB write bound.",
+);
+
+export const WriteWorkspaceAssetPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+  bytes: WORKSPACE_ASSET_BYTES,
+});
+export type WriteWorkspaceAssetPayload = z.infer<
+  typeof WriteWorkspaceAssetPayload
+>;
+
 export const ReadWorkspaceTextResult = z.object({
   // Capped: text views are for human-scale files; very large files fall back
   // to a download affordance rather than streaming megabytes through IPC.
@@ -2125,6 +2148,7 @@ export interface DohcDesktopBridge {
     payload: ReadWorkspaceTextPayload,
   ): Promise<ReadWorkspaceTextResult>;
   writeWorkspaceText(payload: WriteWorkspaceTextPayload): Promise<void>;
+  writeWorkspaceAsset(payload: WriteWorkspaceAssetPayload): Promise<void>;
   openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,

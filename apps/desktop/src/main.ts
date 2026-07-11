@@ -165,6 +165,7 @@ import {
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
+  WriteWorkspaceAssetPayload,
   SetTitlebarThemePayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
@@ -350,6 +351,7 @@ import {
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
+  writeWorkspaceAsset,
   writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
@@ -2636,6 +2638,18 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
     await writeWorkspaceText(workspace.rootPath, input.relativePath, input.text);
+  });
+
+  ipcMain.handle(CHANNELS.writeWorkspaceAsset, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WriteWorkspaceAssetPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
+    await writeWorkspaceAsset(
+      workspace.rootPath,
+      input.relativePath,
+      input.bytes,
+    );
   });
 
   ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {
