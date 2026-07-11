@@ -36,6 +36,7 @@ export function DocumentMenu(props: {
     Partial<Record<DocumentMenuItemId, string>>
   >({});
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -43,6 +44,13 @@ export function DocumentMenu(props: {
     if (!open) return;
     setSelected(0);
     menuRef.current?.focus();
+    // On every close path (Escape, outside pointer-down, post-feedback
+    // auto-close) the menu div unmounts and focus would fall to document.body,
+    // breaking the WAI-ARIA menu-button contract. Return focus to the trigger
+    // when the menu closes — mirrors PageIdentity's emoji picker (phase 2).
+    return () => {
+      triggerRef.current?.focus();
+    };
   }, [open]);
 
   useEffect(() => {
@@ -117,6 +125,7 @@ export function DocumentMenu(props: {
   return (
     <div className="dohc-document-menu" ref={containerRef}>
       <IconButton
+        ref={triggerRef}
         data-testid="document-menu-trigger"
         aria-label="Document actions"
         aria-haspopup="menu"

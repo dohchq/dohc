@@ -82,4 +82,34 @@ describe("buildStandaloneDocumentHtml", () => {
     expect(malicious).not.toContain("<script>evil()</script>");
     expect(malicious).toContain("&lt;script&gt;evil()&lt;/script&gt;");
   });
+
+  it("typesets inline math with KaTeX instead of emitting raw TeX", () => {
+    const withMath = buildStandaloneDocumentHtml(
+      "Euler: $x^2$ done.",
+      "fallback",
+    );
+    // Rendered KaTeX markup, not the literal `$x^2$` source.
+    expect(withMath).toContain('class="katex"');
+    expect(withMath).not.toContain("$x^2$");
+    // The KaTeX layout CSS is inlined (self-contained, no <link>/font url()).
+    expect(withMath).toContain(".katex");
+    expect(withMath).not.toMatch(/@font-face/);
+    expect(withMath).not.toContain("url(");
+  });
+
+  it("typesets block math with KaTeX in display mode", () => {
+    const withBlock = buildStandaloneDocumentHtml(
+      "$$\n\\frac{a}{b}\n$$",
+      "fallback",
+    );
+    expect(withBlock).toContain('class="katex');
+    expect(withBlock).toContain("katex-display");
+    expect(withBlock).not.toContain("$$");
+  });
+
+  it("omits the KaTeX stylesheet when the document has no math", () => {
+    // The base fixture carries no math — the large KaTeX CSS must not be shipped.
+    expect(html).not.toContain(".katex");
+    expect(html).not.toContain("katex-display");
+  });
 });

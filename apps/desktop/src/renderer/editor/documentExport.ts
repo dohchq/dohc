@@ -7,8 +7,10 @@
 // identically through Electron's printToPDF. Pure and dependency-free
 // beyond import-export.ts, so it's covered by ordinary unit tests instead of
 // needing an Electron window.
+import katex from 'katex'
 import { parseFrontmatter, displayFrontmatterValue } from '../markdown/frontmatter'
 import { markdownBodyToHtml } from './import-export'
+import { KATEX_EXPORT_CSS } from './katexExportStyles'
 
 function escapeHtml(value: string): string {
   return value
@@ -158,6 +160,45 @@ const EXPORT_STYLE_CSS = `
   .dohc-callout-body > *:last-child { margin-bottom: 0; }
 `.trim()
 
+// markdownBodyToHtml renders the math atom nodes (extensions.ts) as their raw
+// TeX source — <span data-dohc-math-inline>$tex$</span> and
+// <div data-dohc-math-block>$$tex$$</div> — which would print as literal
+// dollar-delimited LaTeX. Typeset them with KaTeX so the export matches what
+// the editor shows. renderToString is self-contained markup (no runtime
+// script); the KaTeX layout CSS is inlined separately, font-file-free, so this
+// stays a single offline document. Runs in the same DOM-bearing context
+// markdownBodyToHtml already requires (renderer / vitest jsdom). Returns
+// whether any math was found so the (large) KaTeX CSS is only inlined when a
+// document actually uses math.
+function renderMathInExportedHtml(bodyHtml: string): {
+  html: string
+  hasMath: boolean
+} {
+  const template = document.createElement('template')
+  template.innerHTML = bodyHtml
+  let hasMath = false
+  const typeset = (el: Element, displayMode: boolean, delimiterLength: number) => {
+    hasMath = true
+    const raw = el.textContent ?? ''
+    const tex = raw.slice(delimiterLength, raw.length - delimiterLength)
+    try {
+      // throwOnError:false already renders parse errors as visible red TeX
+      // rather than throwing; the catch is a belt-and-braces guard that keeps
+      // the lossless raw TeX instead of dropping content if KaTeX ever throws.
+      el.innerHTML = katex.renderToString(tex, { displayMode, throwOnError: false })
+    } catch {
+      // Leave the raw `$tex$` in place.
+    }
+  }
+  template.content
+    .querySelectorAll('[data-dohc-math-inline]')
+    .forEach((el) => typeset(el, false, 1))
+  template.content
+    .querySelectorAll('[data-dohc-math-block]')
+    .forEach((el) => typeset(el, true, 2))
+  return { html: template.innerHTML, hasMath }
+}
+
 // Builds the full standalone HTML document. `markdown` is the WHOLE document
 // source (frontmatter included, exactly what "Copy as Markdown" copies) —
 // frontmatter drives the title; everything after it is the rendered body.
@@ -168,7 +209,12 @@ export function buildStandaloneDocumentHtml(
   const { body } = parseFrontmatter(markdown)
   const title = resolveDocumentTitle(markdown, fallbackTitle)
   const escapedTitle = escapeHtml(title)
-  const bodyHtml = markdownBodyToHtml(body)
+  const { html: bodyHtml, hasMath } = renderMathInExportedHtml(
+    markdownBodyToHtml(body),
+  )
+  const style = hasMath
+    ? `${EXPORT_STYLE_CSS}\n${KATEX_EXPORT_CSS}`
+    : EXPORT_STYLE_CSS
 
   return `<!doctype html>
 <html lang="en">
@@ -176,7 +222,7 @@ export function buildStandaloneDocumentHtml(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapedTitle}</title>
-<style>${EXPORT_STYLE_CSS}</style>
+<style>${style}</style>
 </head>
 <body>
 <h1 class="dohc-export-title">${escapedTitle}</h1>

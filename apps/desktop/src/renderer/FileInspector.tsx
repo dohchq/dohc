@@ -530,6 +530,19 @@ function MarkdownView(props: {
     return latestDraft.current;
   };
 
+  // Engine-mode export/serialize: in the engine branch the WYSIWYG editor is
+  // ALWAYS mounted and collab-bound to the engine Y.Doc, so its live body is
+  // the canonical current markdown — the same merge the wysiwyg save path uses.
+  // serializeDraftRef can't be reused here because it falls back to the stale
+  // (possibly truncated) props.body whenever the properties panel is open or
+  // the doc opened in read mode, neither of which reflects the live edit. This
+  // reads the editor on demand at click time so the exported source is fresh.
+  const serializeEngineDraft = () =>
+    mergeMarkdownEditorBody(
+      latestDraft.current,
+      wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(props.body),
+    );
+
   useEffect(() => {
     if (mode === "read") void loadMarkdownEditor();
   }, [mode, props.path]);
@@ -833,7 +846,7 @@ function MarkdownView(props: {
               <DocumentMenu
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
-                getMarkdown={() => serializeDraftRef.current()}
+                getMarkdown={() => serializeEngineDraft()}
               />
             </>
           }
