@@ -2239,3 +2239,68 @@ mark.dohc-highlight,
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+
+/* `:shortcode:` emoji autocomplete picker — same floating-popover
+ * conventions as .dohc-wikilink-picker (border/shadow/pop-in shared via
+ * that rule's selector group; this file only adds emoji-specific layout). */
+.dohc-emoji-picker {
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  width: 220px;
+  padding: 4px;
+}
+
+[data-theme='dark'] .dohc-emoji-picker {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dohc-emoji-picker__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-ink);
+  text-align: left;
+  padding: 5px 7px;
+}
+
+.dohc-emoji-picker__item.is-active {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-emoji-picker__item-glyph {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.dohc-emoji-picker__item-shortcode {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.dohc-emoji-picker__empty {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-size: 11px;
+  padding: 6px 7px;
+}
