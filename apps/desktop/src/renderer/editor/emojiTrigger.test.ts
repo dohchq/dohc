@@ -1,5 +1,8 @@
-import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { describe, it, expect } from 'vitest'
+// @vitest-environment jsdom
+import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
+import { afterEach, describe, it, expect } from 'vitest'
+import { Editor, Extension } from '@tiptap/core'
+import { StarterKit } from '@tiptap/starter-kit'
 import {
   detectEmojiAutocomplete,
   detectCompleteEmojiShortcode,
@@ -148,6 +151,76 @@ describe('detectCompleteEmojiShortcode — immediate-insert trigger', () => {
     expect(
       detectCompleteEmojiShortcode(makeDocWithParent(':smile:', codeBlock()), 8),
     ).toBeNull()
+  })
+})
+
+// --- appendTransaction gating: the Slack-style auto-insert must fire ONLY on
+// local typing that completes the shortcode, never on other doc-changing
+// transactions (remote collab edits, edits elsewhere) that merely leave the
+// cursor after a pre-existing literal `:shortcode:`. Uses a real editor so the
+// transactions carry real ReplaceSteps. ---
+
+describe('makeEmojiPlugin — appendTransaction auto-insert gating', () => {
+  const editors: Editor[] = []
+  const mounts: HTMLElement[] = []
+
+  afterEach(() => {
+    while (editors.length) editors.pop()?.destroy()
+    while (mounts.length) mounts.pop()?.remove()
+  })
+
+  function makeEditor(html: string): Editor {
+    const element = document.createElement('div')
+    document.body.appendChild(element)
+    mounts.push(element)
+    const emoji = Extension.create({
+      name: 'testEmoji',
+      addProseMirrorPlugins() {
+        return [makeEmojiPlugin(() => {})]
+      },
+    })
+    const editor = new Editor({
+      element,
+      extensions: [StarterKit.configure({ trailingNode: false }), emoji],
+      content: html,
+    })
+    editors.push(editor)
+    return editor
+  }
+
+  it('replaces the shortcode when the user types the closing colon at the cursor', () => {
+    const editor = makeEditor('<p>hi :smile</p>')
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)))
+
+    // Type the final ':' — a real ReplaceStep inserting it at the cursor.
+    editor.view.dispatch(editor.state.tr.insertText(':'))
+
+    expect(editor.state.doc.textContent).toContain('😄')
+    expect(editor.state.doc.textContent).not.toContain(':smile:')
+  })
+
+  it('does NOT replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it', () => {
+    // "hi :smile: yo" — the literal is intentionally left in prose.
+    const editor = makeEditor('<p>hi :smile: yo</p>')
+
+    // Cursor sits right after the literal ':smile:' (absolute pos 11: para
+    // start offset 1 + text index 10).
+    const cursor = 11
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.create(editor.state.doc, cursor)),
+    )
+
+    // A doc-changing transaction ELSEWHERE (mimicking a remote/collab edit or
+    // an edit further along) that keeps the collapsed cursor parked after the
+    // literal. Pre-fix, any docChanged with the cursor after a complete
+    // shortcode triggered the auto-insert; the step-gate now blocks it.
+    const endPos = editor.state.doc.content.size - 1
+    const tr = editor.state.tr.insertText('Z', endPos)
+    tr.setSelection(TextSelection.create(tr.doc, cursor))
+    editor.view.dispatch(tr)
+
+    expect(editor.state.doc.textContent).toContain(':smile:')
+    expect(editor.state.doc.textContent).not.toContain('😄')
   })
 })
 

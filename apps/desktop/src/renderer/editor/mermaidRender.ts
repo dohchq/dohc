@@ -78,6 +78,47 @@ export function isMermaidBlockCollapsed(
   return cursorPos < block.pos || cursorPos > block.end
 }
 
+/** A mermaid block paired with a STABLE widget id. The id — not the doc
+ *  position — is what the decoration key, the widget DOM (`data-mermaid-id`)
+ *  and the render scheduler key are derived from, so a fence that merely
+ *  shifts position (an edit above it) keeps its painted widget instead of
+ *  having ProseMirror destroy and remint it. */
+export type MermaidWidgetEntry = {
+  id: string
+  pos: number
+  end: number
+  text: string
+}
+
+/** PURE: reconcile the previous frame's widget entries against the freshly
+ *  computed blocks, reusing an id whenever a block's (mapped) start position
+ *  matches a previous entry. `mapPos` maps an OLD doc position into the new
+ *  document (identity when the transaction didn't change the doc), so a fence
+ *  pushed down by an edit above it still matches and keeps its identity. New
+ *  fences get a fresh id via `nextId`; deleted fences simply drop out (the
+ *  caller prunes their scheduler state). */
+export function reconcileMermaidEntries(
+  previous: readonly MermaidWidgetEntry[],
+  blocks: readonly MermaidBlock[],
+  mapPos: (pos: number) => number,
+  nextId: () => string,
+): MermaidWidgetEntry[] {
+  const byMappedPos = new Map<number, MermaidWidgetEntry>()
+  for (const entry of previous) {
+    const mapped = mapPos(entry.pos)
+    if (!byMappedPos.has(mapped)) byMappedPos.set(mapped, entry)
+  }
+  const used = new Set<MermaidWidgetEntry>()
+  return blocks.map((block) => {
+    const match = byMappedPos.get(block.pos)
+    if (match && !used.has(match)) {
+      used.add(match)
+      return { id: match.id, pos: block.pos, end: block.end, text: block.text }
+    }
+    return { id: nextId(), pos: block.pos, end: block.end, text: block.text }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Debounced render orchestration — separated from the ProseMirror/DOM
 // wiring below so it's unit-testable with an injected fake render function
@@ -153,6 +194,21 @@ export class MermaidRenderScheduler {
     this.timers.delete(key)
     this.lastSource.delete(key)
     this.generation.delete(key)
+  }
+
+  /** Drop scheduler state for every key NOT in `activeKeys` — i.e. fences
+   *  deleted since the last sync — so timers/lastSource/generation don't leak
+   *  across an editing session (previously they only cleared on editor
+   *  destroy). */
+  prune(activeKeys: ReadonlySet<string>): void {
+    const keys = new Set<string>([
+      ...this.timers.keys(),
+      ...this.lastSource.keys(),
+      ...this.generation.keys(),
+    ])
+    for (const key of keys) {
+      if (!activeKeys.has(key)) this.dispose(key)
+    }
   }
 
   disposeAll(): void {
@@ -250,12 +306,14 @@ function focusMermaidSource(view: EditorView, blockPos: number): void {
   view.focus()
 }
 
-function buildMermaidPreviewWidget(blockPos: number): (view: EditorView) => HTMLElement {
+function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElement {
   return (view) => {
     const container = document.createElement('div')
     container.className = 'dohc-mermaid-preview'
     container.setAttribute('contenteditable', 'false')
-    container.dataset.mermaidPos = String(blockPos)
+    // Stable per-block id, NOT the doc position: the widget DOM outlives
+    // position shifts, so a position baked in here would go stale.
+    container.dataset.mermaidId = id
 
     const canvas = document.createElement('div')
     canvas.className = 'dohc-mermaid-preview-canvas'
@@ -268,7 +326,10 @@ function buildMermaidPreviewWidget(blockPos: number): (view: EditorView) => HTML
     container.addEventListener('mousedown', stopEditorMouseEvent)
     container.addEventListener('click', (event) => {
       stopEditorMouseEvent(event)
-      focusMermaidSource(view, blockPos)
+      // Resolve the fence's CURRENT position from plugin state at click time —
+      // this widget DOM survives edits above it, so a captured pos is stale.
+      const entry = mermaidPreviewKey.getState(view.state)?.entries.find((e) => e.id === id)
+      if (entry) focusMermaidSource(view, entry.pos)
     })
 
     container.append(canvas, status)
@@ -276,21 +337,29 @@ function buildMermaidPreviewWidget(blockPos: number): (view: EditorView) => HTML
   }
 }
 
-function buildMermaidDecorations(doc: unknown, cursorPos: number): DecorationSet {
+function buildMermaidDecorationSet(
+  doc: unknown,
+  entries: readonly MermaidWidgetEntry[],
+  cursorPos: number,
+): DecorationSet {
   const decorations: Decoration[] = []
-  for (const block of computeMermaidBlocks(doc as DocLike)) {
-    const collapsed = isMermaidBlockCollapsed(block, cursorPos)
+  for (const entry of entries) {
+    const collapsed = isMermaidBlockCollapsed(entry, cursorPos)
     decorations.push(
-      Decoration.node(block.pos, block.end, {
+      Decoration.node(entry.pos, entry.end, {
         class: collapsed ? 'dohc-mermaid-block dohc-mermaid-collapsed' : 'dohc-mermaid-block',
       }),
     )
     decorations.push(
-      Decoration.widget(block.end, buildMermaidPreviewWidget(block.pos), {
+      Decoration.widget(entry.end, buildMermaidPreviewWidget(entry.id), {
         // side:0 — sorts before codeBlockChrome's side:1 continuation "+"
         // button at the same position, so the diagram reads above it.
         side: 0,
-        key: `mermaid-preview-${block.pos}`,
+        // Keyed by the STABLE widget id (not the doc position): ProseMirror's
+        // widget equality is key-based, so an edit above the fence maps the
+        // decoration to its new position while PM preserves the painted DOM
+        // instead of destroying it and building an empty canvas.
+        key: `mermaid-preview-${entry.id}`,
         ignoreSelection: true,
         stopEvent: () => true,
       }),
@@ -330,40 +399,77 @@ function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult)
   status.textContent = 'Diagram too large to preview (10,000+ characters).'
 }
 
-const mermaidPreviewKey = new PluginKey<DecorationSet>('dohc-mermaid-preview')
+type MermaidPluginState = {
+  /** Monotonic counter for minting fresh widget ids across the plugin's life. */
+  seq: number
+  entries: MermaidWidgetEntry[]
+  set: DecorationSet
+}
+
+const mermaidPreviewKey = new PluginKey<MermaidPluginState>('dohc-mermaid-preview')
 
 export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaidDiagram) {
-  return new Plugin<DecorationSet>({
+  return new Plugin<MermaidPluginState>({
     key: mermaidPreviewKey,
     state: {
       init(_, instance) {
-        return buildMermaidDecorations(instance.doc, instance.selection.from)
+        let seq = 0
+        const entries = computeMermaidBlocks(instance.doc as unknown as DocLike).map((block) => ({
+          id: `m${seq++}`,
+          pos: block.pos,
+          end: block.end,
+          text: block.text,
+        }))
+        return {
+          seq,
+          entries,
+          set: buildMermaidDecorationSet(instance.doc, entries, instance.selection.from),
+        }
       },
       apply(tr, old, _oldState, newState) {
         // Rebuild on doc changes (source edited) OR selection changes (the
         // cursor moved into/out of a block — toggle collapse), same trigger
         // pair as wikilinkPlugin's source/preview toggle.
         if (!tr.docChanged && !tr.selectionSet) return old
-        return buildMermaidDecorations(newState.doc, newState.selection.from)
+        const blocks = computeMermaidBlocks(newState.doc as unknown as DocLike)
+        let seq = old.seq
+        // Map each previous fence's position through the transaction so a fence
+        // shifted by an edit above it keeps its stable id (and painted widget)
+        // rather than being reminted under a new position-derived key.
+        const mapPos = tr.docChanged
+          ? (pos: number) => tr.mapping.map(pos)
+          : (pos: number) => pos
+        const entries = reconcileMermaidEntries(old.entries, blocks, mapPos, () => `m${seq++}`)
+        return {
+          seq,
+          entries,
+          set: buildMermaidDecorationSet(newState.doc, entries, newState.selection.from),
+        }
       },
     },
     props: {
       decorations(state) {
-        return mermaidPreviewKey.getState(state)
+        return mermaidPreviewKey.getState(state)?.set
       },
     },
     view(editorView) {
       const scheduler = new MermaidRenderScheduler(render, (key, result) => {
         const container = editorView.dom.querySelector<HTMLElement>(
-          `.dohc-mermaid-preview[data-mermaid-pos="${key}"]`,
+          `.dohc-mermaid-preview[data-mermaid-id="${key}"]`,
         )
         if (container) applyMermaidResult(container, result)
       })
 
       function syncBlocks(view: EditorView, options: { force?: boolean } = {}): void {
-        for (const block of computeMermaidBlocks(view.state.doc as unknown as DocLike)) {
-          scheduler.schedule(String(block.pos), block.text, options)
+        const entries = mermaidPreviewKey.getState(view.state)?.entries ?? []
+        const activeIds = new Set<string>()
+        for (const entry of entries) {
+          activeIds.add(entry.id)
+          scheduler.schedule(entry.id, entry.text, options)
         }
+        // Prune scheduler state for fences deleted since the last sync so
+        // timers/lastSource/generation don't accumulate across the session.
+        scheduler.prune(activeIds)
       }
 
       let lastThemeKey = currentThemeName()
