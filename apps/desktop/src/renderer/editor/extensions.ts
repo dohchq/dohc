@@ -12,6 +12,16 @@ export interface DohcImageStorage {
   resolveContext: (() => ImageSrcContext | null) | null
 }
 
+// Type `editor.storage.image` as DohcImageStorage via TipTap's documented
+// storage augmentation, so consumers (MarkdownEditor's onBeforeCreate) reach it
+// without an untyped double cast. Runtime guards still apply for consumers where
+// the DohcImage extension isn't registered.
+declare module '@tiptap/core' {
+  interface Storage {
+    image: DohcImageStorage
+  }
+}
+
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
   return match?.index === 0 ? match : null

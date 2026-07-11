@@ -238,6 +238,43 @@ describe("table controls grips", () => {
 
     expect(tableNode(editor).content).toHaveLength(3);
   });
+
+  // setColumnAlign spreads existing attrs, so lock down what alignment newly
+  // appended cells inherit: prosemirror-tables' addColumnAfter/addRowAfter fill
+  // fresh cells with default attrs, so the new column/row resets to null rather
+  // than picking up the adjacent aligned cells.
+  it("an appended column resets to null alignment (not inherited from the aligned neighbour)", () => {
+    editor = createTableEditor(2, 2);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Align center"));
+    expect(columnAligns(editor, 0)).toEqual(["center", "center"]);
+
+    const appendCol = editor.view.dom.querySelector(
+      ".dohc-table-append--col",
+    ) as HTMLElement;
+    click(appendCol);
+
+    // Original column keeps its alignment; the new right-edge column is null.
+    expect(columnAligns(editor, 0)).toEqual(["center", "center"]);
+    expect(columnAligns(editor, 2)).toEqual([null, null]);
+  });
+
+  it("an appended row resets to null alignment (not inherited from the aligned column above)", () => {
+    editor = createTableEditor(2, 2);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Align center"));
+    expect(columnAligns(editor, 0)).toEqual(["center", "center"]);
+
+    const appendRow = editor.view.dom.querySelector(
+      ".dohc-table-append--row",
+    ) as HTMLElement;
+    click(appendRow);
+
+    // The two original cells stay centered; the appended bottom row is null.
+    expect(columnAligns(editor, 0)).toEqual(["center", "center", null]);
+  });
 });
 
 describe("table Notion conveniences", () => {

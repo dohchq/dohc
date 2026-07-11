@@ -473,6 +473,18 @@ export function makeTableControlsPlugin(): Plugin {
     },
     view() {
       return {
+        // An open grip menu closes over a raw cell position (see
+        // columnMenuItems). If the doc shifts while it's open — e.g. a remote
+        // collab edit inserting/removing a column — that offset goes stale and
+        // an "Align …" click would target the wrong column. The menu is a
+        // detached body element, not a decoration, so it isn't rebuilt with the
+        // grips; tear it down on any doc change instead.
+        update(view, prevState) {
+          if (closeOpenMenu && !view.state.doc.eq(prevState.doc)) {
+            closeOpenMenu();
+            closeOpenMenu = null;
+          }
+        },
         destroy() {
           closeOpenMenu?.();
           closeOpenMenu = null;

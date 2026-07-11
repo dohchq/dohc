@@ -468,8 +468,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // Node views themselves are registered through their extensions'
         // addNodeView (TipTap 3.x ignores editorProps.nodeViews).
         onBeforeCreate({ editor }) {
-          const imageStorage = (editor.storage as unknown as Record<string, unknown>)
-            .image as DohcImageStorage | undefined;
+          const imageStorage = editor.storage.image as DohcImageStorage | undefined;
           if (imageStorage) {
             imageStorage.resolveContext = () => imageContextRef.current;
           }

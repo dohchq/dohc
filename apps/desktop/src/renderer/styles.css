@@ -273,13 +273,6 @@ body {
   user-select: text;
 }
 
-/* The first body block sits right under the top matter — zero its top margin
- * so the title→body rhythm is set by the padding above, not a stacked heading
- * margin (otherwise an opening h1/h2 reintroduces a gap). */
-.dohc-notion-editor > :first-child {
-  margin-top: 0;
-}
-
 /* Centered column, like paper on a desk — not text pinned to the left rail. */
 .dohc-notion-editor > * {
   max-width: var(--dohc-editor-measure);
@@ -289,7 +282,9 @@ body {
 
 /* The document opens flush to the editor's top padding and ends flush to its
  * bottom, regardless of which block leads/trails — a heading's space-before
- * (e.g. h2's 30px) must not compound with the 40px pad into a lopsided gap. */
+ * (e.g. h2's 30px) must not compound with the 40px pad into a lopsided gap.
+ * Zeroing the first block's top margin also keeps the title→body rhythm set by
+ * the padding above rather than a stacked opening h1/h2 margin. */
 .dohc-notion-editor > :first-child {
   margin-top: 0;
 }
@@ -1510,7 +1505,10 @@ body {
 .dohc-table-append:hover,
 .dohc-table-append:focus-visible {
   border-color: var(--dohc-line);
-  background: var(--dohc-panel-2);
+  /* --dohc-line, not --dohc-panel-2: matches the menu-family unification (see
+   * the note above .dohc-slash-menu__item) — panel-2 is darker than the panel
+   * surface in dark mode and would make the hovered chip nearly invisible. */
+  background: var(--dohc-line);
   color: var(--dohc-ink);
 }
 
