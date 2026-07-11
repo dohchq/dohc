@@ -279,8 +279,8 @@ test("@ui-audit capture baseline screenshots", async () => {
     }
     await page.keyboard.press("Escape");
 
-    // 20 — properties panel open on the document. Clicking the ACTIVE rail
-    // item toggles the panel closed, so only click when the tree is hidden.
+    // 20 — inline properties under the title. They render in the document
+    // flow now (no toggle), so just open the doc and capture.
     if (!(await explorerRow(page, "notes").isVisible().catch(() => false))) {
       await page.getByTestId("activity-explorer").click();
     }
@@ -289,9 +289,13 @@ test("@ui-audit capture baseline screenshots", async () => {
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
     });
-    const propsToggle = page.getByTestId("markdown-properties-toggle");
-    if (await propsToggle.isVisible().catch(() => false)) {
-      await propsToggle.click();
+    if (
+      await page
+        .getByTestId("properties-panel")
+        .waitFor({ state: "visible", timeout: 5_000 })
+        .then(() => true)
+        .catch(() => false)
+    ) {
       await page.waitForTimeout(500);
       await shot(page, "20-properties-panel-light");
     }

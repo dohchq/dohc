@@ -69,9 +69,9 @@ export function createDebouncer(
 export const WORD_COUNT_DEBOUNCE_MS = 300;
 
 /** Recompute word/character counts on mount and (debounced) on every doc
- *  change, cancelling the pending run on unmount. Shared by OutlinePanel and
- *  WordCountBadge so the timing-sensitive subscribe/debounce/cleanup dance
- *  lives in exactly one place. */
+ *  change, cancelling the pending run on unmount. Used by OutlinePanel (the
+ *  count lives in its footer) so the timing-sensitive subscribe/debounce/
+ *  cleanup dance lives in exactly one place. */
 export function useDebouncedWordCount(
   editor: Editor | null,
   debounceMs = WORD_COUNT_DEBOUNCE_MS,

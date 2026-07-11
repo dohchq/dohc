@@ -9,10 +9,10 @@ import { FileInspector } from "./FileInspector";
 
 // Finding: in engine mode the DocumentMenu export must serialize the LIVE
 // editor (collab-bound to the engine Y.Doc), not the stale props.body that
-// serializeDraftRef falls back to whenever the properties panel is open or the
-// doc opened in read/truncated mode. We prove this by opening the properties
-// panel (the exact state where the old code returned the stale disk body) and
-// asserting the exported markdown is the live editor body.
+// serializeDraftRef falls back to whenever the inline properties surface is
+// present or the doc opened in read/truncated mode. We prove this with the
+// properties rendered (the exact state where the old code returned the stale
+// disk body) and assert the exported markdown is the live editor body.
 
 const engineDocState: {
   available: boolean;
@@ -99,9 +99,8 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     // Editor mounts once the file text loads (async IPC).
     await screen.findByTestId("editor-stub");
 
-    // Open the properties panel — the state where serializeDraftRef used to
-    // return the stale disk body.
-    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    // Inline properties always render under the title now — the state where
+    // serializeDraftRef used to return the stale disk body.
     await screen.findByTestId("properties-stub");
 
     await user.click(screen.getByTestId("document-menu-trigger"));

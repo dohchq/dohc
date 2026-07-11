@@ -260,7 +260,10 @@ body {
 .dohc-notion-editor {
   box-sizing: border-box;
   min-height: 100%;
-  padding: 40px 56px 120px;
+  /* Top matter (PageIdentity + inline properties) supplies the space above
+   * the body now, so this only needs a small settle gap — not the old 40px
+   * chasm that stacked under the title. */
+  padding: 6px 56px 120px;
   color: var(--dohc-ink);
   cursor: text;
   font-size: 15px;
@@ -268,6 +271,13 @@ body {
   letter-spacing: -0.006em;
   outline: none;
   user-select: text;
+}
+
+/* The first body block sits right under the top matter — zero its top margin
+ * so the title→body rhythm is set by the padding above, not a stacked heading
+ * margin (otherwise an opening h1/h2 reintroduces a gap). */
+.dohc-notion-editor > :first-child {
+  margin-top: 0;
 }
 
 /* Centered column, like paper on a desk — not text pinned to the left rail. */
@@ -1716,19 +1726,20 @@ body {
 }
 
 /* ---------------------------------------------------------------------
- * Document outline rail + word count (OutlinePanel.tsx, WordCountBadge.tsx)
+ * Document outline rail (OutlinePanel.tsx) — its footer also carries the
+ * quiet word count (there is no floating word-count badge; the count lives
+ * where the document's structure does).
  *
- * Both float in the editor's margins WITHOUT taking part in the document's
- * own layout, so neither can ever shift the prose. The trick: turn a
- * dedicated inner wrapper — .dohc-editor-surface, NOT .dohc-tiptap-editor
- * itself — into a single-cell CSS grid and stack EditorContent, the
- * outline, and the word-count badge all in that one cell (grid items can
- * overlap on purpose). The outline/badge wrappers are height: 0 so they
- * never affect the grid row's size — EditorContent (the tall one) is what
- * actually sizes it — then position: sticky pins each wrapper to the TOP
- * (outline) or BOTTOM (word count) of the nearest scrolling ancestor
- * (FileInspector's overflow-auto pane), so they read as fixed chrome even
- * though the document under them keeps scrolling.
+ * The outline floats in the editor's right margin WITHOUT taking part in
+ * the document's own layout, so it can never shift the prose. The trick:
+ * turn a dedicated inner wrapper — .dohc-editor-surface, NOT
+ * .dohc-tiptap-editor itself — into a single-cell CSS grid and stack
+ * EditorContent and the outline in that one cell (grid items can overlap
+ * on purpose). The outline wrapper is height: 0 so it never affects the
+ * grid row's size — EditorContent (the tall one) is what actually sizes
+ * it — then position: sticky pins it to the TOP of the nearest scrolling
+ * ancestor (FileInspector's overflow-auto pane), so it reads as fixed
+ * chrome even though the document under it keeps scrolling.
  *
  * The outline additionally collapses below ~900px of inline size via a
  * native CSS container query — no JS width tracking needed for that.
@@ -1745,8 +1756,8 @@ body {
  * the pane's offset from the window's top-left (sidebar width, header
  * height). Scoping container-type to .dohc-editor-surface, and rendering
  * the popovers as siblings of it (outside it) inside .dohc-tiptap-editor,
- * keeps them structurally exempt: only EditorContent + OutlinePanel +
- * WordCountBadge are its descendants (verified against the MarkdownEditor
+ * keeps them structurally exempt: only EditorContent + OutlinePanel are
+ * its descendants (verified against the MarkdownEditor
  * JSX — the popovers all render before the .dohc-editor-surface wrapper
  * as siblings, and none of them are inside it). No layout-affecting
  * container query needs to reach a fixed-position popover, so this loses
@@ -1931,48 +1942,7 @@ body {
   animation: dohc-outline-target-flash 900ms ease-out;
 }
 
-/* Independent of the outline: a quiet words/characters line, hover-reveal
- * over the WHOLE editor area — like the block gutter — not just the badge
- * itself (it's invisible+non-interactive until then, so hovering only the
- * badge's own footprint would be unreachable). */
-.dohc-word-count-badge {
-  position: sticky;
-  bottom: 14px;
-  grid-row: 1;
-  grid-column: 1;
-  align-self: end;
-  justify-self: end;
-  height: 0;
-  margin-right: 18px;
-  overflow: visible;
-  z-index: 3;
-}
-
-.dohc-word-count-badge-text {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  overflow: hidden;
-  padding: 4px 10px;
-  border: 1px solid var(--dohc-line);
-  border-radius: 999px;
-  background: var(--dohc-panel);
-  color: var(--dohc-subtle);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  opacity: 0;
-  transition: opacity 120ms ease;
-  pointer-events: none;
-}
-
-.dohc-tiptap-editor:hover .dohc-word-count-badge-text {
-  opacity: 1;
-}
-
-[data-theme='dark'] .dohc-outline-panel,
-[data-theme='dark'] .dohc-word-count-badge-text {
+[data-theme='dark'] .dohc-outline-panel {
   border-color: color-mix(in srgb, var(--dohc-line) 80%, transparent);
 }
 
@@ -1988,7 +1958,7 @@ body {
 .dohc-page-identity {
   box-sizing: border-box;
   width: 100%;
-  padding: 28px 56px 0;
+  padding: 20px 56px 0;
   background: var(--dohc-bg);
 }
 
@@ -1999,8 +1969,8 @@ body {
 
 .dohc-page-identity__icon-row {
   position: relative;
-  min-height: 22px;
-  margin-bottom: 6px;
+  min-height: 20px;
+  margin-bottom: 4px;
 }
 
 .dohc-page-identity__icon {
@@ -2149,6 +2119,152 @@ body {
 
 [data-theme='dark'] .dohc-page-identity__picker {
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+}
+
+
+/* ===========================================================================
+ * Inline document properties — Notion-style rows in the document flow, sitting
+ * directly under the title (below PageIdentity, above the body) and aligned to
+ * the same reading measure. Quiet by design: a small mono key on the left, the
+ * value on the right, borderless inputs that read as text until hovered/focused,
+ * and a whisper "Add a property" affordance. No box, no divider — the brand
+ * prefers whitespace over chrome. Both data modes (local body frontmatter and
+ * the engine Y.Map) render through this exact surface.
+ * ========================================================================= */
+.dohc-page-properties {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 56px 0;
+  background: var(--dohc-bg);
+}
+
+.dohc-page-properties__inner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.dohc-page-properties__row {
+  display: grid;
+  grid-template-columns: minmax(88px, 168px) minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border-radius: 6px;
+}
+
+.dohc-page-properties__key,
+.dohc-page-properties__value {
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  padding: 3px 6px;
+  outline: none;
+  transition:
+    background-color 100ms ease-out,
+    box-shadow 100ms ease-out;
+}
+
+.dohc-page-properties__key {
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.dohc-page-properties__value {
+  color: var(--dohc-ink);
+  font-size: 13px;
+}
+
+.dohc-page-properties__key::placeholder,
+.dohc-page-properties__value::placeholder {
+  color: var(--dohc-subtle);
+}
+
+.dohc-page-properties__key.is-invalid {
+  color: var(--dohc-danger);
+}
+
+.dohc-page-properties__key:hover,
+.dohc-page-properties__value:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-page-properties__key:focus,
+.dohc-page-properties__value:focus {
+  background: var(--dohc-panel-2);
+  box-shadow: inset 0 0 0 1px var(--dohc-line);
+}
+
+/* Reserved/duplicate-name notice sits where the value would — same column,
+ * quiet danger text, never an input the user can commit a bad value into. */
+.dohc-page-properties__flag {
+  overflow: hidden;
+  padding: 0 6px;
+  color: var(--dohc-danger);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.dohc-page-properties__remove {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 100ms ease-out,
+    color 100ms ease-out,
+    background-color 100ms ease-out;
+}
+
+.dohc-page-properties__row:hover .dohc-page-properties__remove,
+.dohc-page-properties__remove:focus-visible {
+  opacity: 1;
+}
+
+.dohc-page-properties__remove:hover {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-danger);
+}
+
+.dohc-page-properties__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  padding: 4px 6px;
+  color: var(--dohc-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 100ms ease-out,
+    opacity 100ms ease-out;
+}
+
+.dohc-page-properties__add:hover {
+  color: var(--dohc-muted);
+}
+
+/* Empty document: the add row is the ONLY thing here, so keep it a whisper —
+ * revealed when the pointer is over the top-matter zone, like the "Add icon"
+ * affordance — instead of stamping chrome on every property-less page. */
+.dohc-page-properties__add--empty {
+  opacity: 0;
+}
+
+.dohc-page-topmatter:hover .dohc-page-properties__add--empty,
+.dohc-page-properties__add--empty:focus-visible {
+  opacity: 1;
 }
 
 

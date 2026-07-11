@@ -214,7 +214,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    // Properties render inline under the title now — no toggle to open.
     await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
     await user.clear(screen.getByDisplayValue("draft"));
     await user.type(screen.getByLabelText("Property status value"), "ready");
@@ -277,7 +277,8 @@ describe("markdown editor unmount flush", () => {
     await screen.findByTestId("view-markdown");
 
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
-    expect(screen.queryByTestId("markdown-properties-toggle")).toBeNull();
+    // A truncated (read-only) doc never exposes editable inline properties.
+    expect(screen.queryByTestId("properties-panel")).toBeNull();
     const editToggle = screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement;
     expect(editToggle.disabled).toBe(true);
     await user.click(editToggle);
@@ -418,7 +419,7 @@ describe("markdown editor unmount flush", () => {
     expect(onSharePath).toHaveBeenCalledWith("data.sqlite");
   });
 
-  it("closes local properties before returning to WYSIWYG", async () => {
+  it("shows inline properties in WYSIWYG and hides them in source mode", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
       truncated: false,
@@ -427,13 +428,19 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    // WYSIWYG opens with properties inline under the title — no toggle needed.
     await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
 
+    // Source mode edits the raw markdown (frontmatter included), so the inline
+    // property rows step aside.
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
     await waitFor(() => {
       expect(screen.queryByTestId("properties-panel")).toBeNull();
     });
+
+    // Returning to WYSIWYG brings the inline properties back.
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
   });
 
   it("keeps read-mode properties edits dirty across a refresh before save", async () => {
@@ -454,7 +461,7 @@ describe("markdown editor unmount flush", () => {
     );
 
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    // Large docs open in read mode; properties still render inline (editable).
     await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
     await user.clear(screen.getByDisplayValue("draft"));
     await user.type(screen.getByLabelText("Property status value"), "ready");
