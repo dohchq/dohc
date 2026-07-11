@@ -20,6 +20,8 @@ export type DohcV2ConstructName =
   | 'inlineAtom'
   | 'formula'
   | 'queryBlock'
+  | 'callout'
+  | 'highlight'
   | 'math'
   | 'htmlAtom'
   | 'frontmatter'
@@ -330,6 +332,38 @@ export const DOHC_V2_CONSTRUCTS = [
     note: 'Fenced query blocks remain deterministic markdown and editable as a block.',
   },
   {
+    name: 'callout',
+    kind: 'block',
+    canonical: 'tiptap-node',
+    yjsField: 'body',
+    editableBodyNode: true,
+    markdown: {
+      parse: 'custom-extension',
+      render: 'custom-extension',
+      lossless: true,
+      fixtureRequired: true,
+    },
+    requiresPaidTiptap: false,
+    phase1Scope: 'required',
+    note: 'Obsidian callouts (with `-`/`+` fold syntax) round-trip as a block; unknown types are preserved verbatim.',
+  },
+  {
+    name: 'highlight',
+    kind: 'mark',
+    canonical: 'tiptap-mark',
+    yjsField: 'body',
+    editableBodyNode: true,
+    markdown: {
+      parse: 'custom-extension',
+      render: 'custom-extension',
+      lossless: true,
+      fixtureRequired: true,
+    },
+    requiresPaidTiptap: false,
+    phase1Scope: 'required',
+    note: 'Obsidian `==highlight==` mark parsed by a custom inline tokenizer; no attributes.',
+  },
+  {
     name: 'math',
     kind: 'inline',
     canonical: 'tiptap-node',
@@ -395,6 +429,8 @@ const REQUIRED_CONSTRUCTS: readonly DohcV2ConstructName[] = [
   'inlineAtom',
   'formula',
   'queryBlock',
+  'callout',
+  'highlight',
   'math',
   'htmlAtom',
   'frontmatter',

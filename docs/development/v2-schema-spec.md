@@ -50,9 +50,29 @@ Tiptap's Collaboration extension can bind to a raw Yjs fragment. v2 uses that sh
 | `inlineAtom` | Tiptap node | `body` | yes | custom extension | required |
 | `formula` | Tiptap node | `body` | yes | custom extension | required |
 | `queryBlock` | Tiptap node | `body` | yes | custom extension | required |
+| `callout` | Tiptap node | `body` | yes | custom extension | required |
+| `highlight` | Tiptap mark | `body` | yes | custom extension | required |
 | `math` | Tiptap node/text syntax | `body` | yes | passthrough | preserve as text in Phase 1 |
 | `htmlAtom` | raw atom body mode | `meta` | no | raw HTML atom mode | separate mode |
 | `frontmatter` | `Y.Map` | `frontmatter` | no | frontmatter map projection | required |
+
+### Obsidian callouts and highlights
+
+`callout` follows the Obsidian dialect so files stay portable: a blockquote
+whose first line is `[!type]`, optionally followed by a fold flag (`-` folded,
+`+` explicitly open) and a title — e.g. `> [!note]- My title`. Core types
+(`note`, `tip`, `info`, `warning`, `danger`, `quote`) get themed styling;
+**unknown types are preserved verbatim** (styled like a note but keeping the
+original type string) so nothing is dropped. Plain blockquotes with no `[!type]`
+first line stay ordinary blockquotes (the tokenizer is block-level and only
+claims the block when the header line matches). Titles containing `]` survive
+because the type is captured up to the first `]`. The node stores
+`{ calloutType, title, fold }` and renders exactly the Obsidian form.
+
+`highlight` is the Obsidian/extended-CommonMark `==text==` mark, parsed by a
+custom inline tokenizer (the base parser has no `==` rule). Flanking non-space
+characters are required so stray `=` and `a == b` never fire, and nested marks
+like `**==x==**` round-trip.
 
 ## First-Class AI-Native Constructs
 
