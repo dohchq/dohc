@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { open } from "node:fs/promises";
+import { classifyEngineFilePath } from "@dohc/workspace-engine";
 import { resolveWorkspaceFile } from "./workspaceAssets";
 import { listFiles } from "./workspaceFiles";
 
@@ -842,11 +843,22 @@ async function loadGraphDocuments(rootPath: string): Promise<{
   omittedFileCount: number;
 }> {
   const listed = await listFiles(rootPath);
-  const graphPaths = listed.files.map((file) => file.path).slice(0, MAX_GRAPH_FILES);
+  // Enforce the engine secret floor at the loader so EVERY graph/backlinks
+  // consumer inherits it: a secret- or ignored-classified file (the whole
+  // `.env` family, incl. markdown-extensioned variants like `.env.local.md`,
+  // and ignored segments) must never be scanned as a link source, indexed as
+  // a resolvable node, or surfaced as a backlink entry/snippet. This mirrors
+  // search, which fails-closed on the same `classifyEngineFilePath` floor
+  // (workspaceSearch.ts + searchIndex.ts) so "what the graph reads" and "what
+  // search may reveal" cannot drift apart.
+  const visiblePaths = listed.files
+    .map((file) => file.path)
+    .filter((path) => classifyEngineFilePath(path).kind === "tracked");
+  const graphPaths = visiblePaths.slice(0, MAX_GRAPH_FILES);
   const selected = graphPaths.filter((path) => isMarkdownGraphPath(path));
   const docs: MarkdownGraphDocument[] = [];
   let totalTextBytes = 0;
-  let omittedFileCount = Math.max(0, listed.files.length - graphPaths.length);
+  let omittedFileCount = Math.max(0, visiblePaths.length - graphPaths.length);
 
   for (let index = 0; index < selected.length; index++) {
     const path = selected[index];

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ResolvedPos } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
 import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
@@ -72,6 +72,11 @@ export function rankEmoji(query: string, entries: ReadonlyArray<EmojiEntry> = EM
 export function EmojiPicker({ state, view, onDismiss }: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // Stable per-instance prefix for option ids so aria-activedescendant can
+  // point at the active option — the editor keeps DOM focus (onMouseDown
+  // preventDefault), so this is how AT learns which emoji is highlighted.
+  const listId = useId();
+  const optionId = (index: number) => `${listId}-opt-${index}`;
 
   useEffect(() => {
     setActiveIdx(0);
@@ -160,6 +165,9 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       }}
       role="listbox"
       aria-label="emoji"
+      aria-activedescendant={
+        matches.length > 0 ? optionId(activeIdx) : undefined
+      }
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
@@ -169,6 +177,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
           {matches.map((entry, i) => (
             <button
               key={entry.shortcode}
+              id={optionId(i)}
               ref={(el) => {
                 itemRefs.current[i] = el;
               }}

@@ -194,4 +194,24 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
     expect(editor.getText()).toBe(smile.emoji);
     editor.destroy();
   });
+
+  it("exposes the active option via aria-activedescendant and tracks arrow keys", () => {
+    const editor = makeEditor(":smi");
+    const state: EmojiPickerState = { open: true, from: 1, query: "smi" };
+    const view = editor.view as Parameters<typeof EmojiPicker>[0]["view"];
+
+    render(createElement(EmojiPicker, { state, view, onDismiss: vi.fn() }));
+
+    const listbox = screen.getByRole("listbox", { name: "emoji" });
+    const options = screen.getAllByRole("option");
+    expect(options.length).toBeGreaterThan(1);
+    // Points at the first option on open.
+    expect(listbox.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
+    expect(options[0]!.id).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "ArrowDown" });
+
+    expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+    editor.destroy();
+  });
 });

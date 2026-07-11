@@ -1,3 +1,4 @@
+import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 
@@ -46,16 +47,21 @@ export function SecondaryButton({ className, type, ...rest }: NativeButtonProps)
 }
 
 /** Ghost icon affordance for toolbars and row actions. Pass the icon as
- * children; size stays 24px unless a `size-*` class overrides it. */
-export function IconButton({ className, type, ...rest }: NativeButtonProps) {
-  return (
-    <button
-      type={type ?? "button"}
-      className={cx(iconButtonClass, className)}
-      {...rest}
-    />
-  );
-}
+ * children; size stays 24px unless a `size-*` class overrides it. Forwards its
+ * ref so callers can restore focus to the trigger (e.g. a menu returning focus
+ * on Escape/dismiss). */
+export const IconButton = forwardRef<HTMLButtonElement, NativeButtonProps>(
+  function IconButton({ className, type, ...rest }, ref) {
+    return (
+      <button
+        ref={ref}
+        type={type ?? "button"}
+        className={cx(iconButtonClass, className)}
+        {...rest}
+      />
+    );
+  },
+);
 
 /** Quiet count/status pill. Semantics change the TEXT color, never the fill. */
 export function Pill({

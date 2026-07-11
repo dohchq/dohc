@@ -76,6 +76,20 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  it("returns focus to the trigger when closed with Escape", async () => {
+    const user = userEvent.setup();
+    renderMenu();
+    const trigger = screen.getByTestId("document-menu-trigger");
+    await user.click(trigger);
+    // Focus moves into the menu list on open.
+    expect(document.activeElement).toBe(screen.getByRole("menu"));
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("navigates items with ArrowDown/ArrowUp and selects with Enter", async () => {
     const user = userEvent.setup();
     renderMenu();

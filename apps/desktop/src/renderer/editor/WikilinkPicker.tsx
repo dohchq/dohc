@@ -1,5 +1,5 @@
 import { FileText } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ResolvedPos } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
 import type { WikilinkFile } from "./wikilinkPlugin";
@@ -105,6 +105,11 @@ export function WikilinkPicker({
 }: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // Stable per-instance prefix for option ids so aria-activedescendant can
+  // point at the active option — the editor keeps DOM focus (onMouseDown
+  // preventDefault), so this is how AT learns which file is highlighted.
+  const listId = useId();
+  const optionId = (index: number) => `${listId}-opt-${index}`;
 
   useEffect(() => {
     setActiveIdx(0);
@@ -203,6 +208,9 @@ export function WikilinkPicker({
       }}
       role="listbox"
       aria-label="page links"
+      aria-activedescendant={
+        matches.length > 0 ? optionId(activeIdx) : undefined
+      }
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
@@ -217,6 +225,7 @@ export function WikilinkPicker({
             return (
               <button
                 key={f.path}
+                id={optionId(i)}
                 ref={(el) => {
                   itemRefs.current[i] = el;
                 }}

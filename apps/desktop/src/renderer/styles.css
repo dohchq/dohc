@@ -2307,7 +2307,10 @@ mark.dohc-highlight,
 .dohc-mermaid-preview--skipped .dohc-mermaid-preview-status {
   border: 1px solid var(--dohc-line);
   background: var(--dohc-panel-2);
-  color: var(--dohc-subtle);
+  /* subtle-on-panel-2 fails WCAG AA at this 11.5px size (light 3.46:1, dark
+   * 4.16:1). muted clears AA in both themes (light 6.37:1, dark 7.28:1) — the
+   * same fix applied to code comments in phase 1. */
+  color: var(--dohc-muted);
 }
 
 /* ===================================================================== *

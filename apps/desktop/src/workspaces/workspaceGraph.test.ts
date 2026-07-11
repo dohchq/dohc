@@ -292,6 +292,18 @@ describe("readWorkspaceGraph", () => {
     expect(graph.scannedFileCount).toBe(70);
     expect(graph.omittedFileCount).toBeGreaterThan(0);
   });
+
+  it("excludes secret-floor markdown files from graph nodes and edges", async () => {
+    await writeFile(join(root, "roadmap.md"), "# Roadmap\n");
+    // `.env.local.md` is secret-classified by basename regardless of the
+    // markdown extension, so it must never appear as a node nor resolve as an
+    // edge target even though it carries a wikilink.
+    await writeFile(join(root, ".env.local.md"), "# Env\n[[roadmap]]\n");
+
+    const graph = await readWorkspaceGraph(root);
+    expect(graph.nodes.map((node) => node.path)).toEqual(["roadmap.md"]);
+    expect(graph.edges).toEqual([]);
+  });
 });
 
 describe("computeBacklinks", () => {
@@ -464,5 +476,27 @@ describe("computeBacklinks", () => {
         ],
       },
     ]);
+  });
+
+  it("never surfaces a secret-floor file as a backlink source", async () => {
+    // A secret-classified markdown file linking to the open doc must not leak
+    // its content: no backlink entry and no snippet, matching the hard search
+    // floor that fails-closed on `.env`-family paths.
+    await writeFile(
+      join(root, ".env.local.md"),
+      "SECRET=deadbeef\nLink to [[Target]] here.\n",
+    );
+    await writeFile(join(root, "target.md"), "# Target\n");
+
+    const sources = await readWorkspaceBacklinks(root, "target.md");
+    expect(sources).toEqual([]);
+  });
+
+  it("still surfaces backlinks from policy-allowed files", async () => {
+    await writeFile(join(root, "allowed.md"), "# Allowed\nSee [[Target]].\n");
+    await writeFile(join(root, "target.md"), "# Target\n");
+
+    const sources = await readWorkspaceBacklinks(root, "target.md");
+    expect(sources.map((source) => source.sourcePath)).toEqual(["allowed.md"]);
   });
 });
