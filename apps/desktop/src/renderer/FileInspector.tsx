@@ -30,6 +30,7 @@ import type {
 } from "./editor/MarkdownEditor";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
 
@@ -476,6 +477,9 @@ function MarkdownView(props: {
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
   reopenKey?: number;
+  // Workspace-activity token: bumps after saves / external edits so the linked
+  // mentions section recomputes without polling.
+  refreshKey?: number;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -768,6 +772,18 @@ function MarkdownView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush, readOnly]);
 
+  // Linked mentions live at the BOTTOM of the document, inside the reading
+  // measure, in every markdown branch (engine / wysiwyg / read). Hidden when a
+  // file has none, so it only ever adds chrome when there's something to show.
+  const backlinks = (
+    <BacklinksPanel
+      workspaceId={props.workspaceId}
+      path={props.path}
+      refreshKey={props.refreshKey}
+      onOpenPath={props.onOpenPath}
+    />
+  );
+
   // Engine mode: the engine-native rich Y.Doc drives Tiptap (recordUpdate +
   // debounced settle in main; engine.db + the .md are the durable artifact).
   // There is no read/source/Edit gate here — the CRDT is canonical the whole
@@ -851,6 +867,7 @@ function MarkdownView(props: {
               }}
             />
           </Suspense>
+          {backlinks}
         </div>
       </div>
     );
@@ -968,6 +985,7 @@ function MarkdownView(props: {
               collab={null}
             />
           </Suspense>
+          {backlinks}
         </div>
       ) : (
         <div
@@ -981,6 +999,7 @@ function MarkdownView(props: {
             readOnly={readOnly}
           />
           <div className="dohc-readable-text p-6 text-[15px]">{renderedDocument}</div>
+          {backlinks}
         </div>
       )}
     </div>
@@ -1702,6 +1721,7 @@ export function FileInspector(props: {
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
             reopenKey={props.engineVersionKey}
+            refreshKey={props.refreshKey}
           />
         </div>
       );
