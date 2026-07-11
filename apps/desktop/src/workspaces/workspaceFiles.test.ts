@@ -15,6 +15,7 @@ import {
   createFile,
   createFolder,
   deletePath,
+  extractFrontmatterIcon,
   importDroppedPaths,
   listFiles,
   movePath,
@@ -66,6 +67,25 @@ describe("createFile", () => {
   });
 });
 
+describe("extractFrontmatterIcon", () => {
+  it("reads a plain icon scalar from a leading frontmatter block", () => {
+    expect(
+      extractFrontmatterIcon("---\nid: n1\ntitle: Plan\nicon: 🚀\n---\n# Body\n"),
+    ).toBe("🚀");
+  });
+
+  it("strips surrounding quotes and inline comments", () => {
+    expect(extractFrontmatterIcon('---\nicon: "📄"\n---\n')).toBe("📄");
+    expect(extractFrontmatterIcon("---\nicon: 📝 # my note\n---\n")).toBe("📝");
+  });
+
+  it("returns undefined without frontmatter, before an icon, or when empty", () => {
+    expect(extractFrontmatterIcon("# No frontmatter\nicon: 🚀\n")).toBeUndefined();
+    expect(extractFrontmatterIcon("---\ntitle: Plan\n---\nicon: 🚀\n")).toBeUndefined();
+    expect(extractFrontmatterIcon("---\nicon:\n---\n")).toBeUndefined();
+  });
+});
+
 describe("listFiles", () => {
   it("lists files and folders but skips internal directories", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
@@ -79,6 +99,19 @@ describe("listFiles", () => {
       { path: "wallet.sqlite", kind: "database" },
     ]);
     expect(result.folders).toEqual(["notes"]);
+  });
+
+  it("surfaces a markdown page's icon frontmatter for the tree glyph", async () => {
+    await writeFile(
+      join(root, "plan.md"),
+      "---\nid: n1\ntitle: Plan\nicon: 🚀\n---\n\n# Plan\n",
+    );
+    await writeFile(join(root, "plain.md"), "# No frontmatter\n");
+    const result = await listFiles(root);
+    expect(result.files).toEqual([
+      { path: "plain.md", kind: "file" },
+      { path: "plan.md", kind: "file", icon: "🚀" },
+    ]);
   });
 
   it("returns EMPTY folders so the tree can render them", async () => {

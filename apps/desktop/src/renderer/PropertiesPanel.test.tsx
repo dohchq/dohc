@@ -132,6 +132,33 @@ describe("PropertiesPanel", () => {
     );
   });
 
+  it("hides the reserved icon key from the user property rows", () => {
+    render(
+      <PropertiesPanel
+        body={"---\nid: n1\ntitle: Plan\nicon: 🚀\nstatus: draft\n---\n\n# Plan\n"}
+        onChange={vi.fn()}
+      />,
+    );
+
+    // Only the single user property (status) is editable; id/title/icon are
+    // managed by the document system and never surface as rows.
+    expect(screen.queryAllByTestId("property-row")).toHaveLength(1);
+    expect(screen.queryByDisplayValue("🚀")).toBeNull();
+    expect(screen.getByDisplayValue("status")).toBeTruthy();
+  });
+
+  it("rejects the reserved icon name without writing it", async () => {
+    const user = userEvent.setup({ delay: 20 });
+    const initialBody = "---\nid: note-1\ntitle: Plan\n---\n\n# Plan\n";
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 1 name"), "icon");
+
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
+  });
+
   it("rejects reserved property names without writing them", async () => {
     const user = userEvent.setup({ delay: 20 });
     const initialBody = "---\nid: note-1\ntitle: Plan\n---\n\n# Plan\n";

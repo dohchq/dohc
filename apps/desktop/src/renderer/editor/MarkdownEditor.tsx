@@ -45,7 +45,7 @@ import {
 } from "./floatingMenuPosition";
 
 export type MarkdownEditorHandle = {
-  focus: () => void;
+  focus: (position?: "start" | "end") => void;
   getMarkdown: () => string;
 };
 
@@ -1332,8 +1332,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useImperativeHandle(
       ref,
       () => ({
-        focus() {
-          editor?.commands.focus();
+        focus(position) {
+          editor?.commands.focus(position);
         },
         getMarkdown() {
           return editor?.getMarkdown() ?? value;

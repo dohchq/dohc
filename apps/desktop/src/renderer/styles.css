@@ -925,3 +925,177 @@ body {
   border-radius: 999px;
   background: var(--dohc-success);
 }
+
+/* ===========================================================================
+ * Page identity — Notion-style title + emoji icon above the document body.
+ * A serif page title on warm paper, an emoji icon that reveals a quiet "Add
+ * icon" affordance on hover, and a small self-contained picker. This is a
+ * sibling of the ProseMirror surface (never part of the doc), aligned to the
+ * shared editor reading measure. Colors ride the theme tokens so both light
+ * and dark come for free; the dark block only deepens the picker shadow.
+ * ========================================================================= */
+.dohc-page-identity {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 28px 56px 0;
+  background: var(--dohc-bg);
+}
+
+.dohc-page-identity__inner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.dohc-page-identity__icon-row {
+  position: relative;
+  min-height: 22px;
+  margin-bottom: 6px;
+}
+
+.dohc-page-identity__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  padding: 2px 6px;
+  font-size: 46px;
+  line-height: 1.1;
+  cursor: pointer;
+}
+
+.dohc-page-identity__icon:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-page-identity__add-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 3px 6px;
+  color: var(--dohc-subtle);
+  font-size: 12.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-page-identity:hover .dohc-page-identity__add-icon,
+.dohc-page-identity__add-icon:focus-visible {
+  opacity: 1;
+}
+
+.dohc-page-identity__add-icon:hover {
+  color: var(--dohc-muted);
+}
+
+.dohc-page-identity__title {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--dohc-ink);
+  font-family: var(--font-serif);
+  font-size: 2em;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  outline: none;
+}
+
+.dohc-page-identity__title::placeholder {
+  color: var(--dohc-subtle);
+  font-weight: 600;
+}
+
+.dohc-page-identity__title:read-only {
+  cursor: default;
+}
+
+.dohc-page-identity__picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 264px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 10px;
+  background: var(--dohc-panel);
+  padding: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
+}
+
+.dohc-page-identity__picker-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
+  max-height: 172px;
+  overflow-y: auto;
+}
+
+.dohc-page-identity__picker-emoji {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 2px 0;
+  font-size: 17px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.dohc-page-identity__picker-emoji:hover {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-page-identity__picker-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  border-top: 1px solid var(--dohc-line);
+  padding-top: 8px;
+}
+
+.dohc-page-identity__picker-field {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: var(--dohc-bg);
+  padding: 4px 8px;
+  color: var(--dohc-ink);
+  font-size: 13px;
+  outline: none;
+}
+
+.dohc-page-identity__picker-field:focus {
+  border-color: var(--dohc-ink);
+}
+
+.dohc-page-identity__picker-remove {
+  flex-shrink: 0;
+  border: 1px solid var(--dohc-line);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 10px;
+  color: var(--dohc-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dohc-page-identity__picker-remove:hover {
+  color: var(--dohc-ink);
+  background: var(--dohc-panel-2);
+}
+
+[data-theme='dark'] .dohc-page-identity__picker {
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+}

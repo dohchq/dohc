@@ -69,6 +69,59 @@ function fitWithinNameMax(name: string, prefix: string): string {
     .replace(/\uFFFD+$/, "");
 }
 
+// Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
+// short scalar near the top (id, title, icon priority order), so a small
+// bounded read covers it without ever loading a whole document.
+const MARKDOWN_ICON_HEAD_BYTES = 1024;
+
+// Minimal, dependency-free scan for `icon:` inside a leading `--- ... ---`
+// frontmatter block. Intentionally NOT a full YAML parse: the buffer may be
+// truncated mid-document, and we only want one short scalar. Exported for
+// unit testing. Returns undefined when there is no leading frontmatter, the
+// block closes before an icon, or the value is empty/comment-only.
+export function extractFrontmatterIcon(head: string): string | undefined {
+  const lines = head.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return undefined;
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (line.trim() === "---") return undefined; // block closed, no icon
+    const match = /^icon:[ \t]*(.*)$/.exec(line);
+    if (!match) continue;
+    let value = (match[1] ?? "").trim();
+    if (!value || value.startsWith("#")) return undefined;
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    } else {
+      // Strip a trailing inline comment on an unquoted scalar.
+      const comment = value.indexOf(" #");
+      if (comment !== -1) value = value.slice(0, comment).trim();
+    }
+    return value.slice(0, 64) || undefined;
+  }
+  return undefined;
+}
+
+// Best-effort, failure-tolerant read of a markdown file's icon: this runs for
+// every markdown file on every listing, so it must never throw or read the
+// whole file.
+async function readMarkdownIcon(absolutePath: string): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(absolutePath, "r");
+    const buffer = Buffer.alloc(MARKDOWN_ICON_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, MARKDOWN_ICON_HEAD_BYTES, 0);
+    return extractFrontmatterIcon(buffer.subarray(0, bytesRead).toString("utf8"));
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 export async function listFiles(
   rootPath: string,
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
@@ -90,7 +143,13 @@ export async function listFiles(
           await walk(join(dir, dirent.name), rel);
         }
       } else if (dirent.isFile()) {
-        entries.push({ path: rel, kind: classifyPath(rel).kind });
+        const kind = classifyPath(rel).kind;
+        const entry: WorkspaceFileEntry = { path: rel, kind };
+        if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
+          const icon = await readMarkdownIcon(join(dir, dirent.name));
+          if (icon) entry.icon = icon;
+        }
+        entries.push(entry);
       }
     }
   }
