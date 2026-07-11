@@ -110,4 +110,29 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(LIVE_BODY));
     expect(writeText).not.toHaveBeenCalledWith("# Stale disk body\n");
   });
+
+  it("carries LIVE frontmatter (title/icon) edits, not the mount-time markdown", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    // Title / icon edits land in the engine Y.Doc frontmatter MAP (PageIdentity
+    // writes there), never in latestDraft.current — so an export must read the
+    // live map, not the stale mount-time frontmatter.
+    engineDocState.doc!.getMap("frontmatter").set("title", "Live Title");
+    engineDocState.doc!.getMap("frontmatter").set("icon", "🚀");
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        `---\ntitle: Live Title\nicon: 🚀\n---\n${LIVE_BODY}`,
+      ),
+    );
+  });
 });

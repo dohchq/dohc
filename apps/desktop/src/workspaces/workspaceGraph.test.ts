@@ -454,6 +454,26 @@ describe("computeBacklinks", () => {
     );
   });
 
+  it("bounds total mentions scanned by a workspace-wide budget", () => {
+    // MAX_GRAPH_LINK_CANDIDATES (20k) is spent ACROSS all source docs, like
+    // buildMarkdownGraph — not refreshed per file. A leading doc packed with
+    // non-matching mentions exhausts the budget, so a later doc's real mention
+    // is never scanned (bounded cost). Pre-fix, every file got the full 20k.
+    const heavy = "[[Nowhere]]\n".repeat(20_001);
+    const sources = computeBacklinks(
+      [
+        { path: "aaa.md", text: heavy },
+        { path: "zzz.md", text: "Real [[Target]] mention.\n" },
+        { path: "target.md", text: "# Target\n" },
+      ],
+      "target.md",
+    );
+
+    // aaa.md alone drains the budget (its links resolve nowhere → 0 sources);
+    // zzz.md is cut off before its matching mention is reached.
+    expect(sources).toEqual([]);
+  });
+
   it("reads backlinks off disk for the open document", async () => {
     await writeFile(
       join(root, "one.md"),

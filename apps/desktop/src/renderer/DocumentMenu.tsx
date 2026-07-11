@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { IconButton } from "./ui/controls";
 import { bridge } from "./bridge";
-import { buildStandaloneDocumentHtml } from "./editor/documentExport";
 
 // The document header's "…" menu (ViewHeader): copy the raw markdown, or
 // export a self-contained HTML/PDF file. Styled and keyboard-driven like
@@ -93,6 +92,13 @@ export function DocumentMenu(props: {
   async function exportDocument(kind: "html" | "pdf") {
     setOpen(false);
     try {
+      // Imported on demand, not at module load: documentExport statically
+      // pulls in the Tiptap MarkdownManager/schema stack and KaTeX, which the
+      // lazy MarkdownEditor split otherwise keeps out of the initial/open
+      // path. A user who never exports never pays for it.
+      const { buildStandaloneDocumentHtml } = await import(
+        "./editor/documentExport"
+      );
       const html = buildStandaloneDocumentHtml(
         props.getMarkdown(),
         props.suggestedName,

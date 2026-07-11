@@ -227,7 +227,18 @@ export function makeMathNodeView(
         return true;
       },
       destroy() {
-        exitEditing(null);
+        // The node view can be torn down (document switch / editor destroy)
+        // while the source field is still open with an uncommitted edit and
+        // before blur/Enter fires — cancelling here would silently drop the
+        // last TeX the user typed. Commit the field value instead. commit()
+        // no-ops when getPos() is no longer a number (the node was deleted),
+        // and a dispatch onto an already-destroyed view is swallowed so
+        // teardown can never throw.
+        try {
+          exitEditing(field ? field.value : null);
+        } catch {
+          // View already torn down — the edit can't be persisted onto it.
+        }
       },
     };
   };

@@ -159,6 +159,11 @@ export class MermaidRenderScheduler {
     this.timers.delete(key)
 
     if (source.length > this.maxChars) {
+      // Supersede any render already in flight for this key: a valid render
+      // scheduled just before the edit crossed the guard could otherwise
+      // resolve afterward (its generation still matched) and repaint its SVG
+      // over this skipped state. Bumping the generation invalidates it.
+      this.generation.set(key, (this.generation.get(key) ?? 0) + 1)
       this.onResult(key, { status: 'skipped' })
       return
     }
@@ -387,6 +392,10 @@ function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult)
     status.textContent = ''
     return
   }
+  // error / skipped: drop any previously-rendered diagram so a stale SVG from
+  // the last good render never lingers beside the new source's error or
+  // oversize notice (the fence text no longer matches what's painted).
+  canvas.innerHTML = ''
   if (result.status === 'error') {
     container.classList.add('dohc-mermaid-preview--error')
     status.hidden = false

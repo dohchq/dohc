@@ -247,6 +247,29 @@ describe('MermaidRenderScheduler', () => {
     ])
   })
 
+  it('invalidates an in-flight render when a later edit crosses the size guard', async () => {
+    let resolveFirst: (value: { svg: string }) => void = () => {}
+    const first = new Promise<{ svg: string }>((resolve) => {
+      resolveFirst = resolve
+    })
+    const render = vi.fn<MermaidRenderFn>().mockImplementationOnce(() => first)
+    const results: MermaidRenderResult[] = []
+    const scheduler = new MermaidRenderScheduler(render, (_key, r) => results.push(r))
+
+    scheduler.schedule('a', 'graph TD;A')
+    await vi.advanceTimersByTimeAsync(400) // the valid render is now in flight
+    scheduler.schedule('a', 'a'.repeat(10_001)) // edit crosses the 10k guard → skipped
+
+    resolveFirst({ svg: '<svg>stale</svg>' }) // late resolution of the superseded render
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The generation bump on skip drops the stale render — it never repaints
+    // its SVG over the skipped state, which stays the last word.
+    expect(results.filter((r) => r.status === 'rendered')).toEqual([])
+    expect(results.at(-1)).toEqual({ status: 'skipped' })
+  })
+
   it('dispose() cancels an in-flight debounce for that key', async () => {
     const render = vi.fn(async () => ({ svg: '<svg/>' }))
     const scheduler = new MermaidRenderScheduler(render, () => {})
@@ -408,6 +431,30 @@ describe('makeMermaidPreviewPlugin — DOM wiring', () => {
     expect(status?.textContent).toContain('Parse error on line 1')
     // The source stays fully editable — a render failure never locks the block.
     expect(editor.isEditable).toBe(true)
+  })
+
+  it('clears the previously-rendered diagram when the edited source errors', async () => {
+    vi.useFakeTimers()
+    const render = vi.fn(async (_id: string, source: string) => {
+      if (source.includes('BOOM')) throw new Error('Parse error on line 1')
+      return { svg: `<svg data-src="${source}"></svg>` }
+    })
+    const editor = makeEditor('```mermaid\ngraph TD;\nA-->B\n```', render)
+
+    await vi.advanceTimersByTimeAsync(400)
+    const canvas = previewContainer(editor).querySelector('.dohc-mermaid-preview-canvas')
+    expect(canvas?.innerHTML).toContain('data-src="graph TD;\nA-->B"')
+
+    // Edit the fence body IN PLACE (same widget identity) into invalid syntax.
+    editor.view.dispatch(
+      editor.state.tr.insertText('BOOM', 1, editor.state.doc.content.size - 1),
+    )
+    await vi.advanceTimersByTimeAsync(400)
+
+    const container = previewContainer(editor)
+    expect(container.classList.contains('dohc-mermaid-preview--error')).toBe(true)
+    // The stale diagram is gone — no outdated SVG lingering beside the error.
+    expect(canvas?.innerHTML).toBe('')
   })
 
   it('skips rendering and shows a quiet notice over the 10k-char guard', async () => {

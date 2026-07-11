@@ -23,7 +23,11 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
-import { parseFrontmatter } from "./markdown/frontmatter";
+import {
+  applyFrontmatter,
+  orderFrontmatter,
+  parseFrontmatter,
+} from "./markdown/frontmatter";
 import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
@@ -36,6 +40,11 @@ import { IconButton, SectionLabel } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
+
+// The engine Y.Doc frontmatter map field name — the same key PageIdentity and
+// PropertiesPanel write title/icon/properties into (v2 schema). Read directly
+// here so engine-mode export/copy reflects live frontmatter edits.
+const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
 // main process resolves <workspaceId> to a real workspace root and enforces
@@ -532,16 +541,29 @@ function MarkdownView(props: {
 
   // Engine-mode export/serialize: in the engine branch the WYSIWYG editor is
   // ALWAYS mounted and collab-bound to the engine Y.Doc, so its live body is
-  // the canonical current markdown — the same merge the wysiwyg save path uses.
-  // serializeDraftRef can't be reused here because it falls back to the stale
-  // (possibly truncated) props.body whenever the properties panel is open or
-  // the doc opened in read mode, neither of which reflects the live edit. This
-  // reads the editor on demand at click time so the exported source is fresh.
-  const serializeEngineDraft = () =>
-    mergeMarkdownEditorBody(
-      latestDraft.current,
-      wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(props.body),
-    );
+  // the canonical current markdown. serializeDraftRef can't be reused here
+  // because it falls back to the stale (possibly truncated) props.body whenever
+  // the properties panel is open or the doc opened in read mode, neither of
+  // which reflects the live edit. This reads the editor on demand at click time
+  // so the exported source is fresh.
+  //
+  // Frontmatter (title / icon / properties) is edited through PageIdentity and
+  // PropertiesPanel, which write straight into the engine Y.Doc's frontmatter
+  // MAP — NOT into latestDraft.current, which stays at this mount's initial
+  // markdown. Reading latestDraft.current for the frontmatter therefore exports
+  // a stale title. Serialize the LIVE map instead. Reading it directly (rather
+  // than yDocToMarkdown) keeps import-export's heavy schema/KaTeX stack out of
+  // this eager chunk — the mounted WYSIWYG editor already owns the body.
+  const serializeEngineDraft = () => {
+    const body =
+      wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(props.body);
+    const liveMeta = engine.doc
+      ? (Object.fromEntries(
+          engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+        ) as Record<string, unknown>)
+      : parseFrontmatter(latestDraft.current).meta;
+    return applyFrontmatter(body, orderFrontmatter(liveMeta));
+  };
 
   useEffect(() => {
     if (mode === "read") void loadMarkdownEditor();
@@ -955,11 +977,17 @@ function MarkdownView(props: {
             >
               {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
-            <DocumentMenu
-              workspaceId={props.workspaceId}
-              suggestedName={filenameStem(props.path)}
-              getMarkdown={() => serializeDraftRef.current()}
-            />
+            {/* A truncated doc only loaded a bounded prefix into
+                serializeDraftRef — copying/exporting it would silently emit a
+                partial document. Hide the menu until the full file is loaded
+                (same gate as the properties toggle above). */}
+            {!props.truncated ? (
+              <DocumentMenu
+                workspaceId={props.workspaceId}
+                suggestedName={filenameStem(props.path)}
+                getMarkdown={() => serializeDraftRef.current()}
+              />
+            ) : null}
           </>
         }
       />

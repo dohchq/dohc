@@ -775,15 +775,23 @@ export function computeBacklinks(
     .sort((a, b) => a.path.localeCompare(b.path));
 
   const sources: BacklinkSource[] = [];
+  // Workspace-wide mention budget, decremented across ALL source docs — the
+  // same bound buildMarkdownGraph applies via processedLinkCandidates. Without
+  // it, a large workspace of link-heavy files with few/no matches could scan
+  // up to MAX_GRAPH_LINK_CANDIDATES mentions PER file on every backlinks
+  // refresh; this keeps the panel's cost bounded like the graph's.
+  let remainingLinkCandidates = MAX_GRAPH_LINK_CANDIDATES;
   for (const doc of sortedDocs) {
     if (sources.length >= MAX_BACKLINK_SOURCES) break;
+    if (remainingLinkCandidates <= 0) break;
     const snippets: BacklinkSnippet[] = [];
     const seen = new Set<string>();
 
     for (const mention of extractMentionsWithPositions(
       doc.text,
-      MAX_GRAPH_LINK_CANDIDATES,
+      remainingLinkCandidates,
     )) {
+      remainingLinkCandidates -= 1;
       if (snippets.length >= MAX_BACKLINK_SNIPPETS_PER_SOURCE) break;
       const resolved = resolveLinkTarget(
         doc.path,

@@ -104,3 +104,29 @@ describe("makeMathNodeView — concurrent remote edits while the source field is
     expect(dispatched).toHaveLength(0);
   });
 });
+
+describe("makeMathNodeView — destroy commits an in-progress edit instead of discarding", () => {
+  it("commits the field value when the node view is torn down mid-edit", () => {
+    const { nodeView, dispatched } = makeNodeView("a");
+    nodeView.selectNode?.();
+    // User types a new expression but switches/closes the document before
+    // blur or Enter fires — destroy() runs with the field still open.
+    sourceField(nodeView).value = "e=mc^2";
+    nodeView.destroy?.();
+    // The last TeX is committed, not silently dropped.
+    expect(dispatched).toEqual([{ pos: 0, attrs: { tex: "e=mc^2" } }]);
+  });
+
+  it("does not dispatch on destroy when the field was never edited", () => {
+    const { nodeView, dispatched } = makeNodeView("a");
+    nodeView.selectNode?.();
+    nodeView.destroy?.();
+    expect(dispatched).toHaveLength(0);
+  });
+
+  it("does not dispatch on destroy when not in the editing state", () => {
+    const { nodeView, dispatched } = makeNodeView("a");
+    nodeView.destroy?.();
+    expect(dispatched).toHaveLength(0);
+  });
+});
