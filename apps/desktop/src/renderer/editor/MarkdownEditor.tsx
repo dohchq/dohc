@@ -32,6 +32,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
 import { dohcMarkdownExtensions, escapeHighlightMarkdown } from "./extensions";
 import { makeImageNodeView, type ImageSrcContext } from "./imageSrc";
+import { makeMathNodeView } from "./mathRender";
 import {
   handleImageDrop,
   handleImagePaste,
@@ -453,6 +454,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           // attr stays the original relative path).
           nodeViews: {
             image: makeImageNodeView(() => imageContextRef.current),
+            mathInline: makeMathNodeView(false),
+            mathBlock: makeMathNodeView(true),
           },
           handlePaste: (view, event) =>
             handleImagePaste(view, event, pasteContextRef.current),

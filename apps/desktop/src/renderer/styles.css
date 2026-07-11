@@ -2239,3 +2239,94 @@ mark.dohc-highlight,
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+
+/* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled
+ * katex.min.css; these rules only theme the dohc wrappers, the source-edit
+ * field, and the empty/error states so math reads correctly in both themes.
+ * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
+:root {
+  --dohc-math-error-color: #a6402c;
+}
+[data-theme='dark'] {
+  --dohc-math-error-color: #e08065;
+}
+
+.dohc-math-inline {
+  display: inline-block;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.dohc-math-inline:hover {
+  background: color-mix(in srgb, var(--dohc-match) 12%, transparent);
+}
+
+.dohc-math-block {
+  display: block;
+  margin: 0.6em 0;
+  padding: 0.5em 0.75em;
+  text-align: center;
+  cursor: pointer;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.dohc-math-block:hover {
+  background: color-mix(in srgb, var(--dohc-match) 8%, transparent);
+}
+
+/* Empty math (e.g. a freshly inserted `$$` block) shows a calm hint so it is
+ * visible and clickable instead of collapsing to nothing. */
+.dohc-math--empty .dohc-math__preview::after,
+.dohc-math__preview.dohc-math--empty::after {
+  content: 'Empty math — click to edit';
+  color: var(--dohc-subtle);
+  font-size: 12px;
+  font-style: italic;
+}
+.dohc-math-inline.dohc-math--empty .dohc-math__preview::after,
+.dohc-math-inline .dohc-math__preview.dohc-math--empty::after {
+  content: 'math';
+}
+
+/* Invalid TeX: KaTeX paints its own error text in --dohc-math-error-color;
+ * this adds a subtle underline so the warning reads at a glance. */
+.dohc-math--error .dohc-math__preview,
+.dohc-math__preview.dohc-math--error {
+  color: var(--dohc-math-error-color);
+  text-decoration: underline wavy var(--dohc-math-error-color);
+  text-underline-offset: 3px;
+}
+
+.dohc-math--editing {
+  outline: 1px solid color-mix(in srgb, var(--dohc-match) 45%, transparent);
+  border-radius: 4px;
+}
+
+/* Source-edit field revealed while editing math. Monospace + themed to match
+ * the code surfaces. */
+.dohc-math__source {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dohc-ink);
+  background: var(--dohc-panel-2);
+  border: 1px solid var(--dohc-line);
+  border-radius: 4px;
+  padding: 2px 6px;
+  box-sizing: border-box;
+}
+.dohc-math__source:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dohc-match) 55%, var(--dohc-line));
+}
+textarea.dohc-math__source {
+  display: block;
+  width: 100%;
+  min-height: 4.5em;
+  resize: vertical;
+  text-align: left;
+  white-space: pre;
+}
+input.dohc-math__source {
+  min-width: 8ch;
+}

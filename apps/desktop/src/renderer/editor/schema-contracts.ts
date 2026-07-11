@@ -22,7 +22,8 @@ export type DohcV2ConstructName =
   | 'queryBlock'
   | 'callout'
   | 'highlight'
-  | 'math'
+  | 'mathInline'
+  | 'mathBlock'
   | 'htmlAtom'
   | 'frontmatter'
 
@@ -364,20 +365,36 @@ export const DOHC_V2_CONSTRUCTS = [
     note: 'Obsidian `==highlight==` mark parsed by a custom inline tokenizer; no attributes.',
   },
   {
-    name: 'math',
+    name: 'mathInline',
     kind: 'inline',
     canonical: 'tiptap-node',
     yjsField: 'body',
     editableBodyNode: true,
     markdown: {
-      parse: 'passthrough',
-      render: 'passthrough',
+      parse: 'custom-extension',
+      render: 'custom-extension',
       lossless: true,
       fixtureRequired: true,
     },
     requiresPaidTiptap: false,
-    phase1Scope: 'preserve-as-text',
-    note: 'Phase 1 preserves inline and block math syntax; richer math UI is deferred.',
+    phase1Scope: 'required',
+    note: 'Obsidian/Pandoc `$...$` TeX atom; flanking rules keep prose dollars literal. KaTeX render is desktop-only.',
+  },
+  {
+    name: 'mathBlock',
+    kind: 'block',
+    canonical: 'tiptap-node',
+    yjsField: 'body',
+    editableBodyNode: true,
+    markdown: {
+      parse: 'custom-extension',
+      render: 'custom-extension',
+      lossless: true,
+      fixtureRequired: true,
+    },
+    requiresPaidTiptap: false,
+    phase1Scope: 'required',
+    note: 'Obsidian `$$...$$` display-math block atom (single- or multi-line); stores the raw TeX for a byte-identical round-trip.',
   },
   {
     name: 'htmlAtom',
@@ -431,7 +448,8 @@ const REQUIRED_CONSTRUCTS: readonly DohcV2ConstructName[] = [
   'queryBlock',
   'callout',
   'highlight',
-  'math',
+  'mathInline',
+  'mathBlock',
   'htmlAtom',
   'frontmatter',
 ]

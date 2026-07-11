@@ -1,6 +1,11 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { Editor } from "@tiptap/core";
-import { Plugin, PluginKey, type EditorState } from "@tiptap/pm/state";
+import {
+  NodeSelection,
+  Plugin,
+  PluginKey,
+  type EditorState,
+} from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   FLOATING_MENU_MAX_HEIGHT,
@@ -20,6 +25,7 @@ export type SlashCommandId =
   | "callout"
   | "toggle"
   | "code-block"
+  | "math"
   | "divider"
   | "table"
   | "image";
@@ -125,6 +131,13 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     hint: "Write code or raw text",
     glyph: "</>",
     aliases: ["code", "fence", "pre"],
+  },
+  {
+    id: "math",
+    label: "Math block",
+    hint: "TeX equation with $$",
+    glyph: "∑",
+    aliases: ["math", "equation", "tex", "latex", "katex", "formula"],
   },
   {
     id: "divider",
@@ -378,6 +391,25 @@ export function SlashCommandMenu({
   );
 }
 
+// Select the empty `mathBlock` closest to the insertion point so its NodeView
+// opens in edit mode. Scanning (rather than trusting a computed position) is
+// robust to how block insertion reshapes the surrounding paragraph/caret.
+function selectInsertedMathBlock(editor: Editor, near: number): void {
+  editor.commands.command(({ tr, dispatch }) => {
+    let target: number | null = null;
+    tr.doc.descendants((node, pos) => {
+      if (node.type.name !== "mathBlock") return;
+      if (String(node.attrs.tex ?? "") !== "") return;
+      if (target === null || Math.abs(pos - near) < Math.abs(target - near)) {
+        target = pos;
+      }
+    });
+    if (target === null) return false;
+    if (dispatch) tr.setSelection(NodeSelection.create(tr.doc, target));
+    return true;
+  });
+}
+
 export function runSlashCommand(
   editor: Editor | null,
   id: SlashCommandId,
@@ -445,6 +477,14 @@ export function runSlashCommand(
       return;
     case "code-block":
       chain.setCodeBlock({ language: "" }).run();
+      return;
+    case "math":
+      // Insert an empty `$$` block, then select it so its NodeView opens
+      // straight into the source editor (selectNode → edit mode), ready for
+      // TeX input. Selection is resolved by scanning for the inserted node
+      // rather than a guessed position (block insertion shifts the caret).
+      chain.insertContent({ type: "mathBlock", attrs: { tex: "" } }).run();
+      selectInsertedMathBlock(editor, state.from);
       return;
     case "divider":
       chain.setHorizontalRule().run();

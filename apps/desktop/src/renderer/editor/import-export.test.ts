@@ -603,4 +603,68 @@ describe('desktop editor markdown round-trip', () => {
       expect(twice, `input=${JSON.stringify(input)}`).toBe(once)
     }
   })
+
+  it('round-trips inline $...$ TeX math byte-for-byte', () => {
+    const input = 'Euler: $e^{i\\pi} + 1 = 0$ is neat.'
+    const once = expectStableMarkdownRoundTrip(input, ['$e^{i\\pi} + 1 = 0$'])
+    expect(once).toBe(input)
+  })
+
+  it('round-trips a single-line $$...$$ block byte-for-byte', () => {
+    const input = '$$E = mc^2$$'
+    const once = expectStableMarkdownRoundTrip(input, ['$$E = mc^2$$'])
+    expect(once).toBe(input)
+  })
+
+  it('round-trips a multi-line $$...$$ block byte-for-byte', () => {
+    const input = [
+      '$$',
+      '\\sum_{i=0}^n i = \\frac{n(n+1)}{2}',
+      'E = mc^2',
+      '$$',
+    ].join('\n')
+    const once = yDocToMarkdown(markdownToYDoc(input))
+    expect(once).toBe(input)
+    const twice = yDocToMarkdown(markdownToYDoc(once))
+    expect(twice).toBe(once)
+  })
+
+  it('round-trips an empty $$$$ block', () => {
+    const input = '$$$$'
+    const once = expectStableMarkdownRoundTrip(input, ['$$$$'])
+    expect(once).toBe(input)
+  })
+
+  it('keeps escaped \\$ literal instead of opening math', () => {
+    const input = 'Price is \\$5 and \\$6 today.'
+    const once = expectStableMarkdownRoundTrip(input, ['\\$5', '\\$6'])
+    expect(once).toBe(input)
+  })
+
+  it('does not fire inline math on prose dollar amounts like $5 and $6', () => {
+    const input = 'I have $5 and $6 in my wallet.'
+    const once = expectStableMarkdownRoundTrip(input, ['$5 and $6'])
+    expect(once).toBe(input)
+  })
+
+  it('round-trips inline math adjacent to marks', () => {
+    // A mark that WRAPS a childless inline atom is dropped by the base markdown
+    // manager (applyMarkToContent only attaches marks to text nodes) — this is
+    // shared by every inline atom (image, inlineAtom, formula, wikilink), not a
+    // math quirk. Marks ADJACENT to math round-trip cleanly, which is the case
+    // that matters in practice.
+    const input = 'Adjacent **bold** and $x^2$ and *emphasis* stay put.'
+    const once = expectStableMarkdownRoundTrip(input, [
+      '**bold**',
+      '$x^2$',
+      '*emphasis*',
+    ])
+    expect(once).toBe(input)
+  })
+
+  it('leaves a mid-paragraph $$x$$ with trailing text literal', () => {
+    const input = 'inline $$x$$ trailing stays literal'
+    const once = expectStableMarkdownRoundTrip(input, ['$$x$$ trailing'])
+    expect(once).toBe(input)
+  })
 })
