@@ -1,16 +1,21 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import {
+  computeAttachmentPaths,
+  dragCarriesFiles,
   extractImageFiles,
   generateAssetFilename,
+  handleImageDrop,
   handleImagePaste,
-  IMAGE_PICKER_ACCEPT,
+  handlePaneImageDragOver,
+  handlePaneImageDrop,
   imageExtension,
   insertImageAtPosition,
   pickAndInsertImages,
-  pickImageFiles,
+  sanitizeAttachmentFolderName,
   shortContentHash,
   slugifyBaseName,
+  type PickedImage,
 } from "./imagePaste";
 
 describe("slugifyBaseName", () => {
@@ -60,6 +65,142 @@ describe("generateAssetFilename", () => {
   });
 });
 
+describe("sanitizeAttachmentFolderName", () => {
+  it("keeps a valid single segment", () => {
+    expect(sanitizeAttachmentFolderName("assets")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("  media  ")).toBe("media");
+  });
+
+  it("falls back to 'assets' for empty, separator, or dot-segment names", () => {
+    expect(sanitizeAttachmentFolderName("")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("   ")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("a/b")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("a\\b")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("..")).toBe("assets");
+    expect(sanitizeAttachmentFolderName(".")).toBe("assets");
+  });
+});
+
+describe("computeAttachmentPaths", () => {
+  const file = "pic-abc.png";
+
+  it("per-document: a subfolder next to the document", () => {
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "per-document",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "notes/assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
+    // A root-level document has no folder prefix.
+    expect(
+      computeAttachmentPaths("plan.md", file, {
+        location: "per-document",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
+  });
+
+  it("same-folder: directly beside the document (folderName ignored)", () => {
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "same-folder",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "notes/pic-abc.png", relativeSrc: "pic-abc.png" });
+    expect(
+      computeAttachmentPaths("plan.md", file, {
+        location: "same-folder",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "pic-abc.png", relativeSrc: "pic-abc.png" });
+  });
+
+  it("global-folder: one folder at the root, climbed to with `..`", () => {
+    // Root doc: no climb needed.
+    expect(
+      computeAttachmentPaths("plan.md", file, {
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    ).toEqual({
+      writePath: "attachments/pic-abc.png",
+      relativeSrc: "attachments/pic-abc.png",
+    });
+    // One level deep: climb once.
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    ).toEqual({
+      writePath: "attachments/pic-abc.png",
+      relativeSrc: "../attachments/pic-abc.png",
+    });
+    // Deep nesting: climb once per folder segment.
+    expect(
+      computeAttachmentPaths("a/b/c/plan.md", file, {
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    ).toEqual({
+      writePath: "attachments/pic-abc.png",
+      relativeSrc: "../../../attachments/pic-abc.png",
+    });
+  });
+
+  it("defaults to per-document/assets when no setting is threaded", () => {
+    expect(computeAttachmentPaths("notes/plan.md", file)).toEqual({
+      writePath: "notes/assets/pic-abc.png",
+      relativeSrc: "assets/pic-abc.png",
+    });
+  });
+
+  it("sanitizes an invalid folderName back to 'assets'", () => {
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "per-document",
+        folderName: "../evil",
+      }),
+    ).toEqual({ writePath: "notes/assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
+  });
+});
+
+describe("sanitizeAttachmentFolderName", () => {
+  it("keeps an ordinary folder name", () => {
+    expect(sanitizeAttachmentFolderName("attachments")).toBe("attachments");
+    expect(sanitizeAttachmentFolderName("  my files  ")).toBe("my files");
+  });
+
+  // The whole point of falling back rather than passing the name through: the
+  // main process runs every asset write through validateUserWritePath. A name it
+  // REJECTS would make writeWorkspaceAsset throw for every image, and
+  // placeImageFiles would quietly skip them all — a setting that silently breaks
+  // pasting. So anything the writer would reject degrades to "assets" here, and
+  // the paste still lands.
+  it("falls back to 'assets' for any name the workspace writer would reject", () => {
+    for (const rejected of [
+      "",
+      "   ",
+      ".",
+      "..",
+      "a/b",
+      "a\\b",
+      ".dohc", // reserved
+      ".DOHC", // reserved (case-insensitive)
+      ".dohc.", // reserved (Windows dot-alias)
+      "shared-with-me", // reserved
+      "node_modules", // ignored segment
+      ".git", // ignored segment
+      "%2e%2e", // percent-encoded traversal
+      "%2E%2E%2F", // percent-encoded traversal + separator
+      "a%2fb", // decodes into TWO segments — not a single folder
+      "...", // dots-only Windows alias
+    ]) {
+      expect(sanitizeAttachmentFolderName(rejected)).toBe("assets");
+    }
+  });
+});
+
 // jsdom's File does not implement arrayBuffer() in this environment, so tests
 // use a minimal File-like carrying the fields the paste path reads.
 function fakeImageFile(
@@ -93,7 +234,7 @@ describe("extractImageFiles", () => {
 // insert path touches — real ProseMirror views are too heavy for a unit test.
 type MockNode = { nodeSize: number; attrs: Record<string, unknown> };
 
-function makeMockView(docSize = 8) {
+function makeMockView(docSize = 8, coordsPos: number | null = 5) {
   const dispatched: Array<{ pos: number; node: MockNode }> = [];
   const imageType = {
     create: (attrs: Record<string, unknown>): MockNode => ({
@@ -115,6 +256,9 @@ function makeMockView(docSize = 8) {
     dispatch(tr: { pos: number; node: MockNode }) {
       dispatched.push(tr);
     },
+    // Drops resolve their insert position from the cursor coordinates.
+    posAtCoords: (_coords: { left: number; top: number }) =>
+      coordsPos === null ? null : { pos: coordsPos },
   };
   return { view, dispatched };
 }
@@ -192,6 +336,36 @@ describe("handleImagePaste", () => {
     );
   });
 
+  it("writes to a global root folder and inserts an upward-relative src", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const file = fakeImageFile("Shot.png", "image/png", new Uint8Array([9, 8, 7]));
+    const event = {
+      clipboardData: { files: [file] },
+      preventDefault: vi.fn(),
+    } as unknown as ClipboardEvent;
+
+    handleImagePaste(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      readAttachments: async () => ({
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    });
+
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    const [writePath] = writeAsset.mock.calls[0]!;
+    // Bytes land in the single root folder...
+    expect(writePath).toMatch(/^attachments\/shot-[0-9a-z]+\.png$/);
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    // ...and the node src climbs to it from the nested doc's folder.
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^\.\.\/attachments\/shot-[0-9a-z]+\.png$/,
+    );
+  });
+
   it("skips an oversized image without writing it", async () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn().mockResolvedValue(undefined);
@@ -222,112 +396,391 @@ describe("handleImagePaste", () => {
   });
 });
 
-// A minimal Document stand-in: the `/image` slash command triggers a native
-// file picker via `document.createElement("input")` + `.click()`. Neither the
-// input's presence in a live DOM nor the OS dialog is testable in jsdom, so
-// these tests fake just the surface pickImageFiles touches (create/append/
-// click/change) and never exercise a real `<input>`.
-function makeFakeInputDocument() {
-  const listeners: Record<string, () => void> = {};
-  const input = {
-    type: "",
-    accept: "",
-    multiple: false,
-    style: {} as Record<string, string>,
-    files: null as unknown as FileList | null,
-    addEventListener: (event: string, cb: () => void) => {
-      listeners[event] = cb;
-    },
-    click: vi.fn(),
-    remove: vi.fn(),
+// A drag/drop event stand-in. `types` carries "Files" exactly as a real OS file
+// drag does; `files` is only populated on drop (the browser withholds it during
+// dragover), which is why dragCarriesFiles reads types instead.
+function makeDragEvent(
+  files: File[],
+  options: { defaultPrevented?: boolean; types?: string[] } = {},
+) {
+  const preventDefault = vi.fn();
+  const dataTransfer = {
+    types: options.types ?? (files.length > 0 ? ["Files"] : []),
+    files,
+    dropEffect: "none",
   };
-  const doc = {
-    createElement: vi.fn(() => input),
-    body: { appendChild: vi.fn() },
-  } as unknown as Document;
-  return { doc, input, fireChange: () => listeners.change?.() };
+  const event = {
+    dataTransfer,
+    clientX: 100,
+    clientY: 200,
+    defaultPrevented: options.defaultPrevented ?? false,
+    preventDefault,
+  };
+  return { event: event as unknown as DragEvent, preventDefault, dataTransfer };
 }
 
-describe("pickImageFiles", () => {
-  it("opens a hidden multi-file image input and triggers its picker", () => {
-    const { doc, input } = makeFakeInputDocument();
-    const onFiles = vi.fn();
+describe("handleImageDrop", () => {
+  it("writes a dropped image and inserts it at the drop position", async () => {
+    const { view, dispatched } = makeMockView(8, 5);
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const { event, preventDefault } = makeDragEvent([
+      fakeImageFile("Dropped Shot.png", "image/png", new Uint8Array([4, 5, 6])),
+    ]);
 
-    pickImageFiles(onFiles, doc);
+    const handled = handleImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
 
-    expect(input.type).toBe("file");
-    expect(input.accept).toBe(IMAGE_PICKER_ACCEPT);
-    expect(input.multiple).toBe(true);
-    expect(doc.body.appendChild).toHaveBeenCalledWith(input);
-    expect(input.click).toHaveBeenCalledTimes(1);
-    expect(onFiles).not.toHaveBeenCalled();
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^notes\/assets\/dropped-shot-[0-9a-z]+\.png$/,
+    );
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    // Inserted where the cursor was, not at the selection.
+    expect(dispatched[0]!.pos).toBe(5);
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^assets\/dropped-shot-[0-9a-z]+\.png$/,
+    );
   });
 
-  it("forwards the chosen files on change and cleans up the element", () => {
-    const { doc, input, fireChange } = makeFakeInputDocument();
-    const onFiles = vi.fn();
-    const file = fakeImageFile("a.png", "image/png", new Uint8Array([1]));
+  it("honors the attachment setting for the src it inserts", async () => {
+    const { view, dispatched } = makeMockView(8, 5);
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const { event } = makeDragEvent([
+      fakeImageFile("shot.png", "image/png", new Uint8Array([7])),
+    ]);
 
-    pickImageFiles(onFiles, doc);
-    input.files = [file] as unknown as FileList;
-    fireChange();
+    handleImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      readAttachments: async () => ({
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    });
 
-    expect(onFiles).toHaveBeenCalledTimes(1);
-    expect(onFiles).toHaveBeenCalledWith([file]);
-    expect(input.remove).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^attachments\/shot-[0-9a-z]+\.png$/,
+    );
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^\.\.\/attachments\/shot-[0-9a-z]+\.png$/,
+    );
   });
 
-  it("never calls onFiles if the picker is dismissed (no change event)", () => {
-    const { doc } = makeFakeInputDocument();
-    const onFiles = vi.fn();
-    pickImageFiles(onFiles, doc);
-    expect(onFiles).not.toHaveBeenCalled();
+  it("leaves an in-editor drag (a slice, no files) to ProseMirror", () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    const { event, preventDefault } = makeDragEvent([]);
+
+    const handled = handleImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
+
+    expect(handled).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+  });
+});
+
+describe("dragCarriesFiles", () => {
+  it("is true for an OS file drag even before the files are exposed", () => {
+    const { dataTransfer } = makeDragEvent([], { types: ["Files"] });
+    expect(dragCarriesFiles(dataTransfer as unknown as DataTransfer)).toBe(true);
+  });
+
+  it("is false for an in-editor slice drag and a null dataTransfer", () => {
+    const { dataTransfer } = makeDragEvent([], {
+      types: ["text/html", "text/plain"],
+    });
+    expect(dragCarriesFiles(dataTransfer as unknown as DataTransfer)).toBe(false);
+    expect(dragCarriesFiles(null)).toBe(false);
+  });
+});
+
+describe("handlePaneImageDragOver", () => {
+  it("accepts a file drag (so the browser will deliver a drop)", () => {
+    const { event, preventDefault, dataTransfer } = makeDragEvent([], {
+      types: ["Files"],
+    });
+    expect(handlePaneImageDragOver(event)).toBe(true);
+    expect(preventDefault).toHaveBeenCalled();
+    expect(dataTransfer.dropEffect).toBe("copy");
+  });
+
+  it("ignores an in-editor drag, leaving ProseMirror's reorder alone", () => {
+    const { event, preventDefault } = makeDragEvent([], { types: ["text/html"] });
+    expect(handlePaneImageDragOver(event)).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("handlePaneImageDrop", () => {
+  it("embeds an image dropped on the pane OUTSIDE the ProseMirror content", async () => {
+    // posAtCoords === null: the drop landed on the page top-matter, so there is
+    // no content position under the cursor — it appends at the end of the doc.
+    const { view, dispatched } = makeMockView(8, null);
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const { event, preventDefault } = makeDragEvent([
+      fakeImageFile("Title Drop.png", "image/png", new Uint8Array([1, 2])),
+    ]);
+
+    const handled = handlePaneImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
+
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^notes\/assets\/title-drop-[0-9a-z]+\.png$/,
+    );
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    expect(dispatched[0]!.pos).toBe(8); // end of the document
+  });
+
+  it("does NOT double-write a drop ProseMirror already handled", () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    // ProseMirror's handleDrop preventDefaults the drops it takes; the pane
+    // listener sits on an ancestor and must skip those.
+    const { event } = makeDragEvent(
+      [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
+      { defaultPrevented: true },
+    );
+
+    expect(handlePaneImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    })).toBe(false);
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+  });
+
+  it("ignores a drop with no image files", () => {
+    const { view } = makeMockView();
+    const writeAsset = vi.fn();
+    const { event } = makeDragEvent([
+      fakeImageFile("notes.txt", "text/plain", new Uint8Array([1])),
+    ]);
+
+    expect(handlePaneImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    })).toBe(false);
+    expect(writeAsset).not.toHaveBeenCalled();
   });
 });
 
 describe("pickAndInsertImages", () => {
-  it("writes and inserts each file chosen through the picker", async () => {
-    const { doc, input, fireChange } = makeFakeInputDocument();
-    const { view, dispatched } = makeMockView();
-    const writeAsset = vi.fn().mockResolvedValue(undefined);
-    const file = fakeImageFile(
-      "Diagram.png",
-      "image/png",
-      new Uint8Array([5, 6, 7]),
-    );
-
-    pickAndInsertImages(
-      view as never,
-      3,
-      { workspaceId: "ws1", docPath: "notes/plan.md", writeAsset },
-      doc,
-    );
-    input.files = [file] as unknown as FileList;
-    fireChange();
-
-    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
-    const [writePath] = writeAsset.mock.calls[0]!;
-    expect(writePath).toMatch(/^notes\/assets\/diagram-[0-9a-z]+\.png$/);
-
-    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
-    expect(dispatched[0]!.pos).toBe(3);
+  const picked = (name: string, bytes: number[]): PickedImage => ({
+    name,
+    mediaType: "image/png",
+    bytes: new Uint8Array(bytes),
   });
 
-  it("writes nothing when the picker yields no files", () => {
-    const { doc, input, fireChange } = makeFakeInputDocument();
+  it("writes and inserts each image returned by the native picker", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const pickImages = vi
+      .fn()
+      .mockResolvedValue([picked("Diagram.png", [5, 6, 7])]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(pickImages).toHaveBeenCalledTimes(1);
+    expect(writeAsset).toHaveBeenCalledTimes(1);
+    // The picker's bytes travel the SAME write path paste/drop use, so the
+    // attachment-location logic applies unchanged.
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^notes\/assets\/diagram-[0-9a-z]+\.png$/,
+    );
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.pos).toBe(3);
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^assets\/diagram-[0-9a-z]+\.png$/,
+    );
+  });
+
+  it("applies the attachment setting to picked images too", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const pickImages = vi.fn().mockResolvedValue([picked("Shot.png", [9])]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+      readAttachments: async () => ({
+        location: "same-folder",
+        folderName: "assets",
+      }),
+    });
+
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/shot-[0-9a-z]+\.png$/);
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^shot-[0-9a-z]+\.png$/);
+  });
+
+  it("inserts every picked image, in order", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const pickImages = vi
+      .fn()
+      .mockResolvedValue([picked("a.png", [1]), picked("b.png", [2])]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(writeAsset).toHaveBeenCalledTimes(2);
+    expect(dispatched.map((d) => d.pos)).toEqual([3, 4]);
+  });
+
+  it("writes nothing when the picker is cancelled", async () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn();
+    const pickImages = vi.fn().mockResolvedValue([]);
 
-    pickAndInsertImages(
-      view as never,
-      3,
-      { workspaceId: "ws1", docPath: "notes/plan.md", writeAsset },
-      doc,
-    );
-    input.files = [] as unknown as FileList;
-    fireChange();
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+    });
 
     expect(writeAsset).not.toHaveBeenCalled();
     expect(dispatched).toHaveLength(0);
+  });
+
+  it("survives a picker that rejects", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pickImages = vi.fn().mockRejectedValue(new Error("dialog failed"));
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+    warn.mockRestore();
+  });
+
+  it("does nothing when no picker is wired (non-desktop context)", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
+
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+  });
+});
+
+// The attachment setting is workspace state that changes UNDER a mounted editor
+// (the user edits it in the settings dialog; it differs per workspace). The
+// paste context therefore holds a READER, not a value — these tests pin that,
+// because a cached copy is exactly how the old code wrote images to the previous
+// workspace's / the pre-edit location.
+describe("attachment settings are read at use time", () => {
+  it("re-reads the setting for every paste, so a settings change takes effect immediately", async () => {
+    const { view } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    // Stands in for the workspace setting the user edits between the two pastes.
+    let location: "per-document" | "same-folder" = "per-document";
+    const readAttachments = vi.fn(async () => ({
+      location,
+      folderName: "assets",
+    }));
+    const context = {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      readAttachments,
+    };
+    const paste = () =>
+      handleImagePaste(
+        view as never,
+        {
+          clipboardData: {
+            files: [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
+          },
+          preventDefault: vi.fn(),
+        } as unknown as ClipboardEvent,
+        context,
+      );
+
+    paste();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\//);
+
+    // The user changes the setting; the editor is NOT remounted.
+    location = "same-folder";
+    paste();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(2));
+    // The second paste honors the NEW location, not the one read at mount.
+    expect(writeAsset.mock.calls[1]![0]).toMatch(/^notes\/a-[0-9a-z]+\.png$/);
+    expect(readAttachments).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the per-document default when the settings read fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+
+    handleImagePaste(
+      view as never,
+      {
+        clipboardData: {
+          files: [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
+        },
+        preventDefault: vi.fn(),
+      } as unknown as ClipboardEvent,
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset,
+        readAttachments: async () => {
+          throw new Error("settings unavailable");
+        },
+      },
+    );
+
+    // A failed settings read must never break pasting: the image still lands, in
+    // the default per-document folder.
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\//);
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    warn.mockRestore();
   });
 });

@@ -109,6 +109,32 @@ export function SegmentedControl<T extends string>(props: {
   );
 }
 
+export function TextControl(props: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  testId?: string;
+  // The setting's schema bound. Settings save on change through a schema parse
+  // that THROWS on an over-long value, so a bounded setting must bound its input
+  // — `maxLength` truncates typing AND paste, and the caller clamps besides.
+  maxLength?: number;
+}) {
+  return (
+    <input
+      type="text"
+      spellCheck={false}
+      aria-label={props.label}
+      value={props.value}
+      placeholder={props.placeholder}
+      maxLength={props.maxLength}
+      data-testid={props.testId}
+      onChange={(event) => props.onChange(event.target.value)}
+      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink focus-visible:outline-none"
+    />
+  );
+}
+
 export function SwitchControl(props: {
   label: string;
   checked: boolean;

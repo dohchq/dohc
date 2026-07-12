@@ -4,6 +4,13 @@ import {
   settingsDeepEqual,
 } from "../settings/userSettings";
 
+// The schema bound on `files.attachmentFolderName`. Exported because the
+// settings UI must enforce the SAME bound on its input: mergeWorkspaceSettings
+// re-parses and THROWS on an over-long value, and it is called straight from a
+// React change handler — so an unbounded input would turn a long paste into an
+// unhandled exception instead of a rejected edit.
+export const ATTACHMENT_FOLDER_NAME_MAX_LENGTH = 100;
+
 export const WorkspaceSettings = z.object({
   version: z.literal(1),
   agents: z.object({
@@ -31,6 +38,21 @@ export const WorkspaceSettings = z.object({
   experimental: z.object({
     workspaceEngineAlpha: z.boolean(),
   }).strict().default({ workspaceEngineAlpha: true }),
+  // Defaulted like `experimental` above so settings files written before this
+  // group existed keep parsing as-is (a failed parse silently resets the whole
+  // file). Controls where pasted/uploaded attachments (images/files) are saved,
+  // modeled on Obsidian's "Default location for new attachments":
+  //   per-document  — a subfolder next to the document (`<folder>/x.png`)
+  //   global-folder — one folder at the workspace root (`../<folder>/x.png`)
+  //   same-folder   — directly beside the document (`x.png`)
+  // `attachmentFolderName` is the subfolder name (per-document) or root folder
+  // name (global-folder); it is ignored for same-folder. Stored loosely (any
+  // string) and sanitized to a single safe path segment at use time — an
+  // invalid value falls back to "assets" rather than resetting the file.
+  files: z.object({
+    attachmentLocation: z.enum(["per-document", "global-folder", "same-folder"]),
+    attachmentFolderName: z.string().max(ATTACHMENT_FOLDER_NAME_MAX_LENGTH),
+  }).strict().default({ attachmentLocation: "per-document", attachmentFolderName: "assets" }),
 }).strict();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
 
@@ -50,6 +72,10 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   experimental: {
     workspaceEngineAlpha: true,
   },
+  files: {
+    attachmentLocation: "per-document",
+    attachmentFolderName: "assets",
+  },
 };
 
 export const WorkspaceSettingsResult = z.object({
@@ -60,11 +86,12 @@ export const WorkspaceSettingsResult = z.object({
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 
 export type WorkspaceSettingsPatch =
-  Partial<Omit<WorkspaceSettings, "agents" | "sites" | "privacy" | "experimental">> & {
+  Partial<Omit<WorkspaceSettings, "agents" | "sites" | "privacy" | "experimental" | "files">> & {
     agents?: Partial<WorkspaceSettings["agents"]>;
     sites?: Partial<WorkspaceSettings["sites"]>;
     privacy?: Partial<WorkspaceSettings["privacy"]>;
     experimental?: Partial<WorkspaceSettings["experimental"]>;
+    files?: Partial<WorkspaceSettings["files"]>;
   };
 
 export function parseWorkspaceSettings(raw: unknown): WorkspaceSettings {
@@ -83,6 +110,7 @@ export function mergeWorkspaceSettings(
     sites: { ...current.sites, ...patch.sites },
     privacy: { ...current.privacy, ...patch.privacy },
     experimental: { ...current.experimental, ...patch.experimental },
+    files: { ...current.files, ...patch.files },
   });
 }
 

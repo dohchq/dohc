@@ -115,6 +115,35 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
   }
 });
 
+test("attachment location setting persists across reopen", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    desktop = await openWorkspace(temp);
+    await openSettings(desktop.page);
+    await desktop.page.getByTestId("settings-nav-files").click();
+    await expect(desktop.page.getByTestId("settings-section-files")).toBeVisible();
+
+    const select = desktop.page.getByTestId("attachment-location-select");
+    // The folder-name row is present for the default (per-document) location.
+    await expect(desktop.page.getByTestId("attachment-folder-input")).toBeVisible();
+    await select.selectOption("same-folder");
+    // same-folder hides the (meaningless) folder-name row.
+    await expect(desktop.page.getByTestId("attachment-folder-input")).toHaveCount(0);
+
+    await closeSettings(desktop.page);
+    await openSettings(desktop.page);
+    await desktop.page.getByTestId("settings-nav-files").click();
+    await expect(desktop.page.getByTestId("attachment-location-select")).toHaveValue(
+      "same-folder",
+    );
+    expect(fatalLogs(desktop)).toEqual([]);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("settings remains usable at desktop minimum size", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;

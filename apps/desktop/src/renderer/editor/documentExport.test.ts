@@ -83,6 +83,59 @@ describe("buildStandaloneDocumentHtml", () => {
     expect(malicious).toContain("&lt;script&gt;evil()&lt;/script&gt;");
   });
 
+  // EXPORT IMAGE CONTRACT (documentExport.ts): an exported document may only
+  // reference images at or below its OWN folder. The editor can serve a
+  // workspace-relative src over dohc-file:// because it knows the document's
+  // place in the workspace; an export has no such base — it is opened from
+  // wherever the user saved it, or (for PDF) from a throwaway temp dir that
+  // printToPDF loads over file://. So a `../` src, which is legitimate INSIDE
+  // the workspace (global-folder attachments), must not survive into the
+  // exported artifact, where it would point at the real filesystem.
+  describe("image srcs", () => {
+    const bodyOf = (markdown: string) =>
+      buildStandaloneDocumentHtml(markdown, "fallback");
+
+    it("keeps a plain relative src (it still resolves beside the exported file)", () => {
+      expect(bodyOf("![shot](assets/pic.png)")).toContain(
+        'src="assets/pic.png"',
+      );
+    });
+
+    it("keeps remote http(s) images", () => {
+      expect(bodyOf("![remote](https://example.com/x.png)")).toContain(
+        'src="https://example.com/x.png"',
+      );
+    });
+
+    it("emits NO src for a `..` traversal, keeping the alt text", () => {
+      const html = bodyOf("![escape](../../outside.png)");
+      expect(html).not.toContain("../../outside.png");
+      expect(html).not.toContain('src=""');
+      expect(html).toContain('alt="escape"');
+    });
+
+    it("emits NO src for a single-level `..` (a global-folder attachment src)", () => {
+      expect(bodyOf("![att](../assets/pic.png)")).not.toContain(
+        "../assets/pic.png",
+      );
+    });
+
+    it("emits NO src for absolute and protocol-relative paths", () => {
+      expect(bodyOf("![abs](/etc/passwd.png)")).not.toContain("/etc/passwd.png");
+      expect(bodyOf("![pr](//evil.example.com/x.png)")).not.toContain(
+        "//evil.example.com/x.png",
+      );
+    });
+
+    it("never emits an empty src (which browsers re-request as the page itself)", () => {
+      // `data:` is already stripped to '' by the markdown sanitizer; the export
+      // pass must drop the attribute rather than leave src="".
+      expect(bodyOf("![data](data:image/svg+xml;base64,PHN2Zz4=)")).not.toContain(
+        'src=""',
+      );
+    });
+  });
+
   it("typesets inline math with KaTeX instead of emitting raw TeX", () => {
     const withMath = buildStandaloneDocumentHtml(
       "Euler: $x^2$ done.",
