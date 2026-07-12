@@ -226,10 +226,11 @@ body {
   background-clip: padding-box;
 }
 
-/* The editor tab strip scrolls horizontally with no visible scrollbar
- * (VS Code treatment): wheel, active-tab reveal, and the overflow menu are
- * the affordances. A painted bar would eat a third of the 36px strip and
- * push the fixed-height tabs into vertical overflow. */
+/* The editor tab strip scrolls horizontally with the NATIVE scrollbar
+ * hidden (a painted bar would eat a third of the 36px strip and push the
+ * fixed-height tabs into vertical overflow). The visible affordance is the
+ * overlay thumb EditorTabs draws over the strip's bottom edge (VS Code
+ * treatment), plus wheel, active-tab reveal, and the overflow menu. */
 .dohc-tab-strip {
   scrollbar-width: none;
 }
@@ -498,45 +499,24 @@ body {
   line-height: 1.6;
 }
 
-/* Tables: quiet grid, tinted header band, rounded frame — data that reads
- * like part of the document, not an embedded spreadsheet. */
-/* No `overflow: hidden` here: the row/column grips float into the table's
- * outer margin (negative offsets, see the table-controls block below) and
- * would be clipped by it. The rounded frame is instead preserved by rounding
- * the four corner cells to match the table's own rounded border. */
+/* Tables — Notion's simple-table look: a quiet square hairline grid with a
+ * subtly tinted header band; data that reads like part of the document, not
+ * an embedded spreadsheet. No `overflow: hidden` on the table: the hover
+ * chrome (handles, "+" strips) floats into the table's outer margin via
+ * negative offsets (see the table-controls block below) and would be
+ * clipped by it. */
 .dohc-notion-editor table {
   border-collapse: separate;
   border-spacing: 0;
   width: 100%;
   border: 1px solid var(--dohc-line);
-  border-radius: 8px;
-}
-
-.dohc-notion-editor tr:first-child > th:first-child,
-.dohc-notion-editor tr:first-child > td:first-child {
-  border-top-left-radius: 7px;
-}
-
-.dohc-notion-editor tr:first-child > th:last-child,
-.dohc-notion-editor tr:first-child > td:last-child {
-  border-top-right-radius: 7px;
-}
-
-.dohc-notion-editor tr:last-child > th:first-child,
-.dohc-notion-editor tr:last-child > td:first-child {
-  border-bottom-left-radius: 7px;
-}
-
-.dohc-notion-editor tr:last-child > th:last-child,
-.dohc-notion-editor tr:last-child > td:last-child {
-  border-bottom-right-radius: 7px;
 }
 
 .dohc-notion-editor th,
 .dohc-notion-editor td {
   border: 0;
   border-top: 1px solid var(--dohc-line);
-  padding: 7px 10px;
+  padding: 8px 10px;
   vertical-align: top;
   text-align: left;
   font-size: 14px;
@@ -554,8 +534,6 @@ body {
 
 .dohc-notion-editor th {
   background: var(--dohc-panel);
-  color: var(--dohc-muted);
-  font-size: 13px;
   font-weight: 600;
 }
 
@@ -812,8 +790,7 @@ body {
 }
 
 .dohc-code-language-select,
-.dohc-code-copy-btn,
-.dohc-code-block-continue-btn {
+.dohc-code-copy-btn {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -826,8 +803,7 @@ body {
 }
 
 .dohc-code-language-select:hover,
-.dohc-code-copy-btn:hover,
-.dohc-code-block-continue-btn:hover {
+.dohc-code-copy-btn:hover {
   border-color: var(--dohc-line);
   background: var(--dohc-line);
   color: var(--dohc-ink);
@@ -837,20 +813,64 @@ body {
   padding: 2px 7px;
 }
 
+/* Rendered only after a terminal code block (nothing below it): a quiet
+ * strip for getting a cursor under the block. The whole strip is the click
+ * target; hovering it reveals a gutter-style "+" that matches the
+ * block-controls affordances (18px box, 120ms fade, --dohc-line fill). */
 .dohc-code-block-continuation {
+  display: flex;
+  align-items: center;
   max-width: var(--dohc-editor-measure);
+  height: 26px;
+  margin-top: -4px;
+  cursor: text;
+}
+
+.dohc-code-block-continuation:has(> .dohc-code-block-continue-btn:disabled) {
+  display: none;
 }
 
 .dohc-code-block-continue-btn {
-  margin: 2px 0 10px;
-  width: 22px;
-  height: 20px;
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background-color 100ms ease-out,
+    border-color 100ms ease-out,
+    color 100ms ease-out;
 }
 
+.dohc-code-block-continuation:hover .dohc-code-block-continue-btn,
+.dohc-code-block-continue-btn:focus-visible {
+  opacity: 1;
+}
+
+.dohc-code-block-continue-btn:hover,
+.dohc-code-block-continue-btn:focus-visible {
+  border-color: var(--dohc-line);
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
+}
+
+/* Shared popover box treatment. `overflow` is deliberately NOT shared: the
+ * scrolling menus (slash menu, wikilink picker) own it individually, because
+ * the bubble menu must stay overflow-visible — it hosts the anchored
+ * turn-into dropdown (.dohc-turn-into-menu), which an overflow rule here
+ * would clip to the toolbar's own height. */
 .dohc-slash-menu,
 .dohc-wikilink-picker,
 .dohc-bubble-menu {
-  overflow: auto;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-panel);
@@ -873,6 +893,7 @@ body {
   z-index: 70;
   width: 320px;
   padding: 5px;
+  overflow: auto;
 }
 
 .dohc-slash-menu__item,
@@ -948,6 +969,7 @@ body {
 .dohc-wikilink-picker {
   width: 360px;
   padding: 4px;
+  overflow: auto;
 }
 
 .dohc-wikilink-picker__item {
@@ -1005,7 +1027,17 @@ body {
   -webkit-box-decoration-break: clone;
 }
 
+/* The selection toolbar. TipTap appends this element inside
+ * .dohc-editor-surface next to the ProseMirror DOM — the SAME stacking
+ * context as all in-document chrome — so it needs an explicit spot on the
+ * editor's layering scale: content chrome stays ≤ 20 (outline z3, block
+ * gutter, table grips z4 / table-menu chip z5, column-resize handle +
+ * collab caret labels z20), popovers sit at 69 (backdrop) / 70 (menus) /
+ * 71 (dropdowns nested inside a z70 menu). Without a z-index here the
+ * positive-z table controls paint OVER the selection menu. Table chrome
+ * must stay below 69 so selection UI always wins. */
 .dohc-bubble-menu {
+  z-index: 70;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -1428,25 +1460,28 @@ body {
 }
 
 /* ── table controls ──
- * Row/column grips, the table menu, and the append "+" buttons
- * (tableControls.tsx). Each is a decoration widget nested one position inside
- * its target cell — same "widget-inside-node, hover-revealed via an ancestor
- * class" technique as the block gutter (.dohc-block-node /
- * .dohc-block-affordance above), so `td`/`th` needs `position: relative`
- * exactly like `.dohc-block-node` does. The chrome is then pushed into the
- * table's OUTER margin with negative offsets so it never overlaps cell text,
- * while staying a DOM descendant of the cell — which is what keeps every grip
- * glued to its column/row while a resize drag is live (see the comment at the
- * top of tableControls.tsx). */
+ * Notion-style row/column handles, the table menu, and the append "+"
+ * strips (tableControls.tsx). Each is a decoration widget nested one
+ * position inside its target cell — same "widget-inside-node" technique as
+ * the block gutter (.dohc-block-node / .dohc-block-affordance above), so
+ * `td`/`th` needs `position: relative` exactly like `.dohc-block-node`
+ * does. The chrome is then pushed into the table's OUTER margin with
+ * negative offsets so it never overlaps cell text, while staying a DOM
+ * descendant of the cell — which is what keeps every handle glued to its
+ * column/row while a resize drag is live (see the comment at the top of
+ * tableControls.tsx). Reveal is split: handles show per hovered row/column
+ * (`is-active`, toggled by the plugin's mousemove tracking); the ⋯ menu and
+ * "+" strips show on table hover (`.dohc-table-node:hover`). */
 .dohc-notion-editor td,
 .dohc-notion-editor th {
   position: relative;
 }
 
-/* Grips, the table menu, and the append "+" buttons all float in the table's
- * OUTER margin (negative offsets), so none of them overlap or reflow cell
- * text. They share the hover-reveal treatment: shown when the table is
- * hovered or the control itself is keyboard-focused. */
+/* Handles, the table menu, and the append "+" strips all float in the
+ * table's OUTER margin (negative offsets), so none of them overlap or
+ * reflow cell text. z-index stays modest ON PURPOSE: editor-surface content
+ * chrome must stay ≤ 20 so selection UI (bubble menu and friends, 69–71)
+ * always paints on top — see the stacking-scale note on .dohc-bubble-menu. */
 .dohc-table-grip,
 .dohc-table-menu-btn,
 .dohc-table-append {
@@ -1455,50 +1490,67 @@ body {
   border: 0;
   padding: 0;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition:
+    opacity 100ms ease,
+    background-color 100ms ease;
 }
 
-.dohc-table-node:hover .dohc-table-grip,
-.dohc-table-node:hover .dohc-table-menu-btn,
-.dohc-table-node:hover .dohc-table-append,
-.dohc-table-grip:focus-visible,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
-  opacity: 1;
-}
-
+/* Notion-style handles: a small pill centered above the hovered COLUMN /
+ * beside the hovered ROW. `is-active` is toggled by tableControls.tsx's
+ * mousemove tracking, so exactly one column handle and one row handle show
+ * at a time — not a bar on every row and column at once. */
 .dohc-table-grip {
+  /* Invisible handles must not eat clicks meant for the table margins. */
+  pointer-events: none;
   background: var(--dohc-line);
   border-radius: 999px;
   cursor: pointer;
 }
 
+.dohc-table-grip.is-active,
+.dohc-table-grip:focus-visible {
+  pointer-events: auto;
+  opacity: 1;
+}
+
 .dohc-table-grip:hover,
 .dohc-table-grip:focus-visible {
-  background: var(--dohc-accent);
+  background: var(--dohc-subtle);
 }
 
-/* Column grip: a pill floating just ABOVE its column, spanning the column
- * width. Negative `top` lifts it into the margin over the table's top edge;
- * `left`/`right` keep it glued to the (live-resized) column box. */
+/* Column handle: floats just above the table's top edge, centered on the
+ * (live-resized) column box. */
 .dohc-table-grip--col {
-  top: -11px;
-  left: 1px;
-  right: 1px;
-  height: 7px;
+  top: -13px;
+  left: 50%;
+  width: 24px;
+  height: 8px;
+  transform: translateX(-50%);
 }
 
-/* Row grip: a pill floating just LEFT of its row, spanning the row height. */
+/* Row handle: floats just left of the table, centered on the row box. */
 .dohc-table-grip--row {
-  top: 1px;
-  bottom: 1px;
-  left: -11px;
-  width: 7px;
+  top: 50%;
+  left: -13px;
+  width: 8px;
+  height: 24px;
+  transform: translateY(-50%);
 }
 
-/* Corner chips — the table menu (⋯) and the append "+" buttons. */
-.dohc-table-menu-btn,
-.dohc-table-append {
+/* The table menu (⋯) and the append strips reveal on table hover. */
+.dohc-table-node:hover .dohc-table-menu-btn,
+.dohc-table-node:hover .dohc-table-append,
+.dohc-table-menu-btn:focus-visible,
+.dohc-table-append:focus-visible {
+  opacity: 1;
+}
+
+/* Table menu chip: the top-left outer corner (the spreadsheet "select-all"
+ * corner where the handle strips meet). */
+.dohc-table-menu-btn {
+  top: -12px;
+  left: -12px;
+  z-index: 5;
   display: inline-grid;
   place-items: center;
   width: 16px;
@@ -1513,9 +1565,7 @@ body {
 }
 
 .dohc-table-menu-btn:hover,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:hover,
-.dohc-table-append:focus-visible {
+.dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
   /* --dohc-line, not --dohc-panel-2: matches the menu-family unification (see
    * the note above .dohc-slash-menu__item) — panel-2 is darker than the panel
@@ -1524,38 +1574,48 @@ body {
   color: var(--dohc-ink);
 }
 
-/* Table menu: the top-left outer corner (the spreadsheet "select-all"
- * corner where the row and column strips meet). */
-.dohc-table-menu-btn {
-  top: -12px;
-  left: -12px;
-  z-index: 5;
-}
-
 .dohc-table-menu-btn::before {
   content: "⋯";
+}
+
+/* Append strips — Notion's slim "+" bars hugging the table's full right
+ * edge (add column) and bottom edge (add row). The CSS geometry here only
+ * spans the anchor corner cell (the strip's absolute containing block);
+ * sizeAppendStrips in tableControls.tsx stretches it to the full table edge
+ * with inline offsets on hover. */
+.dohc-table-append {
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dohc-table-append:hover,
+.dohc-table-append:focus-visible {
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
 }
 
 .dohc-table-append::before {
   content: "+";
 }
 
-/* Append column: hugs the table's right edge, spanning the anchor cell. */
 .dohc-table-append--col {
-  top: 1px;
-  bottom: 1px;
-  right: -12px;
-  width: 16px;
-  height: auto;
+  top: 0;
+  right: -15px;
+  width: 11px;
+  height: 100%;
 }
 
-/* Append row: hugs the table's bottom edge under the first column. */
 .dohc-table-append--row {
-  bottom: -12px;
-  left: 1px;
-  right: 1px;
-  width: auto;
-  height: 16px;
+  bottom: -15px;
+  left: 0;
+  width: 100%;
+  height: 11px;
 }
 
 /* Grip menu (insert/delete row or column, toggle header, delete table) —
@@ -1691,6 +1751,18 @@ body {
     0 1px 2px rgba(28, 27, 24, 0.05),
     0 8px 24px rgba(28, 27, 24, 0.12);
   animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+/* Flipped above the trigger when the viewport has more room there — the
+ * placement/maxHeight come from resolveTurnIntoDropdown (blockControls.tsx),
+ * which reuses the shared floating-menu math. The dropdown stays ANCHORED
+ * (position: absolute), never position: fixed: the bubble menu lives inside
+ * .dohc-editor-surface, whose container-type would re-base fixed coordinates
+ * onto the pane instead of the viewport (see the .dohc-editor-surface
+ * comment below). */
+.dohc-turn-into-menu[data-placement='above'] {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .dohc-turn-into-menu:focus {

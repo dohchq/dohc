@@ -10,6 +10,8 @@ import {
   MAX_RECENT_FILES,
   CHATS_MAX_WIDTH,
   CHATS_MIN_WIDTH,
+  OPEN_EDITORS_MAX_HEIGHT,
+  OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   RETIRED_VIEW_IDS,
@@ -2163,6 +2165,16 @@ export const WorkspaceUiState = z.object({
   // instead of nulling every tab/pin/fold the user had.
   chatsVisible: z.boolean().optional(),
   chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
+  // Additive (resizable Open Editors section), still version 1. It must NEVER
+  // null the whole saved state: serializeUiState clamps every write, so this
+  // catch only handles foreign/hand-edited files.
+  openEditorsHeight: z
+    .number()
+    .int()
+    .min(OPEN_EDITORS_MIN_HEIGHT)
+    .max(OPEN_EDITORS_MAX_HEIGHT)
+    .optional()
+    .catch(undefined),
   // Additive (Phase E3 explorer), still version 1: optional fields parse old
   // files, and zod's non-strict parse drops unknown keys for old readers.
   expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),

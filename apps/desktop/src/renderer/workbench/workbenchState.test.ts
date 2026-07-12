@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activateTab,
   clampChatsWidth,
+  clampOpenEditorsHeight,
   clampSidebarWidth,
   closeTab,
   defaultWorkbenchState,
@@ -30,7 +31,11 @@ import {
   serializeUiState,
   setSidebarWidth,
   setChatsWidth,
+  setOpenEditorsHeight,
   setView,
+  OPEN_EDITORS_DEFAULT_HEIGHT,
+  OPEN_EDITORS_MAX_HEIGHT,
+  OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -256,6 +261,23 @@ describe("rail widths", () => {
     expect(setChatsWidth(state, 360).chatsWidth).toBe(360);
     expect(setChatsWidth(state, CHATS_DEFAULT_WIDTH)).toBe(state);
   });
+
+  it("clamps the open-editors height into bounds and rounds; non-finite resets to the default", () => {
+    expect(clampOpenEditorsHeight(10)).toBe(OPEN_EDITORS_MIN_HEIGHT);
+    expect(clampOpenEditorsHeight(9999)).toBe(OPEN_EDITORS_MAX_HEIGHT);
+    expect(clampOpenEditorsHeight(300)).toBe(300);
+    expect(clampOpenEditorsHeight(300.6)).toBe(301);
+    expect(clampOpenEditorsHeight(Number.NaN)).toBe(OPEN_EDITORS_DEFAULT_HEIGHT);
+    expect(clampOpenEditorsHeight(Number.POSITIVE_INFINITY)).toBe(
+      OPEN_EDITORS_DEFAULT_HEIGHT,
+    );
+  });
+
+  it("setOpenEditorsHeight stores the clamped height and no-ops on no change", () => {
+    const state = defaultWorkbenchState();
+    expect(setOpenEditorsHeight(state, 300).openEditorsHeight).toBe(300);
+    expect(setOpenEditorsHeight(state, OPEN_EDITORS_DEFAULT_HEIGHT)).toBe(state);
+  });
 });
 
 describe("ui-state persistence round-trip", () => {
@@ -264,8 +286,20 @@ describe("ui-state persistence round-trip", () => {
     state = setView(state, "history");
     state = setSidebarWidth(state, 333);
     state = setChatsWidth(state, 444);
+    state = setOpenEditorsHeight(state, 210);
     state = toggleChats(state);
     expect(parseUiState(serializeUiState(state))).toEqual(state);
+  });
+
+  it("parse of an old file without openEditorsHeight falls back to the default", () => {
+    const old = parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" });
+    expect(old.openEditorsHeight).toBe(OPEN_EDITORS_DEFAULT_HEIGHT);
+    expect(parseUiState({ openEditorsHeight: 7 }).openEditorsHeight).toBe(
+      OPEN_EDITORS_MIN_HEIGHT,
+    );
+    expect(parseUiState({ openEditorsHeight: "tall" }).openEditorsHeight).toBe(
+      OPEN_EDITORS_DEFAULT_HEIGHT,
+    );
   });
 
   it("parse is tolerant: null/garbage/foreign shapes yield defaults", () => {

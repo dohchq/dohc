@@ -126,6 +126,7 @@ import {
   serializeUiState,
   setChatsWidth,
   setFolderExpanded,
+  setOpenEditorsHeight,
   setSidebarWidth,
   setView,
   toggleChats,
@@ -2151,6 +2152,10 @@ export function DesktopWorkspaceShell(props: {
         dirtyTab={activeTabDirty ? wb.activeTab : null}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
+        openEditorsHeight={wb.openEditorsHeight}
+        onOpenEditorsHeightChange={(height) =>
+          mutateWb((state) => setOpenEditorsHeight(state, height))
+        }
         createRequest={createRequest}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}

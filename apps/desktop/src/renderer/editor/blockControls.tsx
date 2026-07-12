@@ -593,6 +593,39 @@ export function BlockMenu({
 
 // ── bubble menu turn-into dropdown ─────────────────────────────────────────
 
+// Width of .dohc-turn-into-menu (styles.css); only used for the shared
+// floating-menu math's horizontal clamp, the dropdown itself stays anchored.
+const TURN_INTO_MENU_WIDTH = 190;
+
+export type TurnIntoDropdownPosition = {
+  placement: FloatingMenuPlacement;
+  maxHeight: number;
+};
+
+/**
+ * Flip side + viewport-fitted max height for the bubble menu's turn-into
+ * dropdown. Unlike the other editor popovers this one stays ANCHORED to its
+ * trigger with position: absolute — the bubble menu is appended inside
+ * .dohc-editor-surface, whose container-type makes it the containing block
+ * for fixed descendants, so position: fixed viewport coordinates would be
+ * re-based onto the pane (see the .dohc-editor-surface comment in
+ * styles.css). Only placement/maxHeight from the shared floating-menu math
+ * apply; x/y remain the anchor's.
+ */
+export function resolveTurnIntoDropdown(
+  triggerRect: { left: number; top: number; bottom: number },
+  viewport?: { width: number; height: number },
+): TurnIntoDropdownPosition {
+  const { placement, maxHeight } = resolveFloatingMenuPosition({
+    cursorRect: triggerRect,
+    menuWidth: TURN_INTO_MENU_WIDTH,
+    ...(viewport
+      ? { viewportWidth: viewport.width, viewportHeight: viewport.height }
+      : {}),
+  });
+  return { placement, maxHeight };
+}
+
 /**
  * Compact "current block type" button + dropdown at the left of the bubble
  * menu (MarkdownEditor.tsx). Reuses TURN_INTO_ENTRIES/turnBlockInto —
@@ -603,6 +636,10 @@ export function BlockMenu({
 export function TurnIntoMenu({ editor }: { editor: Editor }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
+  const [dropdown, setDropdown] = useState<TurnIntoDropdownPosition>({
+    placement: "below",
+    maxHeight: FLOATING_MENU_MAX_HEIGHT,
+  });
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -636,6 +673,15 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
         (current + delta + TURN_INTO_ENTRIES.length) % TURN_INTO_ENTRIES.length,
     );
 
+  // Measure ONCE, at open — the dropdown is anchored to the trigger, so it
+  // never repositions while open; only the flip side and max height are
+  // resolved here (offscreen/jsdom rects fall back to below/full height).
+  const openMenu = () => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect) setDropdown(resolveTurnIntoDropdown(rect));
+    setOpen(true);
+  };
+
   const select = (entry: BlockMenuEntry) => {
     setOpen(false);
     const pos = topLevelBlockPos(editor);
@@ -651,11 +697,11 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
         aria-haspopup="listbox"
         aria-expanded={open}
         title="Turn into"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "Enter") {
             event.preventDefault();
-            setOpen(true);
+            openMenu();
           }
         }}
       >
@@ -669,6 +715,8 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
           role="listbox"
           aria-label="turn into"
           tabIndex={-1}
+          data-placement={dropdown.placement}
+          style={{ maxHeight: dropdown.maxHeight }}
           onMouseDown={(event) => event.preventDefault()}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
@@ -683,6 +731,9 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
             } else if (event.key === "Escape") {
               event.preventDefault();
               setOpen(false);
+              // The listbox held DOM focus; without this, dismissing leaves
+              // focus on a removed node and the keyboard goes dead.
+              editor.commands.focus();
             }
           }}
         >
