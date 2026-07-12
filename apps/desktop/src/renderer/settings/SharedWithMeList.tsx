@@ -8,7 +8,12 @@ import { bridge } from "../bridge";
 // workspace as a read-only shared-with-me/<label>/ folder, and an
 // already-mounted share says so with a way to remove it.
 
-type MountInfo = { shareId: string; label: string; ended?: boolean };
+type MountInfo = {
+  shareId: string;
+  label: string;
+  granterEmail?: string | null;
+  ended?: boolean;
+};
 
 type LoadState =
   | { status: "loading" }
@@ -113,7 +118,13 @@ export function SharedWithMeList(props: {
       </p>
     );
   }
-  if (load.shares.length === 0) {
+  // A revoked (or wrong-relay) mount vanishes from the relay's received
+  // listing while its local copy stays readable — those registry-only mounts
+  // still need a row here so "Remove from workspace" stays reachable.
+  const registryOnlyMounts = load.mounts.filter(
+    (mount) => !load.shares.some((share) => share.shareId === mount.shareId),
+  );
+  if (load.shares.length === 0 && registryOnlyMounts.length === 0) {
     return (
       <p data-testid="shared-with-me-empty" className="m-0 text-[11px] text-subtle">
         Nothing shared with you yet. When someone shares files to your account,
@@ -126,6 +137,36 @@ export function SharedWithMeList(props: {
       className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
       data-testid="shared-with-me-list"
     >
+      {registryOnlyMounts.map((mount) => (
+        <li
+          key={mount.shareId}
+          data-testid="shared-with-me-row"
+          data-share-id={mount.shareId}
+          data-registry-only
+          className="flex items-center gap-2 bg-panel px-2.5 py-2"
+        >
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-mono text-[11px] text-ink">
+              {`shared-with-me/${mount.label}`}
+            </div>
+            <div className="truncate text-[11px] text-subtle">
+              {`From ${mount.granterEmail ?? "another dohc user"}`}
+              {mount.ended
+                ? " — ended; your copy stays readable but won't update"
+                : " — not listed by the relay right now"}
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="shared-with-me-unmount"
+            disabled={busyShareId === mount.shareId}
+            onClick={() => void unmount(mount.shareId)}
+            className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:text-danger disabled:opacity-50"
+          >
+            {busyShareId === mount.shareId ? "Removing…" : "Remove from workspace"}
+          </button>
+        </li>
+      ))}
       {load.shares.map((share) => {
         const mounted = load.mounts.find((m) => m.shareId === share.shareId);
         return (

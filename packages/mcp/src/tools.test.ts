@@ -246,6 +246,21 @@ describe("mcp tool path containment", () => {
       });
       expect(found).toMatchObject({ ok: true });
 
+      // Read-side resolution also covers open + database query paths.
+      const opened = await openInDohc(ctx, { path: "shared-with-me/alex/brief.md" });
+      expect(opened).toMatchObject({ ok: true });
+      // The database file doesn't exist (open throws), but the failure must
+      // never be the reserved prefix — mounted databases are queryable.
+      const queried = await queryDatabase(ctx, {
+        databasePath: "shared-with-me/alex/data.sqlite",
+        sql: "SELECT 1",
+      }).catch((error: unknown) => ({
+        ok: false as const,
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+      expect(queried.ok).toBe(false);
+      if (!queried.ok) expect(queried.reason).not.toContain("reserved");
+
       // Writes: every mutation refuses the reserved projection.
       await expect(
         writeWorkspaceFile(ctx, { path: "shared-with-me/alex/brief.md", content: "hijack" }),

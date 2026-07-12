@@ -2196,7 +2196,9 @@ export async function queryDatabase(
   ctx: ToolContext,
   args: { databasePath: string; sql: string },
 ) {
-  const dbRel = await safeResolve(ctx, args.databasePath);
+  // Registered read-only (SELECT enforcement below): a mounted share's
+  // database is queryable like any other readable file.
+  const dbRel = await safeResolve(ctx, args.databasePath, "read");
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   // Only a VISIBLE user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
@@ -2652,7 +2654,8 @@ export function resolveConflict(args: { base: string; local: string; remote: str
 // Returns the absolute path the desktop should surface (open/select). Path is
 // contained first so it can never point outside the workspace.
 export async function openInDohc(ctx: ToolContext, args: { path: string }) {
-  const resolved = await safeResolve(ctx, args.path);
+  // Opening is a read: mounted files open in dohc like any other file.
+  const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return { ok: true as const, path: resolved.absolute, relativePath: resolved.normalized };
 }
