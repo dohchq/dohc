@@ -4,9 +4,11 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
   seedWorkspaceSettings,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // WS-E — CHATS EXPANSION (plan PR 12/13): a flagged workspace gets a Chats
@@ -157,11 +159,18 @@ test("flagged: expand opens chats as an editor tab on the current conversation",
     await seedWorkspaceSettings(temp, {
       experimental: { workspaceEngineAlpha: true },
     });
+    await writeWorkspaceFiles(temp, [
+      { path: "notes.md", contents: "# Notes\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // Into a conversation in the PANEL first.
+    // A document tab first, so tab switching can be exercised later.
+    await explorerRow(page, "notes.md").click();
+    await expect(page.getByTestId("tab-notes.md")).toBeVisible();
+
+    // Into a conversation in the PANEL.
     await page.getByTestId("activity-chats").click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
     await page.getByTestId("chats-channel").click();
@@ -183,8 +192,24 @@ test("flagged: expand opens chats as an editor tab on the current conversation",
       pageThreadView.getByTestId("chats-thread-post-title"),
     ).toHaveText("Expand me into a tab.");
 
-    // The tab is first-class: it closes like any document tab and the panel
-    // keeps working on its own.
+    // Chats is ONE live surface: while the tab is active the panel defers
+    // (no second presence lease or duplicate composer ids) and the expand
+    // button hides.
+    await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
+    await expect(page.getByTestId("chats-open-tab")).toHaveCount(0);
+
+    // Switching to a document tab hands the conversation back to the panel;
+    // re-activating the Chats tab defers the panel again.
+    await page.getByTestId("tab-notes.md").click();
+    await expect(
+      page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
+    ).toBeVisible();
+    await chatsTab.click();
+    await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
+    await expect(pageThreadView).toBeVisible();
+
+    // The tab is first-class: it closes like any document tab, and the
+    // conversation hands back to the panel — same thread, panel variant.
     await chatsTab.getByRole("button", { name: "Close Chats" }).click();
     await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
     await expect(

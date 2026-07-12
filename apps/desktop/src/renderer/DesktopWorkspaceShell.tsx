@@ -8,6 +8,7 @@ import {
   History,
   Lock,
   Maximize2,
+  MessagesSquare,
   PanelRight,
   RefreshCw,
   Search,
@@ -1282,31 +1283,22 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
-  // Chats expand-to-tab: the panel reports its position here (runtime-only),
-  // and expanding snapshots it so the tab opens on the SAME conversation.
-  // The nonce keys the tab's ChatsView: re-expanding while the tab is
-  // already open remounts it onto the panel's current conversation instead
-  // of leaving it wherever it last was. A tab restored from persisted
-  // ui-state has no seed and starts at the overview.
-  const chatsPanelNav = useRef<ChatsNav | null>(null);
-  const onChatsPanelNav = useCallback((nav: ChatsNav) => {
-    chatsPanelNav.current = nav;
+  // Chats expand-to-tab. Chats is a LIVE surface (presence lease, IPC-backed
+  // state, labeled composer ids), so unlike graph/history at most ONE
+  // ChatsView is ever mounted: while the chats tab is ACTIVE the side panel
+  // shows a note instead of a second instance, and an inactive tab is
+  // unmounted anyway (only the active tab renders). This ref is chats' ONE
+  // current position (runtime-only): whichever instance is live reports into
+  // it, and whichever instance mounts next seeds from it — expanding opens
+  // the tab on the panel's conversation, and closing (or leaving) the tab
+  // hands the conversation back to the panel.
+  const chatsNav = useRef<ChatsNav | null>(null);
+  const onChatsNav = useCallback((nav: ChatsNav) => {
+    chatsNav.current = nav;
   }, []);
-  const [chatsTabSeed, setChatsTabSeed] = useState<{
-    nav: ChatsNav | null;
-    nonce: number;
-  }>({ nav: null, nonce: 0 });
   const openChatsTab = useCallback(() => {
-    setChatsTabSeed((seed) => ({ nav: chatsPanelNav.current, nonce: seed.nonce + 1 }));
     mutateWb((state) => openTab(state, CHATS_TAB_PATH));
   }, [mutateWb]);
-  // The tab clears the seed once applied: switching away unmounts the page
-  // (only the active tab renders), so a later re-activation remounts it and
-  // starts fresh at the overview — it must not replay the conversation
-  // captured at expand time.
-  const consumeChatsTabSeed = useCallback(() => {
-    setChatsTabSeed((seed) => (seed.nav === null ? seed : { ...seed, nav: null }));
-  }, []);
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -2093,7 +2085,9 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
-              ) : wb.activeView === "chats" && versionsEnabled ? (
+              ) : wb.activeView === "chats" &&
+                versionsEnabled &&
+                !isChatsTabPath(wb.activeTab) ? (
                 <button
                   type="button"
                   data-testid="chats-open-tab"
@@ -2145,19 +2139,34 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "chats" ? (
               versionsEnabled ? (
-                <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView
-                    workspaceId={workspaceId}
-                    onOpenFileChat={openFileChatInRail}
-                    onOpenPath={openFile}
-                    onError={(message) => setShellError(message)}
-                    mentionCandidates={mentionCandidates}
-                    addressedToMe={addressedToMe}
-                    onOpenAddressed={openAgentNotification}
-                    collaboration={chatCollaboration}
-                    onNavChange={onChatsPanelNav}
-                  />
-                </Suspense>
+                isChatsTabPath(wb.activeTab) ? (
+                  // The chats TAB is live — never mount a second chat client
+                  // (duplicate presence lease, composer ids, diverging state).
+                  <div
+                    data-testid="chats-panel-deferred"
+                    className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+                  >
+                    <MessagesSquare size={16} aria-hidden className="text-subtle" />
+                    <span className="text-xs text-muted">
+                      Chats are open as a tab.
+                    </span>
+                  </div>
+                ) : (
+                  <Suspense fallback={<PanelLoading label="Chats" />}>
+                    <LazyChatsView
+                      workspaceId={workspaceId}
+                      initialNav={chatsNav.current ?? undefined}
+                      onNavChange={onChatsNav}
+                      onOpenFileChat={openFileChatInRail}
+                      onOpenPath={openFile}
+                      onError={(message) => setShellError(message)}
+                      mentionCandidates={mentionCandidates}
+                      addressedToMe={addressedToMe}
+                      onOpenAddressed={openAgentNotification}
+                      collaboration={chatCollaboration}
+                    />
+                  </Suspense>
+                )
               ) : (
                 // Transient: the settings load corrects activeView moments
                 // later; never a blank panel meanwhile.
@@ -2315,13 +2324,10 @@ export function DesktopWorkspaceShell(props: {
               versionsEnabled ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyChatsView
-                    // Remount per expand so a re-expand lands on the panel's
-                    // CURRENT conversation, not wherever the tab last was.
-                    key={chatsTabSeed.nonce}
                     workspaceId={workspaceId}
                     variant="page"
-                    initialNav={chatsTabSeed.nav ?? undefined}
-                    onInitialNavConsumed={consumeChatsTabSeed}
+                    initialNav={chatsNav.current ?? undefined}
+                    onNavChange={onChatsNav}
                     onOpenFileChat={openFileChatInRail}
                     onOpenPath={openFile}
                     onError={(message) => setShellError(message)}

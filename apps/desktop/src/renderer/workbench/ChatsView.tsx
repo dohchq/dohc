@@ -615,16 +615,13 @@ export function ChatsView(props: {
   // The page variant centers the narrow surfaces in a reading column — the
   // thread/channel views already read as pages.
   variant?: "panel" | "page";
-  // Expand-to-tab: the conversation to open once the overview is ready
-  // (the panel's position when the user expanded). Consumed exactly once —
-  // workspace switches and later navigation behave exactly as before.
+  // Expand-to-tab: the conversation to open once the overview is ready —
+  // the shell hands the live surface's position to whichever instance mounts
+  // next, so panel and tab feel like ONE chats surface. Applied once per
+  // mount; workspace switches and later navigation behave exactly as before.
   initialNav?: ChatsNav;
-  // Fires when initialNav is consumed so the owner can clear it — a later
-  // remount (tab re-activation) must not re-apply a stale seed
-  // (LinkedChatsPanel's onInitialThreadConsumed precedent).
-  onInitialNavConsumed?: () => void;
-  // Reports every navigation so the shell can seed an expanded tab with the
-  // panel's current conversation.
+  // Reports every navigation so the shell can seed the next mount (panel or
+  // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
 }) {
   const { workspaceId, onNavChange } = props;
@@ -1303,10 +1300,9 @@ export function ChatsView(props: {
   // seeded conversation exactly the way a click would (same loaders, same
   // token discipline). Waiting for "ready" matters — the open* navigations
   // advance the shared liveness token, so seeding earlier would cancel the
-  // initial overview load. Consumed once: workspace switches and later
-  // navigation never re-apply a stale seed.
+  // initial overview load. Applied once per mount (the ref guard): workspace
+  // switches and later navigation never re-apply a stale seed.
   const seededRef = useRef(false);
-  const { onInitialNavConsumed } = props;
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     seededRef.current = true;
@@ -1315,15 +1311,7 @@ export function ChatsView(props: {
     if (seed.level === "channel") void openChannel(seed.channel);
     else if (seed.level === "thread") void openThread(seed.channel, seed.thread);
     else if (seed.level === "dm") void openDm(seed.dm);
-    onInitialNavConsumed?.();
-  }, [
-    onInitialNavConsumed,
-    openChannel,
-    openDm,
-    openThread,
-    overview.status,
-    props.initialNav,
-  ]);
+  }, [openChannel, openDm, openThread, overview.status, props.initialNav]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers')
   // then reload the conversation. Token-guarded so a stale response never
