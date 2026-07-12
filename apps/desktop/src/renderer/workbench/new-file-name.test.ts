@@ -39,9 +39,16 @@ describe("withMarkdownDefault", () => {
     expect(withMarkdownDefault("notes.")).toBe("notes.md");
   });
 
+  it("strips trailing separators — the backend drops empty segments", () => {
+    expect(withMarkdownDefault("notes/")).toBe("notes.md");
+    expect(withMarkdownDefault("notes\\")).toBe("notes.md");
+    expect(withMarkdownDefault("plans/2026/")).toBe("plans/2026.md");
+    expect(withMarkdownDefault("notes.txt/")).toBe("notes.txt/");
+  });
+
   it("leaves empty and path-token leaves untouched", () => {
     expect(withMarkdownDefault("")).toBe("");
-    expect(withMarkdownDefault("notes/")).toBe("notes/");
+    expect(withMarkdownDefault("/")).toBe("/");
     expect(withMarkdownDefault(".")).toBe(".");
     expect(withMarkdownDefault("..")).toBe("..");
   });
