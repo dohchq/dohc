@@ -153,14 +153,6 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       drivers: [],
       session: null,
     })),
-    startAgentSession: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
-    stopAgentSession: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
     answerAgentPermission: vi.fn(async () => ({
       drivers: [],
       session: null,
@@ -882,7 +874,7 @@ describe("native workbench context menus", () => {
 
   it("routes status bar context menu commands to panel actions", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("open-agent");
+    bridge.showWorkbenchMenu.mockResolvedValue("open-history");
     renderShell(bridge);
 
     fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
@@ -893,7 +885,12 @@ describe("native workbench context menus", () => {
         context: "status",
       });
     });
-    expect(await screen.findByTestId("agent-panel")).toBeTruthy();
+    // The command lands: the History view becomes the active rail entry.
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("activity-history").getAttribute("aria-current"),
+      ).toBe("page");
+    });
   });
 
   it("routes status bar update commands to the updater bridge", async () => {

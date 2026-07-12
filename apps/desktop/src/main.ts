@@ -153,7 +153,6 @@ import {
   McpConfigResult,
   AgentPanelSnapshotResult,
   AgentPermissionResponsePayload,
-  StartAgentSessionPayload,
   StopAgentRunPayload,
   ResumeThreadDispatchPayload,
   ChatDispatchStateForThreadPayload,
@@ -1327,8 +1326,8 @@ const agentIntegration = createAgentIntegration({
   },
   home: stateDir(),
   // Every terminal run path funnels through endAgentRun (driver
-  // turn-completed via AgentSessionManager, panel Stop, the endAgentRun IPC)
-  // — the try-in-version review card listens on that single seam.
+  // turn-completed via AgentSessionManager, a Settings stop, the endAgentRun
+  // IPC) — the try-in-version review card listens on that single seam.
   // tryInVersionSessions is initialized just below, before any run can end.
   onRunEnded: ({ workspaceId, runId, status }) => {
     tryInVersionSessions.handleRunEnded(workspaceId, runId, status);
@@ -1358,8 +1357,8 @@ const tryInVersionSessions = createTryInVersionSessions({
     assertChatRunnerIdle(workspaceId);
     desktopMarks.mark("try-in-version-run-start-begin");
     if (driverId) {
-      // The agent panel's session path: the driver does the work and the run
-      // id comes from the session (startSession starts the run through
+      // The driver session path: the driver does the work and the run id
+      // comes from the session (startSession starts the run through
       // AgentIntegration, so 0N-1 attribution applies identically).
       const sessions = await agentSessionManager();
       const snapshot = await sessions.startSession({
@@ -2630,7 +2629,6 @@ function registerIpcHandlers(): void {
             ]
           : input.context === "status"
             ? [
-                item("Open Agent Panel", "open-agent"),
                 item("Open History", "open-history"),
                 separator,
                 item("Connect dohc Cloud", "connect-cloud"),
@@ -4790,6 +4788,23 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = EndAgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
+    // A driver-backed run owns a live session (a child process). Ending such
+    // a run must go through the session manager so the child is actually
+    // stopped and disposed — not just the run record closed (this stop used
+    // to live on the retired Agent panel; Settings' stop lands here now).
+    // stopSession finalizes the run through agentIntegration.endAgentRun
+    // exactly once, so onRunEnded fires as before. No cached manager means
+    // no session ever started — plain run-record end.
+    const session = cachedAgentSessions?.panelSnapshot(input.workspaceId).session;
+    if (
+      cachedAgentSessions &&
+      session?.runId === input.runId &&
+      ["starting", "ready", "running", "waiting-permission"].includes(session.status)
+    ) {
+      // Keep the caller's explicit outcome (e.g. "failed") on the record.
+      await cachedAgentSessions.stopSession(input.workspaceId, input.status);
+      return;
+    }
     await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
   });
 
@@ -4827,26 +4842,6 @@ function registerIpcHandlers(): void {
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
     return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-  });
-
-  ipcMain.handle(CHANNELS.startAgentSession, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartAgentSessionPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertAgentRunnableWorkspace(workspace.workspaceId);
-    assertChatRunnerIdle(workspace.workspaceId);
-    await openWorkspaceActivity(workspace);
-    await warmCredentialCache();
-    const sessions = await agentSessionManager();
-    return AgentPanelSnapshotResult.parse(await sessions.startSession(input));
-  });
-
-  ipcMain.handle(CHANNELS.stopAgentSession, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    const sessions = await agentSessionManager();
-    return AgentPanelSnapshotResult.parse(await sessions.stopSession(input.workspaceId));
   });
 
   ipcMain.handle(CHANNELS.answerAgentPermission, async (event, payload) => {

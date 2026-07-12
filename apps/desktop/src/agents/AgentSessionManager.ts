@@ -423,10 +423,16 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     return panelSnapshot(input.workspaceId);
   }
 
-  async function stopSession(workspaceId: string): Promise<AgentPanelSnapshot> {
+  // `runStatus` lets a caller that is ending the run with an explicit
+  // outcome (endAgentRun IPC with status "failed") keep that outcome on the
+  // record; omitted = derive from the session as before.
+  async function stopSession(
+    workspaceId: string,
+    runStatus?: "complete" | "failed",
+  ): Promise<AgentPanelSnapshot> {
     const state = sessions.get(workspaceId);
     if (!state) return panelSnapshot(workspaceId);
-    const finalStatus = terminalRunStatus(state);
+    const finalStatus = runStatus ?? terminalRunStatus(state);
     state.ended = true;
     state.endedAt = now();
     if (state.status !== "failed") state.status = "stopped";

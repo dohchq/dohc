@@ -70,7 +70,7 @@ import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-o
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
-import type { AgentNotification } from "./workbench/agentNotifications";
+import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -178,9 +178,6 @@ const LazySitesView = lazy(() =>
 );
 const LazySitePreviewPage = lazy(() =>
   import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
-);
-const LazyAgentPanelView = lazy(() =>
-  import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -774,7 +771,6 @@ export function DesktopWorkspaceShell(props: {
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
   const [agentActive, setAgentActive] = useState(false);
-  const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
@@ -808,7 +804,6 @@ export function DesktopWorkspaceShell(props: {
   }, [wb.activeTab]);
   const onSettingsAgentActiveChange = useCallback((active: boolean) => {
     setAgentActive(active);
-    setAgentPanelRefreshKey((key) => key + 1);
   }, []);
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
@@ -1551,24 +1546,6 @@ export function DesktopWorkspaceShell(props: {
       historyVisible: true,
     }));
   }, [mutateWb]);
-  const openAgentView = useCallback(() => {
-    // Opening the Agent panel means the user is now looking at the run, so
-    // its finished/error/ask notices auto-clear.
-    agentNotifs.clearForCurrentWorkspace();
-    mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
-  }, [agentNotifs, mutateWb]);
-
-  // A NoticeCenter / inbox item was opened: land on the run and clear it.
-  // openAgentView() clears every notice for this workspace, so opening the run
-  // is the single, obvious clear — there is no per-thread clear because the
-  // agent session isn't tied to a specific chat thread (see agentNotifications).
-  const openAgentNotification = useCallback(
-    (_notification: AgentNotification) => {
-      openAgentView();
-    },
-    [openAgentView],
-  );
-
   const checkForDesktopUpdates = useCallback(async () => {
     try {
       const result = await bridge().checkForUpdates();
@@ -1607,8 +1584,6 @@ export function DesktopWorkspaceShell(props: {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path && !isVirtualTabPath(path)) {
         showPathInExplorer(path);
-      } else if (command === "open-agent") {
-        openAgentView();
       } else if (command === "open-history") {
         openHistoryView();
       } else if (command === "connect-cloud") {
@@ -1629,7 +1604,6 @@ export function DesktopWorkspaceShell(props: {
       closeOtherTabs,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      openAgentView,
       openHistoryView,
       openSettings,
       showPathInExplorer,
@@ -2004,7 +1978,6 @@ export function DesktopWorkspaceShell(props: {
     onError: setShellError,
     mentionCandidates,
     addressedToMe,
-    onOpenAddressed: openAgentNotification,
     collaboration: chatCollaboration,
   } as const;
 
@@ -2080,7 +2053,6 @@ export function DesktopWorkspaceShell(props: {
           activeView={wb.activeView}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
-          agentActive={agentActive}
           chatsEnabled={versionsEnabled}
           searchResultCount={
             search.model.totalMatches > 0 ? search.model.totalMatches : undefined
@@ -2211,14 +2183,6 @@ export function DesktopWorkspaceShell(props: {
               )
             ) : wb.activeView === "history" ? (
               historyTimeline
-            ) : wb.activeView === "agent" ? (
-              <Suspense fallback={<PanelLoading label="agent" />}>
-                <LazyAgentPanelView
-                  workspaceId={workspaceId}
-                  refreshKey={agentPanelRefreshKey}
-                  onAgentActiveChange={setAgentActive}
-                />
-              </Suspense>
             ) : null}
           </SidePanel>
         ) : null}
@@ -2284,13 +2248,7 @@ export function DesktopWorkspaceShell(props: {
               agent works, then the review card when the run ends. Flagged
               workspaces only (tryState never exists otherwise). */}
           {versionsEnabled && tryState?.status === "running" ? (
-            <TryInVersionBanner
-              task={tryState.task}
-              versionName={tryState.versionName}
-              onWatch={() =>
-                mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }))
-              }
-            />
+            <TryInVersionBanner task={tryState.task} versionName={tryState.versionName} />
           ) : null}
           {versionsEnabled && tryState?.status === "review" ? (
             <TryInVersionReviewCard
@@ -2517,7 +2475,6 @@ export function DesktopWorkspaceShell(props: {
         agentActive={agentActive}
         conflictSummaries={conflictSummaries}
         onConnectCloud={() => setCloudOpen(true)}
-        onOpenAgent={openAgentView}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}
         onDismissSyncReview={() =>
@@ -2529,8 +2486,16 @@ export function DesktopWorkspaceShell(props: {
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
-        onOpenAgentNotification={openAgentNotification}
         onDismissAgentNotification={agentNotifs.dismiss}
+      />
+
+      {/* A blocked agent run's consent asks (the retired Agent panel's one
+          load-bearing interaction). Floats wherever the user already is —
+          answering resumes the run. */}
+      <AgentPermissionRequests
+        workspaceId={workspaceId}
+        runId={agentNotifs.pendingPermissionsRunId}
+        requests={agentNotifs.pendingPermissions}
       />
 
       {paletteOpen ? (

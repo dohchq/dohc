@@ -212,10 +212,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.probeAgentDrivers, payload),
   getAgentSessionState: (payload) =>
     ipcRenderer.invoke(CHANNELS.getAgentSessionState, payload),
-  startAgentSession: (payload) =>
-    ipcRenderer.invoke(CHANNELS.startAgentSession, payload),
-  stopAgentSession: (payload) =>
-    ipcRenderer.invoke(CHANNELS.stopAgentSession, payload),
   answerAgentPermission: (payload) =>
     ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
   stopAgentRun: (payload) =>

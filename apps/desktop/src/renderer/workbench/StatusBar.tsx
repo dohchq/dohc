@@ -31,7 +31,6 @@ export function StatusBar(props: {
   agentActive: boolean;
   conflictSummaries: string[];
   onConnectCloud: () => void;
-  onOpenAgent: () => void;
   onOpenHistory: () => void;
   onOpenConflicts: () => void;
   onDismissSyncReview?: () => void;
@@ -39,7 +38,6 @@ export function StatusBar(props: {
   onToggleTheme: () => void;
   onContextMenu: () => void;
   agentNotifications?: readonly AgentNotification[];
-  onOpenAgentNotification?: (notification: AgentNotification) => void;
   onDismissAgentNotification?: (id: string) => void;
 }) {
   const state = props.syncStatus?.state ?? "synced";
@@ -87,16 +85,12 @@ export function StatusBar(props: {
           syncStatus={props.syncStatus}
           agentActive={props.agentActive}
           conflictSummaries={props.conflictSummaries}
-          onOpenAgent={props.onOpenAgent}
           onOpenHistory={props.onOpenHistory}
           onOpenConflicts={props.onOpenConflicts}
           {...(props.onDismissSyncReview
             ? { onDismissSyncReview: props.onDismissSyncReview }
             : {})}
           {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
-          {...(props.onOpenAgentNotification
-            ? { onOpenAgentNotification: props.onOpenAgentNotification }
-            : {})}
           {...(props.onDismissAgentNotification
             ? { onDismissAgentNotification: props.onDismissAgentNotification }
             : {})}

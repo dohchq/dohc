@@ -1,5 +1,4 @@
 import {
-  Bot,
   Cloud,
   Files,
   Globe2,
@@ -23,7 +22,6 @@ const ICONS: Record<ViewId, typeof Files> = {
   chats: MessagesSquare,
   graph: Workflow,
   sites: Globe2,
-  agent: Bot,
   history: History,
 };
 
@@ -33,7 +31,6 @@ const LABELS: Record<ViewId, string> = {
   chats: "Chats",
   graph: "Graph",
   sites: "Sites",
-  agent: "Agent",
   history: "History",
 };
 
@@ -101,7 +98,6 @@ export function ActivityBar(props: {
   activeView: ViewId;
   sidebarVisible: boolean;
   hasConflict: boolean;
-  agentActive: boolean;
   // Content-search results count (Phase E5.0); undefined = no badge.
   searchResultCount?: number;
   // Chats (PR 13) exists only for workspace-engine-flagged workspaces; the
@@ -124,13 +120,7 @@ export function ActivityBar(props: {
           label={LABELS[view]}
           // The rail reflects a collapsed panel: no active mark while hidden.
           active={props.sidebarVisible && props.activeView === view}
-          badge={
-            view === "explorer" && props.hasConflict
-              ? "danger"
-              : view === "agent" && props.agentActive
-                ? "success"
-                : undefined
-          }
+          badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
           count={view === "search" ? props.searchResultCount : undefined}
           onClick={() => props.onSelectView(view)}
           Icon={ICONS[view]}

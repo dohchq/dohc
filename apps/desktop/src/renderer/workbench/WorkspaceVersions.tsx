@@ -697,7 +697,7 @@ export function TryTaskDialog(props: {
           {helper.status === "checking"
             ? "Checking for agent tools…"
             : helper.status === "driver"
-              ? `${helper.driverName} will do the work. Watch it in the agent panel.`
+              ? `${helper.driverName} will do the work. Its edits show up in History as they land.`
               : "No agent app was found — start your own agent in this folder and dohc will follow what it changes."}
         </p>
         {error ? (

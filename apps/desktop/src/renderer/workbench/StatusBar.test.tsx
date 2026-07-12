@@ -64,16 +64,12 @@ function renderBar(
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
       onConnectCloud={() => {}}
-      onOpenAgent={props.onOpenAgent ?? (() => {})}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       {...(props.onDismissSyncReview
         ? { onDismissSyncReview: props.onDismissSyncReview }
         : {})}
       {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
-      {...(props.onOpenAgentNotification
-        ? { onOpenAgentNotification: props.onOpenAgentNotification }
-        : {})}
       {...(props.onDismissAgentNotification
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
         : {})}
@@ -202,7 +198,7 @@ describe("sync status surface", () => {
 describe("notice center", () => {
   it("collects conflict, agent, and update notices in one popover", async () => {
     const onOpenConflicts = vi.fn();
-    const onOpenAgent = vi.fn();
+    const onOpenHistory = vi.fn();
     renderBar({
       syncStatus: {
         state: "conflict",
@@ -213,7 +209,7 @@ describe("notice center", () => {
       agentActive: true,
       conflictSummaries: ["Both sides changed notes/today.md."],
       onOpenConflicts,
-      onOpenAgent,
+      onOpenHistory,
     });
     pushUpdate?.({
       status: "ready",
@@ -244,11 +240,15 @@ describe("notice center", () => {
     expect(onOpenConflicts).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("notice-center")).toBeNull();
 
+    // The running-agent notice points at History — the place the run's
+    // edits land (the dedicated Agent panel is retired).
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.click(
-      within(screen.getByTestId("notice-center")).getByRole("button", { name: "Open" }),
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Open History",
+      }),
     );
-    expect(onOpenAgent).toHaveBeenCalledOnce();
+    expect(onOpenHistory).toHaveBeenCalledOnce();
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
@@ -317,7 +317,6 @@ describe("notice center", () => {
         agentActive={false}
         conflictSummaries={[]}
         onConnectCloud={() => {}}
-        onOpenAgent={() => {}}
         onOpenHistory={() => {}}
         onOpenConflicts={() => {}}
         onDismissSyncReview={onDismissSyncReview}
@@ -385,7 +384,6 @@ describe("notice center", () => {
         agentActive={false}
         conflictSummaries={[]}
         onConnectCloud={() => {}}
-        onOpenAgent={() => {}}
         onOpenHistory={() => {}}
         onOpenConflicts={() => {}}
         onOpenSettings={() => {}}
@@ -515,7 +513,6 @@ describe("notice center", () => {
           createdAtMs: 2000,
         }),
       ],
-      onOpenAgentNotification: vi.fn(),
       onDismissAgentNotification: vi.fn(),
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -527,20 +524,13 @@ describe("notice center", () => {
     expect(within(center).getByText("Reorganized /notes into three folders.")).toBeTruthy();
   });
 
-  it("opens and dismisses an agent notification through its actions", async () => {
-    const onOpenAgentNotification = vi.fn();
+  it("dismisses an agent notification through its dismiss action", async () => {
     const onDismissAgentNotification = vi.fn();
     const notice = agentNotice();
     renderBar({
       agentNotifications: [notice],
-      onOpenAgentNotification,
       onDismissAgentNotification,
     });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const center = screen.getByTestId("notice-center");
-    await userEvent.click(within(center).getByRole("button", { name: "Open" }));
-    expect(onOpenAgentNotification).toHaveBeenCalledWith(notice);
-
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.click(
       within(screen.getByTestId("notice-center")).getByTestId(
