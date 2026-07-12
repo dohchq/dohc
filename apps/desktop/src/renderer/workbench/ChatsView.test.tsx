@@ -1497,5 +1497,27 @@ describe("ChatsView expand-to-tab", () => {
       "general",
     );
   });
+
+  it("never reports the default overview position while a seed is pending", async () => {
+    // The shell's nav ref holds the conversation being restored; reporting
+    // the pre-seed default would overwrite it, so closing the tab mid-load
+    // would lose the conversation the expand was supposed to preserve.
+    const onNavChange = vi.fn();
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+      onNavChange,
+    });
+
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() =>
+      expect(onNavChange).toHaveBeenCalledWith(
+        expect.objectContaining({ level: "thread" }),
+      ),
+    );
+    expect(onNavChange).not.toHaveBeenCalledWith({ level: "channels" });
+    expect(onNavChange.mock.calls[0]?.[0]).toMatchObject({ level: "thread" });
+  });
 });
 

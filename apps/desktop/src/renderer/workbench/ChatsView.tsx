@@ -1291,8 +1291,14 @@ export function ChatsView(props: {
   );
 
   // Expand-to-tab seam, outbound: report where this view is so the shell can
-  // seed a freshly expanded tab with the panel's current conversation.
+  // seed the next mount with this instance's current conversation. While a
+  // seed is still PENDING the report is suppressed — nav starts as the
+  // default "channels", and reporting that on mount would overwrite the very
+  // position the seed is about to restore (closing the tab while the
+  // overview is still loading would then hand "channels" back to the panel).
+  const navReportBlocked = useRef(props.initialNav !== undefined);
   useEffect(() => {
+    if (navReportBlocked.current) return;
     onNavChange?.(nav);
   }, [nav, onNavChange]);
 
@@ -1306,6 +1312,7 @@ export function ChatsView(props: {
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     seededRef.current = true;
+    navReportBlocked.current = false;
     const seed = props.initialNav;
     if (!seed) return;
     if (seed.level === "channel") void openChannel(seed.channel);
