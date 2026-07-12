@@ -847,10 +847,14 @@ body {
   height: 20px;
 }
 
+/* Shared popover box treatment. `overflow` is deliberately NOT shared: the
+ * scrolling menus (slash menu, wikilink picker) own it individually, because
+ * the bubble menu must stay overflow-visible — it hosts the anchored
+ * turn-into dropdown (.dohc-turn-into-menu), which an overflow rule here
+ * would clip to the toolbar's own height. */
 .dohc-slash-menu,
 .dohc-wikilink-picker,
 .dohc-bubble-menu {
-  overflow: auto;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-panel);
@@ -873,6 +877,7 @@ body {
   z-index: 70;
   width: 320px;
   padding: 5px;
+  overflow: auto;
 }
 
 .dohc-slash-menu__item,
@@ -948,6 +953,7 @@ body {
 .dohc-wikilink-picker {
   width: 360px;
   padding: 4px;
+  overflow: auto;
 }
 
 .dohc-wikilink-picker__item {
@@ -1005,7 +1011,17 @@ body {
   -webkit-box-decoration-break: clone;
 }
 
+/* The selection toolbar. TipTap appends this element inside
+ * .dohc-editor-surface next to the ProseMirror DOM — the SAME stacking
+ * context as all in-document chrome — so it needs an explicit spot on the
+ * editor's layering scale: content chrome stays ≤ 20 (outline z3, block
+ * gutter, table grips z4 / table-menu chip z5, column-resize handle +
+ * collab caret labels z20), popovers sit at 69 (backdrop) / 70 (menus) /
+ * 71 (dropdowns nested inside a z70 menu). Without a z-index here the
+ * positive-z table controls paint OVER the selection menu. Table chrome
+ * must stay below 69 so selection UI always wins. */
 .dohc-bubble-menu {
+  z-index: 70;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -1691,6 +1707,18 @@ body {
     0 1px 2px rgba(28, 27, 24, 0.05),
     0 8px 24px rgba(28, 27, 24, 0.12);
   animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+/* Flipped above the trigger when the viewport has more room there — the
+ * placement/maxHeight come from resolveTurnIntoDropdown (blockControls.tsx),
+ * which reuses the shared floating-menu math. The dropdown stays ANCHORED
+ * (position: absolute), never position: fixed: the bubble menu lives inside
+ * .dohc-editor-surface, whose container-type would re-base fixed coordinates
+ * onto the pane instead of the viewport (see the .dohc-editor-surface
+ * comment below). */
+.dohc-turn-into-menu[data-placement='above'] {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .dohc-turn-into-menu:focus {

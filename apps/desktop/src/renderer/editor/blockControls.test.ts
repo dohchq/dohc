@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { createElement } from "react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -11,10 +13,12 @@ import {
   copyBlockAsMarkdown,
   deleteBlock,
   duplicateBlock,
+  resolveTurnIntoDropdown,
   serializeBlockToMarkdown,
   topLevelBlockPos,
   turnBlockInto,
   TURN_INTO_ENTRIES,
+  TurnIntoMenu,
 } from "./blockControls";
 
 function makeEditor(markdown: string): Editor {
@@ -48,6 +52,7 @@ function track(editor: Editor): Editor {
 }
 
 afterEach(() => {
+  cleanup();
   while (editors.length) editors.pop()?.destroy();
   vi.restoreAllMocks();
 });
@@ -196,6 +201,74 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
       "Todo list",
       "Quote",
     ]);
+  });
+});
+
+describe("resolveTurnIntoDropdown", () => {
+  it("opens below the trigger when the viewport has room", () => {
+    expect(
+      resolveTurnIntoDropdown(
+        { left: 100, top: 100, bottom: 126 },
+        { width: 1024, height: 768 },
+      ),
+    ).toEqual({ placement: "below", maxHeight: 320 });
+  });
+
+  it("flips above with a fitted max height near the viewport bottom", () => {
+    expect(
+      resolveTurnIntoDropdown(
+        { left: 100, top: 300, bottom: 326 },
+        { width: 1024, height: 400 },
+      ),
+    ).toEqual({ placement: "above", maxHeight: 282 });
+  });
+});
+
+// Mount-level coverage for the dropdown itself: every option must be
+// rendered readable (bullet 8a was the bubble menu's overflow clipping the
+// dropdown to the toolbar's height), and the placement/max-height resolved
+// at open time must land on the listbox element for the CSS to consume.
+describe("TurnIntoMenu dropdown rendering", () => {
+  it("opens a listbox with every turn-into option and the resolved placement/max height", () => {
+    const editor = track(makeEditor("Hello world"));
+    editor.commands.setTextSelection(3);
+    render(createElement(TurnIntoMenu, { editor }));
+
+    fireEvent.click(screen.getByTitle("Turn into"));
+    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    // jsdom rects are all-zero -> plenty of room below at the default
+    // viewport, so the dropdown gets its full height, uncapped by the bar.
+    expect(listbox.getAttribute("data-placement")).toBe("below");
+    expect(listbox.style.maxHeight).toBe("320px");
+    for (const entry of TURN_INTO_ENTRIES) {
+      expect(within(listbox).getByText(entry.label)).toBeTruthy();
+    }
+  });
+
+  it("converts the selection's block when an option is clicked", () => {
+    const editor = track(makeEditor("Some text"));
+    editor.commands.setTextSelection(3);
+    render(createElement(TurnIntoMenu, { editor }));
+
+    fireEvent.click(screen.getByTitle("Turn into"));
+    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    fireEvent.click(within(listbox).getByText("Heading 1"));
+
+    expect(screen.queryByRole("listbox")).toBeNull();
+    const first = editor.getJSON().content?.[0];
+    expect(first?.type).toBe("heading");
+    expect(first?.attrs?.level).toBe(1);
+  });
+
+  it("closes on Escape", () => {
+    const editor = track(makeEditor("Hello"));
+    editor.commands.setTextSelection(3);
+    render(createElement(TurnIntoMenu, { editor }));
+
+    fireEvent.click(screen.getByTitle("Turn into"));
+    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    fireEvent.keyDown(listbox, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 });
 
