@@ -31,6 +31,7 @@ import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
+import { SharedWithMeList } from "./SharedWithMeList";
 import {
   DEFAULT_SETTINGS_SECTION,
   isSettingsSectionId,
@@ -78,6 +79,7 @@ export function SettingsDialog(props: {
   onClose: () => void;
   onAgentActiveChange?: (active: boolean) => void;
   onOpenCloud?: () => void;
+  onWorkspaceFilesChanged?: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -584,6 +586,20 @@ export function SettingsDialog(props: {
             </SettingRow>
             <div className="px-1 pb-2">
               <SharedByMeList />
+            </div>
+            <SettingRow
+              title="Shared with me"
+              description="Files other dohc accounts shared to you. Adding one places it in this workspace under shared-with-me/ — read-only, kept up to date, readable by your agent."
+            >
+              <span aria-hidden />
+            </SettingRow>
+            <div className="px-1 pb-2">
+              <SharedWithMeList
+                workspaceId={props.workspaceId}
+                {...(props.onWorkspaceFilesChanged
+                  ? { onWorkspaceFilesChanged: props.onWorkspaceFilesChanged }
+                  : {})}
+              />
             </div>
           </div>
         );

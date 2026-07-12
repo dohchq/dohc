@@ -1,3 +1,4 @@
+import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
   Bot,
   CircleHelp,
@@ -135,6 +136,15 @@ import {
   VIEW_IDS,
   type WorkbenchState,
 } from "./workbench/workbenchState";
+
+// Mounted-share paths (shared-with-me/…) are read-only projections of
+// someone else's files. This check is a renderer UX affordance only — main
+// refuses every write to the reserved prefix regardless — but it uses the
+// same alias-normalizing predicate as main so a case-variant path arriving
+// from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+function isMountedSharePath(path: string | null): boolean {
+  return !!path && isSharedWithMePath(path);
+}
 
 export type Workspace = WorkspaceSummary;
 
@@ -1072,18 +1082,18 @@ export function DesktopWorkspaceShell(props: {
     setShellError(error instanceof Error ? error.message : fallback);
   }, []);
 
-  // Quiet, self-dismissing status line for import summaries ("Imported 3
-  // files into notes.") — informational, so it never uses the error banner.
-  const [importNotice, setImportNotice] = useState<string | null>(null);
-  const importNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showImportNotice = useCallback((message: string) => {
-    setImportNotice(message);
-    if (importNoticeTimer.current) clearTimeout(importNoticeTimer.current);
-    importNoticeTimer.current = setTimeout(() => setImportNotice(null), 6000);
+  // Quiet, self-dismissing status line for import/share-mount summaries
+  // ("Imported 3 files into notes.") — informational, never the error banner.
+  const [shellNotice, setShellNotice] = useState<string | null>(null);
+  const shellNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showShellNotice = useCallback((message: string) => {
+    setShellNotice(message);
+    if (shellNoticeTimer.current) clearTimeout(shellNoticeTimer.current);
+    shellNoticeTimer.current = setTimeout(() => setShellNotice(null), 6000);
   }, []);
   useEffect(
     () => () => {
-      if (importNoticeTimer.current) clearTimeout(importNoticeTimer.current);
+      if (shellNoticeTimer.current) clearTimeout(shellNoticeTimer.current);
     },
     [],
   );
@@ -1276,7 +1286,7 @@ export function DesktopWorkspaceShell(props: {
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
-      showImportNotice(
+      showShellNotice(
         count === 0
           ? `Nothing imported${skippedSuffix}.`
           : `Imported ${count} ${count === 1 ? "file" : "files"}${
@@ -1290,8 +1300,9 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showImportNotice],
+    [workspaceId, refreshFiles, reportShellError, showShellNotice],
   );
+
 
   // THE one way a file opens (tree click, quick-open, tab activation): marks
   // file-open-start — file views measure open latency from here — then opens
@@ -1527,6 +1538,146 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [mutateWb],
+  );
+
+  // Share mounts: the registry is loaded once at boot, so the shell owns a
+  // LIVE copy of this workspace's mounts — reloaded after every mount /
+  // unmount / refresh — otherwise the poll gate and unmount lookups would
+  // run against a stale boot-time snapshot (gpt-5.6-sol P1).
+  const [shareMounts, setShareMounts] = useState(
+    props.workspace.shareMounts ?? [],
+  );
+  // Bumped whenever a share pull changed files: mounted content has no host
+  // history, so the open-file refresh key needs its own signal or an open
+  // mounted tab keeps showing pre-pull content (codex P2).
+  const [mountContentEpoch, setMountContentEpoch] = useState(0);
+  // Ref mirror so reloads diff against the CURRENT set without making the
+  // state updater side-effectful (StrictMode replays updaters).
+  const shareMountsRef = useRef(shareMounts);
+  shareMountsRef.current = shareMounts;
+  // Latest-wins token (cloudStatusToken/engineHistoryToken precedent): a
+  // slower, earlier-started reload must never clobber a fresher one — a
+  // stale registry snapshot could resurrect a just-removed mount or fire a
+  // spurious delete-folder projection against a still-valid one.
+  const shareMountsToken = useRef(0);
+  const reloadShareMounts = useCallback(async () => {
+    const token = ++shareMountsToken.current;
+    try {
+      const registry = await bridge().getWorkspaceRegistry();
+      if (token !== shareMountsToken.current) return;
+      const entry = registry.workspaces.find(
+        (candidate) => candidate.workspaceId === workspaceId,
+      );
+      const next = entry?.shareMounts ?? [];
+      // A mount that vanished (removed from Settings or another surface)
+      // reprojects tabs/pins exactly like the Explorer unmount path — open
+      // tabs under the deleted folder must not linger with stale content.
+      const gone = shareMountsRef.current.filter(
+        (mount) => !next.some((candidate) => candidate.shareId === mount.shareId),
+      );
+      if (gone.length > 0) {
+        onExplorerPathsChanged(
+          gone.map((mount) => ({
+            id: `unmount-${mount.shareId}`,
+            kind: "delete-folder" as const,
+            path: `shared-with-me/${mount.label}`,
+          })),
+        );
+      }
+      setShareMounts(next);
+    } catch {
+      // Keep the last known set; the next reload corrects it.
+    }
+  }, [workspaceId, onExplorerPathsChanged]);
+
+  // Share mounts: pull every mount's share once (quietly — offline or
+  // signed-out refreshes are no-ops main-side). `announce` adds the visible
+  // summary for the explicit "Refresh Share(s)" menu action.
+  const refreshShareMounts = useCallback(
+    async (announce = false) => {
+      let results: Array<{
+        label: string;
+        status: "updated" | "unchanged" | "ended";
+        changedPaths: number;
+      }>;
+      try {
+        results = (await bridge().refreshShareMounts({ workspaceId })).results;
+      } catch (error) {
+        if (announce) reportShellError("Couldn't refresh shares.", error);
+        return;
+      }
+      const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
+      if (changed > 0) {
+        setMountContentEpoch((epoch) => epoch + 1);
+        await refreshFiles().catch(() => undefined);
+      }
+      if (results.some((row) => row.status === "ended")) void reloadShareMounts();
+      if (announce) {
+        const ended = results.filter((row) => row.status === "ended");
+        showShellNotice(
+          results.length === 0
+            ? "No shares are added to this workspace."
+            : `Shares refreshed — ${changed} ${changed === 1 ? "file" : "files"} updated${
+                ended.length > 0
+                  ? `; ${ended.map((row) => row.label).join(", ")} ended`
+                  : ""
+              }.`,
+        );
+      }
+    },
+    [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
+  );
+
+  // The workspace prop is DesktopRoot's boot-time registry snapshot — a
+  // shell that remounts after workspace switching needs a fresh read or a
+  // mount added/removed in the previous visit is invisible (codex P2).
+  useEffect(() => {
+    void reloadShareMounts();
+  }, [reloadShareMounts]);
+
+  // Mounts follow their shares while the workspace is open: one pull on
+  // open, then a slow poll. Manual refresh stays available in the explorer
+  // context menu.
+  const mountCount = shareMounts.length;
+  useEffect(() => {
+    if (mountCount === 0) return;
+    void refreshShareMounts();
+    const timer = setInterval(() => void refreshShareMounts(), 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [mountCount, refreshShareMounts]);
+
+  const unmountShare = useCallback(
+    async (path: string) => {
+      const label = path.split("/")[1] ?? "";
+      const mount = shareMounts.find((m) => m.label === label);
+      if (!mount) return;
+      try {
+        await bridge().unmountShare({ workspaceId, shareId: mount.shareId });
+      } catch (error) {
+        reportShellError("Couldn't remove the share.", error);
+        return;
+      }
+      // Reproject tabs/pins exactly like a folder delete, then re-list.
+      onExplorerPathsChanged([
+        {
+          id: `unmount-${mount.shareId}`,
+          kind: "delete-folder",
+          path: `shared-with-me/${label}`,
+        },
+      ]);
+      await refreshFiles().catch(() => undefined);
+      void reloadShareMounts();
+      showShellNotice(`Removed ${label} from this workspace.`);
+    },
+    [
+      workspaceId,
+      shareMounts,
+      onExplorerPathsChanged,
+      refreshFiles,
+      reportShellError,
+      showShellNotice,
+      reloadShareMounts,
+    ],
   );
 
   // Reveal-then-create: the inline editbox lives in the explorer view, so
@@ -1988,6 +2139,8 @@ export function DesktopWorkspaceShell(props: {
         onImportFiles={(droppedPaths, targetDir) =>
           void importFiles(droppedPaths, targetDir)
         }
+        onRefreshShareMounts={() => void refreshShareMounts(true)}
+        onUnmountShare={(path) => void unmountShare(path)}
         onShare={(path) => setShareTarget({ path })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
@@ -2051,16 +2204,16 @@ export function DesktopWorkspaceShell(props: {
           </button>
         </div>
       ) : null}
-      {importNotice ? (
+      {shellNotice ? (
         <div
-          data-testid="import-summary"
+          data-testid="shell-notice"
           className="flex min-h-8 items-center gap-2 border-b border-line bg-panel-2 px-3 text-[12px] text-muted"
         >
-          <span className="min-w-0 flex-1 truncate">{importNotice}</span>
+          <span className="min-w-0 flex-1 truncate">{shellNotice}</span>
           <button
             type="button"
-            aria-label="Dismiss import summary"
-            onClick={() => setImportNotice(null)}
+            aria-label="Dismiss notice"
+            onClick={() => setShellNotice(null)}
             className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
           >
             <X size={12} aria-hidden />
@@ -2396,9 +2549,9 @@ export function DesktopWorkspaceShell(props: {
                 key={wb.activeTab}
                 workspaceId={workspaceId}
                 path={wb.activeTab}
-                // History growth AND version switches both re-read the open
-                // file (both counters only ever increase).
-                refreshKey={historyRefreshCounter + versionEpoch}
+                // History growth, version switches, AND share-mount pulls all
+                // re-read the open file (every counter only ever increases).
+                refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
                 // G2-C-3: the engine editor re-binds to the new version's Y.Doc
                 // lineage ONLY on an active-version change — versionEpoch alone,
                 // NOT history growth (which must not churn the live session).
@@ -2410,8 +2563,8 @@ export function DesktopWorkspaceShell(props: {
                 registerDraftFlush={registerDraftFlush}
                 registerSourceToggle={registerSourceToggle}
                 knownMarkdownFiles={markdownWikilinkFiles}
-                readOnly={!!shareView}
-                {...(shareView
+                readOnly={!!shareView || isMountedSharePath(wb.activeTab)}
+                {...(shareView || isMountedSharePath(wb.activeTab)
                   ? {}
                   : { onSharePath: (path: string) => setShareTarget({ path }) })}
               />
@@ -2627,6 +2780,10 @@ export function DesktopWorkspaceShell(props: {
             initialSection={settingsSection}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
+            onWorkspaceFilesChanged={() => {
+              void reloadShareMounts();
+              void refreshFiles().catch(() => undefined);
+            }}
             onOpenCloud={() => {
               closeSettings();
               setCloudOpen(true);
@@ -2659,6 +2816,23 @@ export function DesktopWorkspaceShell(props: {
               props.onSwitchWorkspace(workspace);
             }}
             onBack={() => setOpenShareOpen(false)}
+            {...(shareView
+              ? {}
+              : {
+                  mountInto: {
+                    workspaceId,
+                    onMounted: (label: string) => {
+                      setOpenShareOpen(false);
+                      void reloadShareMounts();
+                      void refreshFiles().catch(() => undefined);
+                      setExplorerFolderExpanded("shared-with-me", true);
+                      setExplorerFolderExpanded(`shared-with-me/${label}`, true);
+                      showShellNotice(
+                        `Added ${label} to shared-with-me — read-only, kept up to date.`,
+                      );
+                    },
+                  },
+                })}
           />
         </Overlay>
       ) : null}

@@ -98,7 +98,11 @@ export async function readDatabaseSnapshot(
   rootPath: string,
   relativePath: string,
 ): Promise<DatabaseSnapshotView> {
-  const { realTarget, normalized } = await resolveWorkspaceFile(rootPath, relativePath);
+  const { realTarget, normalized } = await resolveWorkspaceFile(
+    rootPath,
+    relativePath,
+    "read",
+  );
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(realTarget, { readOnly: true });
   try {
@@ -302,7 +306,11 @@ export async function importToDatabase(
   databaseRelativePath: string,
   tableName: string,
 ): Promise<{ path: string; tableName: string; rowCount: number }> {
-  const { realTarget } = await resolveWorkspaceFile(rootPath, sourceRelativePath);
+  const { realTarget } = await resolveWorkspaceFile(
+    rootPath,
+    sourceRelativePath,
+    "read",
+  );
   const body = await readFile(realTarget, "utf8");
   const mediaType = mediaTypeForPath(sourceRelativePath) ?? "text/plain";
 

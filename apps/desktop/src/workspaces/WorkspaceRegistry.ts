@@ -5,6 +5,7 @@ import {
   createRegistryStore,
   type JoinedSharedChannel,
   type RegistryEntry,
+  type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
 
@@ -80,4 +81,12 @@ export function setWorkspaceSharedChannels(
   sharedChannels: JoinedSharedChannel[],
 ): void {
   store().setSharedChannels(workspaceId, sharedChannels);
+}
+
+// Share mounts: the workspace's mounted shares (replace-the-set write).
+export function setWorkspaceShareMounts(
+  workspaceId: string,
+  shareMounts: ShareMountRecord[],
+): void {
+  store().setShareMounts(workspaceId, shareMounts);
 }

@@ -230,6 +230,118 @@ describe("mcp tool path containment", () => {
     });
   });
 
+  it("shared-with-me is agent-READABLE but never agent-writable (share mounts)", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "shared-with-me", "alex"), { recursive: true });
+      await writeFile(join(ctx.root, "shared-with-me", "alex", "brief.md"), "the brief");
+
+      // Reads: list, read, search all see the mounted projection.
+      const listed = await listWorkspaceFiles(ctx, { path: "shared-with-me/alex" });
+      expect(listed).toMatchObject({ ok: true });
+      const read = await readWorkspaceFile(ctx, { path: "shared-with-me/alex/brief.md" });
+      expect(read).toMatchObject({ ok: true, content: "the brief" });
+      const found = await searchWorkspaceFiles(ctx, {
+        path: "shared-with-me/alex",
+        query: "brief",
+      });
+      expect(found).toMatchObject({ ok: true });
+
+      // The secret floor holds INSIDE mounts: a mounted .env is denied to
+      // reads and searches even though the mount itself is readable.
+      await writeFile(join(ctx.root, "shared-with-me", "alex", ".env"), "API_KEY=x");
+      await expect(
+        readWorkspaceFile(ctx, { path: "shared-with-me/alex/.env" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      const secretSearch = await searchWorkspaceFiles(ctx, {
+        path: "shared-with-me/alex",
+        query: "API_KEY",
+      });
+      expect(secretSearch).toMatchObject({ ok: true });
+      if (secretSearch.ok) {
+        expect(JSON.stringify(secretSearch)).not.toContain("API_KEY=x");
+      }
+
+      // The floor also covers the import/query LAUNDERING paths: a secret
+      // source must not become a visible database, and a secret-named
+      // database must not answer SELECTs (mounted or local).
+      await writeFile(join(ctx.root, "shared-with-me", "alex", ".env.csv"), "k,v\nX,1");
+      await expect(
+        importData(ctx, {
+          sourcePath: "shared-with-me/alex/.env.csv",
+          databasePath: "laundered.sqlite",
+          tableName: "t",
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      const secretDb = await queryDatabase(ctx, {
+        databasePath: "shared-with-me/alex/.env.sqlite",
+        sql: "SELECT 1",
+      });
+      expect(secretDb).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+
+      // Read-side resolution also covers open + database query paths.
+      const opened = await openInDohc(ctx, { path: "shared-with-me/alex/brief.md" });
+      expect(opened).toMatchObject({ ok: true });
+      // The database file doesn't exist (open throws), but the failure must
+      // never be the reserved prefix — mounted databases are queryable.
+      const queried = await queryDatabase(ctx, {
+        databasePath: "shared-with-me/alex/data.sqlite",
+        sql: "SELECT 1",
+      }).catch((error: unknown) => ({
+        ok: false as const,
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+      expect(queried.ok).toBe(false);
+      if (!queried.ok) expect(queried.reason).not.toContain("reserved");
+
+      // Writes: every mutation refuses the reserved projection.
+      await expect(
+        writeWorkspaceFile(ctx, { path: "shared-with-me/alex/brief.md", content: "hijack" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("reserved") });
+      await expect(
+        createWorkspaceDirectory(ctx, { path: "shared-with-me/mine" }),
+      ).resolves.toMatchObject({ ok: false });
+      await expect(
+        deleteWorkspacePath(ctx, { path: "shared-with-me/alex/brief.md" }),
+      ).resolves.toMatchObject({ ok: false });
+      await expect(
+        moveWorkspacePath(ctx, {
+          fromPath: "shared-with-me/alex/brief.md",
+          toPath: "stolen.md",
+        }),
+      ).resolves.toMatchObject({ ok: false });
+      expect(await readFile(join(ctx.root, "shared-with-me", "alex", "brief.md"), "utf8")).toBe(
+        "the brief",
+      );
+    });
+  });
+
+  it("site tools refuse mounted-share roots (no running someone else's code)", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "shared-with-me", "alex", "site"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "shared-with-me", "alex", "site", "index.html"),
+        "<!doctype html><title>shared</title>",
+      );
+      // Case variants name the same directory on case-insensitive
+      // filesystems — the guard must hold for them too, not just the
+      // canonical casing.
+      for (const siteRoot of ["shared-with-me/alex/site", "Shared-With-Me/alex/site"]) {
+        for (const run of [
+          () => testSite(ctx, { siteRoot }),
+          () => buildSite(ctx, { siteRoot }),
+          () => previewSite(ctx, { siteRoot }),
+          () => publishSite(ctx, { siteRoot }),
+          () => addSiteSdk(ctx, { siteRoot }),
+        ]) {
+          await expect(run()).resolves.toMatchObject({
+            ok: false,
+            reason: expect.stringContaining("mounted share"),
+          });
+        }
+      }
+    });
+  });
+
   it("workspace mutations refuse a symlinked .dohc before changing visible files", async () => {
     await withWorkspace(async (ctx) => {
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-metadata-outside-"));

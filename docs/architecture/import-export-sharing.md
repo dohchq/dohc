@@ -96,56 +96,69 @@ filtered op log, never a local source of truth.
 workspace, visible in the tree, and reserved against user writes
 (`isReservedPath` in `packages/workspace-core/src/paths.ts`).
 
-### Mount lifecycle
+### Mount lifecycle (as implemented)
 
-- **Mount:** from "Open a share" (or the received-shares list), the recipient
-  picks *Mount into workspace* and a host workspace. The mount record —
-  shareId, relayUrl, label, last-applied cursor, status — persists in the
-  host workspace's `.dohc/` metadata (per-workspace scoping; a mount in
-  workspace A is unreachable from workspace B). The label defaults to the
-  granter (e.g. `shared-with-me/alex/`), deduplicated like import collisions.
-- **Materialize + follow:** reuse the existing share pull
-  (`pullShareView` + versioned text store, as `sharedView.ts` does today) but
-  target the mount folder. Refresh on workspace open, on a poll/presence
-  cadence, and manually; each pass applies filtered ops, materializes changed
-  paths (containment-checked), and commits the cursor.
+- **Mount:** from "Open a share" inside a workspace (default mode *Add to
+  this workspace*) or Settings → Cloud → *Shared with me*. The mount record —
+  shareId, label, granter, origin relay — persists on the host workspace's
+  registry entry (`shareMounts`, the `sharedChannels` precedent;
+  per-workspace scoping — a mount in workspace A is unreachable from
+  workspace B). The label derives from the granter (`shared-with-me/alex/`),
+  deduplicated like import collisions, and is re-validated as a single safe
+  path segment on every use.
+- **Materialize + follow:** the existing share pull (`pullShareView` +
+  versioned text store, exactly as the island `sharedView.ts` does) targets
+  the mount folder; the mount's op log and fetch cursor live in its own
+  nested `<mount>/.dohc/engine/engine.db`, which the host tree/watcher never
+  sees (`.dohc` is ignored at any depth). Refresh runs on workspace open, on
+  a slow poll while the workspace is open, and manually from the mount's
+  context menu; each pass applies filtered ops, materializes changed paths
+  (containment-checked), then commits the cursor (crash-safe ordering).
 - **Revoked/ended:** the mount freezes with status `ended` — files stay
-  readable, nothing updates, the UI banners the folder (same semantics as
-  today's island view). Unmounting deletes the folder and the mount record.
+  readable, nothing updates, the origin-relay pin prevents a wrong-server 404
+  from ever flipping a mount to ended. Unmounting deletes the projection
+  folder and the record; the granter's source is untouched either way.
 
 ### Invariants
 
 - **Read-only is enforced at every write surface, not by convention:** the
-  editor, desktop IPC write handlers, and MCP mutation tools already refuse
-  reserved paths via `validateUserWritePath`. A physical write that sneaks in
-  through a rogue tool is not durable: the next refresh re-materializes the
-  projection.
-- **Reads must be allowed where writes are refused.** Today MCP *reads* also
-  route through the write validator, so agents cannot read `shared-with-me/`
-  at all. The implementation splits read validation from write validation:
-  reads under `shared-with-me/` are legal (still refusing `.dohc`, secrets,
-  traversal); writes stay refused everywhere under the mount.
+  editor (mount paths open read-only, no engine session), desktop IPC write
+  handlers, and MCP mutation tools all refuse reserved paths via
+  `validateUserWritePath`. A physical write that sneaks in through a rogue
+  tool is not durable: the next refresh re-materializes the projection.
+- **Reads are allowed where writes are refused.** Historically every content
+  read reused the write validator, so agents could not read `shared-with-me/`
+  at all. `validateUserReadPath` (workspace-core) is the read-side twin —
+  identical traversal/encoding/`.dohc` rules, shared-with-me allowed — used
+  by the desktop read surfaces (text, assets, graph, database snapshots,
+  content search) and MCP read tools. Writes keep the strict validator
+  everywhere.
 - **No write path back to the granter.** Mounting adds zero relay routes; the
   share filter remains the only boundary, and it is already fail-closed.
 - **No transitive sharing.** Mounted content cannot be granted onward from
-  inside the mount: share creation refuses `shared-with-me/` paths. Re-sharing
-  someone's work requires deliberately copying it into your own files, which
-  makes it yours — an explicit act with provenance, not a leak.
-- **Provenance marks the content foreign.** Mount refreshes record engine
-  moments under a share-scoped author label (never the local user, never an
-  agent-run attribution), so history answers "where did this come from" the
-  same way it does for local edits.
-- **Sync boundaries:** mount folders are excluded from the host workspace's
-  own relay push (they are someone else's data arriving by another route) and
-  from exports by default; a workspace zip includes them only as the plain
-  files they are, which is what the user sees.
+  inside the mount: the relay's selector validation refuses reserved paths
+  (the authoritative gate), the desktop refuses with honest copy, and the
+  mount's context menu offers no "Share…". Re-sharing someone's work
+  requires deliberately copying it into your own files, which makes it
+  yours — an explicit act, not a leak.
+- **The host records nothing about mounted content.** The effective-policy
+  floor classifies `shared-with-me/` as untracked, so the host workspace's
+  capture, engine search, exports policy, and relay push all exclude it —
+  mounted content cannot leak into the host's history or its synced copy.
+  Provenance lives where the content does: the mount's own nested store
+  carries the share's replayed op log, and the tree boundary
+  (`shared-with-me/alex/…`) states the origin more plainly than an author
+  label could.
+- **Workspace zips** include mounted files as the plain files they are —
+  which is exactly what the user sees in the tree.
 
 ### Why this is the obvious shape
 
 Text is the primitive: "someone shared X with me" should mean "X is files in
 my workspace" — the default an agent would assume. The island view survives
-as the zero-commitment preview (open a code, look, close); mounting is the
-"keep this" gesture.
+as the zero-commitment preview (open a code, look, close) and as the
+first-run path when no workspace exists yet; mounting is the "keep this"
+gesture.
 
 ## Retired: the workspace-to-workspace field-exchange panel
 

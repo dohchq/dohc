@@ -1,5 +1,6 @@
 import {
   defaultWorkspaceRoot,
+  isSharedWithMePath,
   normalizeAbsolutePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
@@ -18,7 +19,7 @@ import {
   type IpcMainInvokeEvent,
 } from "electron";
 import { existsSync, statSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
@@ -54,10 +55,16 @@ import {
   JoinSharedChannelPayload,
   JoinSharedChannelResult,
   LeaveSharedChannelPayload,
+  MountSharePayload,
+  MountShareResult,
   OpenSharedViewPayload,
   OpenSharedViewResult,
+  RefreshShareMountsPayload,
+  RefreshShareMountsResult,
   RefreshSharedViewPayload,
   RefreshSharedViewResult,
+  UnmountSharePayload,
+  UnmountShareResult,
   CloudJoinWorkspaceResult,
   CloudLoginPollResult,
   CloudLoginStartPayload,
@@ -230,6 +237,7 @@ import {
 import {
   createWorkspaceFolder,
   resetFailedJoinFolder,
+  SHARED_WITH_ME_FOLDER,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
@@ -240,6 +248,7 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
+  setWorkspaceShareMounts,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
   stateDir,
@@ -277,6 +286,13 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import { refreshSharedViewOnce } from "./workspaces/sharedView";
+import {
+  assertMountableSelector,
+  createMountDirectory,
+  mountLabelFor,
+  refreshShareMountOnce,
+  removeMountFolder,
+} from "./workspaces/shareMounts";
 import {
   createLinkedChatStore,
   createVersionedTextStore,
@@ -396,7 +412,10 @@ import {
   readWorkspaceSettingsFile,
   writeWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
-import { createSearchRegistry } from "./workspaces/workspaceSearch";
+import {
+  createSearchRegistry,
+  mountScopedIncludeGlob,
+} from "./workspaces/workspaceSearch";
 import { rgPath } from "@vscode/ripgrep";
 import {
   startCliServer,
@@ -499,6 +518,13 @@ const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
+
+// Latest search per renderer: the engine-backed search path awaits (flush +
+// index query) before its mount-scoped rg pass, so an OLDER search can reach
+// startSearch after a NEWER one already started — and the registry's
+// kill-and-replace would cancel the newer child. Stale handlers check this
+// before touching the registry.
+const latestSearchIdBySender = new Map<number, string>();
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
@@ -2544,11 +2570,38 @@ function registerIpcHandlers(): void {
       // workspaces (a share needs a relay-side workspace to grant from).
       const registryEntry = findWorkspace(input.workspaceId);
       const isSharedView = !!registryEntry?.shareView;
-      const canShare = !isSharedView && !!registryEntry?.remote && input.kind !== "root";
+      // Share-mount paths (shared-with-me/…) are a read-only projection of
+      // someone else's files: no create/rename/delete/import/share — main
+      // owns the menu, so the reduction cannot be bypassed by the renderer.
+      // The mount root itself (shared-with-me/<label> with a matching mount
+      // record) additionally offers refresh and removal.
+      const isMountPath =
+        !isSharedView && !!input.path && isSharedWithMePath(input.path);
+      const mountForPath = isMountPath
+        ? (registryEntry?.shareMounts ?? []).find(
+            (mount) => input.path === `shared-with-me/${mount.label}`,
+          )
+        : undefined;
+      const canShare =
+        !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root";
       const template: Electron.MenuItemConstructorOptions[] = isSharedView
         ? input.kind === "root"
           ? [item("Export Workspace as Zip…", "export-zip")]
           : [
+              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
+              separator,
+              item("Export as Zip…", "export-zip"),
+              item("Reveal in File Manager", "open-externally"),
+            ]
+        : isMountPath
+          ? [
+              ...(mountForPath
+                ? [
+                    item("Refresh Share", "refresh-share-mount"),
+                    item("Remove Share from Workspace", "unmount-share"),
+                    separator,
+                  ]
+                : [item("Refresh Shares", "refresh-share-mount"), separator]),
               input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
               separator,
               item("Export as Zip…", "export-zip"),
@@ -2598,6 +2651,7 @@ function registerIpcHandlers(): void {
       const { realTarget } = await resolveWorkspaceFile(
         workspace.rootPath,
         input.path,
+        "read",
       );
       shell.showItemInFolder(realTarget);
     }
@@ -2808,6 +2862,7 @@ function registerIpcHandlers(): void {
     const { realTarget } = await resolveWorkspaceFile(
       workspace.rootPath,
       input.relativePath,
+      "read",
     );
     const error = await shell.openPath(realTarget);
     if (error) throw new Error(error);
@@ -3122,6 +3177,14 @@ function registerIpcHandlers(): void {
     if (!input.paths?.length && !input.versionId) {
       throw new Error("Pick a file, folder, or version to share.");
     }
+    // No transitive sharing: mounted shares are someone else's files. The
+    // relay's selector validation refuses reserved paths anyway (the
+    // authoritative gate); this adds the honest product copy.
+    if (input.paths?.some((path) => isSharedWithMePath(path))) {
+      throw new Error(
+        "This came to you through a share — copy it into your own files to share it onward.",
+      );
+    }
     const entry = requireWorkspace(input.workspaceId);
     if (entry.shareView) {
       throw new Error("This is a shared view — only the original workspace can be shared.");
@@ -3153,20 +3216,20 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const result = await relayShareJson<{
       granted: Array<Record<string, unknown>>;
+      received?: Array<Record<string, unknown>>;
     }>("/sync/shares");
     const relayUrl = cachedCredentials?.relayUrl;
-    const granted = (result.granted ?? [])
-      // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
-      // this surface stays the PR-18 path/version share manager.
-      .filter(
-        (row) =>
-          (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel",
-      )
-      .map((row) => ({
-        ...row,
-        shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
-      }));
-    return ListRelaySharesResult.parse({ granted });
+    // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
+    // this surface stays the path/version share manager (grant AND receive).
+    const notChatChannel = (row: Record<string, unknown>) =>
+      (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel";
+    const withCode = (row: Record<string, unknown>) => ({
+      ...row,
+      shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
+    });
+    const granted = (result.granted ?? []).filter(notChatChannel).map(withCode);
+    const received = (result.received ?? []).filter(notChatChannel).map(withCode);
+    return ListRelaySharesResult.parse({ granted, received });
   });
 
   ipcMain.handle(CHANNELS.revokeRelayShare, async (event, payload) => {
@@ -3496,6 +3559,253 @@ function registerIpcHandlers(): void {
     return RefreshSharedViewResult.parse(outcome);
   });
 
+  // ---- Share mounts ----
+  // ONE mount operation at a time per workspace: mount, bulk refresh, and
+  // unmount all interleave at their awaits, and unserialized they can drop
+  // each other's registry rows (stale replace-the-set snapshots) or
+  // re-materialize a folder the unmount just deleted (codex P2 pair). A
+  // simple promise chain is enough — operations are short and rare.
+  const shareMountLocks = new Map<string, Promise<unknown>>();
+  function withShareMountLock<T>(
+    workspaceId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previous = shareMountLocks.get(workspaceId) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    shareMountLocks.set(
+      workspaceId,
+      next.catch(() => undefined),
+    );
+    return next;
+  }
+
+  // The receive side materialized INSIDE a host workspace: the share's
+  // filtered files arrive under shared-with-me/<label>/ as ordinary
+  // read-only files (agent-readable through normal tools). The mount's pull
+  // state lives in its own nested .dohc (invisible to the host tree), and
+  // the host's capture/search/relay-push already exclude shared-with-me via
+  // the effective-policy floor — mounted content cannot leak into the
+  // host's history or its synced copy.
+
+  ipcMain.handle(CHANNELS.mountShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = MountSharePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    // A mount changes the host tree — shared views cannot host mounts.
+    assertWritableWorkspace(workspace);
+    return withShareMountLock(workspace.workspaceId, async () => {
+    const parsed = parseShareCode(input.shareCode);
+    if (!parsed) {
+      throw new Error("That doesn't look like a share code. Copy it again and retry.");
+    }
+    const credentials = await cloudLogin().credentials();
+    if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
+      // Same security gate as openSharedView: the session token is only ever
+      // sent to the relay this machine signed in with.
+      throw new Error(
+        "This share lives on a different server than the one you're signed in to. " +
+          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
+      );
+    }
+    setCachedCredentials(credentials);
+    const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+    const existing = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+    if (existing.some((mount) => mount.shareId === parsed.shareId)) {
+      throw new Error("This share is already added to this workspace.");
+    }
+    let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
+    try {
+      info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
+    } catch (error) {
+      if (error instanceof ShareUnavailableError) {
+        throw new Error(
+          "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
+        );
+      }
+      if (error instanceof RelayUnauthorizedError) {
+        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+      }
+      throw error;
+    }
+    // A chat-channel code has no file content to mount — send the user to
+    // the right surface instead of creating an empty folder.
+    assertMountableSelector(info.selector);
+    // Label dedupe considers BOTH registry mounts and whatever is already on
+    // disk under shared-with-me — a leftover or hand-made folder must never
+    // be adopted (its contents would be overwritten by the pull and deleted
+    // by rollback/unmount). createMountDirectory guards the container
+    // against symlinks BEFORE any mkdir and creates the label EXCLUSIVELY.
+    const sharedWithMeDir = join(workspace.rootPath, SHARED_WITH_ME_FOLDER);
+    const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
+    const mount = {
+      shareId: parsed.shareId,
+      label: mountLabelFor(info.granterEmail, [
+        ...existing.map((m) => m.label),
+        ...onDisk,
+      ]),
+      granterEmail: info.granterEmail,
+      relayUrl: credentials.relayUrl,
+      recipientEmail: credentials.email ?? null,
+    };
+    await createMountDirectory(workspace.rootPath, mount.label);
+    try {
+      // Inside the rollback scope: a failed registry write (ENOSPC, perms)
+      // must also remove the just-created folder — the app deliberately
+      // refuses to adopt or delete unrecorded shared-with-me folders, so an
+      // orphan here would be permanent (codex P2).
+      setWorkspaceShareMounts(workspace.workspaceId, [
+        ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
+        mount,
+      ]);
+      const outcome = await refreshShareMountOnce({
+        hostRoot: workspace.rootPath,
+        mount,
+        relay,
+      });
+      if (outcome.status === "ended") throw new ShareUnavailableError();
+      refreshNativeWorkspaceSurfaces();
+      notifyRenderer();
+      return MountShareResult.parse({
+        workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+        mount: {
+          shareId: mount.shareId,
+          label: mount.label,
+          status: outcome.status,
+          changedPaths: outcome.changedPaths,
+        },
+      });
+    } catch (error) {
+      // Rollback both sides — a failed mount leaves no record and no folder.
+      // The record removal filters the CURRENT set (never a stale snapshot).
+      console.error(`[desktop] mount-share rollback for ${mount.label}:`, error);
+      try {
+        const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+        setWorkspaceShareMounts(
+          workspace.workspaceId,
+          current.filter((m) => m.shareId !== mount.shareId),
+        );
+      } catch {}
+      await removeMountFolder(workspace.rootPath, mount.label).catch(() => undefined);
+      notifyRenderer();
+      if (error instanceof ShareUnavailableError) {
+        throw new Error(
+          "This share was ended before it could be added. Nothing was added to this workspace.",
+        );
+      }
+      throw new Error(
+        "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
+      );
+    }
+    });
+  });
+
+  ipcMain.handle(CHANNELS.refreshShareMounts, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RefreshShareMountsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return withShareMountLock(workspace.workspaceId, async () => {
+    const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+    const results: Array<{
+      shareId: string;
+      label: string;
+      status: "updated" | "unchanged" | "ended";
+      changedPaths: number;
+    }> = [];
+    if (mounts.length === 0) {
+      return RefreshShareMountsResult.parse({ results });
+    }
+    await warmCredentialCache().catch(() => undefined);
+    // ONE credentials snapshot for the whole loop: a sign-out/sign-in while
+    // an awaited refresh runs must never pair the old relay URL with a new
+    // account's token (gpt-5.6-sol P1).
+    const credentials = cachedCredentials;
+    for (const mount of mounts) {
+      if (mount.ended) {
+        results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
+        continue;
+      }
+      // Offline, signed out, signed into a DIFFERENT relay, or signed into a
+      // different ACCOUNT: skip — recipient routes 404 identically for "not
+      // yours" and "revoked", so refreshing under the wrong identity would
+      // permanently (and wrongly) stamp the mount ended.
+      if (
+        !credentials?.relayUrl ||
+        !relayUrlsMatch(credentials.relayUrl, mount.relayUrl) ||
+        (mount.recipientEmail != null &&
+          credentials.email != null &&
+          credentials.email !== mount.recipientEmail)
+      ) {
+        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        continue;
+      }
+      try {
+        const outcome = await refreshShareMountOnce({
+          hostRoot: workspace.rootPath,
+          mount,
+          relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+        });
+        if (outcome.status === "ended") {
+          const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+          setWorkspaceShareMounts(
+            workspace.workspaceId,
+            current.map((m) => (m.shareId === mount.shareId ? { ...m, ended: true } : m)),
+          );
+        }
+        results.push({
+          shareId: mount.shareId,
+          label: mount.label,
+          status: outcome.status,
+          changedPaths: outcome.changedPaths,
+        });
+      } catch (error) {
+        // An expired session must SURFACE, not read as "refreshed, nothing
+        // new" — a manual Refresh Share would otherwise report success
+        // forever while every pull 401s (codex P2).
+        if (error instanceof RelayUnauthorizedError) {
+          throw new Error(
+            "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+          );
+        }
+        // One mount's network failure must not stop the others; report it
+        // as unchanged and move on.
+        console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
+        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+      }
+    }
+    notifyRenderer();
+    return RefreshShareMountsResult.parse({ results });
+    });
+  });
+
+  ipcMain.handle(CHANNELS.unmountShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = UnmountSharePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
+    return withShareMountLock(workspace.workspaceId, async () => {
+    const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+    const mount = mounts.find((m) => m.shareId === input.shareId);
+    if (!mount) throw new Error("This share is not added to this workspace.");
+    // Disk first, record second: a crash between the two leaves a record
+    // whose folder is gone — refresh simply re-materializes or reports
+    // ended — never an orphaned folder that looks like local files. The
+    // record removal filters the CURRENT set (the lock serializes mount
+    // operations, so no writer can interleave here anyway).
+    await removeMountFolder(workspace.rootPath, mount.label);
+    const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+    setWorkspaceShareMounts(
+      workspace.workspaceId,
+      current.filter((m) => m.shareId !== mount.shareId),
+    );
+    refreshNativeWorkspaceSurfaces();
+    notifyRenderer();
+    return UnmountShareResult.parse({
+      workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+    });
+    });
+  });
+
   // Explicit dismissal of the "a choice made on another machine needs a
   // look" notice (0P-C gate fix): the pending remote-resolve set otherwise
   // clears itself when the referenced conflict resolves or converges.
@@ -3567,6 +3877,14 @@ function registerIpcHandlers(): void {
     const input = StartSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertSitePreviewMode(workspace.workspaceId, input.mode);
+    // Mounted shares are someone else's code AND previews carry host-scoped
+    // SDK reads, so EVERY preview mode is refused for shared-with-me roots
+    // (stricter than a shared view, whose whole workspace IS the share).
+    if (isSharedWithMePath(input.siteRoot)) {
+      throw new Error(
+        "This site arrived through a share. Previews run with workspace access, so copy the site into your own files to run it.",
+      );
+    }
     const site = await getSitePackage(workspace.rootPath, input.siteRoot);
     if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
     return StartSitePreviewResult.parse(
@@ -5040,6 +5358,7 @@ function registerIpcHandlers(): void {
     const input = WorkspaceSearchPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const sender = event.sender;
+    latestSearchIdBySender.set(sender.id, input.searchId);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -5084,6 +5403,12 @@ function registerIpcHandlers(): void {
             fileVisibility: decision.fileVisibility,
           },
         });
+        // The engine index deliberately excludes shared-with-me (host
+        // capture ignores mounts), so mounted content searches through the
+        // rg path, streamed AFTER the engine results under the SAME
+        // searchId. Skipped when the workspace has no mounts.
+        const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+        const searchMounts = mounts.length > 0;
         if (!sender.isDestroyed()) {
           sender.send(
             CHANNELS.searchResults,
@@ -5101,9 +5426,60 @@ function registerIpcHandlers(): void {
                 ...(result.threadId ? { threadId: result.threadId } : {}),
                 ...(result.objectId ? { objectId: result.objectId } : {}),
               })),
-              done: true,
+              done: !searchMounts,
               limitHit: false,
             }),
+          );
+        }
+        if (searchMounts) {
+          // Stale-search guard: a newer query may have started its own
+          // mount pass while this handler awaited the engine phase — the
+          // registry's kill-and-replace must never let the OLDER search
+          // cancel it. (The renderer already drops stale batches by id.)
+          if (latestSearchIdBySender.get(sender.id) !== input.searchId) return;
+          // rg include globs are gitignore-style: basename globs float to
+          // any depth (so "*.md" intersects mounts and must be scoped),
+          // while anchored path globs outside the projection cannot match
+          // under it — the pass is skipped entirely.
+          const mountGlob = mountScopedIncludeGlob(input.includeGlob);
+          if (mountGlob === null) {
+            if (!sender.isDestroyed()) {
+              sender.send(
+                CHANNELS.searchResults,
+                SearchResultsEventSchema.parse({
+                  searchId: input.searchId,
+                  entries: [],
+                  done: true,
+                  limitHit: false,
+                }),
+              );
+            }
+            return;
+          }
+          if (!searchCleanupHooked.has(sender)) {
+            searchCleanupHooked.add(sender);
+            sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
+          }
+          await searchRegistry.startSearch(
+            sender.id,
+            workspace.rootPath,
+            input.searchId,
+            {
+              query: input.query,
+              caseSensitive: input.caseSensitive,
+              wholeWord: input.wholeWord,
+              regex: input.regex,
+              includeGlob: mountGlob,
+              excludeGlob: input.excludeGlob,
+            },
+            (batch) => {
+              if (sender.isDestroyed()) return;
+              try {
+                sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
+              } catch (error) {
+                console.error("[desktop] mount search batch dropped:", error);
+              }
+            },
           );
         }
       }

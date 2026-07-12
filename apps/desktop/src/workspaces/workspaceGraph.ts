@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 import { open } from "node:fs/promises";
-import { classifyEngineFilePath } from "@dohc/workspace-engine";
+import { classifyEngineFilePathForRead } from "@dohc/workspace-engine";
 import { resolveWorkspaceFile } from "./workspaceAssets";
 import { listFiles } from "./workspaceFiles";
 
@@ -822,7 +822,7 @@ async function readGraphText(
   rootPath: string,
   relativePath: string,
 ): Promise<{ text: string; truncated: boolean; bytesRead: number }> {
-  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
+  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath, "read");
   const handle = await open(realTarget, "r");
   try {
     const buf = Buffer.alloc(MAX_GRAPH_FILE_TEXT_BYTES + 1);
@@ -859,9 +859,12 @@ async function loadGraphDocuments(rootPath: string): Promise<{
   // search, which fails-closed on the same `classifyEngineFilePath` floor
   // (workspaceSearch.ts + searchIndex.ts) so "what the graph reads" and "what
   // search may reveal" cannot drift apart.
+  // Read-aware: mounted shares are readable content, so their markdown
+  // joins the graph/backlinks like any other file; secrets stay excluded
+  // inside and outside mounts.
   const visiblePaths = listed.files
     .map((file) => file.path)
-    .filter((path) => classifyEngineFilePath(path).kind === "tracked");
+    .filter((path) => classifyEngineFilePathForRead(path).kind === "tracked");
   const graphPaths = visiblePaths.slice(0, MAX_GRAPH_FILES);
   const selected = graphPaths.filter((path) => isMarkdownGraphPath(path));
   const docs: MarkdownGraphDocument[] = [];

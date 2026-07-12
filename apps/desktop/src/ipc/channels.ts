@@ -48,6 +48,8 @@ export const EXPLORER_MENU_COMMANDS = [
   "open-externally",
   "import-files",
   "share",
+  "refresh-share-mount",
+  "unmount-share",
 ] as const;
 
 export type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
@@ -468,6 +470,9 @@ export const CHANNELS = {
   leaveSharedChannel: "desktop:leave-shared-channel",
   openSharedView: "desktop:open-shared-view",
   refreshSharedView: "desktop:refresh-shared-view",
+  mountShare: "desktop:mount-share",
+  refreshShareMounts: "desktop:refresh-share-mounts",
+  unmountShare: "desktop:unmount-share",
   openWorkspace: "desktop:open-workspace",
   listWorkspaceVersions: "desktop:list-workspace-versions",
   createWorkspaceVersion: "desktop:create-workspace-version",

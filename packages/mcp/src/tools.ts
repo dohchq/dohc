@@ -14,6 +14,7 @@ import {
   hasWebDependency,
   mediaTypeForPath,
   packageManagerFromFiles,
+  validateUserReadPath,
   validateUserWritePath,
   type ChangeAuthor,
   type ChangeProvenance,
@@ -26,10 +27,12 @@ import {
   type SiteKind,
   type SiteScripts,
   type WorkspaceSite,
+  isSharedWithMePath,
 } from "@dohc/workspace-core";
 import {
   LinkedChatStoreError,
   classifyEngineFilePath,
+  classifyEngineFilePathForRead,
   createLinkedChatStore,
   createVersionedTextStore,
   type ChatMessage,
@@ -124,8 +127,15 @@ async function isWithinRealRoot(root: string, absolute: string): Promise<boolean
 async function safeResolve(
   ctx: ToolContext,
   relativePath: string,
+  access: "read" | "write" = "write",
 ): Promise<{ ok: true; absolute: string; normalized: string } | { ok: false; reason: string }> {
-  const validated = validateUserWritePath(relativePath);
+  // "write" (the default — fail closed) refuses the reserved shared-with-me
+  // projection; "read" allows it (share mounts exist to be read by agents)
+  // while keeping traversal/encoding/ignored-segment guards identical.
+  const validated =
+    access === "read"
+      ? validateUserReadPath(relativePath)
+      : validateUserWritePath(relativePath);
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
@@ -438,7 +448,7 @@ export async function listWorkspaceFiles(
 > {
   const root =
     args.path && args.path.trim().length > 0
-      ? await safeResolve(ctx, args.path)
+      ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!root.ok) return { ok: false as const, reason: root.reason };
 
@@ -499,7 +509,10 @@ const SECRET_READ_DENIED_REASON =
   "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
 
 function isSecretWorkspacePath(normalizedPath: string): boolean {
-  return classifyEngineFilePath(normalizedPath).kind === "secret";
+  // Read-aware: a mounted `shared-with-me/alex/.env` classifies as the mount
+  // sees it (secret), where the write-side classifier would say "ignored"
+  // and wave it through the floor.
+  return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
 }
 
 export async function readWorkspaceFile(
@@ -511,7 +524,7 @@ export async function readWorkspaceFile(
     offsetBytes?: number;
   },
 ) {
-  const resolved = await safeResolve(ctx, args.path);
+  const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   if (isSecretWorkspacePath(resolved.normalized)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
@@ -660,7 +673,7 @@ export async function searchWorkspaceFiles(
   }
   const root =
     args.path && args.path.trim().length > 0
-      ? await safeResolve(ctx, args.path)
+      ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!root.ok) return { ok: false as const, reason: root.reason };
 
@@ -1598,7 +1611,7 @@ export async function detectSites(
 ): Promise<{ ok: true; sites: WorkspaceSite[]; count: number; detector: "mcp-local" } | { ok: false; reason: string }> {
   const start =
     args.path && args.path.trim().length > 0
-      ? await safeResolve(ctx, args.path)
+      ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
   const allowed = sitePathAllowed(start.normalized);
@@ -1844,8 +1857,21 @@ function escapeHtml(value: string): string {
 }
 
 async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
-  const root = await safeResolve(ctx, siteRoot);
+  const root = await safeResolve(ctx, siteRoot, "read");
   if (!root.ok) return root;
+  // Mounted shares (shared-with-me/) are readable, but site tools execute
+  // or mutate the site (test/build/preview/publish/add-sdk) — running
+  // someone else's shared code with workspace access is refused. Copying
+  // the site into the user's own files makes it runnable. The check is the
+  // shared case-insensitive/alias-normalizing predicate, NOT a literal
+  // compare: normalized paths preserve casing, and "Shared-With-Me/…" names
+  // the same directory on case-insensitive filesystems (CodeRabbit).
+  if (isSharedWithMePath(root.normalized)) {
+    return {
+      ok: false as const,
+      reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
+    };
+  }
   const allowed = sitePathAllowed(root.normalized);
   if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);
@@ -1877,7 +1903,7 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
   }
 
   if (site.entry) {
-    const entry = await safeResolve(ctx, site.entry);
+    const entry = await safeResolve(ctx, site.entry, "read");
     const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
     checks.push({
       name: "entry-file",
@@ -2107,7 +2133,7 @@ export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) 
     review: {
       siteRoot: site.root,
       modes: previewModesForSite(site),
-      includesSharedWithMe: site.root === "shared-with-me" || site.root.startsWith("shared-with-me/"),
+      includesSharedWithMe: isSharedWithMePath(site.root),
     },
     checks: tested.checks,
   };
@@ -2122,8 +2148,14 @@ export async function importData(
   ctx: ToolContext,
   args: { sourcePath: string; databasePath: string; tableName: string },
 ) {
-  const sourceRel = await safeResolve(ctx, args.sourcePath);
+  const sourceRel = await safeResolve(ctx, args.sourcePath, "read");
   if (!sourceRel.ok) return { ok: false as const, reason: sourceRel.reason };
+  // Same secret floor as read/search: an import is a read of the source,
+  // and importing a secret-classified file (".env.csv", mounted or local)
+  // into a visible database would launder its contents past the denial.
+  if (isSecretWorkspacePath(sourceRel.normalized)) {
+    return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+  }
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   const recordable = await ensureRecordable(ctx);
@@ -2178,8 +2210,15 @@ export async function queryDatabase(
   ctx: ToolContext,
   args: { databasePath: string; sql: string },
 ) {
-  const dbRel = await safeResolve(ctx, args.databasePath);
+  // Registered read-only (SELECT enforcement below): a mounted share's
+  // database is queryable like any other readable file.
+  const dbRel = await safeResolve(ctx, args.databasePath, "read");
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
+  // Secret floor before any bytes open: a secret-classified database name
+  // (".env.sqlite", mounted or local) is denied like any other secret read.
+  if (isSecretWorkspacePath(dbRel.normalized)) {
+    return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+  }
   // Only a VISIBLE user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
   if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
@@ -2634,7 +2673,8 @@ export function resolveConflict(args: { base: string; local: string; remote: str
 // Returns the absolute path the desktop should surface (open/select). Path is
 // contained first so it can never point outside the workspace.
 export async function openInDohc(ctx: ToolContext, args: { path: string }) {
-  const resolved = await safeResolve(ctx, args.path);
+  // Opening is a read: mounted files open in dohc like any other file.
+  const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return { ok: true as const, path: resolved.absolute, relativePath: resolved.normalized };
 }

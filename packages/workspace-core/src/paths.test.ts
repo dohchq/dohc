@@ -6,6 +6,7 @@ import {
   isReservedPath,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
+  validateUserReadPath,
   validateUserWritePath,
   hasIgnoredSegment,
   isSiteSourcePath,
@@ -83,6 +84,26 @@ describe("reserved paths", () => {
     const result = validateUserWritePath("shared-with-me/alex/brief.md");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("reserved");
+  });
+
+  it("read validation allows shared-with-me (write reservation, not a secret)", () => {
+    const read = validateUserReadPath("shared-with-me/alex/brief.md");
+    expect(read).toEqual({ ok: true, normalized: "shared-with-me/alex/brief.md" });
+    // Case/alias variants normalize the same way they do on the write side.
+    expect(validateUserReadPath("Shared-With-Me./alex/brief.md").ok).toBe(true);
+  });
+
+  it("read validation still refuses .dohc, traversal, and ignored segments", () => {
+    for (const candidate of [
+      ".dohc/settings.json",
+      "notes/.dohc/x.md",
+      "shared-with-me/../.dohc/x.md",
+      "../escape.md",
+      "%2e%2e/sneak.md",
+      "node_modules/pkg/index.js",
+    ]) {
+      expect(validateUserReadPath(candidate).ok).toBe(false);
+    }
   });
 });
 

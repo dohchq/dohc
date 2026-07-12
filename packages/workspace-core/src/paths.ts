@@ -37,16 +37,31 @@ export function stripWindowsAliasSuffix(segment: string): string {
 // at ANY depth — a nested `notes/.dohc/x` is just as internal as a top-level
 // one (the watcher/tree suppress `.dohc` everywhere via hasIgnoredSegment), so
 // a user/agent write into one must be refused, not just the first segment.
-export function isReservedPath(relativePath: string): boolean {
+function isDohcMetadataPath(relativePath: string): boolean {
+  return relativePath
+    .replaceAll("\\", "/")
+    .toLowerCase()
+    .split("/")
+    .map(stripWindowsAliasSuffix)
+    .some((segment) => segment === ".dohc");
+}
+
+// The top-level shared-with-me projection: share mounts materialize there,
+// and only mount refresh may write it. It is deliberately a WRITE reservation
+// only — the folder exists to be read (user, agent, local sites), so read
+// validation (validateUserReadPath) allows it while every write surface
+// refuses it.
+export function isSharedWithMePath(relativePath: string): boolean {
   const segments = relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
     .split("/")
     .map(stripWindowsAliasSuffix);
-  return (
-    segments.some((segment) => segment === ".dohc") ||
-    segments[0] === "shared-with-me"
-  );
+  return segments[0] === "shared-with-me";
+}
+
+export function isReservedPath(relativePath: string): boolean {
+  return isDohcMetadataPath(relativePath) || isSharedWithMePath(relativePath);
 }
 
 // Path segments that are dohc/system internals at ANY depth — hidden from the
@@ -90,6 +105,34 @@ export function validateUserWritePath(
   relativePath: string,
   options: { allowIgnoredSegments?: boolean } = {},
 ): WritePathValidation {
+  return validateWorkspacePath(relativePath, {
+    ...options,
+    reserved: isReservedPath,
+  });
+}
+
+// Read-side validation: identical pipeline to validateUserWritePath except
+// the shared-with-me projection is readable — it is a WRITE reservation, not
+// a secret. `.dohc` metadata stays refused at any depth, and traversal /
+// encoding / ignored-segment rules are byte-identical to the write side so
+// the two validators can never drift on what a path MEANS.
+export function validateUserReadPath(
+  relativePath: string,
+  options: { allowIgnoredSegments?: boolean } = {},
+): WritePathValidation {
+  return validateWorkspacePath(relativePath, {
+    ...options,
+    reserved: isDohcMetadataPath,
+  });
+}
+
+function validateWorkspacePath(
+  relativePath: string,
+  options: {
+    allowIgnoredSegments?: boolean;
+    reserved: (normalized: string) => boolean;
+  },
+): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
   if (isAbsolutePathLike(relativePath)) return { ok: false, reason: "absolute" };
   // Percent-encoded dots/separators are traversal in disguise; decode until
@@ -125,7 +168,7 @@ export function validateUserWritePath(
     .filter((segment) => segment !== "" && segment !== ".")
     .join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
-  if (isReservedPath(normalized)) return { ok: false, reason: "reserved" };
+  if (options.reserved(normalized)) return { ok: false, reason: "reserved" };
   if (!options.allowIgnoredSegments && hasIgnoredSegment(normalized)) {
     return { ok: false, reason: "reserved" };
   }

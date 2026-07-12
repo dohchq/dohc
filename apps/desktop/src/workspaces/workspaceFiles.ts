@@ -1,8 +1,9 @@
 import {
   classifyPath,
+  validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
-import { classifyEngineFilePath } from "@dohc/workspace-engine";
+import { classifyEngineFilePathForRead } from "@dohc/workspace-engine";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -666,11 +667,13 @@ export async function collectZipEntries(
   let prefixRel = "";
   let baseName = basename(realRoot);
   if (relativePath !== undefined) {
-    const validated = validateUserWritePath(relativePath);
+    // Read-side validation: export is a read, so mounted shares
+    // (shared-with-me/…) export like the ordinary files they appear to be.
+    const validated = validateUserReadPath(relativePath);
     if (!validated.ok) {
       throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
     }
-    if (classifyEngineFilePath(validated.normalized).kind === "secret") {
+    if (classifyEngineFilePathForRead(validated.normalized).kind === "secret") {
       throw new Error(
         `Secret files never leave the workspace in an export: ${validated.normalized}`,
       );
@@ -740,8 +743,9 @@ export async function collectZipEntries(
           await walk(join(dir, dirent.name), relPath, archivePath);
         }
       } else if (dirent.isFile()) {
-        // Secret-classified files (.env family) stay out of archives.
-        if (classifyEngineFilePath(relPath).kind === "secret") continue;
+        // Secret-classified files (.env family) stay out of archives —
+        // including inside mounted shares (read-aware classification).
+        if (classifyEngineFilePathForRead(relPath).kind === "secret") continue;
         await add(join(dir, dirent.name), archivePath);
       }
     }

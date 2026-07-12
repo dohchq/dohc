@@ -8,6 +8,9 @@ export function DesktopSettings(props: {
   onClose: () => void;
   onAgentActiveChange?: (active: boolean) => void;
   onOpenCloud?: () => void;
+  // Share mounts added/removed from Settings change the workspace tree and
+  // the shell's live mount set.
+  onWorkspaceFilesChanged?: () => void;
 }) {
   return <SettingsDialog {...props} />;
 }

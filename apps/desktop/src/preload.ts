@@ -140,6 +140,9 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
+  mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
+  refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
+  unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),
   openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
   listWorkspaceVersions: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceVersions, payload),

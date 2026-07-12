@@ -40,6 +40,28 @@ export interface JoinedSharedChannel {
   ended?: boolean;
 }
 
+// A share MOUNTED into a host workspace: the received share materializes
+// under shared-with-me/<label>/ inside the host root — ordinary read-only
+// files the user's agent can read with normal tools — refreshed from the
+// share's filtered op log, never pushed. `ended` marks a revoked share:
+// the mounted copy stays readable but stops refreshing.
+export interface ShareMountRecord {
+  shareId: string;
+  // Folder name under shared-with-me/ (a single path segment; re-validated
+  // on every refresh — the registry file is data, not a write path).
+  label: string;
+  granterEmail: string | null;
+  // Same origin-relay pin as ShareViewIdentity.relayUrl: refreshes only ever
+  // run against the relay the share was mounted from.
+  relayUrl: string;
+  // Account pin: shares are addressed to an account, and recipient routes
+  // 404 identically for "not yours" and "revoked". Signed into a DIFFERENT
+  // account, a refresh must SKIP (not flip the mount to ended). Null on
+  // records from before this field existed — those refresh as before.
+  recipientEmail?: string | null;
+  ended?: boolean;
+}
+
 export interface RegistryEntry extends CreatedWorkspace {
   // Present only after the user explicitly enables cloud sync (Phase 9).
   remote?: RemoteIdentity;
@@ -49,6 +71,8 @@ export interface RegistryEntry extends CreatedWorkspace {
   shareView?: ShareViewIdentity;
   // MU-C4: shared channels joined INTO this workspace's chat store.
   sharedChannels?: JoinedSharedChannel[];
+  // Share mounts materialized into this workspace's shared-with-me/.
+  shareMounts?: ShareMountRecord[];
 }
 
 interface RegistryFile {
@@ -188,6 +212,17 @@ export function createRegistryStore(registryFile: string) {
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       if (sharedChannels.length === 0) delete entry.sharedChannels;
       else entry.sharedChannels = sharedChannels;
+      write(registry);
+    },
+
+    // Share mounts: replace the workspace's mount set (same replace-the-set
+    // write shape as setSharedChannels — callers compute the next set).
+    setShareMounts(workspaceId: string, shareMounts: ShareMountRecord[]): void {
+      const registry = read();
+      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (shareMounts.length === 0) delete entry.shareMounts;
+      else entry.shareMounts = shareMounts;
       write(registry);
     },
 

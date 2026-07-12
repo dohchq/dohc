@@ -80,6 +80,10 @@ export function DatabaseStudioView(props: {
   path: string;
   refreshKey?: number;
   onSharePath?: (path: string) => void;
+  // Mounted shares (and other read-only surfaces): cells never enter edit
+  // mode — main refuses the write anyway, but the grid must not offer an
+  // edit that can only fail on commit.
+  readOnly?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -355,9 +359,11 @@ export function DatabaseStudioView(props: {
                     </span>
                   </div>
                   <div className="mt-1 text-[12px] text-subtle">
-                    {editableRowCount === 0
-                      ? "Read-only: no unique row key in this snapshot"
-                      : `${editableRowCount} editable row${editableRowCount === 1 ? "" : "s"} by row key`}
+                    {props.readOnly
+                      ? "Read-only: this database arrived through a share"
+                      : editableRowCount === 0
+                        ? "Read-only: no unique row key in this snapshot"
+                        : `${editableRowCount} editable row${editableRowCount === 1 ? "" : "s"} by row key`}
                   </div>
                 </div>
                 <label className="flex w-full max-w-[320px] items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 py-1.5 text-subtle transition-colors focus-within:border-ink">
@@ -414,6 +420,7 @@ export function DatabaseStudioView(props: {
                   })
                 }
                 onBeginEdit={(cell, value) => {
+                  if (props.readOnly) return;
                   setDraft(value);
                   setEditing(cell);
                 }}

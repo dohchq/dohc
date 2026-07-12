@@ -1,0 +1,214 @@
+import { lstat, mkdir, realpath, rm } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+import { validateUserWritePath } from "@dohc/workspace-core";
+import {
+  classifyEngineFilePath,
+  type SyncRelayConnection,
+} from "@dohc/workspace-engine";
+import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
+import type { ShareMountRecord } from "./registryStore";
+import {
+  refreshSharedViewOnce,
+  repairSharedViewProjection,
+  type RefreshSharedViewOutcome,
+} from "./sharedView";
+
+// Share mounts: the receive side of a relay share materialized INSIDE a host
+// workspace as shared-with-me/<label>/ — ordinary read-only files the user's
+// agent reads with normal tools — instead of (or alongside) the standalone
+// shared-view window. Each mount is its own pull target: the nested
+// <mount>/.dohc/engine/engine.db holds the share's replayed op log and fetch
+// cursor, and is invisible to the host (`.dohc` is ignored at any depth).
+// The host's own capture/search/relay-push already exclude shared-with-me
+// via the effective-policy floor, so mounted content can never leak into the
+// host's history or its synced copy.
+//
+// Everything here trusts its caller (main) for authorization: the host
+// workspace is resolved via requireWorkspace and the relay connection is
+// built from the machine's own credentials — never from renderer input.
+
+// Folder-name budget for a mount label; generous but bounded (labels become
+// one path component under shared-with-me/).
+const MOUNT_LABEL_MAX = 64;
+
+// A mount label must be exactly one safe path segment. The registry file is
+// data, not a write path into the tree — labels are re-validated on every
+// use so an edited registry cannot smuggle traversal into materialization.
+export function validMountLabel(label: string): boolean {
+  if (label.length === 0 || label.length > MOUNT_LABEL_MAX) return false;
+  const validated = validateUserWritePath(label);
+  // A secret-shaped label (".env", "prod.env") would have the read
+  // classifier taint the whole mount — suppressed from search/graph/export
+  // and denied to agents — so such labels are invalid by construction.
+  if (classifyEngineFilePath(label).kind === "secret") return false;
+  return validated.ok && validated.normalized === label && !label.includes("/");
+}
+
+// Derive a mount label from the granter: the email local part reduced to a
+// conservative charset, deduplicated against existing labels the same way
+// imports deduplicate basenames ("alex", "alex (2)", …).
+export function mountLabelFor(
+  granterEmail: string | null,
+  existingLabels: readonly string[],
+): string {
+  const localPart = (granterEmail ?? "").split("@")[0] ?? "";
+  let base =
+    localPart
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^[-._]+|[-._]+$/g, "")
+      .slice(0, MOUNT_LABEL_MAX - 8) || "share";
+  // "prod.env@example.com" must not produce a secret-shaped label that the
+  // read classifier would suppress: rewrite dots until the shape is safe.
+  if (classifyEngineFilePath(base).kind === "secret") {
+    base = base.replaceAll(".", "-");
+  }
+  if (classifyEngineFilePath(base).kind === "secret") base = "share";
+  const taken = new Set(existingLabels.map((label) => label.toLowerCase()));
+  if (!taken.has(base) && validMountLabel(base)) return base;
+  for (let attempt = 2; ; attempt += 1) {
+    const candidate = `${base} (${attempt})`;
+    if (!taken.has(candidate) && validMountLabel(candidate)) return candidate;
+  }
+}
+
+export function mountRootFor(hostRoot: string, label: string): string {
+  if (!validMountLabel(label)) {
+    throw new Error(`Invalid share mount label: ${label}`);
+  }
+  const target = resolve(join(hostRoot, SHARED_WITH_ME_FOLDER, label));
+  const container = resolve(join(hostRoot, SHARED_WITH_ME_FOLDER));
+  // Containment sandwich even though validMountLabel already refused
+  // separators/traversal — this is the last hop before fs operations.
+  if (target !== container && !target.startsWith(`${container}${sep}`)) {
+    throw new Error(`Share mount escapes shared-with-me: ${label}`);
+  }
+  if (target === container) {
+    throw new Error(`Share mount label resolves to shared-with-me itself: ${label}`);
+  }
+  return target;
+}
+
+// The REAL-path guard the lexical check above cannot give: refuses a
+// symlinked shared-with-me or label directory (at either component) before
+// any materialization. A refresh writes relay-controlled bytes, so a link
+// planted at either level must never redirect those writes outside the
+// workspace (gpt-5.6-sol P1). The workspace root itself is realpath'd first,
+// so ancestor system symlinks above the workspace stay legal.
+async function assertRealMountRoot(hostRoot: string, label: string): Promise<void> {
+  const realHost = await realpath(hostRoot);
+  for (const relative of [
+    SHARED_WITH_ME_FOLDER,
+    `${SHARED_WITH_ME_FOLDER}/${label}`,
+  ]) {
+    const absolute = join(realHost, ...relative.split("/"));
+    const stat = await lstat(absolute).catch(() => null);
+    if (stat === null) continue; // not created yet — mkdir will make a real dir
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Share mount path is not a real directory: ${relative}`);
+    }
+  }
+}
+
+// Creates the mount directory, guarding the container FIRST: a symlinked
+// shared-with-me must be refused before mkdir would follow it and create the
+// label outside the workspace (codex P2 — the refresh guard alone ran after
+// this write). The label directory itself is created EXCLUSIVELY: a mount
+// only ever owns a directory it created — a leftover or hand-made folder
+// must never be adopted (pulls would overwrite it; rollback/unmount would
+// delete it).
+export async function createMountDirectory(
+  hostRoot: string,
+  label: string,
+): Promise<void> {
+  const rootDir = mountRootFor(hostRoot, label);
+  await assertRealMountRoot(hostRoot, label);
+  const container = join(await realpath(hostRoot), SHARED_WITH_ME_FOLDER);
+  await mkdir(container, { recursive: true });
+  await mkdir(rootDir); // NOT recursive: EEXIST refuses adoption
+}
+
+// A mount needs file content to follow: a selector with no paths and no
+// version is a different grant kind (a chat-channel share) that must be
+// joined from Chats, not mounted as an (empty) folder.
+export function assertMountableSelector(selector: {
+  paths: readonly string[];
+  versionId: string | null;
+}): void {
+  if (selector.paths.length === 0 && selector.versionId === null) {
+    throw new Error(
+      "This code is for a shared chat channel — join it from Chats instead of mounting it.",
+    );
+  }
+}
+
+// The store-scoping workspace id inside the mount's own nested engine.db.
+// Purely local and deterministic; it never leaves the machine.
+export function mountStoreWorkspaceIdFor(shareId: string): string {
+  return `share-mount-${shareId}`;
+}
+
+// One refresh pass for one mount: pull the share's filtered ops into the
+// mount's nested store, materialize under shared-with-me/<label>/, commit
+// the cursor. Same crash-safe ordering as the standalone shared view
+// (materialize before commit; re-replay is idempotent). Revocation comes
+// back as status "ended" with the files left exactly as they were.
+export async function refreshShareMountOnce(input: {
+  hostRoot: string;
+  mount: Pick<ShareMountRecord, "shareId" | "label">;
+  relay: SyncRelayConnection;
+}): Promise<RefreshSharedViewOutcome> {
+  const rootDir = mountRootFor(input.hostRoot, input.mount.label);
+  await assertRealMountRoot(input.hostRoot, input.mount.label);
+  const storeWorkspaceId = mountStoreWorkspaceIdFor(input.mount.shareId);
+  // Repair BEFORE pulling: the pull only replays deltas, so a file tampered
+  // on disk (rogue tool — every dohc surface refuses these writes) must be
+  // re-projected from the mount's store or refreshes would report
+  // "unchanged" over broken content. Running the repair first also
+  // self-heals a tampered directory chain (planted symlinks removed and the
+  // real tree rebuilt) so the pull materializes onto a healthy projection
+  // instead of wedging on its containment guards.
+  const repaired = await repairSharedViewProjection(rootDir, storeWorkspaceId);
+  const outcome = await refreshSharedViewOnce({
+    rootDir,
+    workspaceId: storeWorkspaceId,
+    relay: input.relay,
+    shareId: input.mount.shareId,
+  });
+  if (repaired === 0) return outcome;
+  return {
+    status: outcome.status === "ended" ? "ended" : "updated",
+    changedPaths: outcome.changedPaths + repaired,
+  };
+}
+
+// Unmount: delete the projection folder (nested engine store included). The
+// mount is a projection of the granter's data — removing it destroys no
+// source of truth, so a plain recursive remove is honest. Callers remove the
+// registry record; this only owns the disk side.
+export async function removeMountFolder(
+  hostRoot: string,
+  label: string,
+): Promise<void> {
+  mountRootFor(hostRoot, label); // label validation + lexical containment
+  const realHost = await realpath(hostRoot);
+  const container = join(realHost, SHARED_WITH_ME_FOLDER);
+  const containerStat = await lstat(container).catch(() => null);
+  if (containerStat === null) return; // nothing to remove
+  if (containerStat.isSymbolicLink() || !containerStat.isDirectory()) {
+    throw new Error(
+      `Share mount path is not a real directory: ${SHARED_WITH_ME_FOLDER}`,
+    );
+  }
+  const leaf = join(container, label);
+  const leafStat = await lstat(leaf).catch(() => null);
+  if (leafStat === null) return; // already gone
+  if (leafStat.isSymbolicLink()) {
+    // A tampered symlinked mount root is removed AS A LINK — rm without
+    // `recursive` unlinks the entry itself, never following it — so unmount
+    // always succeeds instead of wedging the share in Settings/Explorer.
+    await rm(leaf, { force: true });
+    return;
+  }
+  await rm(leaf, { recursive: true, force: true });
+}

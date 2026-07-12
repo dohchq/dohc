@@ -7,6 +7,7 @@ import { OpenSharedView } from "./OpenSharedView";
 const bridgeMock = {
   cloudStatus: vi.fn(),
   openSharedView: vi.fn(),
+  mountShare: vi.fn(),
   pickWorkspaceRoot: vi.fn(),
   cloudLoginStart: vi.fn(),
   cloudLoginPoll: vi.fn(),
@@ -34,6 +35,10 @@ beforeEach(() => {
   });
   bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/ice/dohc/shared");
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
+  bridgeMock.mountShare.mockResolvedValue({
+    workspace: { ...SHARED_VIEW, shareView: undefined },
+    mount: { shareId: "share-1", label: "granter", status: "updated", changedPaths: 3 },
+  });
 });
 
 afterEach(() => {
@@ -65,6 +70,87 @@ describe("OpenSharedView", () => {
         expect.objectContaining({ workspaceId: "ws-shared-view" }),
       ),
     );
+  });
+
+  it("defaults to mounting into the host workspace when opened from inside one", async () => {
+    const user = userEvent.setup();
+    const onMounted = vi.fn();
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        mountInto={{ workspaceId: "ws-host", onMounted }}
+      />,
+    );
+
+    // Mount mode is the default: no folder picker, the primary action says so.
+    expect(
+      (await screen.findByTestId("open-share-mode-mount")).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.queryByTestId("open-share-choose-folder")).toBeNull();
+
+    await user.type(
+      screen.getByTestId("open-share-code"),
+      "dohc-share:share-1:http://localhost:1788",
+    );
+    await user.click(screen.getByTestId("open-share-start"));
+
+    await waitFor(() =>
+      expect(bridgeMock.mountShare).toHaveBeenCalledWith({
+        workspaceId: "ws-host",
+        shareCode: "dohc-share:share-1:http://localhost:1788",
+      }),
+    );
+    await waitFor(() => expect(onMounted).toHaveBeenCalledWith("granter"));
+    expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a mount failure in the dialog error slot", async () => {
+    const user = userEvent.setup();
+    bridgeMock.mountShare.mockRejectedValue(
+      new Error("This share is already added to this workspace."),
+    );
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        mountInto={{ workspaceId: "ws-host", onMounted: () => {} }}
+      />,
+    );
+
+    await user.type(
+      await screen.findByTestId("open-share-code"),
+      "dohc-share:share-1:http://localhost:1788",
+    );
+    await user.click(screen.getByTestId("open-share-start"));
+
+    expect(
+      (await screen.findByTestId("open-share-error")).textContent,
+    ).toContain("already added to this workspace");
+  });
+
+  it("can still open a separate read-only view from inside a workspace", async () => {
+    const user = userEvent.setup();
+    const onReady = vi.fn();
+    render(
+      <OpenSharedView
+        onWorkspaceReady={onReady}
+        onBack={() => {}}
+        mountInto={{ workspaceId: "ws-host", onMounted: () => {} }}
+      />,
+    );
+
+    await user.click(await screen.findByTestId("open-share-mode-separate"));
+    await user.type(
+      screen.getByTestId("open-share-code"),
+      "dohc-share:share-1:http://localhost:1788",
+    );
+    await user.click(screen.getByTestId("open-share-choose-folder"));
+    await screen.findByText("/home/ice/dohc/shared");
+    await user.click(screen.getByTestId("open-share-start"));
+
+    await waitFor(() => expect(bridgeMock.openSharedView).toHaveBeenCalled());
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
   it("stays disabled until both a code and a folder exist", async () => {

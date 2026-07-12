@@ -115,6 +115,25 @@ describe("registry store", () => {
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
   });
 
+  it("records, marks ended, and clears share mounts", () => {
+    store.register(personal);
+    const mount = {
+      shareId: "share-9",
+      label: "alex",
+      granterEmail: "alex@example.com",
+      relayUrl: "http://relay.test",
+    };
+    store.setShareMounts("ws-1", [mount]);
+    expect(store.find("ws-1")?.shareMounts).toEqual([mount]);
+
+    store.setShareMounts("ws-1", [{ ...mount, ended: true }]);
+    const reopened = createRegistryStore(registryPath);
+    expect(reopened.find("ws-1")?.shareMounts).toEqual([{ ...mount, ended: true }]);
+
+    store.setShareMounts("ws-1", []);
+    expect(store.find("ws-1")?.shareMounts).toBeUndefined();
+  });
+
   it("remove unregisters a workspace and tolerates unknown ids (failed-join rollback)", () => {
     store.register(personal);
     store.remove("ws-1");

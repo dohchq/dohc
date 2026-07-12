@@ -221,6 +221,7 @@ export type {
 export {
   WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS,
   classifyEngineFilePath,
+  classifyEngineFilePathForRead,
   searchWorkspaceEngine,
 } from "./workspaceSearch";
 export { queryChatMessagesGranular } from "./searchIndex";
