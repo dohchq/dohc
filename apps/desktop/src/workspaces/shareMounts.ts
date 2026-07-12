@@ -148,17 +148,20 @@ export async function refreshShareMountOnce(input: {
   const rootDir = mountRootFor(input.hostRoot, input.mount.label);
   await assertRealMountRoot(input.hostRoot, input.mount.label);
   const storeWorkspaceId = mountStoreWorkspaceIdFor(input.mount.shareId);
+  // Repair BEFORE pulling: the pull only replays deltas, so a file tampered
+  // on disk (rogue tool — every dohc surface refuses these writes) must be
+  // re-projected from the mount's store or refreshes would report
+  // "unchanged" over broken content. Running the repair first also
+  // self-heals a tampered directory chain (planted symlinks removed and the
+  // real tree rebuilt) so the pull materializes onto a healthy projection
+  // instead of wedging on its containment guards.
+  const repaired = await repairSharedViewProjection(rootDir, storeWorkspaceId);
   const outcome = await refreshSharedViewOnce({
     rootDir,
     workspaceId: storeWorkspaceId,
     relay: input.relay,
     shareId: input.mount.shareId,
   });
-  // Repair local drift even when the relay had nothing new: the pull only
-  // replays deltas, so a file tampered on disk (rogue tool — every dohc
-  // surface refuses these writes) must be re-projected from the mount's
-  // store or refreshes would report "unchanged" over broken content.
-  const repaired = await repairSharedViewProjection(rootDir, storeWorkspaceId);
   if (repaired === 0) return outcome;
   return {
     status: outcome.status === "ended" ? "ended" : "updated",

@@ -280,18 +280,19 @@ describe("refreshShareMountOnce", () => {
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v2");
 
-    // A planted DIRECTORY symlink on the write path refuses the pass — the
-    // realpath parent check sees the escape before any byte lands.
+    // A planted DIRECTORY symlink on the write path SELF-HEALS: the repair
+    // pass removes the link (as a link), rebuilds the real tree, and the
+    // pull lands v3 inside the workspace — never a byte through the link.
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addWrite("docs/brief.md", "v3");
-    await expect(
-      refreshShareMountOnce({
-        hostRoot: host,
-        mount: { shareId: SHARE_ID, label: "alex" },
-        relay: relay.connection(),
-      }),
-    ).rejects.toThrow(/escapes the workspace/);
+    const healed = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(healed.status).toBe("updated");
+    expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v3");
     expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
   });
 
@@ -324,6 +325,7 @@ describe("refreshShareMountOnce", () => {
       mount: { shareId: SHARE_ID, label: "alex" },
       relay: relay.connection(),
     });
+    expect(restored.status).toBe("updated");
     expect(restored.changedPaths).toBe(1);
     expect(await readFile(mounted, "utf8")).toBe("authoritative");
 
@@ -349,16 +351,19 @@ describe("refreshShareMountOnce", () => {
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
-    // The granter writes a DEEP path: recursive mkdir must not create
-    // "deep/" through the planted link before containment runs.
+    // The granter writes a DEEP path: the repair pass heals the planted
+    // link first, so the deep write lands inside the workspace and nothing
+    // is ever created through the link.
     relay.addWrite("docs/deep/file.md", "payload");
-    await expect(
-      refreshShareMountOnce({
-        hostRoot: host,
-        mount: { shareId: SHARE_ID, label: "alex" },
-        relay: relay.connection(),
-      }),
-    ).rejects.toThrow(/escapes the workspace/);
+    const outcome = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(outcome.status).toBe("updated");
+    expect(
+      await readFile(join(mountRoot, "docs/deep/file.md"), "utf8"),
+    ).toBe("payload");
     expect(existsSync(join(elsewhere, "deep"))).toBe(false);
   });
 
@@ -388,18 +393,19 @@ describe("refreshShareMountOnce", () => {
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
     // Plant a directory symlink where the granter's delete will point: the
-    // unlink must not route through it to a file outside the workspace.
+    // repair pass heals the link first, the delete lands on the REAL tree,
+    // and the file behind the link is never touched.
     await writeFile(join(elsewhere, "brief.md"), "victim");
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addDelete("docs/brief.md");
-    await expect(
-      refreshShareMountOnce({
-        hostRoot: host,
-        mount: { shareId: SHARE_ID, label: "alex" },
-        relay: relay.connection(),
-      }),
-    ).rejects.toThrow(/escapes the workspace/);
+    const outcome = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(outcome.status).toBe("updated");
+    expect(existsSync(join(mountRoot, "docs/brief.md"))).toBe(false);
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
   });
 

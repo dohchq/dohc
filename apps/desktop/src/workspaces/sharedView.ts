@@ -118,8 +118,31 @@ export async function repairSharedViewProjection(
   rootDir: string,
   workspaceId: string,
 ): Promise<number> {
+  // A root that doesn't exist yet (first refresh materializes it) has
+  // nothing to repair.
+  const maybeRealRoot = await realpath(rootDir).catch(() => null);
+  if (maybeRealRoot === null) return 0;
+  const realRoot: string = maybeRealRoot;
   const store = createVersionedTextStore(rootDir);
-  let damaged: ShareViewChangedPath[] = [];
+  const containsReal = (candidate: string) =>
+    candidate === realRoot || candidate.startsWith(`${realRoot}${sep}`);
+  // Self-heal a tampered tree: remove the first symlinked component on the
+  // path (AS A LINK — rm without recursive never follows) so the
+  // re-materialization below can rebuild the real directory chain instead
+  // of wedging on the containment guard.
+  async function healTamperedAncestors(relativePath: string): Promise<void> {
+    let current: string = realRoot;
+    for (const segment of relativePath.split("/")) {
+      current = resolve(current, segment);
+      const stat = await lstat(current).catch(() => null);
+      if (stat === null) return; // chain ends — nothing deeper exists
+      if (stat.isSymbolicLink()) {
+        await rm(current, { force: true });
+        return;
+      }
+    }
+  }
+  const damaged: ShareViewChangedPath[] = [];
   try {
     const main = await store.ensureMainVersion({ workspaceId });
     const snapshots = await store.listTextFiles({
@@ -131,21 +154,28 @@ export async function repairSharedViewProjection(
       const contentKind = snapshot.contentKind === "binary" ? "binary" : "text";
       let intact = false;
       try {
-        // lstat first: a symlink is damage regardless of what it points at.
-        const stat = await lstat(target);
-        if (stat.isFile()) {
-          const bytes = await readFile(target);
-          if (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0) {
-            intact =
-              createHash("sha256").update(bytes).digest("hex") === snapshot.sha256;
-          } else {
-            intact = bytes.toString("utf8") === snapshot.text;
+        // REAL-parent containment before trusting anything on disk: a
+        // symlinked ancestor would redirect the read to attacker-controlled
+        // bytes that could pass the hash compare (CodeRabbit). Then lstat
+        // the leaf: a symlink is damage regardless of what it points at.
+        const realParent = await realpath(dirname(target));
+        if (containsReal(realParent)) {
+          const stat = await lstat(target);
+          if (stat.isFile()) {
+            const bytes = await readFile(target);
+            if (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0) {
+              intact =
+                createHash("sha256").update(bytes).digest("hex") === snapshot.sha256;
+            } else {
+              intact = bytes.toString("utf8") === snapshot.text;
+            }
           }
         }
       } catch {
         intact = false; // missing or unreadable — re-materialize
       }
       if (!intact) {
+        await healTamperedAncestors(snapshot.path);
         damaged.push({ path: snapshot.path, operation: "write", contentKind });
       }
     }
