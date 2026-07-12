@@ -2,6 +2,7 @@ import { ChevronDown, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 import {
+  isChatsTabPath,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -12,6 +13,7 @@ import {
 function fileName(path: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
+  if (isChatsTabPath(path)) return "Chats";
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     const name = parsed?.filePath.split("/").pop() ?? "Diff";
@@ -24,6 +26,7 @@ function fileName(path: string): string {
 function tabTitle(path: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
+  if (isChatsTabPath(path)) return "Workspace chats";
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return parsed ? `History diff: ${parsed.filePath}` : "History diff";

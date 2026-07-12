@@ -8,6 +8,7 @@ import {
   History,
   Lock,
   Maximize2,
+  MessagesSquare,
   PanelRight,
   RefreshCw,
   Search,
@@ -92,6 +93,8 @@ import {
   TryInVersionBanner,
   TryInVersionReviewCard,
 } from "./workbench/TryInVersion";
+// Type-only: erased at compile time, so the ChatsView chunk stays lazy.
+import type { ChatsDrafts, ChatsNav } from "./workbench/ChatsView";
 import {
   activateTab,
   closeTab,
@@ -103,8 +106,10 @@ import {
   momentDiffTabPath,
   parseMomentDiffTabPath,
   defaultWorkbenchState,
+  CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  isChatsTabPath,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -1278,6 +1283,29 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
+  // Chats expand-to-tab. Chats is a LIVE surface (presence lease, IPC-backed
+  // state, labeled composer ids), so unlike graph/history at most ONE
+  // ChatsView is ever mounted: while the chats tab is ACTIVE the side panel
+  // shows a note instead of a second instance, and an inactive tab is
+  // unmounted anyway (only the active tab renders). This ref is chats' ONE
+  // current position (runtime-only): whichever instance is live reports into
+  // it, and whichever instance mounts next seeds from it — expanding opens
+  // the tab on the panel's conversation, and closing (or leaving) the tab
+  // hands the conversation back to the panel.
+  const chatsNav = useRef<ChatsNav | null>(null);
+  const onChatsNav = useCallback((nav: ChatsNav) => {
+    chatsNav.current = nav;
+  }, []);
+  // Unsent drafts ride the same handoff: mirrored live (a ref write per
+  // keystroke, no re-render) and seeded into the next mount, so expanding
+  // or collapsing chats never discards what the user typed.
+  const chatsDrafts = useRef<ChatsDrafts | null>(null);
+  const onChatsDrafts = useCallback((drafts: ChatsDrafts) => {
+    chatsDrafts.current = drafts;
+  }, []);
+  const openChatsTab = useCallback(() => {
+    mutateWb((state) => openTab(state, CHATS_TAB_PATH));
+  }, [mutateWb]);
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -1941,6 +1969,24 @@ export function DesktopWorkspaceShell(props: {
     </>
   );
 
+  // ONE prop bundle for both ChatsView mounts (panel and page) so the live,
+  // presence-bearing surface can never drift between the two call sites —
+  // they differ only by `variant`.
+  const chatsViewProps = {
+    workspaceId,
+    initialNav: chatsNav.current ?? undefined,
+    initialDrafts: chatsDrafts.current ?? undefined,
+    onNavChange: onChatsNav,
+    onDraftsChange: onChatsDrafts,
+    onOpenFileChat: openFileChatInRail,
+    onOpenPath: openFile,
+    onError: setShellError,
+    mentionCandidates,
+    addressedToMe,
+    onOpenAddressed: openAgentNotification,
+    collaboration: chatCollaboration,
+  } as const;
+
   return (
     <div
       data-testid="workspace-shell"
@@ -2064,6 +2110,19 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
+              ) : wb.activeView === "chats" &&
+                versionsEnabled &&
+                !isChatsTabPath(wb.activeTab) ? (
+                <button
+                  type="button"
+                  data-testid="chats-open-tab"
+                  aria-label="Open chats in tab"
+                  title="Open chats in tab"
+                  onClick={openChatsTab}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <Maximize2 size={13} aria-hidden />
+                </button>
               ) : wb.activeView === "sites" ? (
                 <button
                   type="button"
@@ -2105,18 +2164,23 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "chats" ? (
               versionsEnabled ? (
-                <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView
-                    workspaceId={workspaceId}
-                    onOpenFileChat={openFileChatInRail}
-                    onOpenPath={openFile}
-                    onError={(message) => setShellError(message)}
-                    mentionCandidates={mentionCandidates}
-                    addressedToMe={addressedToMe}
-                    onOpenAddressed={openAgentNotification}
-                    collaboration={chatCollaboration}
-                  />
-                </Suspense>
+                isChatsTabPath(wb.activeTab) ? (
+                  // The chats TAB is live — never mount a second chat client
+                  // (duplicate presence lease, composer ids, diverging state).
+                  <div
+                    data-testid="chats-panel-deferred"
+                    className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+                  >
+                    <MessagesSquare size={16} aria-hidden className="text-subtle" />
+                    <span className="text-xs text-muted">
+                      Chats are open as a tab.
+                    </span>
+                  </div>
+                ) : (
+                  <Suspense fallback={<PanelLoading label="Chats" />}>
+                    <LazyChatsView {...chatsViewProps} />
+                  </Suspense>
+                )
               ) : (
                 // Transient: the settings load corrects activeView moments
                 // later; never a blank panel meanwhile.
@@ -2270,6 +2334,19 @@ export function DesktopWorkspaceShell(props: {
                 workspaceId={workspaceId}
                 versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
               />
+            ) : isChatsTabPath(wb.activeTab) ? (
+              versionsEnabled ? (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyChatsView {...chatsViewProps} variant="page" />
+                </Suspense>
+              ) : (
+                <div
+                  data-testid="chats-page-off"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
+                >
+                  Chats aren&apos;t enabled for this workspace.
+                </div>
+              )
             ) : isSiteTabPath(wb.activeTab) ? (
               activeSiteRoot ? (
                 <Suspense fallback={<PanelLoading label="site" />}>

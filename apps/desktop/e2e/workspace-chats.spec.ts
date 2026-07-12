@@ -4,9 +4,11 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
   seedWorkspaceSettings,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // WS-E — CHATS EXPANSION (plan PR 12/13): a flagged workspace gets a Chats
@@ -140,6 +142,100 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
       .filter({ hasText: "The zeppelin-cadence report is ready." });
     await expect(chatGroup).toBeVisible({ timeout: 20_000 });
     await expect(chatGroup.getByText("Chat", { exact: true })).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// Expand-to-tab (chats/expand-to-tab): the panel's Maximize button opens
+// Chats as a first-class editor tab seeded with the panel's CURRENT
+// conversation; the tab closes/reopens like any other tab.
+test("flagged: expand opens chats as an editor tab on the current conversation", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, "chats-expand-e2e");
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    await writeWorkspaceFiles(temp, [
+      { path: "notes.md", contents: "# Notes\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+
+    // A document tab first, so tab switching can be exercised later.
+    await explorerRow(page, "notes.md").click();
+    await expect(page.getByTestId("tab-notes.md")).toBeVisible();
+
+    // Into a conversation in the PANEL.
+    await page.getByTestId("activity-chats").click();
+    await expect(page.getByTestId("chats-view")).toBeVisible();
+    await page.getByTestId("chats-channel").click();
+    const newThreadComposer = page.getByTestId("chats-new-thread-composer");
+    await newThreadComposer.fill("Expand me into a tab.");
+    await newThreadComposer.press("Enter");
+    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+
+    // An unsent reply draft rides the expand handoff instead of vanishing
+    // with the unmounted panel instance.
+    await page.getByTestId("chats-composer").fill("draft in flight");
+
+    // Expand: a "Chats" editor tab opens ON the same thread, page variant.
+    await page.getByTestId("chats-open-tab").click();
+    const chatsTab = page.getByTestId("tab-dohc://chats");
+    await expect(chatsTab).toBeVisible();
+    await expect(chatsTab).toHaveAttribute("data-active", "true");
+    const pageThreadView = page.locator(
+      '[data-testid="chats-thread-view"][data-variant="page"]',
+    );
+    await expect(pageThreadView).toBeVisible();
+    await expect(
+      pageThreadView.getByTestId("chats-thread-post-title"),
+    ).toHaveText("Expand me into a tab.");
+    await expect(page.getByTestId("chats-composer")).toHaveValue(
+      "draft in flight",
+    );
+
+    // Chats is ONE live surface: while the tab is active the panel defers
+    // (no second presence lease or duplicate composer ids) and the expand
+    // button hides. Exactly ONE reply composer exists in the document.
+    await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
+    await expect(page.getByTestId("chats-open-tab")).toHaveCount(0);
+    await expect(page.getByTestId("chats-composer")).toHaveCount(1);
+
+    // Switching to a document tab hands the conversation back to the panel
+    // (draft included) and the expand button returns; re-activating the
+    // Chats tab defers the panel again.
+    await page.getByTestId("tab-notes.md").click();
+    await expect(
+      page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
+    ).toBeVisible();
+    await expect(page.getByTestId("chats-open-tab")).toBeVisible();
+    await expect(page.getByTestId("chats-composer")).toHaveValue(
+      "draft in flight",
+    );
+    await chatsTab.click();
+    await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
+    await expect(pageThreadView).toBeVisible();
+
+    // The tab is first-class: it closes like any document tab, and the
+    // conversation hands back to the panel — same thread, panel variant.
+    await chatsTab.getByRole("button", { name: "Close Chats" }).click();
+    await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
+    ).toBeVisible();
+
+    // Re-expanding from the overview seeds the tab at the overview.
+    await page.getByTestId("chats-thread-back").click();
+    await page.getByTestId("chats-channel-back").click();
+    await page.getByTestId("chats-open-tab").click();
+    await expect(
+      page.locator('[data-testid="chats-view"][data-variant="page"]'),
+    ).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
