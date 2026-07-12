@@ -226,10 +226,11 @@ body {
   background-clip: padding-box;
 }
 
-/* The editor tab strip scrolls horizontally with no visible scrollbar
- * (VS Code treatment): wheel, active-tab reveal, and the overflow menu are
- * the affordances. A painted bar would eat a third of the 36px strip and
- * push the fixed-height tabs into vertical overflow. */
+/* The editor tab strip scrolls horizontally with the NATIVE scrollbar
+ * hidden (a painted bar would eat a third of the 36px strip and push the
+ * fixed-height tabs into vertical overflow). The visible affordance is the
+ * overlay thumb EditorTabs draws over the strip's bottom edge (VS Code
+ * treatment), plus wheel, active-tab reveal, and the overflow menu. */
 .dohc-tab-strip {
   scrollbar-width: none;
 }
