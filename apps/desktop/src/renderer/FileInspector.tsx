@@ -852,8 +852,12 @@ function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
+        {/* data-dohc-doc-pane: the WHOLE pane is the editor's image drop zone,
+            top-matter included — MarkdownEditor finds it with closest(). See
+            the drop-zone comment in imagePaste.ts. */}
         <div
           data-testid="view-markdown"
+          data-dohc-doc-pane=""
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
@@ -975,8 +979,10 @@ function MarkdownView(props: {
           className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
         />
       ) : mode === "wysiwyg" ? (
+        // data-dohc-doc-pane: see the note on the engine pane above.
         <div
           data-testid="view-markdown"
+          data-dohc-doc-pane=""
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
           <div className="dohc-page-topmatter">

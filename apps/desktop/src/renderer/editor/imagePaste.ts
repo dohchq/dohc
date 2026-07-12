@@ -107,6 +107,48 @@ export type WriteWorkspaceAsset = (
   bytes: Uint8Array,
 ) => Promise<void>;
 
+// One image the user chose through the native `/image` picker. Main read the
+// bytes (it owns the dialog and fs access), so unlike a pasted/dropped File
+// they are already in memory. Structurally the bridge's PickedImageFile — kept
+// as a local shape so this module stays bridge-free and unit-testable.
+export type PickedImage = {
+  name: string;
+  mediaType: string;
+  bytes: Uint8Array;
+};
+
+// Opens the native picker and resolves with the chosen images ([] = cancelled).
+export type PickImages = () => Promise<readonly PickedImage[]>;
+
+// The ONE shape the write+insert path consumes, so a pasted File, a dropped
+// File, and a natively-picked file all travel the exact same code below. Bytes
+// stay lazy (`read()`) because a File's bytes still have to be pulled off disk,
+// while a picked image already carries them.
+export type ImageSource = {
+  name: string;
+  mimeType: string;
+  size: number;
+  read(): Promise<Uint8Array>;
+};
+
+export function fileImageSource(file: File): ImageSource {
+  return {
+    name: file.name,
+    mimeType: file.type,
+    size: file.size,
+    read: async () => new Uint8Array(await file.arrayBuffer()),
+  };
+}
+
+export function pickedImageSource(picked: PickedImage): ImageSource {
+  return {
+    name: picked.name,
+    mimeType: picked.mediaType,
+    size: picked.bytes.byteLength,
+    read: async () => picked.bytes,
+  };
+}
+
 export type ImagePasteContext = {
   workspaceId: string;
   // Current document's workspace-relative path (e.g. `notes/plan.md`).
@@ -115,6 +157,9 @@ export type ImagePasteContext = {
   // Where saved attachments go. Absent → the per-document/"assets" default
   // (the historical behavior), so callers that never set it keep working.
   attachments?: AttachmentSettings;
+  // Opens the native `/image` picker (a main-process dialog at the workspace
+  // root). Absent → `/image` simply cannot pick; paste and drop are unaffected.
+  pickImages?: PickImages;
 };
 
 // Slug of the original filename (sans extension): lowercase, non-alphanumerics
@@ -196,36 +241,38 @@ export function insertImageAtPosition(
   return clamped + node.nodeSize;
 }
 
-// Writes each image to the workspace and inserts an image node for it. Files
+// Writes each image to the workspace and inserts an image node for it. Images
 // too large are skipped with a quiet console warning. Insertions walk forward
 // from the starting position so multiple images land in order.
 //
-// Exported so other entry points (the `/image` slash command) can reuse the
-// exact same write+insert pathway paste/drop use, rather than duplicating it.
+// The ONE write+insert pathway: paste, drop (in-editor and pane-level), and the
+// `/image` native picker all funnel through here, so the attachment-location
+// setting and the document-relative src are applied identically for every entry
+// point rather than being reimplemented per-surface.
 export async function placeImageFiles(
   view: EditorView,
-  files: File[],
+  sources: readonly ImageSource[],
   context: ImagePasteContext,
   startPos: number,
 ): Promise<void> {
   let pos = startPos;
-  for (const file of files) {
-    if (file.size > MAX_IMAGE_BYTES) {
+  for (const source of sources) {
+    if (source.size > MAX_IMAGE_BYTES) {
       console.warn(
-        `[dohc] image "${file.name}" is ${file.size} bytes; skipping paste (max ${MAX_IMAGE_BYTES}).`,
+        `[dohc] image "${source.name}" is ${source.size} bytes; skipping (max ${MAX_IMAGE_BYTES}).`,
       );
       continue;
     }
     let bytes: Uint8Array;
     try {
-      bytes = new Uint8Array(await file.arrayBuffer());
+      bytes = await source.read();
     } catch (error) {
-      console.warn(`[dohc] could not read pasted image "${file.name}":`, error);
+      console.warn(`[dohc] could not read image "${source.name}":`, error);
       continue;
     }
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) continue;
 
-    const filename = generateAssetFilename(file.name, file.type, bytes);
+    const filename = generateAssetFilename(source.name, source.mimeType, bytes);
     // The setting picks the write target; the node/markdown src stays the
     // document-relative (lossless) form the resolver rewrites at render time.
     const { writePath, relativeSrc } = computeAttachmentPaths(
@@ -236,7 +283,7 @@ export async function placeImageFiles(
     try {
       await context.writeAsset(writePath, bytes);
     } catch (error) {
-      console.warn(`[dohc] could not write pasted image "${filename}":`, error);
+      console.warn(`[dohc] could not write image "${filename}":`, error);
       continue;
     }
     pos = insertImageAtPosition(view, { src: relativeSrc, alt: "" }, pos);
@@ -254,12 +301,14 @@ export function handleImagePaste(
   if (files.length === 0) return false;
   event.preventDefault();
   const pos = view.state.selection.from;
-  void placeImageFiles(view, files, context, pos);
+  void placeImageFiles(view, files.map(fileImageSource), context, pos);
   return true;
 }
 
 // editorProps.handleDrop hook. Returns true only when image files are dropped,
-// inserting them at the drop point; other drops fall through to ProseMirror.
+// inserting them at the drop point; other drops (notably an in-editor block or
+// image drag, which carries a ProseMirror slice and NO files) fall through to
+// ProseMirror's own move/reorder handling untouched.
 export function handleImageDrop(
   view: EditorView,
   event: DragEvent,
@@ -271,50 +320,82 @@ export function handleImageDrop(
   const dropPos =
     view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ??
     view.state.selection.from;
-  void placeImageFiles(view, files, context, dropPos);
+  void placeImageFiles(view, files.map(fileImageSource), context, dropPos);
   return true;
 }
 
-// The mime types offered by the native file picker for `/image`.
-export const IMAGE_PICKER_ACCEPT =
-  "image/png,image/jpeg,image/webp,image/gif,image/svg+xml";
-
-// Opens a transient, unattached-until-triggered `<input type="file">` and
-// hands the chosen files to `onFiles`. No new IPC: the native picker is a
-// plain DOM affordance the renderer already has access to. The element is
-// removed after firing (or never appended at all — appendChild isn't
-// required for `.click()`/`change` to work) so nothing leaks into the DOM.
-export function pickImageFiles(
-  onFiles: (files: File[]) => void,
-  doc: Document = document,
-): void {
-  const input = doc.createElement("input");
-  input.type = "file";
-  input.accept = IMAGE_PICKER_ACCEPT;
-  input.multiple = true;
-  input.style.display = "none";
-  input.addEventListener(
-    "change",
-    () => {
-      onFiles(Array.from(input.files ?? []));
-      input.remove();
-    },
-    { once: true },
-  );
-  doc.body.appendChild(input);
-  input.click();
+// True when a drag carries OS files (rather than an in-editor ProseMirror
+// slice). Read from `types` because the actual `files` list is deliberately
+// empty during dragenter/dragover — the browser only exposes it on drop.
+export function dragCarriesFiles(dataTransfer: DataTransfer | null): boolean {
+  if (!dataTransfer) return false;
+  return Array.from(dataTransfer.types).includes("Files");
 }
 
-// `/image` slash command entry point: opens the picker, then writes+inserts
-// each chosen file through the same `placeImageFiles` pathway paste/drop use.
-export function pickAndInsertImages(
+// ── the document-pane drop zone ────────────────────────────────────────────
+//
+// ProseMirror's handleDrop only ever runs for drops that land ON the
+// ProseMirror element, because ProseMirror is also the only thing that
+// preventDefault()s `dragover`, and it only does so for events reaching
+// `view.dom`. The document pane is strictly BIGGER than view.dom — the same
+// scroller also holds the page top-matter (icon, title, properties). A file
+// dropped up there hit Chromium's default file handling instead (which Electron
+// then denies as a navigation), so it silently did nothing.
+//
+// These two handlers make the WHOLE pane accept image files and route them into
+// the same placeImageFiles path. They deliberately do nothing for drags without
+// files, so an in-editor block/image reorder still belongs entirely to
+// ProseMirror.
+
+// Pane `dragover`/`dragenter`: accepting the drag (preventDefault + a copy
+// cursor) is what makes the browser deliver a `drop` event at all.
+export function handlePaneImageDragOver(event: DragEvent): boolean {
+  if (!dragCarriesFiles(event.dataTransfer)) return false;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  return true;
+}
+
+// Pane `drop`. Skips anything ProseMirror already took (it preventDefaults the
+// drops it handles, and this listener sits on an ancestor), so a drop on the
+// document body is never written twice. Everything else — top-matter, pane
+// padding, any gap ProseMirror ignores — lands at the position under the
+// cursor, or at the end of the document when the drop was outside the content.
+export function handlePaneImageDrop(
+  view: EditorView,
+  event: DragEvent,
+  context: ImagePasteContext,
+): boolean {
+  if (event.defaultPrevented) return false;
+  const files = extractImageFiles(event.dataTransfer);
+  if (files.length === 0) return false;
+  event.preventDefault();
+  const pos =
+    view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ??
+    view.state.doc.content.size;
+  void placeImageFiles(view, files.map(fileImageSource), context, pos);
+  return true;
+}
+
+// `/image` slash command entry point: opens the NATIVE picker (a main-process
+// dialog rooted at the workspace directory — a renderer `<input type="file">`
+// cannot be given a starting directory), then writes+inserts each chosen file
+// through the same `placeImageFiles` pathway paste and drop use, so the
+// attachment-location setting applies identically.
+export async function pickAndInsertImages(
   view: EditorView,
   pos: number,
   context: ImagePasteContext,
-  doc: Document = document,
-): void {
-  pickImageFiles((files) => {
-    if (files.length === 0) return;
-    void placeImageFiles(view, files, context, pos);
-  }, doc);
+): Promise<void> {
+  const pick = context.pickImages;
+  if (!pick) return;
+  let picked: readonly PickedImage[];
+  try {
+    picked = await pick();
+  } catch (error) {
+    console.warn("[dohc] the image picker failed:", error);
+    return;
+  }
+  if (picked.length === 0) return; // cancelled
+  await placeImageFiles(view, picked.map(pickedImageSource), context, pos);
 }

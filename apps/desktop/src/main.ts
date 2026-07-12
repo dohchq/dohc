@@ -19,7 +19,7 @@ import {
 } from "electron";
 import { existsSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -170,6 +170,10 @@ import {
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceAssetPayload,
+  MAX_PICKED_IMAGES,
+  PickImageFilesPayload,
+  PickImageFilesResult,
+  WRITE_ASSET_MAX_BYTES,
   SetTitlebarThemePayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
@@ -353,6 +357,7 @@ import {
   type StaticSitePreview,
 } from "./workspaces/siteRunner";
 import {
+  mediaTypeForExtension,
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
@@ -731,18 +736,24 @@ async function startPreviewForSiteUnlocked(
   };
 }
 
-function testImportPaths(): string[] | null {
+// Native dialogs cannot be driven by Playwright, so every dialog-backed IPC
+// gets ONE seam of the same shape: a DOHC_TEST_* env var holding a JSON array
+// of absolute paths, honored only in an unpackaged test build. Shared so the
+// import and image-picker seams cannot drift apart in their validation.
+function testAbsolutePaths(envName: string, maxEntries: number): string[] | null {
   if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
-  const raw = process.env.DOHC_TEST_IMPORT_PATHS;
+  const raw = process.env[envName];
   if (!raw) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error("DOHC_TEST_IMPORT_PATHS must be a JSON array of absolute paths");
+    throw new Error(`${envName} must be a JSON array of absolute paths`);
   }
-  if (!Array.isArray(parsed) || parsed.length > 100) {
-    throw new Error("DOHC_TEST_IMPORT_PATHS must be an array with at most 100 paths");
+  if (!Array.isArray(parsed) || parsed.length > maxEntries) {
+    throw new Error(
+      `${envName} must be an array with at most ${maxEntries} paths`,
+    );
   }
   const paths: string[] = [];
   for (const entry of parsed) {
@@ -752,11 +763,15 @@ function testImportPaths(): string[] | null {
       entry.length > 4096 ||
       !isAbsolute(entry)
     ) {
-      throw new Error("DOHC_TEST_IMPORT_PATHS entries must be absolute paths");
+      throw new Error(`${envName} entries must be absolute paths`);
     }
     paths.push(entry);
   }
   return paths;
+}
+
+function testImportPaths(): string[] | null {
+  return testAbsolutePaths("DOHC_TEST_IMPORT_PATHS", 100);
 }
 
 // Lazy: safeStorage and userData are only safe to touch after app ready, and
@@ -2699,6 +2714,65 @@ function registerIpcHandlers(): void {
       input.relativePath,
       input.bytes,
     );
+  });
+
+  // `/image`: a native open dialog that STARTS AT THE WORKSPACE ROOT (a
+  // renderer <input type="file"> cannot set a starting directory), then reads
+  // the picks here and hands the renderer their bytes — one round trip into
+  // the same write+insert path paste and drop already use. The picked files
+  // are deliberately allowed to live ANYWHERE on disk: this is a user-directed
+  // pick, and the bytes are copied INTO the workspace by writeWorkspaceAsset,
+  // which re-validates containment. The renderer never sees an absolute path.
+  ipcMain.handle(CHANNELS.pickImageFiles, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PickImageFilesPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
+
+    const seam = testAbsolutePaths("DOHC_TEST_PICK_IMAGE_PATHS", MAX_PICKED_IMAGES);
+    let picked: string[];
+    if (seam) {
+      picked = seam;
+    } else {
+      const result = await dialog.showOpenDialog({
+        title: "Insert image",
+        // The workspace directory — where a user's own images live — instead
+        // of wherever the OS last happened to leave the dialog.
+        defaultPath: workspace.rootPath,
+        properties: ["openFile", "multiSelections"],
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"],
+          },
+        ],
+      });
+      picked = result.canceled ? [] : result.filePaths;
+    }
+
+    const { readFile, stat } = await import("node:fs/promises");
+    const files: PickImageFilesResult["files"] = [];
+    for (const path of picked.slice(0, MAX_PICKED_IMAGES)) {
+      try {
+        const info = await stat(path);
+        // Oversize picks are refused the same QUIET way paste refuses them:
+        // skipped with a warning, never a thrown dialog in the user's face.
+        if (!info.isFile() || info.size === 0 || info.size > WRITE_ASSET_MAX_BYTES) {
+          console.warn(
+            `[desktop] skipping picked image "${path}" (${info.size} bytes; max ${WRITE_ASSET_MAX_BYTES}).`,
+          );
+          continue;
+        }
+        files.push({
+          name: basename(path),
+          mediaType: mediaTypeForExtension(path),
+          bytes: new Uint8Array(await readFile(path)),
+        });
+      } catch (error) {
+        console.warn(`[desktop] could not read picked image "${path}":`, error);
+      }
+    }
+    return PickImageFilesResult.parse({ files });
   });
 
   ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {

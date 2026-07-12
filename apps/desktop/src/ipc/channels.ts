@@ -441,6 +441,7 @@ export const CHANNELS = {
   readWorkspaceText: "desktop:read-workspace-text",
   writeWorkspaceText: "desktop:write-workspace-text",
   writeWorkspaceAsset: "desktop:write-workspace-asset",
+  pickImageFiles: "desktop:pick-image-files",
   openFileExternally: "desktop:open-file-externally",
   readWorkspaceGraph: "desktop:read-workspace-graph",
   getBacklinks: "desktop:get-backlinks",

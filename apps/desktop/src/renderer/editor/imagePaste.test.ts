@@ -2,17 +2,20 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   computeAttachmentPaths,
+  dragCarriesFiles,
   extractImageFiles,
   generateAssetFilename,
+  handleImageDrop,
   handleImagePaste,
-  IMAGE_PICKER_ACCEPT,
+  handlePaneImageDragOver,
+  handlePaneImageDrop,
   imageExtension,
   insertImageAtPosition,
   pickAndInsertImages,
-  pickImageFiles,
   sanitizeAttachmentFolderName,
   shortContentHash,
   slugifyBaseName,
+  type PickedImage,
 } from "./imagePaste";
 
 describe("slugifyBaseName", () => {
@@ -195,7 +198,7 @@ describe("extractImageFiles", () => {
 // insert path touches — real ProseMirror views are too heavy for a unit test.
 type MockNode = { nodeSize: number; attrs: Record<string, unknown> };
 
-function makeMockView(docSize = 8) {
+function makeMockView(docSize = 8, coordsPos: number | null = 5) {
   const dispatched: Array<{ pos: number; node: MockNode }> = [];
   const imageType = {
     create: (attrs: Record<string, unknown>): MockNode => ({
@@ -217,6 +220,9 @@ function makeMockView(docSize = 8) {
     dispatch(tr: { pos: number; node: MockNode }) {
       dispatched.push(tr);
     },
+    // Drops resolve their insert position from the cursor coordinates.
+    posAtCoords: (_coords: { left: number; top: number }) =>
+      coordsPos === null ? null : { pos: coordsPos },
   };
   return { view, dispatched };
 }
@@ -351,110 +357,305 @@ describe("handleImagePaste", () => {
   });
 });
 
-// A minimal Document stand-in: the `/image` slash command triggers a native
-// file picker via `document.createElement("input")` + `.click()`. Neither the
-// input's presence in a live DOM nor the OS dialog is testable in jsdom, so
-// these tests fake just the surface pickImageFiles touches (create/append/
-// click/change) and never exercise a real `<input>`.
-function makeFakeInputDocument() {
-  const listeners: Record<string, () => void> = {};
-  const input = {
-    type: "",
-    accept: "",
-    multiple: false,
-    style: {} as Record<string, string>,
-    files: null as unknown as FileList | null,
-    addEventListener: (event: string, cb: () => void) => {
-      listeners[event] = cb;
-    },
-    click: vi.fn(),
-    remove: vi.fn(),
+// A drag/drop event stand-in. `types` carries "Files" exactly as a real OS file
+// drag does; `files` is only populated on drop (the browser withholds it during
+// dragover), which is why dragCarriesFiles reads types instead.
+function makeDragEvent(
+  files: File[],
+  options: { defaultPrevented?: boolean; types?: string[] } = {},
+) {
+  const preventDefault = vi.fn();
+  const dataTransfer = {
+    types: options.types ?? (files.length > 0 ? ["Files"] : []),
+    files,
+    dropEffect: "none",
   };
-  const doc = {
-    createElement: vi.fn(() => input),
-    body: { appendChild: vi.fn() },
-  } as unknown as Document;
-  return { doc, input, fireChange: () => listeners.change?.() };
+  const event = {
+    dataTransfer,
+    clientX: 100,
+    clientY: 200,
+    defaultPrevented: options.defaultPrevented ?? false,
+    preventDefault,
+  };
+  return { event: event as unknown as DragEvent, preventDefault, dataTransfer };
 }
 
-describe("pickImageFiles", () => {
-  it("opens a hidden multi-file image input and triggers its picker", () => {
-    const { doc, input } = makeFakeInputDocument();
-    const onFiles = vi.fn();
+describe("handleImageDrop", () => {
+  it("writes a dropped image and inserts it at the drop position", async () => {
+    const { view, dispatched } = makeMockView(8, 5);
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const { event, preventDefault } = makeDragEvent([
+      fakeImageFile("Dropped Shot.png", "image/png", new Uint8Array([4, 5, 6])),
+    ]);
 
-    pickImageFiles(onFiles, doc);
+    const handled = handleImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
 
-    expect(input.type).toBe("file");
-    expect(input.accept).toBe(IMAGE_PICKER_ACCEPT);
-    expect(input.multiple).toBe(true);
-    expect(doc.body.appendChild).toHaveBeenCalledWith(input);
-    expect(input.click).toHaveBeenCalledTimes(1);
-    expect(onFiles).not.toHaveBeenCalled();
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^notes\/assets\/dropped-shot-[0-9a-z]+\.png$/,
+    );
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    // Inserted where the cursor was, not at the selection.
+    expect(dispatched[0]!.pos).toBe(5);
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^assets\/dropped-shot-[0-9a-z]+\.png$/,
+    );
   });
 
-  it("forwards the chosen files on change and cleans up the element", () => {
-    const { doc, input, fireChange } = makeFakeInputDocument();
-    const onFiles = vi.fn();
-    const file = fakeImageFile("a.png", "image/png", new Uint8Array([1]));
+  it("honors the attachment setting for the src it inserts", async () => {
+    const { view, dispatched } = makeMockView(8, 5);
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const { event } = makeDragEvent([
+      fakeImageFile("shot.png", "image/png", new Uint8Array([7])),
+    ]);
 
-    pickImageFiles(onFiles, doc);
-    input.files = [file] as unknown as FileList;
-    fireChange();
+    handleImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      attachments: { location: "global-folder", folderName: "attachments" },
+    });
 
-    expect(onFiles).toHaveBeenCalledTimes(1);
-    expect(onFiles).toHaveBeenCalledWith([file]);
-    expect(input.remove).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^attachments\/shot-[0-9a-z]+\.png$/,
+    );
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^\.\.\/attachments\/shot-[0-9a-z]+\.png$/,
+    );
   });
 
-  it("never calls onFiles if the picker is dismissed (no change event)", () => {
-    const { doc } = makeFakeInputDocument();
-    const onFiles = vi.fn();
-    pickImageFiles(onFiles, doc);
-    expect(onFiles).not.toHaveBeenCalled();
+  it("leaves an in-editor drag (a slice, no files) to ProseMirror", () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    const { event, preventDefault } = makeDragEvent([]);
+
+    const handled = handleImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
+
+    expect(handled).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+  });
+});
+
+describe("dragCarriesFiles", () => {
+  it("is true for an OS file drag even before the files are exposed", () => {
+    const { dataTransfer } = makeDragEvent([], { types: ["Files"] });
+    expect(dragCarriesFiles(dataTransfer as unknown as DataTransfer)).toBe(true);
+  });
+
+  it("is false for an in-editor slice drag and a null dataTransfer", () => {
+    const { dataTransfer } = makeDragEvent([], {
+      types: ["text/html", "text/plain"],
+    });
+    expect(dragCarriesFiles(dataTransfer as unknown as DataTransfer)).toBe(false);
+    expect(dragCarriesFiles(null)).toBe(false);
+  });
+});
+
+describe("handlePaneImageDragOver", () => {
+  it("accepts a file drag (so the browser will deliver a drop)", () => {
+    const { event, preventDefault, dataTransfer } = makeDragEvent([], {
+      types: ["Files"],
+    });
+    expect(handlePaneImageDragOver(event)).toBe(true);
+    expect(preventDefault).toHaveBeenCalled();
+    expect(dataTransfer.dropEffect).toBe("copy");
+  });
+
+  it("ignores an in-editor drag, leaving ProseMirror's reorder alone", () => {
+    const { event, preventDefault } = makeDragEvent([], { types: ["text/html"] });
+    expect(handlePaneImageDragOver(event)).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("handlePaneImageDrop", () => {
+  it("embeds an image dropped on the pane OUTSIDE the ProseMirror content", async () => {
+    // posAtCoords === null: the drop landed on the page top-matter, so there is
+    // no content position under the cursor — it appends at the end of the doc.
+    const { view, dispatched } = makeMockView(8, null);
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const { event, preventDefault } = makeDragEvent([
+      fakeImageFile("Title Drop.png", "image/png", new Uint8Array([1, 2])),
+    ]);
+
+    const handled = handlePaneImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
+
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^notes\/assets\/title-drop-[0-9a-z]+\.png$/,
+    );
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    expect(dispatched[0]!.pos).toBe(8); // end of the document
+  });
+
+  it("does NOT double-write a drop ProseMirror already handled", () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    // ProseMirror's handleDrop preventDefaults the drops it takes; the pane
+    // listener sits on an ancestor and must skip those.
+    const { event } = makeDragEvent(
+      [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
+      { defaultPrevented: true },
+    );
+
+    expect(handlePaneImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    })).toBe(false);
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+  });
+
+  it("ignores a drop with no image files", () => {
+    const { view } = makeMockView();
+    const writeAsset = vi.fn();
+    const { event } = makeDragEvent([
+      fakeImageFile("notes.txt", "text/plain", new Uint8Array([1])),
+    ]);
+
+    expect(handlePaneImageDrop(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    })).toBe(false);
+    expect(writeAsset).not.toHaveBeenCalled();
   });
 });
 
 describe("pickAndInsertImages", () => {
-  it("writes and inserts each file chosen through the picker", async () => {
-    const { doc, input, fireChange } = makeFakeInputDocument();
-    const { view, dispatched } = makeMockView();
-    const writeAsset = vi.fn().mockResolvedValue(undefined);
-    const file = fakeImageFile(
-      "Diagram.png",
-      "image/png",
-      new Uint8Array([5, 6, 7]),
-    );
-
-    pickAndInsertImages(
-      view as never,
-      3,
-      { workspaceId: "ws1", docPath: "notes/plan.md", writeAsset },
-      doc,
-    );
-    input.files = [file] as unknown as FileList;
-    fireChange();
-
-    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
-    const [writePath] = writeAsset.mock.calls[0]!;
-    expect(writePath).toMatch(/^notes\/assets\/diagram-[0-9a-z]+\.png$/);
-
-    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
-    expect(dispatched[0]!.pos).toBe(3);
+  const picked = (name: string, bytes: number[]): PickedImage => ({
+    name,
+    mediaType: "image/png",
+    bytes: new Uint8Array(bytes),
   });
 
-  it("writes nothing when the picker yields no files", () => {
-    const { doc, input, fireChange } = makeFakeInputDocument();
+  it("writes and inserts each image returned by the native picker", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const pickImages = vi
+      .fn()
+      .mockResolvedValue([picked("Diagram.png", [5, 6, 7])]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(pickImages).toHaveBeenCalledTimes(1);
+    expect(writeAsset).toHaveBeenCalledTimes(1);
+    // The picker's bytes travel the SAME write path paste/drop use, so the
+    // attachment-location logic applies unchanged.
+    expect(writeAsset.mock.calls[0]![0]).toMatch(
+      /^notes\/assets\/diagram-[0-9a-z]+\.png$/,
+    );
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.pos).toBe(3);
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^assets\/diagram-[0-9a-z]+\.png$/,
+    );
+  });
+
+  it("applies the attachment setting to picked images too", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const pickImages = vi.fn().mockResolvedValue([picked("Shot.png", [9])]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+      attachments: { location: "same-folder", folderName: "assets" },
+    });
+
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/shot-[0-9a-z]+\.png$/);
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^shot-[0-9a-z]+\.png$/);
+  });
+
+  it("inserts every picked image, in order", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const pickImages = vi
+      .fn()
+      .mockResolvedValue([picked("a.png", [1]), picked("b.png", [2])]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(writeAsset).toHaveBeenCalledTimes(2);
+    expect(dispatched.map((d) => d.pos)).toEqual([3, 4]);
+  });
+
+  it("writes nothing when the picker is cancelled", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    const pickImages = vi.fn().mockResolvedValue([]);
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+  });
+
+  it("survives a picker that rejects", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pickImages = vi.fn().mockRejectedValue(new Error("dialog failed"));
+
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      pickImages,
+    });
+
+    expect(writeAsset).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
+    warn.mockRestore();
+  });
+
+  it("does nothing when no picker is wired (non-desktop context)", async () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn();
 
-    pickAndInsertImages(
-      view as never,
-      3,
-      { workspaceId: "ws1", docPath: "notes/plan.md", writeAsset },
-      doc,
-    );
-    input.files = [] as unknown as FileList;
-    fireChange();
+    await pickAndInsertImages(view as never, 3, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+    });
 
     expect(writeAsset).not.toHaveBeenCalled();
     expect(dispatched).toHaveLength(0);

@@ -95,6 +95,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeWorkspaceText, payload),
   writeWorkspaceAsset: (payload) =>
     ipcRenderer.invoke(CHANNELS.writeWorkspaceAsset, payload),
+  pickImageFiles: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pickImageFiles, payload),
   openFileExternally: (payload) =>
     ipcRenderer.invoke(CHANNELS.openFileExternally, payload),
   readWorkspaceGraph: (payload) =>

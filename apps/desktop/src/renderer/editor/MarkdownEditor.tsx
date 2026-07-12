@@ -39,6 +39,8 @@ import type { ImageSrcContext } from "./imageSrc";
 import {
   handleImageDrop,
   handleImagePaste,
+  handlePaneImageDragOver,
+  handlePaneImageDrop,
   pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
@@ -316,6 +318,15 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           relativePath,
           bytes,
         }),
+      // `/image` opens a MAIN-process dialog at the workspace root and comes
+      // back with the chosen files' bytes — one round trip into the same
+      // write+insert path paste and drop use.
+      pickImages: async () =>
+        (
+          await bridge().pickImageFiles({
+            workspaceId: imageContextRef.current.workspaceId,
+          })
+        ).files,
     });
 
     useEffect(() => {
@@ -543,6 +554,35 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       return () => cancelAnimationFrame(frame);
     }, [editor]);
 
+    // The whole document PANE is the image drop zone, not just the ProseMirror
+    // element inside it. ProseMirror's handleDrop only fires for drops that land
+    // on view.dom (it is also the only thing that preventDefaults `dragover`),
+    // which left the page top-matter — icon, title, properties — dead to file
+    // drops: dropping an image there did nothing at all. The pane listeners fill
+    // that gap and route into the same placeImageFiles path; they ignore drags
+    // without files, so in-editor block/image reordering stays ProseMirror's.
+    useEffect(() => {
+      const container = containerRef.current;
+      const view = editor?.view;
+      if (!container || !view) return;
+      const pane =
+        container.closest<HTMLElement>("[data-dohc-doc-pane]") ?? container;
+      const onDragOver = (event: DragEvent) => {
+        handlePaneImageDragOver(event);
+      };
+      const onDrop = (event: DragEvent) => {
+        handlePaneImageDrop(view, event, pasteContextRef.current);
+      };
+      pane.addEventListener("dragenter", onDragOver);
+      pane.addEventListener("dragover", onDragOver);
+      pane.addEventListener("drop", onDrop);
+      return () => {
+        pane.removeEventListener("dragenter", onDragOver);
+        pane.removeEventListener("dragover", onDragOver);
+        pane.removeEventListener("drop", onDrop);
+      };
+    }, [editor]);
+
     const openSlashMenuAtPosition = useCallback(
       (pos: number) => {
         const view = editor?.view;
@@ -624,7 +664,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     }, [insertBlockAfter, openBlockMenu]);
 
     const insertImageAtSlash = useCallback((view: EditorView, pos: number) => {
-      pickAndInsertImages(view, pos, pasteContextRef.current);
+      void pickAndInsertImages(view, pos, pasteContextRef.current);
     }, []);
 
     const runSlashCommand = useCallback(

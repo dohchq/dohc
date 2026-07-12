@@ -1,6 +1,8 @@
-import { writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+import type { ElectronApplication } from "playwright";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -8,6 +10,7 @@ import {
   explorerRow,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
+  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -148,6 +151,168 @@ test("in-editor image: a link escaping the workspace root does NOT render", asyn
         { timeout: 5_000 },
       )
       .toBe(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// ── dragging an image FILE into a document ─────────────────────────────────
+
+// Writes a real PNG to a temp dir OUTSIDE the workspace — the OS location a
+// user actually drags from — and returns its absolute path.
+async function pngOutsideWorkspace(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-drag-"));
+  const path = join(dir, "Dragged Shot.png");
+  await writeFile(path, PNG_BYTES);
+  return path;
+}
+
+// A REAL file drag, driven through Chromium's own drag machinery via CDP
+// (Input.dispatchDragEvent carries actual OS file paths). This exercises the
+// full path a user's drag takes — hit-testing included — which a synthetic
+// `dispatchEvent("drop")` would bypass entirely.
+async function dragFileOnto(
+  app: ElectronApplication,
+  page: Page,
+  filePath: string,
+  point: { x: number; y: number },
+): Promise<void> {
+  const cdp = await app.context().newCDPSession(page);
+  const data = { items: [], files: [filePath], dragOperationsMask: 1 };
+  const { x, y } = point;
+  await cdp.send("Input.dispatchDragEvent", { type: "dragEnter", x, y, data });
+  await cdp.send("Input.dispatchDragEvent", { type: "dragOver", x, y, data });
+  await cdp.send("Input.dispatchDragEvent", { type: "drop", x, y, data });
+  await cdp.detach();
+}
+
+async function centerOf(page: Page, testId: string) {
+  const box = await page.getByTestId(testId).boundingBox();
+  if (!box) throw new Error(`${testId} has no bounding box`);
+  return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + 40) };
+}
+
+test("dragging an image file onto the editor embeds it into the configured attachments folder", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    // global-folder: bytes land in ONE folder at the workspace root, and the
+    // nested doc's src has to climb to it — so this proves the drop path runs
+    // the attachment-location logic rather than hardcoding `assets/`.
+    await seedWorkspaceSettings(temp, {
+      files: { attachmentLocation: "global-folder", attachmentFolderName: "attachments" },
+    });
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/plan.md", contents: "# Plan\n\nDrop below.\n" },
+    ]);
+    const dragged = await pngOutsideWorkspace();
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page, app } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await openMarkdownDoc(page, "notes/plan.md");
+
+    await dragFileOnto(app, page, dragged, await centerOf(page, "markdown-editor"));
+
+    // The image renders — the whole write → dohc-file:// serve → decode path.
+    await expectEditorImagePainted(page);
+
+    // ...and the bytes landed in the CONFIGURED folder at the workspace root,
+    // under the slug+hash asset name, not next to the document.
+    await expect
+      .poll(async () => await readdir(join(temp.rootPath, "attachments")).catch(() => []))
+      .toEqual([expect.stringMatching(/^dragged-shot-[0-9a-z]+\.png$/)]);
+    const [written] = await readdir(join(temp.rootPath, "attachments"));
+    expect(await readFile(join(temp.rootPath, "attachments", written!))).toEqual(
+      PNG_BYTES,
+    );
+
+    // The node's src is the document-relative form that climbs to the root.
+    await expect(page.locator(".dohc-editor-image").first()).toHaveAttribute(
+      "src",
+      /^dohc-file:\/\/.*\/attachments\/dragged-shot-[0-9a-z]+\.png$/,
+    );
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("dragging an image onto the page top-matter (outside ProseMirror) still embeds it", async () => {
+  // The regression this guards: file-drop embedding used to live ONLY in
+  // ProseMirror's handleDrop, which never runs for drops outside view.dom.
+  // The document pane is bigger than view.dom — the title/icon/properties
+  // top-matter sits in the same scroller — so dropping an image up there was
+  // silently swallowed (Chromium's default file handling, denied by Electron's
+  // will-navigate guard). The pane-level drop zone makes it embed.
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "note.md", contents: "# Note\n\nBody.\n" }]);
+    const dragged = await pngOutsideWorkspace();
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page, app } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "note.md");
+    await openMarkdownDoc(page, "note.md");
+
+    // Aim at the document TITLE — inside the pane, outside the editor content.
+    const title = page.locator(".dohc-page-identity__title").first();
+    await expect(title).toBeVisible();
+    const box = await title.boundingBox();
+    if (!box) throw new Error("no title box");
+    await dragFileOnto(app, page, dragged, {
+      x: Math.round(box.x + box.width / 2),
+      y: Math.round(box.y + box.height / 2),
+    });
+
+    await expectEditorImagePainted(page);
+    await expect
+      .poll(async () => await readdir(join(temp.rootPath, "assets")).catch(() => []))
+      .toEqual([expect.stringMatching(/^dragged-shot-[0-9a-z]+\.png$/)]);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("/image opens the native picker and embeds the chosen file", async () => {
+  // The picker is a MAIN-process dialog (it must open AT the workspace root,
+  // which a renderer <input type=file> cannot do). Native dialogs can't be
+  // driven by Playwright, so main honors the DOHC_TEST_PICK_IMAGE_PATHS seam —
+  // the same shape as DOHC_TEST_PICK_PATH / DOHC_TEST_SAVE_PATH. Everything
+  // after the dialog (read → IPC → write → insert → render) is the real path.
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/plan.md", contents: "# Plan\n\nPick below.\n" },
+    ]);
+    const picked = await pngOutsideWorkspace();
+
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: { DOHC_TEST_PICK_IMAGE_PATHS: JSON.stringify([picked]) },
+    });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await openMarkdownDoc(page, "notes/plan.md");
+
+    const editor = page.getByTestId("markdown-editor");
+    await editor.click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("/image", { delay: 30 });
+    await expect(page.locator(".dohc-slash-menu__item").first()).toBeVisible();
+    await page.keyboard.press("Enter");
+
+    // The picked bytes travel the SAME write+insert path paste/drop use, so the
+    // default per-document setting puts them in the doc's own assets folder.
+    await expectEditorImagePainted(page);
+    await expect
+      .poll(async () => await readdir(join(temp.rootPath, "notes/assets")).catch(() => []))
+      .toEqual([expect.stringMatching(/^dragged-shot-[0-9a-z]+\.png$/)]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

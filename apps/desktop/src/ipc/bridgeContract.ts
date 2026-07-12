@@ -334,7 +334,7 @@ export type WriteWorkspaceTextPayload = z.infer<typeof WriteWorkspaceTextPayload
 // plain `Uint8Array` and enforces the same 20MB bound the main-process writer
 // re-checks. Bounded like the text write path so a huge paste can't stream
 // unbounded bytes through IPC.
-const WRITE_ASSET_MAX_BYTES = 20 * 1024 * 1024;
+export const WRITE_ASSET_MAX_BYTES = 20 * 1024 * 1024;
 const WORKSPACE_ASSET_BYTES = z.custom<Uint8Array>(
   (value) =>
     value instanceof Uint8Array &&
@@ -351,6 +351,48 @@ export const WriteWorkspaceAssetPayload = z.object({
 export type WriteWorkspaceAssetPayload = z.infer<
   typeof WriteWorkspaceAssetPayload
 >;
+
+// The `/image` slash command's file picker. A renderer <input type="file">
+// CANNOT be opened at a chosen starting directory (browser security), so the
+// picker is a MAIN-process dialog that opens at the workspace ROOT — where a
+// user's images actually live. Main reads the chosen files itself (it already
+// has fs access), so the whole pick is ONE round trip: the renderer gets the
+// bytes it needs for the existing write+insert path, never learns an absolute
+// path, and needs no second read IPC.
+export const PickImageFilesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type PickImageFilesPayload = z.infer<typeof PickImageFilesPayload>;
+
+// One picked image: its ORIGINAL basename (never a path — the renderer only
+// slugifies it into an asset filename), the media type main resolved from the
+// extension, and the bytes under the SAME 20MB bound the asset write enforces.
+// Oversize picks are dropped in main exactly as paste drops them in the
+// renderer, so this array only ever carries files that are writable.
+const PICKED_IMAGE_NAME = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine((value) => !/[/\\\0]/.test(value), {
+    message: "picked image name must be a basename, not a path",
+  });
+
+export const PickedImageFile = z.object({
+  name: PICKED_IMAGE_NAME,
+  mediaType: z.string().min(1).max(120),
+  bytes: WORKSPACE_ASSET_BYTES,
+});
+export type PickedImageFile = z.infer<typeof PickedImageFile>;
+
+// A single `/image` invocation is a handful of images, not a photo library:
+// bounded so one pick can't stream hundreds of megabytes through IPC.
+export const MAX_PICKED_IMAGES = 20;
+
+export const PickImageFilesResult = z.object({
+  // Empty = the user cancelled, or every pick was refused as oversize.
+  files: z.array(PickedImageFile).max(MAX_PICKED_IMAGES),
+});
+export type PickImageFilesResult = z.infer<typeof PickImageFilesResult>;
 
 export const ReadWorkspaceTextResult = z.object({
   // Capped: text views are for human-scale files; very large files fall back
@@ -2221,6 +2263,9 @@ export interface DohcDesktopBridge {
   ): Promise<ReadWorkspaceTextResult>;
   writeWorkspaceText(payload: WriteWorkspaceTextPayload): Promise<void>;
   writeWorkspaceAsset(payload: WriteWorkspaceAssetPayload): Promise<void>;
+  // `/image`: a MAIN-process open dialog rooted at the workspace directory,
+  // returning the chosen files' bytes (see PickImageFilesPayload).
+  pickImageFiles(payload: PickImageFilesPayload): Promise<PickImageFilesResult>;
   openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
