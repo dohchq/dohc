@@ -5392,6 +5392,12 @@ function registerIpcHandlers(): void {
             fileVisibility: decision.fileVisibility,
           },
         });
+        // The engine index deliberately excludes shared-with-me (host
+        // capture ignores mounts), so mounted content searches through the
+        // rg path, streamed AFTER the engine results under the SAME
+        // searchId. Skipped when the workspace has no mounts.
+        const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+        const searchMounts = mounts.length > 0;
         if (!sender.isDestroyed()) {
           sender.send(
             CHANNELS.searchResults,
@@ -5409,9 +5415,44 @@ function registerIpcHandlers(): void {
                 ...(result.threadId ? { threadId: result.threadId } : {}),
                 ...(result.objectId ? { objectId: result.objectId } : {}),
               })),
-              done: true,
+              done: !searchMounts,
               limitHit: false,
             }),
+          );
+        }
+        if (searchMounts) {
+          if (!searchCleanupHooked.has(sender)) {
+            searchCleanupHooked.add(sender);
+            sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
+          }
+          await searchRegistry.startSearch(
+            sender.id,
+            workspace.rootPath,
+            input.searchId,
+            {
+              query: input.query,
+              caseSensitive: input.caseSensitive,
+              wholeWord: input.wholeWord,
+              regex: input.regex,
+              // Always scoped to the mount projection: everything else is
+              // already answered by the engine index above. A user include
+              // glob that itself targets shared-with-me refines the scope;
+              // any other include glob cannot intersect it here, so the
+              // default projection-wide scope applies.
+              includeGlob:
+                input.includeGlob && isSharedWithMePath(input.includeGlob)
+                  ? input.includeGlob
+                  : "shared-with-me/**",
+              excludeGlob: input.excludeGlob,
+            },
+            (batch) => {
+              if (sender.isDestroyed()) return;
+              try {
+                sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
+              } catch (error) {
+                console.error("[desktop] mount search batch dropped:", error);
+              }
+            },
           );
         }
       }

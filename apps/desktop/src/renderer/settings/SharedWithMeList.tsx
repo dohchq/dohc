@@ -45,6 +45,10 @@ export function SharedWithMeList(props: {
   // slower older refresh must never overwrite a newer list, and nothing may
   // set state after unmount or a workspace switch.
   const refreshToken = useRef(0);
+  // Workspace epoch: bumped ONLY by unmount/workspace switch (refresh bumps
+  // its own token per call), so in-flight ACTIONS can tell "still the same
+  // panel" apart from "my own follow-up refresh ran".
+  const workspaceEpoch = useRef(0);
 
   async function refresh() {
     const token = ++refreshToken.current;
@@ -80,8 +84,9 @@ export function SharedWithMeList(props: {
   useEffect(() => {
     void refresh();
     return () => {
-      // Invalidate in-flight responses on unmount / workspace switch.
+      // Invalidate in-flight responses and actions on unmount / switch.
       refreshToken.current += 1;
+      workspaceEpoch.current += 1;
     };
     // Loads once per mount and re-arms per workspace; mount/unmount actions
     // refresh explicitly.
@@ -89,39 +94,40 @@ export function SharedWithMeList(props: {
   }, [props.workspaceId]);
 
   async function mount(share: RelayShareReceivedRow) {
-    const token = refreshToken.current;
+    const epoch = workspaceEpoch.current;
+    const live = () => epoch === workspaceEpoch.current;
     setBusyShareId(share.shareId);
     try {
       await bridge().mountShare({
         workspaceId: props.workspaceId,
         shareCode: share.shareCode,
       });
+      // The panel may have unmounted / switched workspaces mid-action: the
+      // follow-up refresh and files-changed callback belong to the OLD
+      // workspace and must not run against the new one.
+      if (!live()) return;
       await refresh();
-      props.onWorkspaceFilesChanged?.();
+      if (live()) props.onWorkspaceFilesChanged?.();
     } catch (cause) {
-      // Same token rule as refresh(): a rejection from a previous workspace
-      // must not surface after a switch.
-      if (token === refreshToken.current) {
-        setLoad({ status: "error", message: errorMessage(cause) });
-      }
+      if (live()) setLoad({ status: "error", message: errorMessage(cause) });
     } finally {
-      setBusyShareId(null);
+      if (live()) setBusyShareId(null);
     }
   }
 
   async function unmount(shareId: string) {
-    const token = refreshToken.current;
+    const epoch = workspaceEpoch.current;
+    const live = () => epoch === workspaceEpoch.current;
     setBusyShareId(shareId);
     try {
       await bridge().unmountShare({ workspaceId: props.workspaceId, shareId });
+      if (!live()) return;
       await refresh();
-      props.onWorkspaceFilesChanged?.();
+      if (live()) props.onWorkspaceFilesChanged?.();
     } catch (cause) {
-      if (token === refreshToken.current) {
-        setLoad({ status: "error", message: errorMessage(cause) });
-      }
+      if (live()) setLoad({ status: "error", message: errorMessage(cause) });
     } finally {
-      setBusyShareId(null);
+      if (live()) setBusyShareId(null);
     }
   }
 

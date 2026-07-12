@@ -1,3 +1,4 @@
+import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
   Bot,
   CircleHelp,
@@ -138,9 +139,11 @@ import {
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
-// refuses every write to the reserved prefix regardless.
+// refuses every write to the reserved prefix regardless — but it uses the
+// same alias-normalizing predicate as main so a case-variant path arriving
+// from an agent/open flow ("Shared-With-Me/…") renders read-only too.
 function isMountedSharePath(path: string | null): boolean {
-  return !!path && (path === "shared-with-me" || path.startsWith("shared-with-me/"));
+  return !!path && isSharedWithMePath(path);
 }
 
 export type Workspace = WorkspaceSummary;
