@@ -356,6 +356,7 @@ export function Explorer(props: ExplorerProps) {
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const openEditorsListRef = useRef<HTMLUListElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
   // fires with a STALE closure — without this latch the edit would commit
@@ -374,6 +375,25 @@ export function Explorer(props: ExplorerProps) {
       ),
     );
   }, [props.files, props.folders]);
+
+  // The open-editors list caps its height and scrolls internally, so the
+  // active row must be brought back into view whenever it changes. Scroll the
+  // list directly (not scrollIntoView): the list and the file tree share the
+  // sidebar's outer scroll container, and scrollIntoView would also scroll
+  // that ancestor — yanking the user's tree scroll position on tab switches.
+  useEffect(() => {
+    if (!props.activeTab || !openEditorsExpanded) return;
+    const list = openEditorsListRef.current;
+    const row = list?.querySelector<HTMLElement>('[data-active="true"]');
+    if (!list || !row) return;
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    if (rowRect.top < listRect.top) {
+      list.scrollTop += rowRect.top - listRect.top;
+    } else if (rowRect.bottom > listRect.bottom) {
+      list.scrollTop += rowRect.bottom - listRect.bottom;
+    }
+  }, [props.activeTab, openEditorsExpanded]);
 
   // A drag abandoned mid-hover must not expand a folder after unmount.
   useEffect(
@@ -1196,7 +1216,14 @@ export function Explorer(props: ExplorerProps) {
 
           {openEditorsExpanded ? (
             props.openTabs.length > 0 ? (
-              <ul className="m-0 list-none p-0">
+              <ul
+                ref={openEditorsListRef}
+                data-testid="open-editors-list"
+                // Rows are 28px (h-7); cap at 8.5 rows — the half row visible
+                // at the cutoff signals there is more to scroll (VS Code-style
+                // bounded Open Editors pane).
+                className="m-0 max-h-[238px] list-none overflow-y-auto overscroll-contain p-0"
+              >
                 {props.openTabs.map((tab) => {
                   const active = props.activeTab === tab.path;
                   const dirty = props.dirtyTab === tab.path;
