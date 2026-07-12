@@ -27,8 +27,9 @@ const applySlashState: Dispatch<SetStateAction<SlashCommandState>> = (next) => {
 };
 
 // Mirrors MarkdownEditor's dohcDecorations plugin order: the slash-command
-// plugin sees keys BEFORE the block-exit plugin (menu navigation wins), and
-// the whole set runs before StarterKit's keymaps (Mod-Enter beats HardBreak).
+// plugin sees keys BEFORE block exit (menu navigation wins), while block exit
+// sees nested code-block exits before continuation. The whole set runs before
+// StarterKit's keymaps (Mod-Enter beats HardBreak).
 const testChrome = Extension.create({
   name: "testBlockExitChrome",
   addProseMirrorPlugins() {
@@ -38,8 +39,8 @@ const testChrome = Extension.create({
         setState: applySlashState,
         runCommandRef: { current: () => {} },
       }),
-      makeCodeBlockContinuationPlugin(),
       makeBlockExitPlugin(),
+      makeCodeBlockContinuationPlugin(),
       makeCalloutChromePlugin(),
     ];
   },
@@ -193,6 +194,17 @@ describe("blockExit Mod-Enter escape", () => {
     expect(topLevelTypes(editor)).toEqual(["mathBlock", "paragraph"]);
     expect(editor.state.selection.$from.parent.type.name).toBe("paragraph");
   });
+
+  it("escapes a code block past its doc-terminal callout", () => {
+    const editor = makeEditor("> [!note] Title\n> ```\n> code\n> ```");
+    caretAtEndOf(editor, "code");
+
+    press(editor, { key: "Enter", ctrlKey: true });
+
+    expect(topLevelTypes(editor)).toEqual(["callout", "paragraph"]);
+    expect(editor.state.doc.firstChild?.lastChild?.type.name).toBe("codeBlock");
+    expect(editor.state.selection.$from.depth).toBe(1);
+  });
 });
 
 describe("blockExit ArrowDown at document end", () => {
@@ -223,6 +235,37 @@ describe("blockExit ArrowDown at document end", () => {
     press(editor, { key: "ArrowDown" });
 
     expect(topLevelTypes(editor)).toEqual(["table", "paragraph"]);
+  });
+
+  it("escapes a terminal code block past its doc-terminal callout", () => {
+    const editor = makeEditor("> [!note] Title\n> ```\n> code\n> ```");
+    caretAtEndOf(editor, "code");
+
+    press(editor, { key: "ArrowDown" });
+
+    expect(topLevelTypes(editor)).toEqual(["callout", "paragraph"]);
+    expect(editor.state.doc.firstChild?.lastChild?.type.name).toBe("codeBlock");
+    expect(editor.state.selection.$from.depth).toBe(1);
+  });
+
+  it("does not mutate a doc-terminal blockquote", () => {
+    const editor = makeEditor("> just a quote");
+    editor.commands.focus("end");
+    const before = editor.getJSON();
+
+    press(editor, { key: "ArrowDown" });
+
+    expect(editor.getJSON()).toEqual(before);
+  });
+
+  it("does not mutate a doc-terminal bullet list", () => {
+    const editor = makeEditor("- one\n- two");
+    caretAtEndOf(editor, "two");
+    const before = editor.getJSON();
+
+    press(editor, { key: "ArrowDown" });
+
+    expect(editor.getJSON()).toEqual(before);
   });
 
   it("does not mutate the doc when content follows the callout", () => {
@@ -296,6 +339,24 @@ describe("blockExit folded callout (toggle) guards", () => {
     expect(editor.state.doc.textContent).toBe("after");
   });
 
+  it("Ctrl/Cmd-Backspace after a folded callout selects it without changing the doc", () => {
+    const modifiers: KeyboardEventInit[] = [
+      { ctrlKey: true },
+      { metaKey: true },
+    ];
+
+    for (const modifier of modifiers) {
+      const editor = makeEditor("> [!note]- Title\n> hidden\n\nafter");
+      caretAtStartOf(editor, "after");
+      const before = editor.getJSON();
+
+      press(editor, { key: "Backspace", ...modifier });
+
+      expect(editor.getJSON()).toEqual(before);
+      expect(selectedNodeName(editor)).toBe("callout");
+    }
+  });
+
   it("Backspace after an UNfolded callout keeps the default join into its body", () => {
     const editor = makeEditor("> [!note] Title\n> body\n\nafter");
     caretAtStartOf(editor, "after");
@@ -312,6 +373,17 @@ describe("blockExit folded callout (toggle) guards", () => {
     const before = editor.getJSON();
 
     press(editor, { key: "Delete" });
+
+    expect(editor.getJSON()).toEqual(before);
+    expect(selectedNodeName(editor)).toBe("callout");
+  });
+
+  it("Ctrl-Delete before a folded callout selects it without changing the doc", () => {
+    const editor = makeEditor("before\n\n> [!note]- Title\n> hidden");
+    caretAtEndOf(editor, "before");
+    const before = editor.getJSON();
+
+    press(editor, { key: "Delete", ctrlKey: true });
 
     expect(editor.getJSON()).toEqual(before);
     expect(selectedNodeName(editor)).toBe("callout");

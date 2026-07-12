@@ -425,11 +425,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               wikilinkClickPlugin,
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
-              makeCodeBlockContinuationPlugin(),
               // After the slash-command plugin (menu keeps ArrowDown while
-              // open), before StarterKit keymaps (Mod-Enter must beat
-              // HardBreak) — see the ordering note in blockExit.ts.
+              // open), before code-block continuation (nested code escapes
+              // past its callout) and StarterKit keymaps (Mod-Enter beats
+              // HardBreak). Top-level code falls through on Mod-Enter.
               makeBlockExitPlugin(),
+              makeCodeBlockContinuationPlugin(),
               makeCalloutChromePlugin(),
               makeCodeHighlightPlugin(),
               makeMermaidPreviewPlugin(),

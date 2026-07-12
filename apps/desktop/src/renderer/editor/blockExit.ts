@@ -16,17 +16,19 @@ import type { EditorView } from "@tiptap/pm/view";
 //     NodeSelection places the caret in a paragraph after the top-level block.
 //     Without this, HardBreak's Mod-Enter swallows the key inside callouts.
 //   - ArrowDown at the very end of the document, when the caret is trapped
-//     inside a container or code-style block, creates the paragraph below
-//     (parity with makeCodeBlockContinuationPlugin, which only covers
-//     codeBlock — this also covers callout, queryBlock, and table).
+//     inside a top-level callout/table or a code-style block, creates the
+//     paragraph below (parity with makeCodeBlockContinuationPlugin, which
+//     only covers codeBlock — this also covers callout, queryBlock, and table).
 //   - Arrow/Backspace/Delete next to a FOLDED callout select the callout node
 //     instead of joining into / moving the caret onto its hidden body. A
 //     second Backspace/Delete then removes it — making toggles deletable.
 //
 // Registration order matters: this plugin must sit AFTER the slash-command
-// plugin (so menu navigation keeps ArrowDown while the menu is open) and
-// BEFORE the StarterKit keymaps (so Mod-Enter beats HardBreak). Both hold in
-// MarkdownEditor's dohcDecorations plugin list — see the array there.
+// plugin (so menu navigation keeps ArrowDown while the menu is open), BEFORE
+// makeCodeBlockContinuationPlugin (so Mod-Enter/ArrowDown in a terminal code
+// block nested in a callout escape past the whole callout), and BEFORE the
+// StarterKit keymaps (so Mod-Enter beats HardBreak). Top-level code blocks
+// fall through on Mod-Enter for the continuation plugin to handle.
 const blockExitKey = new PluginKey("dohc-block-exit");
 
 function isFoldedCallout(node: PMNode): boolean {
@@ -127,10 +129,14 @@ function handleArrowDown(view: EditorView): boolean {
     // the callout instead so the user sees where they are (and can delete it).
     return isFoldedCallout(next.node) ? selectNodeAt(view, next.pos) : false;
   }
-  // End of the document. Step out only when the caret is actually trapped:
-  // nested inside a container (callout, table cell, list) or in a code-style
-  // textblock (queryBlock) where Enter cannot produce a paragraph.
-  const trapped = $from.depth >= 2 || $from.parent.type.spec.code === true;
+  // End of the document. Step out only when the caret is actually trapped in
+  // a code-style textblock or a top-level callout/table. Lists and blockquotes
+  // already have Enter-based exits, so ArrowDown must not mutate them.
+  const topLevelName = $from.node(1).type.name;
+  const trapped =
+    $from.parent.type.spec.code === true ||
+    topLevelName === "callout" ||
+    topLevelName === "table";
   if (!trapped) return false;
   return caretIntoParagraphAt(view, $from.after(1));
 }
@@ -175,6 +181,14 @@ export function makeBlockExitPlugin(): Plugin {
     key: blockExitKey,
     props: {
       handleKeyDown(view, event) {
+        if (event.key === "Backspace" || event.key === "Delete") {
+          const handled =
+            event.key === "Backspace"
+              ? handleBackspace(view)
+              : handleDelete(view);
+          if (handled) event.preventDefault();
+          return handled;
+        }
         if (event.altKey || event.shiftKey) return false;
         const mod = event.metaKey || event.ctrlKey;
         if (event.key === "Enter" && mod) {
@@ -190,12 +204,6 @@ export function makeBlockExitPlugin(): Plugin {
             break;
           case "ArrowUp":
             handled = handleArrowUp(view);
-            break;
-          case "Backspace":
-            handled = handleBackspace(view);
-            break;
-          case "Delete":
-            handled = handleDelete(view);
             break;
         }
         if (handled) event.preventDefault();
