@@ -1555,6 +1555,8 @@ describe("ChatsView expand-to-tab", () => {
         newThreadBody: "",
         dmRecipients: "",
         dmDraft: "",
+        replyTarget: null,
+        resolveTargetMessageId: null,
       },
     });
 
@@ -1564,6 +1566,28 @@ describe("ChatsView expand-to-tab", () => {
         (screen.getByTestId("chats-composer") as HTMLTextAreaElement).value,
       ).toBe("half-typed reply"),
     );
+  });
+
+  it("restores the composer's reply/resolve mode, not just its text", async () => {
+    // Without the mode, a reply (or decision resolution) drafted before the
+    // handoff would post as a plain top-level comment after it.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+      initialDrafts: {
+        composer: "replying mid-expand",
+        newThreadBody: "",
+        dmRecipients: "",
+        dmDraft: "",
+        replyTarget: { messageId: "message-1", authorLabel: "You" },
+        resolveTargetMessageId: "message-1",
+      },
+    });
+
+    await screen.findByTestId("chats-thread-view");
+    expect(await screen.findByTestId("chats-replying-mode")).toBeTruthy();
+    expect(await screen.findByTestId("chats-resolving-mode")).toBeTruthy();
   });
 
   it("reports draft edits so the shell can hand them to the next mount", async () => {

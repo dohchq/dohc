@@ -111,15 +111,19 @@ export type ChatsNav =
 
 type Nav = ChatsNav;
 
-// Unsent input, one field per composer surface. Part of the expand-to-tab
-// handoff: the shell mirrors the live instance's drafts (onDraftsChange) and
-// seeds the next mount with them, so expanding or collapsing chats never
-// discards something the user typed.
+// Unsent input, one field per composer surface, plus the composer's MODE
+// (replying to a message / resolving a decision) — without the mode a reply
+// drafted in the panel would post as a top-level comment after expanding.
+// Part of the expand-to-tab handoff: the shell mirrors the live instance's
+// drafts (onDraftsChange) and seeds the next mount with them, so expanding
+// or collapsing chats never discards something the user typed.
 export interface ChatsDrafts {
   composer: string;
   newThreadBody: string;
   dmRecipients: string;
   dmDraft: string;
+  replyTarget: ChatsComposerReplyTarget | null;
+  resolveTargetMessageId: string | null;
 }
 
 type FeedOpeningMessage = Omit<
@@ -154,10 +158,12 @@ const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
   paused: false,
 };
 
-interface ComposerReplyTarget {
+export interface ChatsComposerReplyTarget {
   messageId: string;
   authorLabel: string;
 }
+
+type ComposerReplyTarget = ChatsComposerReplyTarget;
 
 function pathBasename(pathHint: string | undefined): string {
   if (!pathHint) return "attachment";
@@ -1321,8 +1327,23 @@ export function ChatsView(props: {
   }, [nav, onNavChange]);
   useEffect(() => {
     if (handoffReportBlocked.current) return;
-    onDraftsChange?.({ composer, newThreadBody, dmRecipients, dmDraft });
-  }, [composer, dmDraft, dmRecipients, newThreadBody, onDraftsChange]);
+    onDraftsChange?.({
+      composer,
+      newThreadBody,
+      dmRecipients,
+      dmDraft,
+      replyTarget,
+      resolveTargetMessageId,
+    });
+  }, [
+    composer,
+    dmDraft,
+    dmRecipients,
+    newThreadBody,
+    onDraftsChange,
+    replyTarget,
+    resolveTargetMessageId,
+  ]);
 
   // Expand-to-tab seam, inbound: once the overview is ready, jump to the
   // seeded conversation exactly the way a click would (same loaders, same
@@ -1349,6 +1370,11 @@ export function ChatsView(props: {
       setNewThreadBody(drafts.newThreadBody);
       setDmRecipients(drafts.dmRecipients);
       setDmDraft(drafts.dmDraft);
+      // AFTER the open* call above: navigation resets these, and restoring
+      // the composer text without its mode would post a drafted reply (or
+      // decision resolution) as a plain top-level comment.
+      setReplyTarget(drafts.replyTarget);
+      setResolveTargetMessageId(drafts.resolveTargetMessageId);
     }
   }, [
     openChannel,
