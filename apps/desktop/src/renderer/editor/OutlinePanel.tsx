@@ -18,29 +18,13 @@ import {
   type OutlineHeading,
 } from "./outline";
 import { useDebouncedWordCount } from "./wordCount";
+import { prefersReducedMotion } from "../reducedMotion";
 
 // How far below the viewport's top edge a heading must scroll before it's
 // considered "reached" — keeps the very top heading active for a beat
 // after the user starts scrolling, instead of flipping the instant a new
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
-
-// Same convention theme.ts uses to install the CSS reduced-motion
-// resets: the OS-level media query OR the app's own reduce-motion setting
-// (mirrored onto <html data-reduce-motion>). scrollIntoView's `behavior`
-// is JS, not CSS, so it isn't covered by the `scroll-behavior: auto
-// !important` reset those install — an explicit "smooth" here must be
-// downgraded by hand.
-function prefersReducedMotion(): boolean {
-  const appSetting =
-    typeof document !== "undefined" &&
-    document.documentElement.dataset.reduceMotion === "true";
-  if (appSetting) return true;
-  return (
-    typeof window !== "undefined" &&
-    (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false)
-  );
-}
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   let node = el?.parentElement ?? null;

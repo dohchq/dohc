@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import {
+  markdownToYDoc,
+  replaceYDocWithMarkdown,
+} from "./editor/import-export";
 import {
   classifyForView,
   FileInspector,
@@ -115,6 +120,41 @@ describe("markdown WYSIWYG frontmatter seam", () => {
   });
 });
 
+// The DOM/layout stubs Tiptap + CodeMirror need under jsdom — shared by every
+// describe that renders an editor surface.
+function stubEditorGlobals() {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [],
+  });
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      bottom: 0,
+      height: 0,
+      left: 0,
+      right: 0,
+      top: 0,
+      width: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    }),
+  });
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+    Number(setTimeout(() => callback(performance.now()), 16)),
+  );
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
+}
+
 // THE P1 trap (codex review): typing arms an 800ms autosave, and unmounting
 // (tab close, tab switch — the inspector is keyed by the active tab) used to
 // clear the timer WITHOUT flushing, silently dropping the draft. The unmount
@@ -138,36 +178,7 @@ describe("markdown editor unmount flush", () => {
   };
 
   beforeEach(() => {
-    vi.stubGlobal(
-      "ResizeObserver",
-      class ResizeObserver {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      },
-    );
-    Object.defineProperty(Range.prototype, "getClientRects", {
-      configurable: true,
-      value: () => [],
-    });
-    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({
-        bottom: 0,
-        height: 0,
-        left: 0,
-        right: 0,
-        top: 0,
-        width: 0,
-        x: 0,
-        y: 0,
-        toJSON: () => {},
-      }),
-    });
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
-      Number(setTimeout(() => callback(performance.now()), 16)),
-    );
-    vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
+    stubEditorGlobals();
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -208,6 +219,65 @@ describe("markdown editor unmount flush", () => {
     // The unmount flush keys off the unsaved-draft flag, not the timer
     // handle: a clean save must not be replayed as a second write.
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  it("palette source toggle flushes a pending raw draft before leaving source mode", async () => {
+    // codex P1: leaving editable source through the palette command must flush
+    // the RAW draft like the header toggle does — a timer firing after the
+    // mode switch would re-serialize through the (lossy) Tiptap parse.
+    const user = userEvent.setup();
+    let registered: (() => void) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          registered = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => registered?.()); // wysiwyg -> editable source (legacy branch)
+    await user.type(screen.getByTestId("markdown-editor"), "Raw!");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    act(() => registered?.()); // source -> wysiwyg: flushes inside the window
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "a.md",
+        text: "# Hello\nRaw!",
+      }),
+    );
+  });
+
+  it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
+    // codex P3 follow-up: a read-only doc can't EDIT, but viewing raw source
+    // is still a view — the palette toggle opens the source textarea with the
+    // readOnly attribute and never writes.
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Big\n",
+      truncated: true,
+    });
+    let registered: (() => void) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="large.md"
+        registerSourceToggle={(toggle) => {
+          registered = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => registered?.());
+    const textarea = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(true);
+    expect(textarea.value).toContain("# Big");
+    act(() => registered?.());
+    await screen.findByTestId("view-markdown");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
   it("edits markdown frontmatter properties through the same save seam", async () => {
@@ -481,5 +551,161 @@ describe("markdown editor unmount flush", () => {
       relativePath: "large.md",
       text: largeBody.replace("status: draft", "status: ready"),
     });
+  });
+});
+
+// "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
+// projection of the canonical Y.Doc (the same yDocToMarkdown the settle uses)
+// — never an editable raw-markdown surface (the derived-cache invariant). The
+// engine session is mocked at the bridge seam exactly like production wires
+// it: openEngineYDocSession seeds the mirror doc, onEngineYDocRemoteUpdate
+// forwards CRDT deltas.
+describe("engine markdown source view", () => {
+  const DOC_MARKDOWN = "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n";
+
+  function makeEngineBridge(markdown: string) {
+    const serverDoc = markdownToYDoc(markdown);
+    const remoteListeners = new Set<
+      (event: { sessionId: string; update: Uint8Array }) => void
+    >();
+    let sessionId = "";
+    const bridgeMock = {
+      readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
+      writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+      listWorkspaceFiles: vi.fn(async () => ({
+        files: [{ path: "a.md", kind: "file" }],
+        folders: [],
+      })),
+      readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
+      getWorkspaceSettings: vi.fn(async () => ({
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+        source: "default" as const,
+      })),
+      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
+        sessionId = payload.sessionId;
+        return { available: true, initialUpdate: Y.encodeStateAsUpdate(serverDoc) };
+      }),
+      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(
+        (listener: (event: { sessionId: string; update: Uint8Array }) => void) => {
+          remoteListeners.add(listener);
+          return () => remoteListeners.delete(listener);
+        },
+      ),
+    };
+    // Simulates a remote writer (co-editor / agent) landing in the live doc:
+    // mutate the engine-side doc and forward the delta like main does.
+    const pushRemoteMarkdown = (next: string) => {
+      const before = Y.encodeStateVector(serverDoc);
+      replaceYDocWithMarkdown(serverDoc, next);
+      const update = Y.encodeStateAsUpdate(serverDoc, before);
+      for (const listener of remoteListeners) listener({ sessionId, update });
+    };
+    return { bridgeMock, pushRemoteMarkdown };
+  }
+
+  beforeEach(() => {
+    stubEditorGlobals();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  async function renderEngineDoc(options?: {
+    registerSourceToggle?: (toggle: (() => void) | null) => void;
+  }) {
+    const { bridgeMock, pushRemoteMarkdown } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={options?.registerSourceToggle}
+      />,
+    );
+    // The engine session takes over once bound: the legacy Edit toggle gives
+    // way to the engine header's Source toggle.
+    const toggle = await screen.findByTestId(
+      "markdown-source-toggle",
+      {},
+      { timeout: 5_000 },
+    );
+    return { bridgeMock, pushRemoteMarkdown, toggle };
+  }
+
+  it("toggles a read-only source projection (frontmatter included) and back", async () => {
+    const user = userEvent.setup();
+    const { toggle } = await renderEngineDoc();
+
+    await user.click(toggle);
+    const sourceView = await screen.findByTestId(
+      "markdown-source-view",
+      {},
+      { timeout: 5_000 },
+    );
+    // Raw markdown, not rendered document: frontmatter and heading markup are
+    // visible as text.
+    await waitFor(() => {
+      expect(sourceView.textContent).toContain("# Plan");
+      expect(sourceView.textContent).toContain("title: Plan");
+    });
+    // READ-ONLY: CodeMirror's content is not editable, and the WYSIWYG pane is
+    // HIDDEN — not unmounted (unmounting would destroy the Collaboration
+    // extension's undo stack and leave copy/export serializing stale state).
+    const content = sourceView.querySelector(".cm-content");
+    expect(content?.getAttribute("contenteditable")).toBe("false");
+    expect(screen.getByTestId("view-markdown").hidden).toBe(true);
+    expect(screen.getByTestId("markdown-source-toggle").textContent).toBe("Editor");
+
+    // Toggling back restores the document surface.
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    expect(screen.getByTestId("view-markdown").hidden).toBe(false);
+    expect(screen.queryByTestId("markdown-source-view")).toBeNull();
+  });
+
+  it("re-projects the source live when a remote CRDT delta lands", async () => {
+    const user = userEvent.setup();
+    const { toggle, pushRemoteMarkdown } = await renderEngineDoc();
+
+    await user.click(toggle);
+    const sourceView = await screen.findByTestId(
+      "markdown-source-view",
+      {},
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(sourceView.textContent).toContain("Base paragraph."));
+
+    act(() => {
+      pushRemoteMarkdown(
+        "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nRemote edit landed.\n",
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("markdown-source-view").textContent).toContain(
+        "Remote edit landed.",
+      );
+    });
+  });
+
+  it("registers a source toggle for the shell's command palette seam", async () => {
+    let registered: (() => void) | null = null;
+    await renderEngineDoc({
+      registerSourceToggle: (toggle) => {
+        registered = toggle;
+      },
+    });
+
+    expect(registered).not.toBeNull();
+    act(() => registered?.());
+    await screen.findByTestId("markdown-source-view", {}, { timeout: 5_000 });
+    expect(screen.getByTestId("view-markdown").hidden).toBe(true);
+
+    act(() => registered?.());
+    expect(screen.getByTestId("view-markdown").hidden).toBe(false);
+    expect(screen.queryByTestId("markdown-source-view")).toBeNull();
   });
 });

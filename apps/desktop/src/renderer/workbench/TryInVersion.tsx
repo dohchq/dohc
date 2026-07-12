@@ -1,4 +1,4 @@
-import { Bot, Eye, X } from "lucide-react";
+import { Bot, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   TryInVersionRunState,
@@ -12,13 +12,12 @@ import { VersionMergeDialog, ipcErrorMessage } from "./WorkspaceVersions";
 // Both mount only for flagged workspaces (the shell gates on versionsEnabled)
 // and every async response is liveness-token gated before it touches state.
 
-// While the agent works: one calm line, no new streaming surface — Watch
-// opens the existing agent panel, and the History rail already shows the
-// agent's edits as they land.
+// While the agent works: one calm line, no new streaming surface — the
+// History rail already shows the agent's edits as they land, and a run
+// blocked on a permission raises its own card (AgentPermissionRequests).
 export function TryInVersionBanner(props: {
   task: string;
   versionName: string;
-  onWatch: () => void;
 }) {
   return (
     <div
@@ -42,15 +41,6 @@ export function TryInVersionBanner(props: {
       <span className="min-w-0 shrink-0 truncate text-subtle">
         — in {props.versionName}
       </span>
-      <button
-        type="button"
-        data-testid="try-run-watch"
-        onClick={props.onWatch}
-        className="ml-auto flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-      >
-        <Eye size={12} aria-hidden />
-        Watch
-      </button>
     </div>
   );
 }

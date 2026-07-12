@@ -18,6 +18,7 @@ import {
   type LazyExoticComponent,
   type RefAttributes,
 } from "react";
+import type * as Y from "yjs";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
@@ -183,6 +184,16 @@ const LazySourceCodeEditor = lazy(() =>
   })),
 );
 
+// yDocToMarkdown lives in editor/import-export, which statically pulls the
+// Tiptap schema/KaTeX stack the lazy MarkdownEditor split keeps out of this
+// eager chunk — load it on demand (first source-view toggle), documentExport
+// precedent. Cached: every later toggle reuses the loaded module.
+let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
+function loadImportExport(): Promise<typeof import("./editor/import-export")> {
+  importExportPromise ??= import("./editor/import-export");
+  return importExportPromise;
+}
+
 function splitRawFrontmatter(markdown: string): {
   frontmatter: string | null;
   body: string;
@@ -319,6 +330,41 @@ function ViewHeader(props: {
       ) : null}
       {props.actions}
     </header>
+  );
+}
+
+// The source view's explicit copy affordance ("view source" implies "grab the
+// text"): quiet inline "Copied" confirmation, same swap-and-restore rhythm as
+// DocumentMenu / the code-block copy button (FEEDBACK_MS there is 1200 too).
+function CopySourceButton(props: { getSource: () => string | null }) {
+  const [label, setLabel] = useState<"Copy" | "Copied" | "Couldn't copy">("Copy");
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  return (
+    <button
+      type="button"
+      data-testid="markdown-source-copy"
+      onClick={() => {
+        const source = props.getSource();
+        const write = source === null ? undefined : navigator.clipboard?.writeText(source);
+        if (!write) return;
+        void write
+          .then(() => setLabel("Copied"))
+          .catch(() => setLabel("Couldn't copy"))
+          .then(() => {
+            if (timer.current) clearTimeout(timer.current);
+            timer.current = setTimeout(() => setLabel("Copy"), 1200);
+          });
+      }}
+      className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -491,6 +537,11 @@ function MarkdownView(props: {
   // Workspace-activity token: bumps after saves / external edits so the linked
   // mentions section recomputes without polling.
   refreshKey?: number;
+  // Registers the mounted document's "view source" toggle with the shell so
+  // the command palette can flip it (registerDraftFlush precedent). Engine
+  // docs toggle the read-only source projection; the legacy autosave editor
+  // switches its existing (editable) source mode.
+  registerSourceToggle?: (toggle: (() => void) | null) => void;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
@@ -631,6 +682,87 @@ function MarkdownView(props: {
     reopenKey: props.reopenKey,
   });
   const readOnly = !!props.forceReadOnly || (props.truncated && !engine.available);
+  const engineMode = engine.available && engine.doc !== null;
+
+  // "View markdown as source" (engine mode): a READ-ONLY projection of the
+  // canonical Y.Doc through the same yDocToMarkdown the settle uses to write
+  // the .md — the source view shows exactly what lands on disk. Deliberately
+  // not editable: `atoms.body` markdown is a DERIVED cache of the Y.Doc, and
+  // an editable raw surface would have to round-trip through full-body
+  // markdown patching (the invariant this must never become).
+  const [showSource, setShowSource] = useState(false);
+  const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
+  useEffect(() => {
+    if (!showSource || !engine.doc) {
+      setSourceMarkdown(null);
+      return;
+    }
+    const doc = engine.doc;
+    let cancelled = false;
+    let serialize: ((doc: Y.Doc) => string) | null = null;
+    let frame: number | null = null;
+    const recompute = () => {
+      if (cancelled || !serialize) return;
+      setSourceMarkdown(serialize(doc));
+    };
+    void loadImportExport().then((mod) => {
+      serialize = mod.yDocToMarkdown;
+      recompute();
+    });
+    // Live: agent edits / co-editors keep flowing into the mirror doc while
+    // the source view is up — re-project on updates. A co-editor's keystroke
+    // burst forwards one delta per keystroke, so coalesce to one full-document
+    // serialize per frame instead of one per delta.
+    const scheduleRecompute = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        recompute();
+      });
+    };
+    doc.on("update", scheduleRecompute);
+    return () => {
+      cancelled = true;
+      if (frame !== null) cancelAnimationFrame(frame);
+      doc.off("update", scheduleRecompute);
+    };
+  }, [showSource, engine.doc]);
+
+  // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
+  // route through it): engine mode flips the read-only source projection; the
+  // legacy autosave editor switches its existing source mode — editable where
+  // the .md on disk IS the source of truth, readOnly-textarea on read-only
+  // docs (shared views / truncated reads), so "view source" works everywhere
+  // a markdown document renders.
+  function toggleSourceView() {
+    if (engineMode) {
+      setShowSource((current) => !current);
+      return;
+    }
+    if (mode === "source") {
+      // Leaving editable source with an autosave still pending: flush the RAW
+      // draft first (header-toggle parity). Switching mode re-points
+      // serializeDraftRef at the Tiptap parse, which is lossy for constructs
+      // the editor doesn't model (e.g. HTML comments) — the late timer would
+      // otherwise overwrite the file with that parse instead of the typed
+      // source.
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        void saveNow();
+      }
+      switchMode(readOnly ? "read" : "wysiwyg");
+      return;
+    }
+    switchMode("source");
+  }
+  const toggleSourceViewRef = useRef(toggleSourceView);
+  toggleSourceViewRef.current = toggleSourceView;
+  const { registerSourceToggle } = props;
+  useEffect(() => {
+    if (!registerSourceToggle) return;
+    registerSourceToggle(() => toggleSourceViewRef.current());
+    return () => registerSourceToggle(null);
+  }, [registerSourceToggle]);
 
   // Lift the save state to the shell (smallest seam): the active editor tab
   // shows a dirty dot while this is not "saved". When the engine owns the
@@ -723,7 +855,11 @@ function MarkdownView(props: {
   }
 
   function switchMode(next: "read" | "wysiwyg" | "source") {
-    if (readOnly && next !== "read") return;
+    // Read-only docs (shared views, truncated reads) still allow SOURCE — the
+    // textarea renders with the readOnly attribute, so it is a view, not an
+    // edit surface (search jumps already force source mode this way). Only
+    // the editable WYSIWYG mode is off-limits.
+    if (readOnly && next === "wysiwyg") return;
     const current =
       mode === "wysiwyg" && !unsavedDraft.current
         ? latestDraft.current
@@ -750,7 +886,14 @@ function MarkdownView(props: {
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.key !== "/") return;
       event.preventDefault();
-      if (readOnly) return;
+      // Engine mode: the same keystroke drives the source-view toggle (the
+      // legacy mode cycle is meaningless there — the CRDT editor is the only
+      // editing surface). Read-only legacy docs get the source toggle too —
+      // the edit-mode cycle is off-limits, viewing raw source is not.
+      if (engineMode || readOnly) {
+        toggleSourceView();
+        return;
+      }
       toggleEditorMode();
     }
     window.addEventListener("keydown", onKeyDown);
@@ -826,13 +969,15 @@ function MarkdownView(props: {
   // time the doc is open — but a settle indicator keeps the editing feel
   // unchanged, and undo/redo stays intact through the Collaboration extension's
   // Yjs UndoManager. This replaces the old HocuspocusProvider collab branch.
+  // "Source" flips to a read-only projection of the Y.Doc's markdown — a VIEW,
+  // never a second editing surface (see the showSource comment above).
   if (engine.available && engine.doc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <ViewHeader
           icon={<FileText size={13} aria-hidden />}
           path={props.path}
-          label="document"
+          label={showSource ? "markdown source" : "document"}
           onShare={onShareCurrentPath}
           actions={
             <>
@@ -843,21 +988,75 @@ function MarkdownView(props: {
               >
                 {engine.saveState === "saved" ? "Saved" : "Saving…"}
               </span>
+              <button
+                type="button"
+                data-testid="markdown-source-toggle"
+                aria-pressed={showSource}
+                title="Toggle markdown source (Ctrl+/)"
+                onClick={toggleSourceView}
+                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+              >
+                {showSource ? "Editor" : "Source"}
+              </button>
               <DocumentMenu
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
+                // Always live, even in source view: the WYSIWYG editor stays
+                // MOUNTED (hidden) while source is shown, so its ref keeps
+                // serializing the current Y.Doc state at click time.
                 getMarkdown={() => serializeEngineDraft()}
               />
             </>
           }
         />
         {props.truncatedNotice}
+        {showSource ? (
+          // Raw markdown, monospaced and read-only — frontmatter included, so
+          // the top-matter zone (which renders the same metadata as chrome)
+          // steps aside, like the legacy editor's source mode.
+          <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
+            <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
+              <span>Read-only markdown source — switch back to Editor to make changes.</span>
+              <CopySourceButton getSource={() => sourceMarkdown} />
+            </div>
+            {sourceMarkdown === null ? (
+              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
+                Loading source...
+              </div>
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="flex flex-1 items-center justify-center text-xs text-subtle">
+                    Loading source...
+                  </div>
+                }
+              >
+                <LazySourceCodeEditor
+                  testId="markdown-source-view"
+                  value={sourceMarkdown}
+                  language="markdown"
+                  path={props.path}
+                  readOnly
+                  onChange={() => undefined}
+                  onSave={() => undefined}
+                />
+              </Suspense>
+            )}
+          </div>
+        ) : null}
         {/* data-dohc-doc-pane: the WHOLE pane is the editor's image drop zone,
             top-matter included — MarkdownEditor finds it with closest(). See
-            the drop-zone comment in imagePaste.ts. */}
+            the drop-zone comment in imagePaste.ts.
+
+            HIDDEN (not unmounted) while source is shown: unmounting Tiptap
+            destroys the Collaboration extension's Yjs UndoManager and the
+            cursor/selection, and would leave the DocumentMenu serializing a
+            stale mount-time body. The hidden editor stays bound to the Y.Doc,
+            so toggling back restores the exact editing state. */}
         <div
           data-testid="view-markdown"
           data-dohc-doc-pane=""
+          hidden={showSource}
           className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
@@ -1687,6 +1886,9 @@ export function FileInspector(props: {
   // version's Y.Doc lineage. Distinct from refreshKey, which ALSO bumps on
   // ordinary history growth (which must NOT reopen the live engine session).
   engineVersionKey?: number;
+  // Registers the mounted markdown view's "view source" toggle with the shell
+  // (command palette seam) — registerDraftFlush precedent.
+  registerSourceToggle?: (toggle: (() => void) | null) => void;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -1763,6 +1965,7 @@ export function FileInspector(props: {
             forceReadOnly={props.readOnly}
             reopenKey={props.engineVersionKey}
             refreshKey={props.refreshKey}
+            registerSourceToggle={props.registerSourceToggle}
           />
         </div>
       );

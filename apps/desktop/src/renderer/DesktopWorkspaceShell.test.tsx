@@ -153,14 +153,6 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       drivers: [],
       session: null,
     })),
-    startAgentSession: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
-    stopAgentSession: vi.fn(async () => ({
-      drivers: [],
-      session: null,
-    })),
     answerAgentPermission: vi.fn(async () => ({
       drivers: [],
       session: null,
@@ -733,6 +725,25 @@ describe("open editors", () => {
     await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
     expect(editorRows().map((row) => row.getAttribute("data-path"))).toEqual(["b.md"]);
   });
+
+  it("caps the open editors list height so it scrolls instead of growing unbounded", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const treeRows = await screen.findAllByTestId("tree-row");
+    const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+    await user.click(rowA);
+    await screen.findByTestId("tab-a.md");
+
+    // The list is bounded and scrolls internally (VS Code-style Open Editors)
+    // instead of growing without limit as more editors open. The scroll-to-
+    // active behavior needs real layout and is covered by the desktop e2e
+    // spec (workspace-open-editors.spec.ts).
+    const list = screen.getByTestId("open-editors-list");
+    expect(list.className).toContain("max-h-[238px]");
+    expect(list.className).toContain("overflow-y-auto");
+  });
 });
 
 describe("history rail", () => {
@@ -863,7 +874,7 @@ describe("native workbench context menus", () => {
 
   it("routes status bar context menu commands to panel actions", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.showWorkbenchMenu.mockResolvedValue("open-agent");
+    bridge.showWorkbenchMenu.mockResolvedValue("open-history");
     renderShell(bridge);
 
     fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
@@ -874,7 +885,12 @@ describe("native workbench context menus", () => {
         context: "status",
       });
     });
-    expect(await screen.findByTestId("agent-panel")).toBeTruthy();
+    // The command lands: the History view becomes the active rail entry.
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("activity-history").getAttribute("aria-current"),
+      ).toBe("page");
+    });
   });
 
   it("routes status bar update commands to the updater bridge", async () => {

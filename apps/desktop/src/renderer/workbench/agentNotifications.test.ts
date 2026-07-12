@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  agentNotificationId,
-  clearAgentNotificationsForWorkspace,
   deriveAgentActivity,
   dismissAgentNotification,
   reduceAgentNotifications,
@@ -299,41 +297,5 @@ describe("deriveAgentActivity", () => {
       }),
     });
     expect(activity?.addressedToUser).toBe(false);
-  });
-});
-
-describe("clear helpers", () => {
-  const sample: AgentNotification[] = [
-    {
-      id: agentNotificationId("ws-a", "run-1", "finished"),
-      kind: "finished",
-      workspaceId: "ws-a",
-      workspaceName: "Personal",
-      agentName: "You's agent",
-      runId: "run-1",
-      title: "Your agent finished",
-      body: "done",
-      createdAtMs: NOW,
-    },
-    {
-      id: agentNotificationId("ws-b", "run-9", "asked"),
-      kind: "asked",
-      workspaceId: "ws-b",
-      workspaceName: "Work",
-      agentName: "You's agent",
-      runId: "run-9",
-      title: "Your agent has a question",
-      body: "which one?",
-      createdAtMs: NOW,
-    },
-  ];
-
-  // Opening a notice lands the user on the run, which clears the WHOLE
-  // workspace's notices — the single, honest auto-clear. There is no per-thread
-  // clear because the agent session isn't tied to a specific chat thread.
-  it("clears every notice for a workspace", () => {
-    expect(clearAgentNotificationsForWorkspace(sample, "ws-a").map((n) => n.workspaceId)).toEqual([
-      "ws-b",
-    ]);
   });
 });

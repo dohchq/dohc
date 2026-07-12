@@ -14,12 +14,18 @@ export const VIEW_IDS = [
   "chats",
   "graph",
   "sites",
-  "agent",
   "history",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
+// Views that existed in earlier releases ("agent": the retired Agent panel).
+// Persisted ui-state may still carry one; the IPC contract accepts these so a
+// stale activeView never nulls the whole saved state, and the tolerant
+// parseUiState below maps them to the default view.
+export const RETIRED_VIEW_IDS = ["agent"] as const;
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
+// Chats expanded to a full editor tab (singleton, graph/history precedent).
+export const CHATS_TAB_PATH = "dohc://chats";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
 export const SITE_TAB_PREFIX = "dohc://site/";
 export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
@@ -61,6 +67,10 @@ export function isGraphTabPath(path: string | null): boolean {
 
 export function isHistoryTabPath(path: string | null): boolean {
   return path === HISTORY_TAB_PATH;
+}
+
+export function isChatsTabPath(path: string | null): boolean {
+  return path === CHATS_TAB_PATH;
 }
 
 export function isHistoryDiffTabPath(path: string | null): boolean {
@@ -125,6 +135,7 @@ export function isVirtualTabPath(path: string | null): boolean {
   return (
     isGraphTabPath(path) ||
     isHistoryTabPath(path) ||
+    isChatsTabPath(path) ||
     isHistoryDiffTabPath(path) ||
     isMomentDiffTabPath(path) ||
     isVersionCompareTabPath(path) ||

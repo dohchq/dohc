@@ -135,7 +135,7 @@ async function endAgentRun(
   }, { id: workspaceId, run: runId });
 }
 
-test("the loop: try a task in a version, watch, review, and merge lands on Main", async () => {
+test("the loop: try a task in a version, review, and merge lands on Main", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -196,10 +196,6 @@ test("the loop: try a task in a version, watch, review, and merge lands on Main"
         `Start click -> banner visible ${uiMs}ms`,
     );
     expect(gestureMs).toBeLessThan(1000);
-
-    // "Watch" opens the existing agent panel — no new streaming surface.
-    await page.getByTestId("try-run-watch").click();
-    await expect(page.getByTestId("agent-panel")).toBeVisible();
 
     const running = await tryRunState(page, workspace.workspaceId);
     expect(running).not.toBeNull();

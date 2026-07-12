@@ -8,6 +8,7 @@ import {
   History,
   Lock,
   Maximize2,
+  MessagesSquare,
   PanelRight,
   RefreshCw,
   Search,
@@ -45,6 +46,7 @@ import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
+  classifyForView,
   FileInspector,
   preloadMarkdownEditor,
   type ScrollTarget,
@@ -68,7 +70,7 @@ import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-o
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
-import type { AgentNotification } from "./workbench/agentNotifications";
+import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -92,6 +94,8 @@ import {
   TryInVersionBanner,
   TryInVersionReviewCard,
 } from "./workbench/TryInVersion";
+// Type-only: erased at compile time, so the ChatsView chunk stays lazy.
+import type { ChatsDrafts, ChatsNav } from "./workbench/ChatsView";
 import {
   activateTab,
   closeTab,
@@ -103,8 +107,10 @@ import {
   momentDiffTabPath,
   parseMomentDiffTabPath,
   defaultWorkbenchState,
+  CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  isChatsTabPath,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -179,9 +185,6 @@ const LazySitesView = lazy(() =>
 );
 const LazySitePreviewPage = lazy(() =>
   import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
-);
-const LazyAgentPanelView = lazy(() =>
-  import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -775,7 +778,6 @@ export function DesktopWorkspaceShell(props: {
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
   const [agentActive, setAgentActive] = useState(false);
-  const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
@@ -809,7 +811,6 @@ export function DesktopWorkspaceShell(props: {
   }, [wb.activeTab]);
   const onSettingsAgentActiveChange = useCallback((active: boolean) => {
     setAgentActive(active);
-    setAgentPanelRefreshKey((key) => key + 1);
   }, []);
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
@@ -835,6 +836,14 @@ export function DesktopWorkspaceShell(props: {
   const activeUndoRef = useRef<ActiveUndoHandler | null>(null);
   const registerActiveUndo = useCallback((handler: ActiveUndoHandler | null) => {
     activeUndoRef.current = handler;
+  }, []);
+
+  // The mounted markdown view's "view source" toggle (registered like the
+  // draft flush above) — the palette's toggle-markdown-source command routes
+  // through it. Null whenever the active tab is not a mounted markdown doc.
+  const sourceToggleRef = useRef<(() => void) | null>(null);
+  const registerSourceToggle = useCallback((toggle: (() => void) | null) => {
+    sourceToggleRef.current = toggle;
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
@@ -1319,6 +1328,29 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
+  // Chats expand-to-tab. Chats is a LIVE surface (presence lease, IPC-backed
+  // state, labeled composer ids), so unlike graph/history at most ONE
+  // ChatsView is ever mounted: while the chats tab is ACTIVE the side panel
+  // shows a note instead of a second instance, and an inactive tab is
+  // unmounted anyway (only the active tab renders). This ref is chats' ONE
+  // current position (runtime-only): whichever instance is live reports into
+  // it, and whichever instance mounts next seeds from it — expanding opens
+  // the tab on the panel's conversation, and closing (or leaving) the tab
+  // hands the conversation back to the panel.
+  const chatsNav = useRef<ChatsNav | null>(null);
+  const onChatsNav = useCallback((nav: ChatsNav) => {
+    chatsNav.current = nav;
+  }, []);
+  // Unsent drafts ride the same handoff: mirrored live (a ref write per
+  // keystroke, no re-render) and seeded into the next mount, so expanding
+  // or collapsing chats never discards what the user typed.
+  const chatsDrafts = useRef<ChatsDrafts | null>(null);
+  const onChatsDrafts = useCallback((drafts: ChatsDrafts) => {
+    chatsDrafts.current = drafts;
+  }, []);
+  const openChatsTab = useCallback(() => {
+    mutateWb((state) => openTab(state, CHATS_TAB_PATH));
+  }, [mutateWb]);
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -1688,24 +1720,6 @@ export function DesktopWorkspaceShell(props: {
       historyVisible: true,
     }));
   }, [mutateWb]);
-  const openAgentView = useCallback(() => {
-    // Opening the Agent panel means the user is now looking at the run, so
-    // its finished/error/ask notices auto-clear.
-    agentNotifs.clearForCurrentWorkspace();
-    mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
-  }, [agentNotifs, mutateWb]);
-
-  // A NoticeCenter / inbox item was opened: land on the run and clear it.
-  // openAgentView() clears every notice for this workspace, so opening the run
-  // is the single, obvious clear — there is no per-thread clear because the
-  // agent session isn't tied to a specific chat thread (see agentNotifications).
-  const openAgentNotification = useCallback(
-    (_notification: AgentNotification) => {
-      openAgentView();
-    },
-    [openAgentView],
-  );
-
   const checkForDesktopUpdates = useCallback(async () => {
     try {
       const result = await bridge().checkForUpdates();
@@ -1744,8 +1758,6 @@ export function DesktopWorkspaceShell(props: {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path && !isVirtualTabPath(path)) {
         showPathInExplorer(path);
-      } else if (command === "open-agent") {
-        openAgentView();
       } else if (command === "open-history") {
         openHistoryView();
       } else if (command === "connect-cloud") {
@@ -1766,7 +1778,6 @@ export function DesktopWorkspaceShell(props: {
       closeOtherTabs,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      openAgentView,
       openHistoryView,
       openSettings,
       showPathInExplorer,
@@ -1941,6 +1952,17 @@ export function DesktopWorkspaceShell(props: {
         label: "Close tab",
         run: closeActiveTab,
       },
+      // Only offered while a markdown document is the active tab — on every
+      // other tab the toggle has nothing to act on, so the palette hides it.
+      ...(activeDocumentPath && classifyForView(activeDocumentPath) === "markdown"
+        ? [
+            {
+              id: "toggle-markdown-source",
+              label: "Toggle markdown source view",
+              run: () => sourceToggleRef.current?.(),
+            },
+          ]
+        : []),
       {
         id: "toggle-history",
         label: "Toggle history rail",
@@ -1990,6 +2012,7 @@ export function DesktopWorkspaceShell(props: {
       },
     ],
     [
+      activeDocumentPath,
       openWorkspaceFolder,
       closeActiveTab,
       importFiles,
@@ -2119,6 +2142,23 @@ export function DesktopWorkspaceShell(props: {
     </>
   );
 
+  // ONE prop bundle for both ChatsView mounts (panel and page) so the live,
+  // presence-bearing surface can never drift between the two call sites —
+  // they differ only by `variant`.
+  const chatsViewProps = {
+    workspaceId,
+    initialNav: chatsNav.current ?? undefined,
+    initialDrafts: chatsDrafts.current ?? undefined,
+    onNavChange: onChatsNav,
+    onDraftsChange: onChatsDrafts,
+    onOpenFileChat: openFileChatInRail,
+    onOpenPath: openFile,
+    onError: setShellError,
+    mentionCandidates,
+    addressedToMe,
+    collaboration: chatCollaboration,
+  } as const;
+
   return (
     <div
       data-testid="workspace-shell"
@@ -2207,7 +2247,6 @@ export function DesktopWorkspaceShell(props: {
           activeView={wb.activeView}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
-          agentActive={agentActive}
           chatsEnabled={versionsEnabled}
           searchResultCount={
             search.model.totalMatches > 0 ? search.model.totalMatches : undefined
@@ -2258,6 +2297,19 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
+              ) : wb.activeView === "chats" &&
+                versionsEnabled &&
+                !isChatsTabPath(wb.activeTab) ? (
+                <button
+                  type="button"
+                  data-testid="chats-open-tab"
+                  aria-label="Open chats in tab"
+                  title="Open chats in tab"
+                  onClick={openChatsTab}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <Maximize2 size={13} aria-hidden />
+                </button>
               ) : wb.activeView === "sites" ? (
                 <button
                   type="button"
@@ -2299,18 +2351,23 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "chats" ? (
               versionsEnabled ? (
-                <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView
-                    workspaceId={workspaceId}
-                    onOpenFileChat={openFileChatInRail}
-                    onOpenPath={openFile}
-                    onError={(message) => setShellError(message)}
-                    mentionCandidates={mentionCandidates}
-                    addressedToMe={addressedToMe}
-                    onOpenAddressed={openAgentNotification}
-                    collaboration={chatCollaboration}
-                  />
-                </Suspense>
+                isChatsTabPath(wb.activeTab) ? (
+                  // The chats TAB is live — never mount a second chat client
+                  // (duplicate presence lease, composer ids, diverging state).
+                  <div
+                    data-testid="chats-panel-deferred"
+                    className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+                  >
+                    <MessagesSquare size={16} aria-hidden className="text-subtle" />
+                    <span className="text-xs text-muted">
+                      Chats are open as a tab.
+                    </span>
+                  </div>
+                ) : (
+                  <Suspense fallback={<PanelLoading label="Chats" />}>
+                    <LazyChatsView {...chatsViewProps} />
+                  </Suspense>
+                )
               ) : (
                 // Transient: the settings load corrects activeView moments
                 // later; never a blank panel meanwhile.
@@ -2320,14 +2377,6 @@ export function DesktopWorkspaceShell(props: {
               )
             ) : wb.activeView === "history" ? (
               historyTimeline
-            ) : wb.activeView === "agent" ? (
-              <Suspense fallback={<PanelLoading label="agent" />}>
-                <LazyAgentPanelView
-                  workspaceId={workspaceId}
-                  refreshKey={agentPanelRefreshKey}
-                  onAgentActiveChange={setAgentActive}
-                />
-              </Suspense>
             ) : null}
           </SidePanel>
         ) : null}
@@ -2393,13 +2442,7 @@ export function DesktopWorkspaceShell(props: {
               agent works, then the review card when the run ends. Flagged
               workspaces only (tryState never exists otherwise). */}
           {versionsEnabled && tryState?.status === "running" ? (
-            <TryInVersionBanner
-              task={tryState.task}
-              versionName={tryState.versionName}
-              onWatch={() =>
-                mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }))
-              }
-            />
+            <TryInVersionBanner task={tryState.task} versionName={tryState.versionName} />
           ) : null}
           {versionsEnabled && tryState?.status === "review" ? (
             <TryInVersionReviewCard
@@ -2464,6 +2507,19 @@ export function DesktopWorkspaceShell(props: {
                 workspaceId={workspaceId}
                 versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
               />
+            ) : isChatsTabPath(wb.activeTab) ? (
+              versionsEnabled ? (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyChatsView {...chatsViewProps} variant="page" />
+                </Suspense>
+              ) : (
+                <div
+                  data-testid="chats-page-off"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
+                >
+                  Chats aren&apos;t enabled for this workspace.
+                </div>
+              )
             ) : isSiteTabPath(wb.activeTab) ? (
               activeSiteRoot ? (
                 <Suspense fallback={<PanelLoading label="site" />}>
@@ -2495,6 +2551,7 @@ export function DesktopWorkspaceShell(props: {
                 onScrollConsumed={consumeScrollTarget}
                 onSaveStateChange={onSaveStateChange}
                 registerDraftFlush={registerDraftFlush}
+                registerSourceToggle={registerSourceToggle}
                 knownMarkdownFiles={markdownWikilinkFiles}
                 readOnly={!!shareView || isMountedSharePath(wb.activeTab)}
                 {...(shareView || isMountedSharePath(wb.activeTab)
@@ -2612,7 +2669,6 @@ export function DesktopWorkspaceShell(props: {
         agentActive={agentActive}
         conflictSummaries={conflictSummaries}
         onConnectCloud={() => setCloudOpen(true)}
-        onOpenAgent={openAgentView}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}
         onDismissSyncReview={() =>
@@ -2624,8 +2680,16 @@ export function DesktopWorkspaceShell(props: {
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
-        onOpenAgentNotification={openAgentNotification}
         onDismissAgentNotification={agentNotifs.dismiss}
+      />
+
+      {/* A blocked agent run's consent asks (the retired Agent panel's one
+          load-bearing interaction). Floats wherever the user already is —
+          answering resumes the run. */}
+      <AgentPermissionRequests
+        workspaceId={workspaceId}
+        runId={agentNotifs.pendingPermissionsRunId}
+        requests={agentNotifs.pendingPermissions}
       />
 
       {paletteOpen ? (

@@ -79,7 +79,6 @@ export function NoticeCenter(props: {
   agentActive: boolean;
   conflictSummaries: string[];
   onOpenHistory: () => void;
-  onOpenAgent: () => void;
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
@@ -87,10 +86,9 @@ export function NoticeCenter(props: {
   // pending remote-resolve set after the user has taken their look.
   onDismissSyncReview?: () => void;
   // Agent -> user notifications (finished / needs-input / asked / error).
-  // Opening one lands the user on the relevant run or chat thread and
-  // auto-clears it; dismiss acknowledges the state.
+  // Informational ledger entries: the History rail shows what the run did,
+  // and a blocked run raises its own permission card. Dismiss acknowledges.
   agentNotifications?: readonly AgentNotification[];
-  onOpenAgentNotification?: (notification: AgentNotification) => void;
   onDismissAgentNotification?: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -206,9 +204,6 @@ export function NoticeCenter(props: {
         body: notification.body,
         timeMs: notification.createdAtMs,
         Icon: AGENT_NOTICE_ICON[notification.kind],
-        ...(props.onOpenAgentNotification
-          ? { action: { label: "Open", onClick: () => props.onOpenAgentNotification?.(notification) } }
-          : {}),
         ...(props.onDismissAgentNotification
           ? { onDismiss: () => props.onDismissAgentNotification?.(notification.id) }
           : {}),
@@ -303,7 +298,7 @@ export function NoticeCenter(props: {
         tone: "success",
         title: "Agent running",
         body: "Workspace changes from this run will be attributed in history.",
-        action: { label: "Open", onClick: props.onOpenAgent },
+        action: { label: "Open History", onClick: props.onOpenHistory },
         Icon: Bot,
       });
     }
@@ -330,8 +325,6 @@ export function NoticeCenter(props: {
     agentNotifications,
     props.agentActive,
     props.conflictSummaries,
-    props.onOpenAgent,
-    props.onOpenAgentNotification,
     props.onDismissAgentNotification,
     props.onOpenConflicts,
     props.onOpenHistory,

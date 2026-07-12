@@ -1425,3 +1425,189 @@ describe("ChatsView direct messages", () => {
     expect(bodies.map((el) => el.textContent)).toEqual(["old message"]);
   });
 });
+
+// Expand-to-tab (chats/expand-to-tab): the panel reports where it is via
+// onNavChange, and a freshly expanded tab (variant "page") starts at that
+// conversation via initialNav — consumed once, loaded through the same
+// openChannel/openThread path a click would take.
+describe("ChatsView expand-to-tab", () => {
+  it("marks the page variant on the root so the tab surface is testable", async () => {
+    renderView(vi.fn(), vi.fn(), { variant: "page" });
+    const view = await screen.findByTestId("chats-view");
+    expect(view.dataset.variant).toBe("page");
+  });
+
+  it("defaults to the panel variant", async () => {
+    renderView();
+    const view = await screen.findByTestId("chats-view");
+    expect(view.dataset.variant).toBe("panel");
+  });
+
+  it("reports every navigation through onNavChange", async () => {
+    const user = userEvent.setup();
+    const onNavChange = vi.fn();
+    renderView(vi.fn(), vi.fn(), { onNavChange });
+
+    await screen.findByTestId("chats-view");
+    expect(onNavChange).toHaveBeenCalledWith({ level: "channels" });
+
+    await user.click(screen.getByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(onNavChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "channel",
+        channel: expect.objectContaining({ id: "channel-1" }),
+      }),
+    );
+  });
+
+  it("seeds an expanded tab at the panel's thread once the overview is ready", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+    });
+
+    const view = await screen.findByTestId("chats-thread-view");
+    expect(view.dataset.variant).toBe("page");
+    expect((await screen.findByTestId("chats-thread-post-title")).textContent).toBe(
+      "Should we ship on Friday?",
+    );
+    await waitFor(() =>
+      expect(bridgeMock.listChatMessages).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+      }),
+    );
+  });
+
+  it("seeds an expanded tab at the panel's channel", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "channel", channel: channel() },
+    });
+
+    const view = await screen.findByTestId("chats-channel-view");
+    expect(view.dataset.variant).toBe("page");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "general",
+    );
+  });
+
+  it("never reports the default overview position while a seed is pending", async () => {
+    // The shell's nav ref holds the conversation being restored; reporting
+    // the pre-seed default would overwrite it, so closing the tab mid-load
+    // would lose the conversation the expand was supposed to preserve.
+    const onNavChange = vi.fn();
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+      onNavChange,
+    });
+
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() =>
+      expect(onNavChange).toHaveBeenCalledWith(
+        expect.objectContaining({ level: "thread" }),
+      ),
+    );
+    expect(onNavChange).not.toHaveBeenCalledWith({ level: "channels" });
+    expect(onNavChange.mock.calls[0]?.[0]).toMatchObject({ level: "thread" });
+  });
+
+  it("seeds an expanded tab at the panel's DM conversation", async () => {
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "dm", dm: dm() },
+    });
+
+    const view = await screen.findByTestId("chats-dm-view");
+    expect(view.dataset.variant).toBe("page");
+    expect((await screen.findByTestId("chats-dm-title")).textContent).toBe(
+      "bob@example.com",
+    );
+  });
+
+  it("seeds an expanded tab at the new-message compose screen", async () => {
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "dm-new" },
+    });
+
+    const view = await screen.findByTestId("chats-dm-new");
+    expect(view.dataset.variant).toBe("page");
+  });
+
+  it("restores unsent drafts alongside the seeded conversation", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+      initialDrafts: {
+        composer: "half-typed reply",
+        newThreadBody: "",
+        dmRecipients: "",
+        dmDraft: "",
+        replyTarget: null,
+        resolveTargetMessageId: null,
+      },
+    });
+
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("chats-composer") as HTMLTextAreaElement).value,
+      ).toBe("half-typed reply"),
+    );
+  });
+
+  it("restores the composer's reply/resolve mode, not just its text", async () => {
+    // Without the mode, a reply (or decision resolution) drafted before the
+    // handoff would post as a plain top-level comment after it.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+      initialDrafts: {
+        composer: "replying mid-expand",
+        newThreadBody: "",
+        dmRecipients: "",
+        dmDraft: "",
+        replyTarget: { messageId: "message-1", authorLabel: "You" },
+        resolveTargetMessageId: "message-1",
+      },
+    });
+
+    await screen.findByTestId("chats-thread-view");
+    expect(await screen.findByTestId("chats-replying-mode")).toBeTruthy();
+    expect(await screen.findByTestId("chats-resolving-mode")).toBeTruthy();
+  });
+
+  it("reports draft edits so the shell can hand them to the next mount", async () => {
+    const user = userEvent.setup();
+    const onDraftsChange = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView(vi.fn(), vi.fn(), { onDraftsChange });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    await user.type(screen.getByTestId("chats-new-thread-composer"), "hi");
+
+    await waitFor(() =>
+      expect(onDraftsChange).toHaveBeenCalledWith(
+        expect.objectContaining({ newThreadBody: "hi" }),
+      ),
+    );
+  });
+});
+

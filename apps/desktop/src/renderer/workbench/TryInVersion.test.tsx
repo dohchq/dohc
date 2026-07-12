@@ -184,22 +184,14 @@ describe("TryTaskDialog", () => {
 });
 
 describe("TryInVersionBanner", () => {
-  it("states the task and version, and Watch opens the agent panel", async () => {
-    const onWatch = vi.fn();
-    const user = userEvent.setup();
+  it("states the task and version", () => {
     render(
-      <TryInVersionBanner
-        task="tidy the notes"
-        versionName="Try: tidy the notes"
-        onWatch={onWatch}
-      />,
+      <TryInVersionBanner task="tidy the notes" versionName="Try: tidy the notes" />,
     );
     const banner = screen.getByTestId("try-run-banner");
     expect(banner.textContent).toContain("An agent is trying:");
     expect(screen.getByTestId("try-run-banner-task").textContent).toBe("tidy the notes");
     expect(banner.textContent).toContain("in Try: tidy the notes");
-    await user.click(screen.getByTestId("try-run-watch"));
-    expect(onWatch).toHaveBeenCalledOnce();
   });
 });
 

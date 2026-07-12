@@ -7,6 +7,12 @@ import { useAgentNotifications } from "./useAgentNotifications";
 // PRODUCT INVARIANT: a slow/stale response for workspace A must never repaint
 // workspace B, and switching away/back must not re-raise a dismissed run.
 
+const WS_A_PERMISSION = {
+  requestId: "perm-1",
+  title: "Write notes/plan.md",
+  options: [{ optionId: "o1", name: "Allow", kind: "allow_once" }],
+};
+
 function panelFor(workspaceId: string) {
   if (workspaceId === "ws-a") {
     return {
@@ -19,7 +25,7 @@ function panelFor(workspaceId: string) {
         runId: "run-a",
         messages: [{ id: "m1", role: "assistant", text: "Reorganized /notes." }],
         items: [],
-        pendingPermissions: [],
+        pendingPermissions: [WS_A_PERMISSION],
         authNotices: [],
       },
     };
@@ -64,6 +70,22 @@ describe("useAgentNotifications workspace isolation", () => {
     // synchronously — the render filters to the current workspace.
     rerender({ ws: "ws-b" });
     expect(result.current.notifications).toEqual([]);
+  });
+
+  it("exposes the session's pending permissions and drops them on switch", async () => {
+    const { result, rerender } = renderHook(
+      ({ ws }) => useAgentNotifications({ workspaceId: ws, ...baseProps }),
+      { initialProps: { ws: "ws-a" } },
+    );
+
+    await waitFor(() =>
+      expect(result.current.pendingPermissions).toEqual([WS_A_PERMISSION]),
+    );
+
+    // Switch to B: A's asks vanish synchronously — a stale card must never
+    // invite an answer against the wrong workspace.
+    rerender({ ws: "ws-b" });
+    expect(result.current.pendingPermissions).toEqual([]);
   });
 
   it("does not re-raise a dismissed run after switching away and back", async () => {

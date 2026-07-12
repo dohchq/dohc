@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AgentPanelSnapshotResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
-  clearAgentNotificationsForWorkspace,
   deriveAgentActivity,
   dismissAgentNotification,
   reduceAgentNotifications,
@@ -11,8 +11,12 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 // Shell-level poller behind Agent -> user notifications. It watches the active
 // workspace's agent session so a run that finishes / blocks / asks / fails
-// surfaces in the NoticeCenter even when the Agent panel isn't the open view
-// (the whole point: a background run finishing while you're editing a doc).
+// surfaces in the NoticeCenter even while the user is editing something else
+// (the whole point: a background run finishing while you're in a doc).
+//
+// The same poll also carries the session's pending permission requests — the
+// asks a blocked run is waiting on. The shell renders those as
+// AgentPermissionRequests cards; answering resumes the run.
 //
 // Scope note (individual-first, LOCAL): this watches the CURRENTLY OPEN
 // workspace only. Cross-workspace background runs would need main to track
@@ -20,11 +24,18 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 // also want, so it's intentionally left as a single, obvious future addition.
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 
+export type AgentPermissionRequest = NonNullable<
+  AgentPanelSnapshotResult["session"]
+>["pendingPermissions"][number];
+
 export interface UseAgentNotifications {
   notifications: AgentNotification[];
+  // The active session's unanswered permission requests (current workspace).
+  pendingPermissions: AgentPermissionRequest[];
+  // The run those asks belong to — the card scopes its optimistic-hide keys
+  // by run, so a LATER session reusing a provider request id can ask again.
+  pendingPermissionsRunId: string | null;
   dismiss: (id: string) => void;
-  // The user is now looking at the run — clear this workspace's notices.
-  clearForCurrentWorkspace: () => void;
 }
 
 export function useAgentNotifications(params: {
@@ -40,6 +51,15 @@ export function useAgentNotifications(params: {
   const pollIntervalMs = params.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   const [notifications, setNotifications] = useState<AgentNotification[]>([]);
+  // Asks are stored WITH their workspace and filtered synchronously at
+  // render (the same isolation rule as notifications below): the render
+  // right after a switch must never hand workspace A's request ids to a
+  // card that would answer them against workspace B.
+  const [pendingAsks, setPendingAsks] = useState<{
+    workspaceId: string;
+    runId: string | null;
+    requests: AgentPermissionRequest[];
+  }>({ workspaceId, runId: null, requests: [] });
   // Dismissed state keys, KEYED BY workspace. A flat set cleared on switch let
   // switching away/back re-raise a dismissed run; per-workspace sets that
   // persist across switches never do. Each notice carries its workspaceId, so
@@ -71,6 +91,11 @@ export function useAgentNotifications(params: {
         return; // transient IPC failure — try again next tick
       }
       if (cancelled) return;
+      setPendingAsks({
+        workspaceId,
+        runId: panel.session?.runId ?? null,
+        requests: panel.session?.pendingPermissions ?? [],
+      });
       const activity = deriveAgentActivity({
         workspaceId,
         workspaceName: metaRef.current.workspaceName,
@@ -106,15 +131,6 @@ export function useAgentNotifications(params: {
     [dismissedFor],
   );
 
-  const clearForCurrentWorkspace = useCallback(() => {
-    setNotifications((prev) => {
-      for (const notice of prev) {
-        if (notice.workspaceId === workspaceId) dismissedFor(workspaceId).add(notice.id);
-      }
-      return clearAgentNotificationsForWorkspace(prev, workspaceId);
-    });
-  }, [dismissedFor, workspaceId]);
-
   // Render only the CURRENT workspace's notices, computed synchronously. A
   // switch to workspace B therefore never repaints workspace A's notices, even
   // for the tick before the next poll runs (product invariant: a slow/stale
@@ -123,10 +139,16 @@ export function useAgentNotifications(params: {
     () => notifications.filter((notice) => notice.workspaceId === workspaceId),
     [notifications, workspaceId],
   );
+  const pendingPermissions = useMemo(
+    () => (pendingAsks.workspaceId === workspaceId ? pendingAsks.requests : []),
+    [pendingAsks, workspaceId],
+  );
 
   return {
     notifications: currentWorkspaceNotifications,
+    pendingPermissions,
+    pendingPermissionsRunId:
+      pendingAsks.workspaceId === workspaceId ? pendingAsks.runId : null,
     dismiss,
-    clearForCurrentWorkspace,
   };
 }
