@@ -4,6 +4,13 @@ import {
   settingsDeepEqual,
 } from "../settings/userSettings";
 
+// The schema bound on `files.attachmentFolderName`. Exported because the
+// settings UI must enforce the SAME bound on its input: mergeWorkspaceSettings
+// re-parses and THROWS on an over-long value, and it is called straight from a
+// React change handler — so an unbounded input would turn a long paste into an
+// unhandled exception instead of a rejected edit.
+export const ATTACHMENT_FOLDER_NAME_MAX_LENGTH = 100;
+
 export const WorkspaceSettings = z.object({
   version: z.literal(1),
   agents: z.object({
@@ -44,7 +51,7 @@ export const WorkspaceSettings = z.object({
   // invalid value falls back to "assets" rather than resetting the file.
   files: z.object({
     attachmentLocation: z.enum(["per-document", "global-folder", "same-folder"]),
-    attachmentFolderName: z.string().max(100),
+    attachmentFolderName: z.string().max(ATTACHMENT_FOLDER_NAME_MAX_LENGTH),
   }).strict().default({ attachmentLocation: "per-document", attachmentFolderName: "assets" }),
 }).strict();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;

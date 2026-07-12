@@ -327,6 +327,23 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             workspaceId: imageContextRef.current.workspaceId,
           })
         ).files,
+      // Read WHEN an image is written, not once when the editor mounts. The
+      // setting is workspace state the user can change from the settings dialog
+      // without this editor ever remounting — a cached copy would keep saving to
+      // the old location — and it is per-workspace, so a copy taken before a
+      // workspace switch would be the wrong workspace's. Reading through
+      // imageContextRef (kept current below) makes the CURRENT workspace's
+      // setting the only one this can ever apply. A failed read falls back to
+      // the per-document default inside placeImageFiles.
+      readAttachments: async () => {
+        const result = await bridge().getWorkspaceSettings({
+          workspaceId: imageContextRef.current.workspaceId,
+        });
+        return {
+          location: result.settings.files.attachmentLocation,
+          folderName: result.settings.files.attachmentFolderName,
+        };
+      },
     });
 
     useEffect(() => {
@@ -337,39 +354,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         docPath: path,
       };
     }, [workspaceId, path]);
-
-    // Where saved attachments land follows the workspace setting. Read through
-    // the same bridge the write path already uses; guarded by a per-workspace
-    // cancel flag so a slow response can never stamp workspace A's setting onto
-    // a paste context that has since switched to workspace B. Absent until the
-    // read resolves, so an early paste falls back to the per-document default.
-    useEffect(() => {
-      let cancelled = false;
-      try {
-        void bridge()
-          .getWorkspaceSettings({ workspaceId })
-          .then((result) => {
-            if (cancelled || pasteContextRef.current.workspaceId !== workspaceId) {
-              return;
-            }
-            pasteContextRef.current = {
-              ...pasteContextRef.current,
-              attachments: {
-                location: result.settings.files.attachmentLocation,
-                folderName: result.settings.files.attachmentFolderName,
-              },
-            };
-          })
-          .catch(() => undefined);
-      } catch {
-        // Settings (or the desktop bridge) unavailable — the paste context
-        // keeps its per-document/"assets" default. A failed settings read must
-        // never break the editor.
-      }
-      return () => {
-        cancelled = true;
-      };
-    }, [workspaceId]);
 
     useEffect(() => {
       slashStateRef.current = slashState;

@@ -166,16 +166,9 @@ const EXPORT_STYLE_CSS = `
 // dollar-delimited LaTeX. Typeset them with KaTeX so the export matches what
 // the editor shows. renderToString is self-contained markup (no runtime
 // script); the KaTeX layout CSS is inlined separately, font-file-free, so this
-// stays a single offline document. Runs in the same DOM-bearing context
-// markdownBodyToHtml already requires (renderer / vitest jsdom). Returns
-// whether any math was found so the (large) KaTeX CSS is only inlined when a
-// document actually uses math.
-function renderMathInExportedHtml(bodyHtml: string): {
-  html: string
-  hasMath: boolean
-} {
-  const template = document.createElement('template')
-  template.innerHTML = bodyHtml
+// stays a single offline document. Returns whether any math was found so the
+// (large) KaTeX CSS is only inlined when a document actually uses math.
+function typesetMath(content: DocumentFragment): boolean {
   let hasMath = false
   const typeset = (el: Element, displayMode: boolean, delimiterLength: number) => {
     hasMath = true
@@ -190,12 +183,77 @@ function renderMathInExportedHtml(bodyHtml: string): {
       // Leave the raw `$tex$` in place.
     }
   }
-  template.content
+  content
     .querySelectorAll('[data-dohc-math-inline]')
     .forEach((el) => typeset(el, false, 1))
-  template.content
+  content
     .querySelectorAll('[data-dohc-math-block]')
     .forEach((el) => typeset(el, true, 2))
+  return hasMath
+}
+
+// EXPORT IMAGE CONTRACT — an exported document never reaches outside its own
+// folder.
+//
+// The editor resolves a workspace-relative image src against the DOCUMENT's
+// folder (imageSrc.ts) and serves the bytes over dohc-file://. An export has
+// neither: the file is opened from wherever the user saved it (HTML), or from a
+// throwaway temp dir (PDF — documentPdfExport writes the HTML to os.tmpdir()
+// and loads it with `file://`). The only base an exported document actually has
+// is its OWN directory, so its containment rule is stricter than the editor's:
+//
+//   http(s)                              → kept (a remote image is still remote)
+//   plain path at/below the export dir   → kept ("assets/x.png" still resolves
+//                                          when the HTML is saved beside the doc)
+//   ANYTHING else                        → emitted with NO src
+//
+// "Anything else" is every src that could climb out of the export directory or
+// name a local resource: `../` traversal (which a global-folder attachment src
+// legitimately carries in the workspace, but which from a temp dir would point
+// at the real filesystem), absolute and protocol-relative paths, and any
+// non-http(s) scheme (data:, file:, dohc-file:). Those images render as their
+// alt text. Nothing is dropped from the DOCUMENT — this only shapes the
+// exported artifact; the markdown keeps its lossless src.
+function isExportSafeImageSrc(src: string): boolean {
+  const trimmed = src.trim()
+  if (trimmed.length === 0) return false
+  // Strip control chars/whitespace before sniffing, mirroring the sanitizer in
+  // extensions.ts, so an obfuscated scheme ("java\nscript:") can't slip past.
+  const compact = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, '')
+  const scheme = /^[a-z][a-z\d+.-]*:/i.exec(compact)?.[0]
+  if (scheme) {
+    const protocol = scheme.slice(0, -1).toLowerCase()
+    return protocol === 'http' || protocol === 'https'
+  }
+  // Backslashes fold to '/' so a Windows-style `..\` traversal is caught too.
+  const forCheck = compact.replace(/\\/g, '/')
+  // Absolute ("/abs") and protocol-relative ("//host") both leave the export dir.
+  if (forCheck.startsWith('/')) return false
+  // Any `..` segment climbs above the exported file.
+  return !/(^|\/)\.\.(\/|$)/.test(forCheck)
+}
+
+function containImages(content: DocumentFragment): void {
+  content.querySelectorAll('img').forEach((img) => {
+    if (!isExportSafeImageSrc(img.getAttribute('src') ?? '')) {
+      // No src at all — not src="", which browsers re-request as the page's own
+      // URL.
+      img.removeAttribute('src')
+    }
+  })
+}
+
+// One DOM pass over the rendered body: typeset math, then contain image srcs.
+// Runs in the same DOM-bearing context markdownBodyToHtml already requires
+// (renderer / vitest jsdom), never in the main process.
+function prepareExportedBodyHtml(bodyHtml: string): {
+  html: string
+  hasMath: boolean
+} {
+  const template = document.createElement('template')
+  template.innerHTML = bodyHtml
+  const hasMath = typesetMath(template.content)
+  containImages(template.content)
   return { html: template.innerHTML, hasMath }
 }
 
@@ -209,7 +267,7 @@ export function buildStandaloneDocumentHtml(
   const { body } = parseFrontmatter(markdown)
   const title = resolveDocumentTitle(markdown, fallbackTitle)
   const escapedTitle = escapeHtml(title)
-  const { html: bodyHtml, hasMath } = renderMathInExportedHtml(
+  const { html: bodyHtml, hasMath } = prepareExportedBodyHtml(
     markdownBodyToHtml(body),
   )
   const style = hasMath

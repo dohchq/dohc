@@ -115,10 +115,12 @@ test("in-editor image: a subfolder doc renders an UPWARD-relative image from the
 
 test("in-editor image: a link escaping the workspace root does NOT render", async () => {
   // `../../outside.png` from notes/ climbs above the workspace root. The
-  // resolver refuses to mint a dohc-file:// URL for it, so the <img> keeps its
-  // raw (unservable) src and never decodes — even though a real file exists at
-  // the escape target. Containment holds without depending on the protocol
-  // layer to reject the request.
+  // resolver refuses to mint a dohc-file:// URL for it AND refuses to hand the
+  // raw path to the browser (which would resolve it against the renderer's own
+  // page, outside the workspace entirely): the <img> ends up with NO src, so
+  // nothing is ever requested — even though a real, decodable file exists at the
+  // escape target. Containment holds without depending on the protocol layer to
+  // reject the request.
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -137,20 +139,34 @@ test("in-editor image: a link escaping the workspace root does NOT render", asyn
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
     await openMarkdownDoc(page, "notes/plan.md");
 
-    const img = page.locator(".dohc-editor-image");
-    await expect(img).toBeVisible({ timeout: 15_000 });
-    // The src is left as the raw path — never rewritten to the privileged
-    // dohc-file:// scheme — and the image never decodes.
-    await expect(img.first()).not.toHaveAttribute("src", /^dohc-file:\/\//);
+    const img = page.locator(".dohc-editor-image").first();
+    await expect(img).toBeAttached({ timeout: 15_000 });
+    // The containment guarantee, asserted positively: no src attribute at all.
+    // (Not `src=""` either — browsers re-request the page's own URL for that.)
     await expect
-      .poll(
-        async () =>
-          await img
-            .first()
-            .evaluate((el) => (el as HTMLImageElement).naturalWidth),
-        { timeout: 5_000 },
-      )
-      .toBe(0);
+      .poll(async () => await img.evaluate((el) => el.getAttribute("src")), {
+        timeout: 10_000,
+      })
+      .toBe(null);
+    // ...and it was never rewritten to the privileged scheme on the way there.
+    await expect(img).not.toHaveAttribute("src", /^dohc-file:\/\//);
+
+    // Now prove it never decodes. `naturalWidth` is 0 BEFORE a load is even
+    // attempted, so polling for the first 0 would pass trivially: give the
+    // browser a real window to attempt (and finish) a load, then assert the
+    // settled state once. An <img> with no src reports complete=true with
+    // naturalWidth 0 and an empty currentSrc — i.e. it never fetched anything.
+    await page.waitForTimeout(2_000);
+    expect(
+      await img.evaluate((el) => {
+        const image = el as HTMLImageElement;
+        return {
+          hasSrc: image.hasAttribute("src"),
+          naturalWidth: image.naturalWidth,
+          currentSrc: image.currentSrc,
+        };
+      }),
+    ).toEqual({ hasSrc: false, naturalWidth: 0, currentSrc: "" });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

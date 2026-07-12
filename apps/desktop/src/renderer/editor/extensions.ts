@@ -156,12 +156,23 @@ function sanitizeImageSrc(src: string): string {
   // parent traversal (`../foo`) is PRESERVED losslessly. Agents legitimately
   // author upward-relative asset links — the global-folder attachment mode
   // writes `../assets/x.png` so a nested doc can point at one folder at the
-  // workspace root. Containment is NOT enforced here; it lives downstream:
-  // the desktop resolver (imageSrc.ts) refuses to mint a dohc-file:// URL for
-  // any path that normalizes outside the workspace root, and readWorkspaceAsset
-  // / the dohc-file protocol re-check real-path containment. A BACKSLASH-
-  // obfuscated `..\` is never legitimate authored markdown, so it stays
-  // blocked (backslashes are folded to '/' first so it can't slip through).
+  // workspace root.
+  //
+  // Containment is NOT enforced here — the sanitizer's job is the MARKDOWN
+  // (what round-trips into the .md), not what any given surface may load. Every
+  // surface that can actually FETCH the src gates it itself, and none of them
+  // may fall back to the raw path:
+  //   - the editor: imageSrc.ts serves a src over dohc-file:// only if it
+  //     normalizes inside the workspace root, and emits NO src otherwise (a raw
+  //     relative path would resolve against the app's own page);
+  //   - the protocol layer: readWorkspaceAsset / the dohc-file handler re-check
+  //     real-path containment;
+  //   - exports: documentExport.ts drops any src that could climb out of the
+  //     exported file's own folder (see its EXPORT IMAGE CONTRACT).
+  //
+  // A BACKSLASH-obfuscated `..\` is never legitimate authored markdown, so it
+  // stays blocked here (backslashes are folded to '/' first so it can't slip
+  // through).
   if (compact.includes('\\') && /(^|\/)\.\.(\/|$)/.test(forCheck)) return ''
   return trimmed
 }

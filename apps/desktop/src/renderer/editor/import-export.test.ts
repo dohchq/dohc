@@ -362,6 +362,59 @@ describe('desktop editor markdown round-trip', () => {
     ).toBe('![backslash]()')
   })
 
+  // PARITY FIXTURE. sanitizeImageSrc is implemented TWICE — apps/desktop's
+  // editor/extensions.ts and packages/ydoc-projection's
+  // dohc-markdown-extensions.ts — because neither package may import the other.
+  // This table is duplicated VERBATIM in the other package's import-export test
+  // and is what keeps the two copies from drifting: any change to the image-src
+  // contract has to change both implementations AND both tables, or one side
+  // goes red. Driven through the node attrs (not markdown source) so each input
+  // reaches the sanitizer exactly as written.
+  const IMAGE_SRC_CONTRACT: ReadonlyArray<{ src: string; markdown: string }> = [
+    // KEPT — relative asset paths (the ordinary case).
+    { src: 'assets/pic.png', markdown: '![x](assets/pic.png)' },
+    { src: './assets/pic.png', markdown: '![x](./assets/pic.png)' },
+    // KEPT — forward-slash parent traversal, losslessly: the global-folder
+    // attachment mode authors exactly this. Containment is downstream (the
+    // resolver refuses to serve an escaping path; the export drops it).
+    { src: '../assets/pic.png', markdown: '![x](../assets/pic.png)' },
+    { src: '../../outside.png', markdown: '![x](../../outside.png)' },
+    // KEPT — remote images.
+    { src: 'https://example.com/x.png', markdown: '![x](https://example.com/x.png)' },
+    { src: 'http://example.com/x.png', markdown: '![x](http://example.com/x.png)' },
+    // DROPPED — every non-http(s) scheme, however obfuscated.
+    { src: 'javascript:alert(1)', markdown: '![x]()' },
+    { src: 'JavaScript:alert(1)', markdown: '![x]()' },
+    { src: 'java\nscript:alert(1)', markdown: '![x]()' },
+    { src: 'data:image/svg+xml;base64,PHN2Zz4=', markdown: '![x]()' },
+    { src: 'file:///etc/passwd', markdown: '![x]()' },
+    { src: 'dohc-file://ws/x.png', markdown: '![x]()' },
+    // DROPPED — absolute and protocol-relative.
+    { src: '/etc/pic.png', markdown: '![x]()' },
+    { src: '//evil.example.com/x.png', markdown: '![x]()' },
+    // DROPPED — backslash-obfuscated traversal (never authored markdown).
+    { src: '..\\secret\\pic.png', markdown: '![x]()' },
+    { src: 'a\\..\\..\\b.png', markdown: '![x]()' },
+    // DROPPED — empty / whitespace-only.
+    { src: '', markdown: '![x]()' },
+    { src: '   ', markdown: '![x]()' },
+  ]
+
+  it('pins the image-src contract (parity fixture — duplicated in the sibling package)', () => {
+    for (const { src, markdown } of IMAGE_SRC_CONTRACT) {
+      expect(
+        yDocToMarkdown(
+          yDocFromBody([
+            {
+              type: 'paragraph',
+              content: [{ type: 'image', attrs: { alt: 'x', src, title: null } }],
+            },
+          ]),
+        ),
+      ).toBe(markdown)
+    }
+  })
+
   it('covers GFM tables, task lists, and strikethrough', () => {
     expectStableMarkdownRoundTrip(
       [

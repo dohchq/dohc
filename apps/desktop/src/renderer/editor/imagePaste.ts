@@ -1,3 +1,4 @@
+import { validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { EditorView } from "@tiptap/pm/view";
 import { documentDir } from "./imageSrc";
 
@@ -29,15 +30,29 @@ export const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
   folderName: DEFAULT_ATTACHMENT_FOLDER,
 };
 
-// Coerces a stored folder name to a single safe path segment. Anything with a
-// separator, a `.`/`..` segment, or that is empty falls back to "assets" — so
-// a malformed setting can never widen the write target or climb directories.
+// Coerces a stored folder name to a single path segment the WRITER will accept.
+//
+// The folder name is user input that becomes one segment of the write path, so
+// "safe" here means exactly one thing: whatever we return, writeWorkspaceAsset
+// must accept. The main process runs every write through validateUserWritePath,
+// which rejects more than traversal — reserved names (`.dohc`,
+// `shared-with-me`), ignored ones (`node_modules`, `.git`), percent-encoded
+// traversal (`%2e%2e`), and Windows dot/space aliases. Re-deriving that list
+// here would drift; instead we ASK the same validator, and require the path it
+// normalizes to be the segment we passed in (so a name that decodes into
+// several segments, like `a%2fb`, is rejected rather than quietly widening the
+// target). Anything it refuses falls back to "assets" — a rejected name must
+// degrade to the default, never make every paste fail its write and silently
+// drop the image.
 export function sanitizeAttachmentFolderName(name: string): string {
   const trimmed = name.trim();
   if (trimmed.length === 0) return DEFAULT_ATTACHMENT_FOLDER;
-  if (trimmed === "." || trimmed === "..") return DEFAULT_ATTACHMENT_FOLDER;
+  // One segment only: the caller joins this into a path itself.
   if (/[/\\]/.test(trimmed)) return DEFAULT_ATTACHMENT_FOLDER;
-  return trimmed;
+  const validated = validateUserWritePath(trimmed);
+  return validated.ok && validated.normalized === trimmed
+    ? trimmed
+    : DEFAULT_ATTACHMENT_FOLDER;
 }
 
 // Computes both paths a saved attachment needs, purely from the document's
@@ -154,13 +169,40 @@ export type ImagePasteContext = {
   // Current document's workspace-relative path (e.g. `notes/plan.md`).
   docPath: string;
   writeAsset: WriteWorkspaceAsset;
-  // Where saved attachments go. Absent → the per-document/"assets" default
-  // (the historical behavior), so callers that never set it keep working.
-  attachments?: AttachmentSettings;
+  // Where saved attachments go — READ AT USE TIME, never cached by the editor.
+  //
+  // The setting lives in workspace settings, which the user can change (in the
+  // settings dialog) while this editor stays mounted, and which differs per
+  // workspace. A copy cached when the editor mounted goes stale on both counts:
+  // it would keep writing to the old location after the setting changed, and to
+  // workspace A's location right after a switch to B. Asking for the value at
+  // the moment we write removes the cache — and the staleness — entirely.
+  //
+  // Absent → the per-document/"assets" default, so callers that never set it
+  // (and any failure to read) keep working.
+  readAttachments?: () => Promise<AttachmentSettings>;
   // Opens the native `/image` picker (a main-process dialog at the workspace
   // root). Absent → `/image` simply cannot pick; paste and drop are unaffected.
   pickImages?: PickImages;
 };
+
+// Reads the attachment setting for THIS write. A failed/absent read is not an
+// error: attachments fall back to the per-document default rather than the
+// paste dying.
+async function resolveAttachmentSettings(
+  context: ImagePasteContext,
+): Promise<AttachmentSettings> {
+  if (!context.readAttachments) return DEFAULT_ATTACHMENT_SETTINGS;
+  try {
+    return await context.readAttachments();
+  } catch (error) {
+    console.warn(
+      "[dohc] could not read the attachment location setting; using the default:",
+      error,
+    );
+    return DEFAULT_ATTACHMENT_SETTINGS;
+  }
+}
 
 // Slug of the original filename (sans extension): lowercase, non-alphanumerics
 // collapsed to single dashes, trimmed, capped. Empty names fall back to
@@ -255,6 +297,9 @@ export async function placeImageFiles(
   context: ImagePasteContext,
   startPos: number,
 ): Promise<void> {
+  // One read for the whole batch: every image in a single paste/drop/pick lands
+  // under the setting as it stands at that moment.
+  const attachments = await resolveAttachmentSettings(context);
   let pos = startPos;
   for (const source of sources) {
     if (source.size > MAX_IMAGE_BYTES) {
@@ -278,7 +323,7 @@ export async function placeImageFiles(
     const { writePath, relativeSrc } = computeAttachmentPaths(
       context.docPath,
       filename,
-      context.attachments,
+      attachments,
     );
     try {
       await context.writeAsset(writePath, bytes);

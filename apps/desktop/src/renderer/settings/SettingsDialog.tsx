@@ -20,6 +20,7 @@ import {
   type DesktopUserSettingsResult,
 } from "../../settings/userSettings";
 import {
+  ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
   type WorkspaceSettings,
@@ -82,6 +83,14 @@ export function SettingsDialog(props: {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const userSaveRequestRef = useRef(0);
   const workspaceSaveRequestRef = useRef(0);
+  // Workspace identity token. The request-id refs above only order responses
+  // WITHIN one workspace; they say nothing about which workspace a response
+  // belongs to. This is bumped whenever props.workspaceId changes, and every
+  // workspace-scoped response (load, save, reset) is dropped unless the token it
+  // captured still matches — so a slow response for workspace A can never repaint
+  // (or, via the next full-settings save, overwrite) workspace B. Mirrors the
+  // token guard DesktopWorkspaceShell uses for engine history.
+  const workspaceTokenRef = useRef(0);
   const updateSubscriptionFiredRef = useRef(false);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? DEFAULT_SETTINGS_SECTION,
@@ -196,6 +205,13 @@ export function SettingsDialog(props: {
 
   useEffect(() => {
     let cancelled = false;
+    // New workspace → new token, and DROP the previous workspace's settings.
+    // Holding on to them would let a control edited before the new workspace's
+    // settings arrive merge workspace A's values into a save aimed at B; with no
+    // result, saveWorkspaceSettings refuses ("still loading") instead.
+    const token = workspaceTokenRef.current + 1;
+    workspaceTokenRef.current = token;
+    setWorkspaceResult(null);
     void Promise.all([
       bridge().getUserSettings(),
       bridge().getWorkspaceSettings({ workspaceId: props.workspaceId }),
@@ -203,8 +219,9 @@ export function SettingsDialog(props: {
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
         setUserResult(nextUser);
-        setWorkspaceResult(nextWorkspace);
         applyAppearanceSettings(nextUser.settings.appearance);
+        if (workspaceTokenRef.current !== token) return;
+        setWorkspaceResult(nextWorkspace);
       })
       .catch((cause) => {
         if (!cancelled) {
@@ -269,6 +286,9 @@ export function SettingsDialog(props: {
       }
       const requestId = workspaceSaveRequestRef.current + 1;
       workspaceSaveRequestRef.current = requestId;
+      // Capture the workspace this save belongs to. Everything after the await
+      // is only allowed to touch state if we are STILL on that workspace.
+      const token = workspaceTokenRef.current;
       const previous = workspaceResult;
       setWorkspaceResult((current) => ({
         settings,
@@ -282,11 +302,21 @@ export function SettingsDialog(props: {
           workspaceId: props.workspaceId,
           settings,
         });
-        if (workspaceSaveRequestRef.current !== requestId) return;
+        if (
+          workspaceTokenRef.current !== token ||
+          workspaceSaveRequestRef.current !== requestId
+        ) {
+          return;
+        }
         setWorkspaceResult(saved);
         markSaved();
       } catch (cause) {
-        if (workspaceSaveRequestRef.current !== requestId) return;
+        if (
+          workspaceTokenRef.current !== token ||
+          workspaceSaveRequestRef.current !== requestId
+        ) {
+          return;
+        }
         setWorkspaceResult(previous);
         setSaveState("error");
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -316,17 +346,28 @@ export function SettingsDialog(props: {
   const resetWorkspaceSettings = useCallback(async () => {
     const requestId = workspaceSaveRequestRef.current + 1;
     workspaceSaveRequestRef.current = requestId;
+    const token = workspaceTokenRef.current;
     markSaving();
     setError(null);
     try {
       const next = await bridge().resetWorkspaceSettings({
         workspaceId: props.workspaceId,
       });
-      if (workspaceSaveRequestRef.current !== requestId) return;
+      if (
+        workspaceTokenRef.current !== token ||
+        workspaceSaveRequestRef.current !== requestId
+      ) {
+        return;
+      }
       setWorkspaceResult(next);
       markSaved();
     } catch (cause) {
-      if (workspaceSaveRequestRef.current !== requestId) return;
+      if (
+        workspaceTokenRef.current !== token ||
+        workspaceSaveRequestRef.current !== requestId
+      ) {
+        return;
+      }
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -628,9 +669,22 @@ export function SettingsDialog(props: {
                   value={workspaceSettings.files.attachmentFolderName}
                   placeholder="assets"
                   testId="attachment-folder-input"
+                  maxLength={ATTACHMENT_FOLDER_NAME_MAX_LENGTH}
                   onChange={(attachmentFolderName) =>
                     void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
-                      files: { ...workspaceSettings.files, attachmentFolderName },
+                      files: {
+                        ...workspaceSettings.files,
+                        // mergeWorkspaceSettings re-parses and throws past the
+                        // schema bound, and this is a plain change handler — an
+                        // over-long value must be clamped, not thrown. `maxLength`
+                        // already stops typing and pasting; this is the belt to
+                        // its braces (a longer value can only arrive if the two
+                        // ever drift).
+                        attachmentFolderName: attachmentFolderName.slice(
+                          0,
+                          ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+                        ),
+                      },
                     }))
                   }
                 />

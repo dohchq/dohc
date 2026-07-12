@@ -165,6 +165,42 @@ describe("computeAttachmentPaths", () => {
   });
 });
 
+describe("sanitizeAttachmentFolderName", () => {
+  it("keeps an ordinary folder name", () => {
+    expect(sanitizeAttachmentFolderName("attachments")).toBe("attachments");
+    expect(sanitizeAttachmentFolderName("  my files  ")).toBe("my files");
+  });
+
+  // The whole point of falling back rather than passing the name through: the
+  // main process runs every asset write through validateUserWritePath. A name it
+  // REJECTS would make writeWorkspaceAsset throw for every image, and
+  // placeImageFiles would quietly skip them all — a setting that silently breaks
+  // pasting. So anything the writer would reject degrades to "assets" here, and
+  // the paste still lands.
+  it("falls back to 'assets' for any name the workspace writer would reject", () => {
+    for (const rejected of [
+      "",
+      "   ",
+      ".",
+      "..",
+      "a/b",
+      "a\\b",
+      ".dohc", // reserved
+      ".DOHC", // reserved (case-insensitive)
+      ".dohc.", // reserved (Windows dot-alias)
+      "shared-with-me", // reserved
+      "node_modules", // ignored segment
+      ".git", // ignored segment
+      "%2e%2e", // percent-encoded traversal
+      "%2E%2E%2F", // percent-encoded traversal + separator
+      "a%2fb", // decodes into TWO segments — not a single folder
+      "...", // dots-only Windows alias
+    ]) {
+      expect(sanitizeAttachmentFolderName(rejected)).toBe("assets");
+    }
+  });
+});
+
 // jsdom's File does not implement arrayBuffer() in this environment, so tests
 // use a minimal File-like carrying the fields the paste path reads.
 function fakeImageFile(
@@ -313,7 +349,10 @@ describe("handleImagePaste", () => {
       workspaceId: "ws1",
       docPath: "notes/plan.md",
       writeAsset,
-      attachments: { location: "global-folder", folderName: "attachments" },
+      readAttachments: async () => ({
+        location: "global-folder",
+        folderName: "attachments",
+      }),
     });
 
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
@@ -419,7 +458,10 @@ describe("handleImageDrop", () => {
       workspaceId: "ws1",
       docPath: "notes/plan.md",
       writeAsset,
-      attachments: { location: "global-folder", folderName: "attachments" },
+      readAttachments: async () => ({
+        location: "global-folder",
+        folderName: "attachments",
+      }),
     });
 
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
@@ -588,7 +630,10 @@ describe("pickAndInsertImages", () => {
       docPath: "notes/plan.md",
       writeAsset,
       pickImages,
-      attachments: { location: "same-folder", folderName: "assets" },
+      readAttachments: async () => ({
+        location: "same-folder",
+        folderName: "assets",
+      }),
     });
 
     expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/shot-[0-9a-z]+\.png$/);
@@ -659,5 +704,83 @@ describe("pickAndInsertImages", () => {
 
     expect(writeAsset).not.toHaveBeenCalled();
     expect(dispatched).toHaveLength(0);
+  });
+});
+
+// The attachment setting is workspace state that changes UNDER a mounted editor
+// (the user edits it in the settings dialog; it differs per workspace). The
+// paste context therefore holds a READER, not a value — these tests pin that,
+// because a cached copy is exactly how the old code wrote images to the previous
+// workspace's / the pre-edit location.
+describe("attachment settings are read at use time", () => {
+  it("re-reads the setting for every paste, so a settings change takes effect immediately", async () => {
+    const { view } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    // Stands in for the workspace setting the user edits between the two pastes.
+    let location: "per-document" | "same-folder" = "per-document";
+    const readAttachments = vi.fn(async () => ({
+      location,
+      folderName: "assets",
+    }));
+    const context = {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      readAttachments,
+    };
+    const paste = () =>
+      handleImagePaste(
+        view as never,
+        {
+          clipboardData: {
+            files: [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
+          },
+          preventDefault: vi.fn(),
+        } as unknown as ClipboardEvent,
+        context,
+      );
+
+    paste();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\//);
+
+    // The user changes the setting; the editor is NOT remounted.
+    location = "same-folder";
+    paste();
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(2));
+    // The second paste honors the NEW location, not the one read at mount.
+    expect(writeAsset.mock.calls[1]![0]).toMatch(/^notes\/a-[0-9a-z]+\.png$/);
+    expect(readAttachments).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the per-document default when the settings read fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+
+    handleImagePaste(
+      view as never,
+      {
+        clipboardData: {
+          files: [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
+        },
+        preventDefault: vi.fn(),
+      } as unknown as ClipboardEvent,
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset,
+        readAttachments: async () => {
+          throw new Error("settings unavailable");
+        },
+      },
+    );
+
+    // A failed settings read must never break pasting: the image still lands, in
+    // the default per-document folder.
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\//);
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    warn.mockRestore();
   });
 });
