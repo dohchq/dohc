@@ -29,6 +29,7 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
+import { withMarkdownDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
   parentDir,
@@ -593,7 +594,10 @@ export function Explorer(props: ExplorerProps) {
 
   const commitCreate = useCallback(
     (kind: "file" | "folder", parentPath: string, value: string) => {
-      const path = resolveTypedPath(value, parentPath);
+      const typed = resolveTypedPath(value, parentPath);
+      // New files are markdown unless an extension is typed. Renames
+      // (commitRename) stay literal so extensions can be changed on purpose.
+      const path = kind === "file" && typed ? withMarkdownDefault(typed) : typed;
       setEditing(null);
       if (!path) return;
       const change: PendingTreeChange = {
