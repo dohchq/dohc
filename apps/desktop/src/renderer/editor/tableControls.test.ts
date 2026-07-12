@@ -113,8 +113,25 @@ describe("table controls grips", () => {
     const outside = Array.from(dom.querySelectorAll("p")).find(
       (p) => !p.closest("table"),
     ) as HTMLElement;
-    outside.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    // jsdom tables have zero rects, so 400,400 is outside the margin band.
+    outside.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }),
+    );
     expect(dom.querySelectorAll(".dohc-table-grip.is-active")).toHaveLength(0);
+  });
+
+  it("mousemove in the margin band next to the table keeps the active handles", () => {
+    editor = createTableEditor(2, 2);
+    const dom = editor.view.dom;
+    const cell = dom.querySelector("td") as HTMLElement;
+    cell.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    const outside = Array.from(dom.querySelectorAll("p")).find(
+      (p) => !p.closest("table"),
+    ) as HTMLElement;
+    outside.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    expect(dom.querySelectorAll(".dohc-table-grip.is-active")).toHaveLength(2);
   });
 
   it("clicking a column grip selects the column and its menu inserts a column left", () => {

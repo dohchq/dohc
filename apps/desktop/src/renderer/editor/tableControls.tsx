@@ -69,6 +69,10 @@ import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
 
 export const tableControlsKey = new PluginKey("dohc-table-controls");
 
+// Grips sit 13px out with an 8px pill; 18px covers that chrome (and the
+// 15px append strips) while the pointer crosses the table-edge gap.
+const GRIP_MARGIN = 18;
+
 type TableCommand = (
   state: EditorState,
   dispatch?: (tr: Transaction) => void,
@@ -639,6 +643,19 @@ export function makeTableControlsPlugin(): Plugin {
     const cell = target.closest("td, th");
     const table = cell?.closest("table");
     if (!cell || !table || !view.dom.contains(table)) {
+      // Inactive grips ignore pointer events. Clearing on the first non-cell
+      // move would deactivate a handle in the 5px table-to-pill gap and make
+      // it unreachable, so keep it alive until the pointer leaves the outer
+      // margin and the grip can catch its own hover/click on the way out.
+      if (hovered) {
+        const rect = hovered.table.getBoundingClientRect();
+        const insideMargin =
+          event.clientX >= rect.left - GRIP_MARGIN &&
+          event.clientX <= rect.right + GRIP_MARGIN &&
+          event.clientY >= rect.top - GRIP_MARGIN &&
+          event.clientY <= rect.bottom + GRIP_MARGIN;
+        if (insideMargin) return false;
+      }
       clearHover();
       return false;
     }
