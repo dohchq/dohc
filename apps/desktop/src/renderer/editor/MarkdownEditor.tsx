@@ -98,6 +98,7 @@ import {
   makeCodeBlockContinuationPlugin,
   makeEmptyListItemFocusPlugin,
 } from "./codeBlockChrome";
+import { makeBlockExitPlugin } from "./blockExit";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
@@ -424,6 +425,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               wikilinkClickPlugin,
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
+              // After the slash-command plugin (menu keeps ArrowDown while
+              // open), before code-block continuation (nested code escapes
+              // past its callout) and StarterKit keymaps (Mod-Enter beats
+              // HardBreak). Top-level code falls through on Mod-Enter.
+              makeBlockExitPlugin(),
               makeCodeBlockContinuationPlugin(),
               makeCalloutChromePlugin(),
               makeCodeHighlightPlugin(),
