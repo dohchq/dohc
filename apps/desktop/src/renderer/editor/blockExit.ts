@@ -129,14 +129,15 @@ function handleArrowDown(view: EditorView): boolean {
     // the callout instead so the user sees where they are (and can delete it).
     return isFoldedCallout(next.node) ? selectNodeAt(view, next.pos) : false;
   }
-  // End of the document. Step out only when the caret is actually trapped in
-  // a code-style textblock or a top-level callout/table. Lists and blockquotes
-  // already have Enter-based exits, so ArrowDown must not mutate them.
+  // End of the document. Escape after a top-level callout/table (including
+  // code nested inside one), or after a top-level code-style textblock. Code
+  // nested in lists/blockquotes falls through so continuation stays inside
+  // its immediate parent.
   const topLevelName = $from.node(1).type.name;
   const trapped =
-    $from.parent.type.spec.code === true ||
     topLevelName === "callout" ||
-    topLevelName === "table";
+    topLevelName === "table" ||
+    ($from.depth === 1 && $from.parent.type.spec.code === true);
   if (!trapped) return false;
   return caretIntoParagraphAt(view, $from.after(1));
 }

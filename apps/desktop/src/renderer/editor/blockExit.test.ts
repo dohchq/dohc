@@ -248,6 +248,29 @@ describe("blockExit ArrowDown at document end", () => {
     expect(editor.state.selection.$from.depth).toBe(1);
   });
 
+  it("lets list-contained code fall through to the in-list continuation", () => {
+    const editor = makeEditor("- item\n\n  ```\n  code\n  ```");
+    expect(topLevelTypes(editor)).toEqual(["bulletList"]);
+    const initialListItem = editor.state.doc.firstChild?.firstChild;
+    expect(initialListItem?.type.name).toBe("listItem");
+    expect(initialListItem?.childCount).toBe(2);
+    expect(initialListItem?.firstChild?.type.name).toBe("paragraph");
+    expect(initialListItem?.lastChild?.type.name).toBe("codeBlock");
+    caretAtEndOf(editor, "code");
+
+    press(editor, { key: "ArrowDown" });
+
+    expect(topLevelTypes(editor)).toEqual(["bulletList"]);
+    const listItem = editor.state.doc.firstChild?.firstChild;
+    expect(listItem?.type.name).toBe("listItem");
+    expect(listItem?.childCount).toBe(3);
+    expect(listItem?.child(1).type.name).toBe("codeBlock");
+    const continuation = listItem?.lastChild;
+    expect(continuation?.type.name).toBe("paragraph");
+    expect(continuation?.content.size).toBe(0);
+    expect(editor.state.selection.$from.parent).toBe(continuation);
+  });
+
   it("does not mutate a doc-terminal blockquote", () => {
     const editor = makeEditor("> just a quote");
     editor.commands.focus("end");
