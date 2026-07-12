@@ -4788,6 +4788,22 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = EndAgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
+    // A driver-backed run owns a live session (a child process). Ending such
+    // a run must go through the session manager so the child is actually
+    // stopped and disposed — not just the run record closed (this stop used
+    // to live on the retired Agent panel; Settings' stop lands here now).
+    // stopSession finalizes the run through agentIntegration.endAgentRun
+    // exactly once, so onRunEnded fires as before. No cached manager means
+    // no session ever started — plain run-record end.
+    const session = cachedAgentSessions?.panelSnapshot(input.workspaceId).session;
+    if (
+      cachedAgentSessions &&
+      session?.runId === input.runId &&
+      ["starting", "ready", "running", "waiting-permission"].includes(session.status)
+    ) {
+      await cachedAgentSessions.stopSession(input.workspaceId);
+      return;
+    }
     await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
   });
 

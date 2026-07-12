@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentPermissionRequests } from "./AgentPermissionRequests";
@@ -17,6 +17,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -62,6 +63,30 @@ describe("AgentPermissionRequests", () => {
     // Optimistic hide: the answered card is gone before the next poll.
     await waitFor(() =>
       expect(screen.queryByTestId("agent-permission-request")).toBeNull(),
+    );
+  });
+
+  it("releases an answered id once the poll drops it, so a reused id can ask again", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <AgentPermissionRequests workspaceId="ws-1" requests={[request()]} />,
+    );
+    await user.click(screen.getByTestId("agent-permission-allow_once"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("agent-permission-request")).toBeNull(),
+    );
+
+    // Poll confirms the answer (request gone), then a LATER ask reuses the
+    // provider request id — it must render, not stay hidden forever.
+    rerender(<AgentPermissionRequests workspaceId="ws-1" requests={[]} />);
+    rerender(
+      <AgentPermissionRequests
+        workspaceId="ws-1"
+        requests={[request({ title: "Run: rm old.md" })]}
+      />,
+    );
+    expect(screen.getByTestId("agent-permission-request").textContent).toContain(
+      "Run: rm old.md",
     );
   });
 

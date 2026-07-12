@@ -41,6 +41,16 @@ export function AgentPermissionRequests(props: {
     setAnswered(new Set());
     setError(null);
   }, [workspaceId]);
+  // Release an answered id once the poll confirms the request is gone —
+  // provider request ids are not guaranteed unique across sessions, so a
+  // kept id could silently hide a future ask forever.
+  useEffect(() => {
+    setAnswered((prev) => {
+      const live = new Set(requests.map((request) => request.requestId));
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [requests]);
 
   const visible = requests.filter((request) => !answered.has(request.requestId));
   if (visible.length === 0) return null;
@@ -65,7 +75,12 @@ export function AgentPermissionRequests(props: {
   return (
     <div
       data-testid="agent-permission-requests"
-      className="fixed bottom-9 right-3 z-30 flex w-[min(380px,calc(100vw-24px))] flex-col gap-2"
+      // Top-right alert stack: clear of the bottom-right corner the update
+      // toast and NoticeCenter popover share. z-40 keeps a consent ask above
+      // the modal overlays (z-30) — it must stay answerable while Settings /
+      // palette / share dialogs are open. Bounded + scrollable so even the
+      // contract's 20-request maximum keeps every decision reachable.
+      className="fixed right-3 top-12 z-40 flex max-h-[calc(100vh-6rem)] w-[min(380px,calc(100vw-24px))] flex-col gap-2 overflow-y-auto"
     >
       {visible.map((request) => (
         <section

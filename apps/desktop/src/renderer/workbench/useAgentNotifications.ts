@@ -48,7 +48,14 @@ export function useAgentNotifications(params: {
   const pollIntervalMs = params.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   const [notifications, setNotifications] = useState<AgentNotification[]>([]);
-  const [pendingPermissions, setPendingPermissions] = useState<AgentPermissionRequest[]>([]);
+  // Asks are stored WITH their workspace and filtered synchronously at
+  // render (the same isolation rule as notifications below): the render
+  // right after a switch must never hand workspace A's request ids to a
+  // card that would answer them against workspace B.
+  const [pendingAsks, setPendingAsks] = useState<{
+    workspaceId: string;
+    requests: AgentPermissionRequest[];
+  }>({ workspaceId, requests: [] });
   // Dismissed state keys, KEYED BY workspace. A flat set cleared on switch let
   // switching away/back re-raise a dismissed run; per-workspace sets that
   // persist across switches never do. Each notice carries its workspaceId, so
@@ -71,9 +78,6 @@ export function useAgentNotifications(params: {
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    // Workspace switched: drop the previous workspace's asks synchronously so
-    // a stale card can never invite an answer against the wrong workspace.
-    setPendingPermissions([]);
 
     const poll = async () => {
       let panel: Awaited<ReturnType<ReturnType<typeof bridge>["getAgentSessionState"]>>;
@@ -83,7 +87,7 @@ export function useAgentNotifications(params: {
         return; // transient IPC failure — try again next tick
       }
       if (cancelled) return;
-      setPendingPermissions(panel.session?.pendingPermissions ?? []);
+      setPendingAsks({ workspaceId, requests: panel.session?.pendingPermissions ?? [] });
       const activity = deriveAgentActivity({
         workspaceId,
         workspaceName: metaRef.current.workspaceName,
@@ -126,6 +130,10 @@ export function useAgentNotifications(params: {
   const currentWorkspaceNotifications = useMemo(
     () => notifications.filter((notice) => notice.workspaceId === workspaceId),
     [notifications, workspaceId],
+  );
+  const pendingPermissions = useMemo(
+    () => (pendingAsks.workspaceId === workspaceId ? pendingAsks.requests : []),
+    [pendingAsks, workspaceId],
   );
 
   return {
