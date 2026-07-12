@@ -176,7 +176,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
-    importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
+    importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"], skipped: 0 })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
     showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),

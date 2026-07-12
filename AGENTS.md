@@ -134,9 +134,11 @@ These are meant to steer us in the right direction. They are not hard-set, but w
   paper + graphite. There must be no legacy product identity in shipping
   source — `src/__tests__/brandNoLegacy.test.ts` enforces this.
 - The product is the local-first desktop app (`apps/desktop`) on the workspace
-  engine; it needs no backend. The opt-in cloud surface is reduced to live
-  collaboration (Hocuspocus + the workspace-api collab-token route) and the
-  sync relay, both authenticated by Better Auth over Postgres — see
-  [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
-  before touching that stack. (The former Convex web app and the
-  sharing/members/invites/files/sync cloud surface have been retired.)
+  engine; it needs no backend. The opt-in cloud surface is reduced to the sync
+  relay (`services/sync-relay`: journal + blob transport, relay shares, and
+  engine-native co-editing via Y.Doc update replication) and auth-only
+  `services/workspace-api`, both authenticated by Better Auth over Postgres —
+  see [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
+  before touching that stack. (Hocuspocus and the collab-token route are
+  retired, as are the former Convex web app and the
+  sharing/members/invites/files/sync cloud surface.)

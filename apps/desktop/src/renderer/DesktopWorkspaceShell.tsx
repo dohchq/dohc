@@ -1072,6 +1072,22 @@ export function DesktopWorkspaceShell(props: {
     setShellError(error instanceof Error ? error.message : fallback);
   }, []);
 
+  // Quiet, self-dismissing status line for import summaries ("Imported 3
+  // files into notes.") — informational, so it never uses the error banner.
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+  const importNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showImportNotice = useCallback((message: string) => {
+    setImportNotice(message);
+    if (importNoticeTimer.current) clearTimeout(importNoticeTimer.current);
+    importNoticeTimer.current = setTimeout(() => setImportNotice(null), 6000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (importNoticeTimer.current) clearTimeout(importNoticeTimer.current);
+    },
+    [],
+  );
+
   const refreshSites = useCallback(() => {
     setSitesRefreshKey((key) => key + 1);
     void refreshFiles().catch((error) =>
@@ -1239,25 +1255,42 @@ export function DesktopWorkspaceShell(props: {
 
   // One import seam for the dialog flow AND the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
-  // ImportWorkspaceFilesPayload).
+  // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
+  // absent = root) — the drop target, or the folder whose context menu ran
+  // "Import Files…". Every import ends with a visible summary: what landed,
+  // where, and how many sources were skipped — never a silent shrink.
   const importFiles = useCallback(
-    async (droppedPaths?: string[]) => {
+    async (droppedPaths?: string[], targetDir?: string) => {
+      let outcome: { imported: string[]; skipped: number };
       try {
-        await bridge().importWorkspaceFiles({
+        outcome = await bridge().importWorkspaceFiles({
           workspaceId,
           ...(droppedPaths ? { droppedPaths } : {}),
+          ...(targetDir ? { targetDir } : {}),
         });
       } catch (error) {
         reportShellError("Could not import files.", error);
         return;
       }
+      const count = outcome.imported.length;
+      if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
+      const skippedSuffix =
+        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      showImportNotice(
+        count === 0
+          ? `Nothing imported${skippedSuffix}.`
+          : `Imported ${count} ${count === 1 ? "file" : "files"}${
+              targetDir ? ` into ${targetDir}` : ""
+            }${skippedSuffix}.`,
+      );
+      if (count === 0) return;
       try {
         await refreshFiles();
       } catch (error) {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError],
+    [workspaceId, refreshFiles, reportShellError, showImportNotice],
   );
 
   // THE one way a file opens (tree click, quick-open, tab activation): marks
@@ -1952,7 +1985,9 @@ export function DesktopWorkspaceShell(props: {
         onTogglePin={toggleExplorerPin}
         onBeforeChanges={flushActiveDraft}
         onPathsChanged={onExplorerPathsChanged}
-        onImportFiles={(droppedPaths) => void importFiles(droppedPaths)}
+        onImportFiles={(droppedPaths, targetDir) =>
+          void importFiles(droppedPaths, targetDir)
+        }
         onShare={(path) => setShareTarget({ path })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
@@ -2010,6 +2045,22 @@ export function DesktopWorkspaceShell(props: {
             type="button"
             aria-label="Dismiss workspace error"
             onClick={() => setShellError(null)}
+            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
+          >
+            <X size={12} aria-hidden />
+          </button>
+        </div>
+      ) : null}
+      {importNotice ? (
+        <div
+          data-testid="import-summary"
+          className="flex min-h-8 items-center gap-2 border-b border-line bg-panel-2 px-3 text-[12px] text-muted"
+        >
+          <span className="min-w-0 flex-1 truncate">{importNotice}</span>
+          <button
+            type="button"
+            aria-label="Dismiss import summary"
+            onClick={() => setImportNotice(null)}
             className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
           >
             <X size={12} aria-hidden />

@@ -7,8 +7,9 @@ title: dohc Product Spec
 
 A working summary of what dohc does today. dohc is a desktop-first product;
 the implementation lives in `apps/desktop`. There is no web client — cloud is
-opt-in collaboration (Better Auth, Hocuspocus collab, and a sync-relay over
-Postgres) that the desktop app connects to.
+opt-in (Better Auth and a sync-relay over Postgres), and co-editing is
+engine-native: Y.Doc updates replicate over the sync relay. There is no
+separate collaboration server.
 
 ## Core model
 
@@ -39,7 +40,7 @@ Postgres) that the desktop app connects to.
 ## Surfaces
 
 - **Workspace shell** — activity bar, file tree, document canvas, and an
-  inspector/chat column (exactly one of chat / imports+exports open).
+  inspector/chat column.
 - **Editor** — Tiptap/Yjs-backed markdown editor with a raw source mode,
   wikilink pills, inline-atom decorations, and ASCII sketches.
 - **HTML atoms** — `.html` atoms render in a sandboxed, server-built
@@ -58,17 +59,23 @@ Postgres) that the desktop app connects to.
   Generated sites should pass the desktop Sites preview E2E path before
   onboarding can finish.
 - **Graph** — a force-directed view of atoms and their links.
-- **Imports / Exports** — controlled workspace-to-workspace data/text
-  exchange. Exports publish only selected fields; imports subscribe to
-  fields another workspace exposes.
-- **Document sharing** — per-atom shares (view/edit), separate from
-  imports/exports.
+- **Import / Export** — files in, files out. Imports land where the user
+  aimed (drop target or folder menu), rename on collision, and end with a
+  visible summary. Exports are per-document Markdown/HTML/PDF plus
+  folder/workspace zip. See
+  [[docs/architecture/import-export-sharing.md]].
+- **Sharing** — relay shares: read-only live-follow shares of paths or
+  versions plus bidirectional shared chat channels, exchanged as
+  `dohc-share:` codes and filtered fail-closed server-side. A received
+  share opens as a read-only shared view today; mounting shares as live
+  `shared-with-me/` folders is the designed next step. (The former
+  workspace-to-workspace field-exchange panel concept is retired.)
 
 ## Stack
 
 Electron, React 19, Vite, Tailwind CSS v4, SQLite (`node:sqlite`), Rust
-(workspace kernel), Tiptap, Yjs + Hocuspocus (opt-in cloud collab), Better
-Auth over Postgres (cloud auth) with a sync-relay, Vitest, Playwright.
+(workspace kernel), Tiptap, Yjs (engine-native collab over the opt-in
+sync-relay), Better Auth over Postgres (cloud auth), Vitest, Playwright.
 
 ## Invariants
 

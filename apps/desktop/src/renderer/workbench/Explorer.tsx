@@ -85,7 +85,9 @@ export interface ExplorerProps {
   onBeforeChanges?: () => Promise<void>;
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
-  onImportFiles: (droppedPaths?: string[]) => void;
+  // Import into targetDir ("" = root): the folder that was dropped on, or the
+  // folder whose context menu ran "Import Files…". Main re-validates it.
+  onImportFiles: (droppedPaths?: string[], targetDir?: string) => void;
   // "Share…" (PR 18): offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
@@ -757,7 +759,7 @@ export function Explorer(props: ExplorerProps) {
           exportZip(kind === "root" ? undefined : path);
           break;
         case "import-files":
-          props.onImportFiles();
+          props.onImportFiles(undefined, targetDir);
           break;
         case "share":
           if (path) props.onShare(path);
@@ -921,10 +923,11 @@ export function Explorer(props: ExplorerProps) {
       }
       // OS drag-in: map dropped Files to absolute paths in the PRELOAD
       // (webUtils) and import through the picker-grade main-side path.
+      // Files land where they were dropped (targetDir), not the root.
       const files = [...event.dataTransfer.files];
       if (files.length > 0) {
         const paths = bridge().getDroppedFilePaths(files);
-        if (paths.length > 0) props.onImportFiles(paths);
+        if (paths.length > 0) props.onImportFiles(paths, targetDir);
       }
     },
     [clearDragPreview, performMoves, props.onImportFiles],

@@ -3,14 +3,20 @@ import { MoreHorizontal } from "lucide-react";
 import { IconButton } from "./ui/controls";
 import { bridge } from "./bridge";
 
-// The document header's "…" menu (ViewHeader): copy the raw markdown, or
-// export a self-contained HTML/PDF file. Styled and keyboard-driven like
-// TurnIntoMenu (editor/blockControls.tsx) — same trigger/list shape, own
-// class names since this lives in the header chrome, not the bubble menu.
-type DocumentMenuItemId = "copy-markdown" | "export-html" | "export-pdf";
+// The document header's "…" menu (ViewHeader): copy the raw markdown, export
+// it as a .md file, or export a self-contained HTML/PDF render. Styled and
+// keyboard-driven like TurnIntoMenu (editor/blockControls.tsx) — same
+// trigger/list shape, own class names since this lives in the header chrome,
+// not the bubble menu.
+type DocumentMenuItemId =
+  | "copy-markdown"
+  | "export-markdown"
+  | "export-html"
+  | "export-pdf";
 
 const ITEMS: ReadonlyArray<{ id: DocumentMenuItemId; label: string }> = [
   { id: "copy-markdown", label: "Copy as Markdown" },
+  { id: "export-markdown", label: "Export as Markdown…" },
   { id: "export-html", label: "Export as HTML…" },
   { id: "export-pdf", label: "Export as PDF…" },
 ];
@@ -89,24 +95,33 @@ export function DocumentMenu(props: {
     }
   }
 
-  async function exportDocument(kind: "html" | "pdf") {
+  async function exportDocument(kind: "markdown" | "html" | "pdf") {
     setOpen(false);
     try {
-      // Imported on demand, not at module load: documentExport statically
-      // pulls in the Tiptap MarkdownManager/schema stack and KaTeX, which the
-      // lazy MarkdownEditor split otherwise keeps out of the initial/open
-      // path. A user who never exports never pays for it.
-      const { buildStandaloneDocumentHtml } = await import(
-        "./editor/documentExport"
-      );
-      const html = buildStandaloneDocumentHtml(
-        props.getMarkdown(),
-        props.suggestedName,
-      );
+      let content: string;
+      if (kind === "markdown") {
+        // The text-first export: the raw document source, written verbatim
+        // to a .md file. A brand-new empty document still exports one
+        // newline — the IPC contract requires non-empty content.
+        const markdown = props.getMarkdown();
+        content = markdown.length > 0 ? markdown : "\n";
+      } else {
+        // Imported on demand, not at module load: documentExport statically
+        // pulls in the Tiptap MarkdownManager/schema stack and KaTeX, which
+        // the lazy MarkdownEditor split otherwise keeps out of the
+        // initial/open path. A user who never exports never pays for it.
+        const { buildStandaloneDocumentHtml } = await import(
+          "./editor/documentExport"
+        );
+        content = buildStandaloneDocumentHtml(
+          props.getMarkdown(),
+          props.suggestedName,
+        );
+      }
       await bridge().exportDocumentFile({
         workspaceId: props.workspaceId,
         suggestedName: props.suggestedName,
-        content: html,
+        content,
         kind,
       });
     } catch (error) {
@@ -122,7 +137,9 @@ export function DocumentMenu(props: {
       void copyAsMarkdown();
       return;
     }
-    void exportDocument(id === "export-pdf" ? "pdf" : "html");
+    void exportDocument(
+      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown",
+    );
   }
 
   const move = (delta: number) =>
