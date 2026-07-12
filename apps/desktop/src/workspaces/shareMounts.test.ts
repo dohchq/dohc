@@ -140,13 +140,18 @@ describe("mount labels", () => {
     expect(mountLabelFor("Wild! Chars?@x.com", [])).toBe("wild-chars");
     expect(mountLabelFor(null, [])).toBe("share");
     expect(mountLabelFor("...@x.com", [])).toBe("share");
+    // A secret-shaped local part must not become a label the read
+    // classifier would suppress (prod.env -> secret).
+    expect(mountLabelFor("prod.env@example.com", [])).toBe("prod-env");
+    expect(mountLabelFor(".env@example.com", [])).toBe("env");
   });
 
-  it("refuses traversal, separators, and reserved names as labels", () => {
-    for (const label of ["", "..", "a/b", "a\\b", ".dohc", "x".repeat(65), ". ."]) {
+  it("refuses traversal, separators, reserved and secret-shaped labels", () => {
+    for (const label of ["", "..", "a/b", "a\\b", ".dohc", "x".repeat(65), ". .", ".env", "prod.env"]) {
       expect(validMountLabel(label)).toBe(false);
     }
     expect(validMountLabel("alex (2)")).toBe(true);
+    expect(validMountLabel("prod-env")).toBe(true);
   });
 
   it("mountRootFor refuses labels that escape shared-with-me", async () => {

@@ -3749,6 +3749,14 @@ function registerIpcHandlers(): void {
           changedPaths: outcome.changedPaths,
         });
       } catch (error) {
+        // An expired session must SURFACE, not read as "refreshed, nothing
+        // new" — a manual Refresh Share would otherwise report success
+        // forever while every pull 401s (codex P2).
+        if (error instanceof RelayUnauthorizedError) {
+          throw new Error(
+            "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+          );
+        }
         // One mount's network failure must not stop the others; report it
         // as unchanged and move on.
         console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);

@@ -1,7 +1,10 @@
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import type { SyncRelayConnection } from "@dohc/workspace-engine";
+import {
+  classifyEngineFilePath,
+  type SyncRelayConnection,
+} from "@dohc/workspace-engine";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { ShareMountRecord } from "./registryStore";
 import {
@@ -34,6 +37,10 @@ const MOUNT_LABEL_MAX = 64;
 export function validMountLabel(label: string): boolean {
   if (label.length === 0 || label.length > MOUNT_LABEL_MAX) return false;
   const validated = validateUserWritePath(label);
+  // A secret-shaped label (".env", "prod.env") would have the read
+  // classifier taint the whole mount — suppressed from search/graph/export
+  // and denied to agents — so such labels are invalid by construction.
+  if (classifyEngineFilePath(label).kind === "secret") return false;
   return validated.ok && validated.normalized === label && !label.includes("/");
 }
 
@@ -45,12 +52,18 @@ export function mountLabelFor(
   existingLabels: readonly string[],
 ): string {
   const localPart = (granterEmail ?? "").split("@")[0] ?? "";
-  const base =
+  let base =
     localPart
       .toLowerCase()
       .replace(/[^a-z0-9._-]+/g, "-")
       .replace(/^[-._]+|[-._]+$/g, "")
       .slice(0, MOUNT_LABEL_MAX - 8) || "share";
+  // "prod.env@example.com" must not produce a secret-shaped label that the
+  // read classifier would suppress: rewrite dots until the shape is safe.
+  if (classifyEngineFilePath(base).kind === "secret") {
+    base = base.replaceAll(".", "-");
+  }
+  if (classifyEngineFilePath(base).kind === "secret") base = "share";
   const taken = new Set(existingLabels.map((label) => label.toLowerCase()));
   if (!taken.has(base) && validMountLabel(base)) return base;
   for (let attempt = 2; ; attempt += 1) {
