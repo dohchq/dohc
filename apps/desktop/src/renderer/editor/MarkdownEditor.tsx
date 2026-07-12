@@ -580,6 +580,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
 
         let x = 12;
         let y = 40;
+        let bottom: number | null = null;
         let maxHeight = FLOATING_MENU_MAX_HEIGHT;
         let placement: FloatingMenuPlacement = "below";
         try {
@@ -587,6 +588,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           const position = resolveFloatingMenuPosition({ cursorRect: coords });
           x = position.x;
           y = position.y;
+          bottom = position.bottom ?? null;
           maxHeight = position.maxHeight;
           placement = position.placement;
         } catch {
@@ -601,6 +603,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           selected: 0,
           x,
           y,
+          bottom,
           maxHeight,
           placement,
         });

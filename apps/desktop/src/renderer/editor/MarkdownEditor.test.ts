@@ -132,6 +132,7 @@ describe("MarkdownEditor slash command: image", () => {
       x: 0,
       y: 0,
       maxHeight: 0,
+      bottom: null,
       placement: "below",
     };
 
@@ -156,6 +157,7 @@ describe("MarkdownEditor slash command: image", () => {
       x: 0,
       y: 0,
       maxHeight: 0,
+      bottom: null,
       placement: "below",
     };
 
@@ -196,6 +198,7 @@ describe("MarkdownEditor slash command: math", () => {
       x: 0,
       y: 0,
       maxHeight: 0,
+      bottom: null,
       placement: "below",
     };
 
