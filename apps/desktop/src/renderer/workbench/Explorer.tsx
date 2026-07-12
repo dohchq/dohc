@@ -377,10 +377,13 @@ export function Explorer(props: ExplorerProps) {
   }, [props.files, props.folders]);
 
   // The open-editors list caps its height and scrolls internally, so the
-  // active row must be brought back into view whenever it changes. Scroll the
-  // list directly (not scrollIntoView): the list and the file tree share the
-  // sidebar's outer scroll container, and scrollIntoView would also scroll
-  // that ancestor — yanking the user's tree scroll position on tab switches.
+  // active row must be brought back into view whenever it changes — or moves:
+  // openTabs (reducer state, referentially stable between changes) is a
+  // dependency because reordering or closing tabs shifts the active row
+  // without changing activeTab. Scroll the list directly (not scrollIntoView):
+  // the list and the file tree share the sidebar's outer scroll container, and
+  // scrollIntoView would also scroll that ancestor — yanking the user's tree
+  // scroll position on tab switches.
   useEffect(() => {
     if (!props.activeTab || !openEditorsExpanded) return;
     const list = openEditorsListRef.current;
@@ -393,7 +396,7 @@ export function Explorer(props: ExplorerProps) {
     } else if (rowRect.bottom > listRect.bottom) {
       list.scrollTop += rowRect.bottom - listRect.bottom;
     }
-  }, [props.activeTab, openEditorsExpanded]);
+  }, [props.activeTab, props.openTabs, openEditorsExpanded]);
 
   // A drag abandoned mid-hover must not expand a folder after unmount.
   useEffect(
