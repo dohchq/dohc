@@ -764,29 +764,29 @@ describe("open editors", () => {
     await screen.findByTestId("tab-a.md");
 
     const list = screen.getByTestId("open-editors-list");
-    Object.defineProperty(list, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({
-        x: 0,
-        y: 60,
-        left: 0,
-        top: 60,
-        right: 240,
-        bottom: 60 + OPEN_EDITORS_DEFAULT_HEIGHT,
-        width: 240,
-        height: OPEN_EDITORS_DEFAULT_HEIGHT,
-        toJSON: () => {},
-      }),
-    });
-
     const handle = screen.getByTestId("open-editors-resize");
     // A non-left press must not start a resize.
-    fireEvent.pointerDown(handle, { button: 2, buttons: 2, pointerId: 1 });
+    fireEvent.pointerDown(handle, {
+      button: 2,
+      buttons: 2,
+      clientY: 200,
+      pointerId: 1,
+    });
     fireEvent.pointerMove(handle, { buttons: 2, clientY: 500 });
     expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
 
-    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 60 + 300 });
+    fireEvent.pointerDown(handle, {
+      button: 0,
+      buttons: 1,
+      clientY: 200,
+      pointerId: 1,
+    });
+    // The one-item list is shorter than its cap; a zero-delta move must
+    // preserve the saved cap.
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+    expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
+
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 374 });
     await waitFor(() => {
       expect(list.style.maxHeight).toBe("300px");
     });

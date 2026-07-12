@@ -2161,13 +2161,16 @@ export const WorkspaceUiState = z.object({
   activeTab: PATH_STRING.nullable(),
   historyVisible: z.boolean(),
   historyWidth: z.number().int().min(HISTORY_MIN_WIDTH).max(HISTORY_MAX_WIDTH).optional(),
-  // Additive (resizable Open Editors section), still version 1.
+  // Additive (resizable Open Editors section), still version 1. It must NEVER
+  // null the whole saved state: serializeUiState clamps every write, so this
+  // catch only handles foreign/hand-edited files.
   openEditorsHeight: z
     .number()
     .int()
     .min(OPEN_EDITORS_MIN_HEIGHT)
     .max(OPEN_EDITORS_MAX_HEIGHT)
-    .optional(),
+    .optional()
+    .catch(undefined),
   // Additive (Phase E3 explorer), still version 1: optional fields parse old
   // files, and zod's non-strict parse drops unknown keys for old readers.
   expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),

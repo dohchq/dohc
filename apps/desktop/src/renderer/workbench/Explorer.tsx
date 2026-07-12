@@ -370,9 +370,13 @@ export function Explorer(props: ExplorerProps) {
   const [opError, setOpError] = useState<string | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const openEditorsListRef = useRef<HTMLUListElement>(null);
-  // The list's top edge at drag start — heights derive from clientY against
-  // it (SidePanel's dragLeft precedent).
-  const openEditorsDragTop = useRef<number | null>(null);
+  // Pointer position + cap at drag start — heights derive from the DELTA, not
+  // from the list's edges: the list is max-height (shorter lists shrink to
+  // fit), so the handle can sit ABOVE the cap and an edge-based height would
+  // collapse the saved cap to the content height on the first move.
+  const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(
+    null,
+  );
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
   // fires with a STALE closure — without this latch the edit would commit
@@ -1325,31 +1329,36 @@ export function Explorer(props: ExplorerProps) {
                 // Left button only — a right/middle press must never start a
                 // resize (SidePanel hardening).
                 if (event.button !== 0) return;
-                openEditorsDragTop.current =
-                  openEditorsListRef.current?.getBoundingClientRect().top ?? 0;
+                openEditorsDrag.current = {
+                  startY: event.clientY,
+                  startHeight: props.openEditorsHeight,
+                };
                 event.currentTarget.setPointerCapture(event.pointerId);
               }}
               onPointerMove={(event) => {
-                if (openEditorsDragTop.current === null) return;
+                const drag = openEditorsDrag.current;
+                if (drag === null) return;
                 // If the release was missed (capture lost outside the
                 // window), a buttons-up move must end the drag — or plain
                 // hovering would keep resizing and persist bogus heights.
                 if ((event.buttons & 1) === 0) {
-                  openEditorsDragTop.current = null;
+                  openEditorsDrag.current = null;
                   return;
                 }
                 props.onOpenEditorsHeightChange(
-                  clampOpenEditorsHeight(event.clientY - openEditorsDragTop.current),
+                  clampOpenEditorsHeight(
+                    drag.startHeight + event.clientY - drag.startY,
+                  ),
                 );
               }}
               onPointerUp={() => {
-                openEditorsDragTop.current = null;
+                openEditorsDrag.current = null;
               }}
               onPointerCancel={() => {
-                openEditorsDragTop.current = null;
+                openEditorsDrag.current = null;
               }}
               onLostPointerCapture={() => {
-                openEditorsDragTop.current = null;
+                openEditorsDrag.current = null;
               }}
               className="absolute -bottom-1 left-0 z-10 h-2 w-full cursor-row-resize bg-transparent transition-colors hover:bg-line/80"
             />
