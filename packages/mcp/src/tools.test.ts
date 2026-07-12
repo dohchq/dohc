@@ -261,6 +261,23 @@ describe("mcp tool path containment", () => {
         expect(JSON.stringify(secretSearch)).not.toContain("API_KEY=x");
       }
 
+      // The floor also covers the import/query LAUNDERING paths: a secret
+      // source must not become a visible database, and a secret-named
+      // database must not answer SELECTs (mounted or local).
+      await writeFile(join(ctx.root, "shared-with-me", "alex", ".env.csv"), "k,v\nX,1");
+      await expect(
+        importData(ctx, {
+          sourcePath: "shared-with-me/alex/.env.csv",
+          databasePath: "laundered.sqlite",
+          tableName: "t",
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      const secretDb = await queryDatabase(ctx, {
+        databasePath: "shared-with-me/alex/.env.sqlite",
+        sql: "SELECT 1",
+      });
+      expect(secretDb).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+
       // Read-side resolution also covers open + database query paths.
       const opened = await openInDohc(ctx, { path: "shared-with-me/alex/brief.md" });
       expect(opened).toMatchObject({ ok: true });

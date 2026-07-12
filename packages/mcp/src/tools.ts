@@ -2150,6 +2150,12 @@ export async function importData(
 ) {
   const sourceRel = await safeResolve(ctx, args.sourcePath, "read");
   if (!sourceRel.ok) return { ok: false as const, reason: sourceRel.reason };
+  // Same secret floor as read/search: an import is a read of the source,
+  // and importing a secret-classified file (".env.csv", mounted or local)
+  // into a visible database would launder its contents past the denial.
+  if (isSecretWorkspacePath(sourceRel.normalized)) {
+    return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+  }
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   const recordable = await ensureRecordable(ctx);
@@ -2208,6 +2214,11 @@ export async function queryDatabase(
   // database is queryable like any other readable file.
   const dbRel = await safeResolve(ctx, args.databasePath, "read");
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
+  // Secret floor before any bytes open: a secret-classified database name
+  // (".env.sqlite", mounted or local) is denied like any other secret read.
+  if (isSecretWorkspacePath(dbRel.normalized)) {
+    return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+  }
   // Only a VISIBLE user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
   if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {

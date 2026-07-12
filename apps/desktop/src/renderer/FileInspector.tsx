@@ -48,10 +48,13 @@ const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
 // main process resolves <workspaceId> to a real workspace root and enforces
-// path containment, so this URL can't escape the workspace.
-function assetUrl(workspaceId: string, path: string): string {
+// path containment, so this URL can't escape the workspace. `refreshKey`
+// rides along as a cache-buster: share-mount pulls (and history refreshes)
+// change bytes without remounting the inspector, and a stable URL would
+// keep the old <img>/<audio> bytes on screen.
+function assetUrl(workspaceId: string, path: string, refreshKey: number): string {
   const encoded = path.split("/").map(encodeURIComponent).join("/");
-  return `dohc-file://${workspaceId}/${encoded}`;
+  return `dohc-file://${workspaceId}/${encoded}?v=${refreshKey}`;
 }
 
 function extensionOf(path: string): string {
@@ -1917,7 +1920,7 @@ export function FileInspector(props: {
       onScrollConsumed?.();
     }
   }, [scrollTarget, props.path, textReady, onScrollConsumed]);
-  const url = assetUrl(props.workspaceId, props.path);
+  const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
   const truncatedNotice =
     isText && truncated ? (
       <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
