@@ -50,4 +50,48 @@ describe("NewFileDialog", () => {
       relativePath: "notes/new.md",
     });
   });
+
+  it("defaults a name typed without an extension to markdown", async () => {
+    bridgeMock.createWorkspaceFile.mockResolvedValueOnce({
+      path: "plans/roadmap.md",
+    });
+    const onCreated = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NewFileDialog
+        workspaceId="ws-1"
+        onClose={() => undefined}
+        onCreated={onCreated}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("File name"), "plans/roadmap{Enter}");
+    await act(async () => {});
+
+    expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "plans/roadmap.md",
+    });
+    expect(onCreated).toHaveBeenCalledWith("plans/roadmap.md");
+  });
+
+  it("respects an explicit non-markdown extension", async () => {
+    bridgeMock.createWorkspaceFile.mockResolvedValueOnce({ path: "data.csv" });
+    const user = userEvent.setup();
+    render(
+      <NewFileDialog
+        workspaceId="ws-1"
+        onClose={() => undefined}
+        onCreated={() => undefined}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("File name"), "data.csv{Enter}");
+    await act(async () => {});
+
+    expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data.csv",
+    });
+  });
 });
