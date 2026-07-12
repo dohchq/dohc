@@ -92,6 +92,8 @@ import {
   TryInVersionBanner,
   TryInVersionReviewCard,
 } from "./workbench/TryInVersion";
+// Type-only: erased at compile time, so the ChatsView chunk stays lazy.
+import type { ChatsNav } from "./workbench/ChatsView";
 import {
   activateTab,
   closeTab,
@@ -103,8 +105,10 @@ import {
   momentDiffTabPath,
   parseMomentDiffTabPath,
   defaultWorkbenchState,
+  CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  isChatsTabPath,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -1278,6 +1282,24 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
+  // Chats expand-to-tab: the panel reports its position here (runtime-only),
+  // and expanding snapshots it so the tab opens on the SAME conversation.
+  // The nonce keys the tab's ChatsView: re-expanding while the tab is
+  // already open remounts it onto the panel's current conversation instead
+  // of leaving it wherever it last was. A tab restored from persisted
+  // ui-state has no seed and starts at the overview.
+  const chatsPanelNav = useRef<ChatsNav | null>(null);
+  const onChatsPanelNav = useCallback((nav: ChatsNav) => {
+    chatsPanelNav.current = nav;
+  }, []);
+  const [chatsTabSeed, setChatsTabSeed] = useState<{
+    nav: ChatsNav | null;
+    nonce: number;
+  }>({ nav: null, nonce: 0 });
+  const openChatsTab = useCallback(() => {
+    setChatsTabSeed((seed) => ({ nav: chatsPanelNav.current, nonce: seed.nonce + 1 }));
+    mutateWb((state) => openTab(state, CHATS_TAB_PATH));
+  }, [mutateWb]);
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -2064,6 +2086,17 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
+              ) : wb.activeView === "chats" && versionsEnabled ? (
+                <button
+                  type="button"
+                  data-testid="chats-open-tab"
+                  aria-label="Open chats in tab"
+                  title="Open chats in tab"
+                  onClick={openChatsTab}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <Maximize2 size={13} aria-hidden />
+                </button>
               ) : wb.activeView === "sites" ? (
                 <button
                   type="button"
@@ -2115,6 +2148,7 @@ export function DesktopWorkspaceShell(props: {
                     addressedToMe={addressedToMe}
                     onOpenAddressed={openAgentNotification}
                     collaboration={chatCollaboration}
+                    onNavChange={onChatsPanelNav}
                   />
                 </Suspense>
               ) : (
@@ -2270,6 +2304,33 @@ export function DesktopWorkspaceShell(props: {
                 workspaceId={workspaceId}
                 versionId={parseVersionCompareTabPath(wb.activeTab) ?? "main"}
               />
+            ) : isChatsTabPath(wb.activeTab) ? (
+              versionsEnabled ? (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyChatsView
+                    // Remount per expand so a re-expand lands on the panel's
+                    // CURRENT conversation, not wherever the tab last was.
+                    key={chatsTabSeed.nonce}
+                    workspaceId={workspaceId}
+                    variant="page"
+                    initialNav={chatsTabSeed.nav ?? undefined}
+                    onOpenFileChat={openFileChatInRail}
+                    onOpenPath={openFile}
+                    onError={(message) => setShellError(message)}
+                    mentionCandidates={mentionCandidates}
+                    addressedToMe={addressedToMe}
+                    onOpenAddressed={openAgentNotification}
+                    collaboration={chatCollaboration}
+                  />
+                </Suspense>
+              ) : (
+                <div
+                  data-testid="chats-page-off"
+                  className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
+                >
+                  Chats aren&apos;t enabled for this workspace.
+                </div>
+              )
             ) : isSiteTabPath(wb.activeTab) ? (
               activeSiteRoot ? (
                 <Suspense fallback={<PanelLoading label="site" />}>

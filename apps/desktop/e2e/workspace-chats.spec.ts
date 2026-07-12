@@ -145,6 +145,64 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
   }
 });
 
+// Expand-to-tab (chats/expand-to-tab): the panel's Maximize button opens
+// Chats as a first-class editor tab seeded with the panel's CURRENT
+// conversation; the tab closes/reopens like any other tab.
+test("flagged: expand opens chats as an editor tab on the current conversation", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, "chats-expand-e2e");
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+
+    // Into a conversation in the PANEL first.
+    await page.getByTestId("activity-chats").click();
+    await expect(page.getByTestId("chats-view")).toBeVisible();
+    await page.getByTestId("chats-channel").click();
+    const newThreadComposer = page.getByTestId("chats-new-thread-composer");
+    await newThreadComposer.fill("Expand me into a tab.");
+    await newThreadComposer.press("Enter");
+    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+
+    // Expand: a "Chats" editor tab opens ON the same thread, page variant.
+    await page.getByTestId("chats-open-tab").click();
+    const chatsTab = page.getByTestId("tab-dohc://chats");
+    await expect(chatsTab).toBeVisible();
+    await expect(chatsTab).toHaveAttribute("data-active", "true");
+    const pageThreadView = page.locator(
+      '[data-testid="chats-thread-view"][data-variant="page"]',
+    );
+    await expect(pageThreadView).toBeVisible();
+    await expect(
+      pageThreadView.getByTestId("chats-thread-post-title"),
+    ).toHaveText("Expand me into a tab.");
+
+    // The tab is first-class: it closes like any document tab and the panel
+    // keeps working on its own.
+    await chatsTab.getByRole("button", { name: "Close Chats" }).click();
+    await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
+    ).toBeVisible();
+
+    // Re-expanding from the overview seeds the tab at the overview.
+    await page.getByTestId("chats-thread-back").click();
+    await page.getByTestId("chats-channel-back").click();
+    await page.getByTestId("chats-open-tab").click();
+    await expect(
+      page.locator('[data-testid="chats-view"][data-variant="page"]'),
+    ).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 // WS-H1 flag flip: chats are engine-backed and the engine is now the
 // default, so only an EXPLICIT opt-out disables the surface.
 test("opted-out workspace: no Chats view, channel handlers reject", async () => {

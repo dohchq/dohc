@@ -1425,3 +1425,76 @@ describe("ChatsView direct messages", () => {
     expect(bodies.map((el) => el.textContent)).toEqual(["old message"]);
   });
 });
+
+// Expand-to-tab (chats/expand-to-tab): the panel reports where it is via
+// onNavChange, and a freshly expanded tab (variant "page") starts at that
+// conversation via initialNav — consumed once, loaded through the same
+// openChannel/openThread path a click would take.
+describe("ChatsView expand-to-tab", () => {
+  it("marks the page variant on the root so the tab surface is testable", async () => {
+    renderView(vi.fn(), vi.fn(), { variant: "page" });
+    const view = await screen.findByTestId("chats-view");
+    expect(view.dataset.variant).toBe("page");
+  });
+
+  it("defaults to the panel variant", async () => {
+    renderView();
+    const view = await screen.findByTestId("chats-view");
+    expect(view.dataset.variant).toBe("panel");
+  });
+
+  it("reports every navigation through onNavChange", async () => {
+    const user = userEvent.setup();
+    const onNavChange = vi.fn();
+    renderView(vi.fn(), vi.fn(), { onNavChange });
+
+    await screen.findByTestId("chats-view");
+    expect(onNavChange).toHaveBeenCalledWith({ level: "channels" });
+
+    await user.click(screen.getByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(onNavChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "channel",
+        channel: expect.objectContaining({ id: "channel-1" }),
+      }),
+    );
+  });
+
+  it("seeds an expanded tab at the panel's thread once the overview is ready", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+    });
+
+    const view = await screen.findByTestId("chats-thread-view");
+    expect(view.dataset.variant).toBe("page");
+    expect((await screen.findByTestId("chats-thread-post-title")).textContent).toBe(
+      "Should we ship on Friday?",
+    );
+    await waitFor(() =>
+      expect(bridgeMock.listChatMessages).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+      }),
+    );
+  });
+
+  it("seeds an expanded tab at the panel's channel", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "channel", channel: channel() },
+    });
+
+    const view = await screen.findByTestId("chats-channel-view");
+    expect(view.dataset.variant).toBe("page");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
+      "general",
+    );
+  });
+});

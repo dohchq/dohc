@@ -98,7 +98,9 @@ type OverviewState =
       fileThreads: FileChatThreadRecord[];
     };
 
-type Nav =
+// Exported for the shell's expand-to-tab seam: the panel reports where it is
+// (onNavChange) and a freshly expanded tab starts there (initialNav).
+export type ChatsNav =
   | { level: "channels" }
   | { level: "channel"; channel: ChatChannelRecord }
   | { level: "thread"; channel: ChatChannelRecord; thread: ChannelThreadRecord }
@@ -106,6 +108,8 @@ type Nav =
   // anti-forum rule), plus a one-step "new message" composer.
   | { level: "dm"; dm: DmRecord }
   | { level: "dm-new" };
+
+type Nav = ChatsNav;
 
 type FeedOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
@@ -607,10 +611,24 @@ export function ChatsView(props: {
   onOpenAddressed?: (notification: AgentNotification) => void;
   // Ephemeral presence/typing transport, present ONLY under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
+  // Where this view lives: the side panel (default) or a full editor tab.
+  // The page variant centers the narrow surfaces in a reading column — the
+  // thread/channel views already read as pages.
+  variant?: "panel" | "page";
+  // Expand-to-tab: the conversation to open once the overview is ready
+  // (the panel's position when the user expanded). Consumed exactly once —
+  // workspace switches and later navigation behave exactly as before.
+  initialNav?: ChatsNav;
+  // Reports every navigation so the shell can seed an expanded tab with the
+  // panel's current conversation.
+  onNavChange?: (nav: ChatsNav) => void;
 }) {
-  const { workspaceId } = props;
+  const { workspaceId, onNavChange } = props;
   const collaboration = props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
+  const variant = props.variant ?? "panel";
+  // Page variant: cap the list-like surfaces at the thread column's width.
+  const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<Nav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
@@ -1271,6 +1289,29 @@ export function ChatsView(props: {
     [loadDmConversation, props],
   );
 
+  // Expand-to-tab seam, outbound: report where this view is so the shell can
+  // seed a freshly expanded tab with the panel's current conversation.
+  useEffect(() => {
+    onNavChange?.(nav);
+  }, [nav, onNavChange]);
+
+  // Expand-to-tab seam, inbound: once the overview is ready, jump to the
+  // seeded conversation exactly the way a click would (same loaders, same
+  // token discipline). Waiting for "ready" matters — the open* navigations
+  // advance the shared liveness token, so seeding earlier would cancel the
+  // initial overview load. Consumed once: workspace switches and later
+  // navigation never re-apply a stale seed.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || overview.status !== "ready") return;
+    seededRef.current = true;
+    const seed = props.initialNav;
+    if (!seed) return;
+    if (seed.level === "channel") void openChannel(seed.channel);
+    else if (seed.level === "thread") void openThread(seed.channel, seed.thread);
+    else if (seed.level === "dm") void openDm(seed.dm);
+  }, [openChannel, openDm, openThread, overview.status, props.initialNav]);
+
   // While a DM is open, poll: sync (push the member's ops, pull the peers')
   // then reload the conversation. Token-guarded so a stale response never
   // repaints a view the user already left.
@@ -1807,6 +1848,7 @@ export function ChatsView(props: {
     return (
       <div
         data-testid="chats-dm-new"
+        data-variant={variant}
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
@@ -1816,36 +1858,38 @@ export function ChatsView(props: {
           onBack={goBack}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
-        <div className="flex flex-col gap-1 border-b border-line p-2">
-          <label className="sr-only" htmlFor="chats-dm-recipients">
-            To
-          </label>
-          <input
-            id="chats-dm-recipients"
-            data-testid="chats-dm-recipients"
-            autoFocus
-            value={dmRecipients}
-            placeholder="To: email@example.com"
-            onChange={(event) => setDmRecipients(event.target.value)}
-            className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+        <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
+          <div className="flex flex-col gap-1 border-b border-line p-2">
+            <label className="sr-only" htmlFor="chats-dm-recipients">
+              To
+            </label>
+            <input
+              id="chats-dm-recipients"
+              data-testid="chats-dm-recipients"
+              autoFocus
+              value={dmRecipients}
+              placeholder="To: email@example.com"
+              onChange={(event) => setDmRecipients(event.target.value)}
+              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+            />
+            <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
+              Separate several people with commas. They&apos;ll see the conversation on
+              their next sync.
+            </p>
+          </div>
+          <div className="min-h-0 flex-1" />
+          <MentionComposer
+            testIdPrefix="chats-dm-new"
+            composerId="chats-dm-new-composer"
+            value={dmDraft}
+            sending={startingDm}
+            placeholder="Write the first message…"
+            sendLabel="Start conversation"
+            candidates={mentionCandidates}
+            onChange={setDmDraft}
+            onSend={() => void startDm()}
           />
-          <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
-            Separate several people with commas. They&apos;ll see the conversation on
-            their next sync.
-          </p>
         </div>
-        <div className="min-h-0 flex-1" />
-        <MentionComposer
-          testIdPrefix="chats-dm-new"
-          composerId="chats-dm-new-composer"
-          value={dmDraft}
-          sending={startingDm}
-          placeholder="Write the first message…"
-          sendLabel="Start conversation"
-          candidates={mentionCandidates}
-          onChange={setDmDraft}
-          onSend={() => void startDm()}
-        />
       </div>
     );
   }
@@ -1855,6 +1899,7 @@ export function ChatsView(props: {
     return (
       <div
         data-testid="chats-dm-view"
+        data-variant={variant}
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
@@ -1868,52 +1913,54 @@ export function ChatsView(props: {
         {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
             its channelWireId and fanned out through the SAME shareForRecipient
             grant gate. Dormant (calm header, no fake liveness) when solo. */}
-        {dm.threadId ? (
-          <ChatMessageList
-            testIdPrefix="chats-dm"
-            messages={messages}
-            loading={messagesLoading}
-            emptyLabel="No messages yet."
-            endRef={messagesEndRef}
-            mentionCandidates={mentionCandidates}
-            reactionControls={{
-              reactions,
-              viewerAuthorId,
-              onToggle: toggleReaction,
-            }}
-          />
-        ) : (
-          <div
-            data-testid="chats-dm-waiting"
-            className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
-          >
-            Waiting for this conversation to sync…
-          </div>
-        )}
-        <TypingIndicator names={presence.typingNames} className="px-2" />
-        {dm.connected ? (
-          <MentionComposer
-            testIdPrefix="chats-dm"
-            composerId="chats-dm-composer"
-            value={composer}
-            sending={sending || !dm.threadId}
-            placeholder={`Message ${dm.peerLabel}…`}
-            sendLabel="Send message"
-            candidates={mentionCandidates}
-            onChange={(value) => {
-              setComposer(value);
-              presence.setTyping(value.trim().length > 0);
-            }}
-            onSend={() => {
-              presence.setTyping(false);
-              void sendDmMessage();
-            }}
-          />
-        ) : (
-          <ComposerNotice testId="chats-dm-ended">
-            This conversation has ended. You can still read it.
-          </ComposerNotice>
-        )}
+        <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
+          {dm.threadId ? (
+            <ChatMessageList
+              testIdPrefix="chats-dm"
+              messages={messages}
+              loading={messagesLoading}
+              emptyLabel="No messages yet."
+              endRef={messagesEndRef}
+              mentionCandidates={mentionCandidates}
+              reactionControls={{
+                reactions,
+                viewerAuthorId,
+                onToggle: toggleReaction,
+              }}
+            />
+          ) : (
+            <div
+              data-testid="chats-dm-waiting"
+              className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
+            >
+              Waiting for this conversation to sync…
+            </div>
+          )}
+          <TypingIndicator names={presence.typingNames} className="px-2" />
+          {dm.connected ? (
+            <MentionComposer
+              testIdPrefix="chats-dm"
+              composerId="chats-dm-composer"
+              value={composer}
+              sending={sending || !dm.threadId}
+              placeholder={`Message ${dm.peerLabel}…`}
+              sendLabel="Send message"
+              candidates={mentionCandidates}
+              onChange={(value) => {
+                setComposer(value);
+                presence.setTyping(value.trim().length > 0);
+              }}
+              onSend={() => {
+                presence.setTyping(false);
+                void sendDmMessage();
+              }}
+            />
+          ) : (
+            <ComposerNotice testId="chats-dm-ended">
+              This conversation has ended. You can still read it.
+            </ComposerNotice>
+          )}
+        </div>
       </div>
     );
   }
@@ -1933,6 +1980,7 @@ export function ChatsView(props: {
     return (
       <div
         data-testid="chats-thread-view"
+        data-variant={variant}
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
@@ -2374,6 +2422,7 @@ export function ChatsView(props: {
     return (
       <div
         data-testid="chats-channel-view"
+        data-variant={variant}
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
@@ -2547,7 +2596,11 @@ export function ChatsView(props: {
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
                 <span className="text-xs text-muted">Nothing here yet.</span>
                 <span className="text-[11px] text-subtle">
-                  {channelLocked ? "There are no posts to read." : "Start a post above."}
+                  {channelLocked
+                    ? "There are no posts to read."
+                    : nav.channel.kind === "agent"
+                      ? "Ask for a change, a summary, or a plan — your agent replies here."
+                      : "Start a post above."}
                 </span>
               </div>
             ) : (
@@ -2590,10 +2643,11 @@ export function ChatsView(props: {
   return (
     <div
       data-testid="chats-view"
+      data-variant={variant}
       className="flex min-h-0 flex-1 flex-col"
       onKeyDownCapture={onKeyDownCapture}
     >
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className={`min-h-0 flex-1 overflow-y-auto ${pageColumn}`}>
         <AddressedToMe
           notifications={props.addressedToMe ?? []}
           onOpen={props.onOpenAddressed}
@@ -2808,7 +2862,7 @@ export function ChatsView(props: {
           </div>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-line p-2">
+      <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
         {creatingChannel === null ? (
           <button
             type="button"
