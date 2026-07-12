@@ -59,9 +59,11 @@ deferred import-confirm quarantine are documented at `importDroppedPaths`.
   clipboard-only.
 - **Folder / workspace → zip:** unchanged (`collectZipEntries` +
   `buildStoreZip`, `.dohc`/`.git`/`node_modules` skipped, bounded).
-- What may leave the workspace remains governed by the effective-policy
-  resolver (`packages/workspace-engine/src/effectivePolicy.ts`): secret-backed
-  files stay out of exports, search, and moments.
+- Secret-classified files (the `.env` family, per the engine path floor that
+  also governs search and moments) never leave in an archive: the zip walk
+  skips them and an explicitly targeted secret refuses loudly. Zips get
+  shared onward; a secret that should travel must be moved out of secret
+  classification deliberately, not exported by accident.
 
 ## Sharing today (relay shares)
 

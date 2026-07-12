@@ -507,6 +507,26 @@ describe("collectZipEntries", () => {
     );
     await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
   });
+
+  it("keeps secret-classified files out of archives (codex P2)", async () => {
+    await writeFile(join(root, "notes.md"), "fine");
+    await writeFile(join(root, ".env"), "API_KEY=hunter2");
+    await mkdir(join(root, "config"), { recursive: true });
+    await writeFile(join(root, "config", "prod.env"), "DB=secret");
+    const { entries } = await collectZipEntries(root);
+    expect(entries.map((entry) => entry.path).sort()).toEqual(["notes.md"]);
+  });
+
+  it("keeps secrets out of SUBFOLDER exports and refuses an explicit secret target", async () => {
+    await mkdir(join(root, "config"), { recursive: true });
+    await writeFile(join(root, "config", "app.md"), "fine");
+    await writeFile(join(root, "config", "prod.env"), "DB=secret");
+    const { entries } = await collectZipEntries(root, "config");
+    expect(entries.map((entry) => entry.path)).toEqual(["config/app.md"]);
+    await expect(collectZipEntries(root, "config/prod.env")).rejects.toThrow(
+      /Secret files never leave the workspace/,
+    );
+  });
 });
 
 describe("copyIntoWorkspace", () => {
@@ -593,6 +613,28 @@ describe("copyIntoWorkspace", () => {
     await expect(
       copyIntoWorkspace(root, [join(outside, "receipt.png")], "missing"),
     ).rejects.toThrow(/not a workspace folder/);
+  });
+
+  it("refuses a symlinked ANCESTOR in the target folder (reserved-space smuggle, codex P2)", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    // link -> shared-with-me resolves INSIDE the workspace, so realpath
+    // containment alone would pass while the copy lands in reserved space.
+    await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
+    await symlink(join(root, SHARED_WITH_ME_FOLDER), join(root, "link"), "dir");
+    await expect(
+      copyIntoWorkspace(root, [join(outside, "receipt.png")], "link/alex"),
+    ).rejects.toThrow(/not a workspace folder/);
+    expect(existsSync(join(root, SHARED_WITH_ME_FOLDER, "alex", "receipt.png"))).toBe(
+      false,
+    );
+  });
+
+  it("accepts an explicit empty-string target as the root", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    const outcome = await copyIntoWorkspace(root, [join(outside, "receipt.png")], "");
+    expect(outcome).toEqual({ imported: ["receipt.png"], skipped: 0 });
   });
 
   it("refuses a symlinked target folder (must not teleport the import)", async () => {

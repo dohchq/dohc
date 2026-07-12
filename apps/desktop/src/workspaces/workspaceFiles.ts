@@ -2,6 +2,7 @@ import {
   classifyPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
+import { classifyEngineFilePath } from "@dohc/workspace-engine";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -265,10 +266,20 @@ export async function resolveImportDestination(
   if (!validated.ok) {
     throw new Error(`Invalid import destination (${validated.reason}): ${targetDir}`);
   }
-  const absDir = join(realRoot, ...validated.normalized.split("/"));
-  const linkStat = await lstat(absDir).catch(() => null);
-  if (!linkStat || linkStat.isSymbolicLink() || !linkStat.isDirectory()) {
-    throw new Error(`Import destination is not a workspace folder: ${validated.normalized}`);
+  // EVERY component must be a real directory — lstat refuses a symlink at
+  // any depth, not just the final one. An ancestor symlink that resolves
+  // inside the workspace would otherwise smuggle the import into a tree the
+  // lexical check never saw (e.g. link -> shared-with-me puts "link/alex"
+  // imports into the reserved projection). Workspace-internal destinations
+  // have no legitimate ancestor symlinks (unlike macOS system paths on the
+  // drag-in SOURCE side), so strict refusal costs nothing (codex P2).
+  let absDir = realRoot;
+  for (const segment of validated.normalized.split("/")) {
+    absDir = join(absDir, segment);
+    const linkStat = await lstat(absDir).catch(() => null);
+    if (!linkStat || linkStat.isSymbolicLink() || !linkStat.isDirectory()) {
+      throw new Error(`Import destination is not a workspace folder: ${validated.normalized}`);
+    }
   }
   if (!isInside(realRoot, await realpath(absDir))) {
     throw new Error(`Import destination escapes the workspace: ${validated.normalized}`);
@@ -638,8 +649,12 @@ const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
 
 // Gathers the zip entries for a workspace export: the whole workspace, one
 // folder, or one file. Ignored segments (.dohc, .git, node_modules) and
-// symlinks never export — the same walk rules as listFiles. Bounded: more
-// than MAX_ZIP_ENTRIES files or MAX_ZIP_TOTAL_BYTES refuses (loudly, before
+// symlinks never export — the same walk rules as listFiles — and
+// secret-classified files (the .env family) never leave in an archive: the
+// walk skips them, and an explicitly targeted secret refuses loudly (zips
+// get shared onward; the effective-policy posture is that secrets stay out
+// of everything that leaves the workspace). Bounded: more than
+// MAX_ZIP_ENTRIES files or MAX_ZIP_TOTAL_BYTES refuses (loudly, before
 // buffering everything) rather than producing a surprise multi-GB archive.
 export async function collectZipEntries(
   rootPath: string,
@@ -648,11 +663,17 @@ export async function collectZipEntries(
   const realRoot = await realpath(rootPath);
   let startAbsolute = realRoot;
   let prefix = "";
+  let prefixRel = "";
   let baseName = basename(realRoot);
   if (relativePath !== undefined) {
     const validated = validateUserWritePath(relativePath);
     if (!validated.ok) {
       throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
+    }
+    if (classifyEngineFilePath(validated.normalized).kind === "secret") {
+      throw new Error(
+        `Secret files never leave the workspace in an export: ${validated.normalized}`,
+      );
     }
     const realTarget = await realpath(join(rootPath, validated.normalized));
     if (!isInside(realRoot, realTarget)) {
@@ -662,6 +683,7 @@ export async function collectZipEntries(
     // Entries keep the exported folder/file as their top-level name so the
     // extracted archive unpacks to "notes/…", not loose children.
     prefix = basename(validated.normalized);
+    prefixRel = validated.normalized;
     baseName = prefix.replace(/\.[^.]+$/, "") || prefix;
   }
 
@@ -705,21 +727,29 @@ export async function collectZipEntries(
     }
   }
 
-  async function walk(dir: string, archiveDir: string): Promise<void> {
+  // relDir is the WORKSPACE-relative directory (for secret classification);
+  // archiveDir is the path inside the archive (rooted at the export target).
+  async function walk(dir: string, relDir: string, archiveDir: string): Promise<void> {
     const dirents = await readdir(dir, { withFileTypes: true });
     for (const dirent of dirents) {
       if (dirent.isSymbolicLink()) continue;
+      const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) await walk(join(dir, dirent.name), archivePath);
+        if (!IGNORED_DIRS.has(dirent.name)) {
+          await walk(join(dir, dirent.name), relPath, archivePath);
+        }
       } else if (dirent.isFile()) {
+        // Secret-classified files (.env family) stay out of archives.
+        if (classifyEngineFilePath(relPath).kind === "secret") continue;
         await add(join(dir, dirent.name), archivePath);
       }
     }
   }
 
+  const startRel = relativePath === undefined ? "" : prefixRel;
   if ((await stat(startAbsolute)).isDirectory()) {
-    await walk(startAbsolute, prefix);
+    await walk(startAbsolute, startRel, prefix);
   } else {
     await add(startAbsolute, prefix);
   }

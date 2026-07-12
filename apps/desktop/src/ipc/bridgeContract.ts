@@ -296,12 +296,13 @@ export const ImportWorkspaceFilesPayload = z.object({
   // never a registered workspace's .dohc) and the count is capped here.
   droppedPaths: z.array(PATH_STRING).max(100).optional(),
   // Destination folder for the import, workspace-relative ("" / absent =
-  // root). Files land where the user aimed: the folder that was dropped on,
-  // or the folder whose context menu ran "Import Files…". Renderer-supplied,
-  // so main re-validates it end to end (resolveImportDestination: lexical
-  // validation, must exist as a real non-symlink directory, realpath
+  // root — the empty string is legal here, unlike PATH_STRING). Files land
+  // where the user aimed: the folder that was dropped on, or the folder
+  // whose context menu ran "Import Files…". Renderer-supplied, so main
+  // re-validates it end to end (resolveImportDestination: lexical
+  // validation, every component a real non-symlink directory, realpath
   // containment) before any copy.
-  targetDir: PATH_STRING.optional(),
+  targetDir: z.string().max(4096).optional(),
 });
 export type ImportWorkspaceFilesPayload = z.infer<
   typeof ImportWorkspaceFilesPayload
