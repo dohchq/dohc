@@ -33,6 +33,25 @@ export interface WorkspaceSearchRequest {
   excludeGlob?: string;
 }
 
+// The include glob for the mount-scoped rg pass that completes an
+// engine-backed search (the engine index deliberately excludes
+// shared-with-me). Three-way, following rg's gitignore-style semantics:
+// - a glob already targeting the projection is used as-is;
+// - a basename-style glob (no "/") floats to any depth, so it intersects
+//   mounts — scope it: "*.md" -> "shared-with-me/**/*.md";
+// - any other path-style glob is ANCHORED at the workspace root and cannot
+//   match under shared-with-me/ — the intersection is empty, so the pass
+//   is skipped (null).
+export function mountScopedIncludeGlob(
+  userGlob: string | undefined,
+): string | null {
+  if (!userGlob || userGlob.trim().length === 0) return "shared-with-me/**";
+  const glob = userGlob.trim();
+  if (glob === "shared-with-me" || glob.startsWith("shared-with-me/")) return glob;
+  if (!glob.includes("/")) return `shared-with-me/**/${glob}`;
+  return null;
+}
+
 export interface SearchResultEntry {
   // Workspace-relative, forward-slashed, validateUserReadPath-clean.
   path: string;

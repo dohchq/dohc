@@ -412,7 +412,10 @@ import {
   readWorkspaceSettingsFile,
   writeWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
-import { createSearchRegistry } from "./workspaces/workspaceSearch";
+import {
+  createSearchRegistry,
+  mountScopedIncludeGlob,
+} from "./workspaces/workspaceSearch";
 import { rgPath } from "@vscode/ripgrep";
 import {
   startCliServer,
@@ -515,6 +518,13 @@ const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
+
+// Latest search per renderer: the engine-backed search path awaits (flush +
+// index query) before its mount-scoped rg pass, so an OLDER search can reach
+// startSearch after a NEWER one already started — and the registry's
+// kill-and-replace would cancel the newer child. Stale handlers check this
+// before touching the registry.
+const latestSearchIdBySender = new Map<number, string>();
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
@@ -5348,6 +5358,7 @@ function registerIpcHandlers(): void {
     const input = WorkspaceSearchPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const sender = event.sender;
+    latestSearchIdBySender.set(sender.id, input.searchId);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -5421,6 +5432,30 @@ function registerIpcHandlers(): void {
           );
         }
         if (searchMounts) {
+          // Stale-search guard: a newer query may have started its own
+          // mount pass while this handler awaited the engine phase — the
+          // registry's kill-and-replace must never let the OLDER search
+          // cancel it. (The renderer already drops stale batches by id.)
+          if (latestSearchIdBySender.get(sender.id) !== input.searchId) return;
+          // rg include globs are gitignore-style: basename globs float to
+          // any depth (so "*.md" intersects mounts and must be scoped),
+          // while anchored path globs outside the projection cannot match
+          // under it — the pass is skipped entirely.
+          const mountGlob = mountScopedIncludeGlob(input.includeGlob);
+          if (mountGlob === null) {
+            if (!sender.isDestroyed()) {
+              sender.send(
+                CHANNELS.searchResults,
+                SearchResultsEventSchema.parse({
+                  searchId: input.searchId,
+                  entries: [],
+                  done: true,
+                  limitHit: false,
+                }),
+              );
+            }
+            return;
+          }
           if (!searchCleanupHooked.has(sender)) {
             searchCleanupHooked.add(sender);
             sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
@@ -5434,15 +5469,7 @@ function registerIpcHandlers(): void {
               caseSensitive: input.caseSensitive,
               wholeWord: input.wholeWord,
               regex: input.regex,
-              // Always scoped to the mount projection: everything else is
-              // already answered by the engine index above. A user include
-              // glob that itself targets shared-with-me refines the scope;
-              // any other include glob cannot intersect it here, so the
-              // default projection-wide scope applies.
-              includeGlob:
-                input.includeGlob && isSharedWithMePath(input.includeGlob)
-                  ? input.includeGlob
-                  : "shared-with-me/**",
+              includeGlob: mountGlob,
               excludeGlob: input.excludeGlob,
             },
             (batch) => {

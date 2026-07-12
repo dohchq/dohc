@@ -13,7 +13,7 @@ import {
   toSearchEntries,
   type SearchBatch,
   type SearchHandle,
-} from "./workspaceSearch";
+ mountScopedIncludeGlob,} from "./workspaceSearch";
 
 describe("buildRipgrepArgs", () => {
   it("pins the security-relevant base shape: json, exclusions, caps, -- terminator", () => {
@@ -427,5 +427,25 @@ describe("createSearchRegistry", () => {
     await expect(
       registry.startSearch(1, "/definitely/not/a/real/root", "s1", { query: "a" }, () => {}),
     ).rejects.toThrow();
+  });
+});
+
+describe("mountScopedIncludeGlob", () => {
+  it("keeps projection-targeting globs, scopes basename globs, skips anchored ones", () => {
+    // No user glob: the whole projection.
+    expect(mountScopedIncludeGlob(undefined)).toBe("shared-with-me/**");
+    expect(mountScopedIncludeGlob("")).toBe("shared-with-me/**");
+    // Projection-targeting globs pass through.
+    expect(mountScopedIncludeGlob("shared-with-me/**")).toBe("shared-with-me/**");
+    expect(mountScopedIncludeGlob("shared-with-me/alex/**")).toBe(
+      "shared-with-me/alex/**",
+    );
+    // Basename globs float to any depth in rg's gitignore semantics, so
+    // they intersect mounts and get scoped.
+    expect(mountScopedIncludeGlob("*.md")).toBe("shared-with-me/**/*.md");
+    expect(mountScopedIncludeGlob("brief.*")).toBe("shared-with-me/**/brief.*");
+    // Anchored path globs outside the projection cannot match under it.
+    expect(mountScopedIncludeGlob("notes/**")).toBeNull();
+    expect(mountScopedIncludeGlob("docs/plan.md")).toBeNull();
   });
 });
