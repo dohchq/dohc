@@ -22,6 +22,10 @@ import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import {
+  OPEN_EDITORS_DEFAULT_HEIGHT,
+  OPEN_EDITORS_MIN_HEIGHT,
+} from "./workbench/workbenchState";
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -741,8 +745,57 @@ describe("open editors", () => {
     // active behavior needs real layout and is covered by the desktop e2e
     // spec (workspace-open-editors.spec.ts).
     const list = screen.getByTestId("open-editors-list");
-    expect(list.className).toContain("max-h-[238px]");
+    expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
     expect(list.className).toContain("overflow-y-auto");
+  });
+
+  it("resizes the open editors section by dragging its bottom edge", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const treeRows = await screen.findAllByTestId("tree-row");
+    const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+    await user.click(rowA);
+    await screen.findByTestId("tab-a.md");
+
+    const list = screen.getByTestId("open-editors-list");
+    Object.defineProperty(list, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 60,
+        left: 0,
+        top: 60,
+        right: 240,
+        bottom: 60 + OPEN_EDITORS_DEFAULT_HEIGHT,
+        width: 240,
+        height: OPEN_EDITORS_DEFAULT_HEIGHT,
+        toJSON: () => {},
+      }),
+    });
+
+    const handle = screen.getByTestId("open-editors-resize");
+    // A non-left press must not start a resize.
+    fireEvent.pointerDown(handle, { button: 2, buttons: 2, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 2, clientY: 500 });
+    expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
+
+    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 60 + 300 });
+    await waitFor(() => {
+      expect(list.style.maxHeight).toBe("300px");
+    });
+
+    // Dragging far above the list clamps at the minimum height.
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 0 });
+    await waitFor(() => {
+      expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_MIN_HEIGHT}px`);
+    });
   });
 });
 

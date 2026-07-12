@@ -153,6 +153,10 @@ export interface WorkbenchState {
   // zero clicks). Independent of the left panel's History view.
   historyVisible: boolean;
   historyWidth: number;
+  // Max height of the explorer's Open Editors list (VS Code-style resizable
+  // section): the list caps here and scrolls internally; shorter lists shrink
+  // to fit.
+  openEditorsHeight: number;
   // Explorer state (Phase E3), persisted with the rest: which folders are
   // expanded and which paths are pinned to the favorites section.
   expandedFolders: string[];
@@ -168,6 +172,12 @@ export const SIDEBAR_DEFAULT_WIDTH = 240;
 export const HISTORY_MIN_WIDTH = 180;
 export const HISTORY_MAX_WIDTH = 2400;
 export const HISTORY_DEFAULT_WIDTH = 280;
+// Open-editors rows are 28px (h-7). The default shows 4.5 rows — the half row
+// at the cutoff signals there is more to scroll; the min keeps two rows
+// grabbable and the max is generous (tall portrait monitors) like the rails.
+export const OPEN_EDITORS_MIN_HEIGHT = 56;
+export const OPEN_EDITORS_MAX_HEIGHT = 2400;
+export const OPEN_EDITORS_DEFAULT_HEIGHT = 126;
 // Bounds the persisted payload (and the tab strip) — not a UX target.
 export const MAX_OPEN_TABS = 100;
 // Bounds the persisted explorer state the same way (oldest entries give way).
@@ -185,6 +195,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     activeTab: null,
     historyVisible: true,
     historyWidth: HISTORY_DEFAULT_WIDTH,
+    openEditorsHeight: OPEN_EDITORS_DEFAULT_HEIGHT,
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
@@ -199,6 +210,14 @@ export function clampSidebarWidth(width: number): number {
 export function clampHistoryWidth(width: number): number {
   if (!Number.isFinite(width)) return HISTORY_DEFAULT_WIDTH;
   return Math.min(HISTORY_MAX_WIDTH, Math.max(HISTORY_MIN_WIDTH, Math.round(width)));
+}
+
+export function clampOpenEditorsHeight(height: number): number {
+  if (!Number.isFinite(height)) return OPEN_EDITORS_DEFAULT_HEIGHT;
+  return Math.min(
+    OPEN_EDITORS_MAX_HEIGHT,
+    Math.max(OPEN_EDITORS_MIN_HEIGHT, Math.round(height)),
+  );
 }
 
 // Open (or re-activate) a file's tab. No duplicates; opening always
@@ -277,6 +296,16 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
 export function setHistoryWidth(state: WorkbenchState, width: number): WorkbenchState {
   const clamped = clampHistoryWidth(width);
   return clamped === state.historyWidth ? state : { ...state, historyWidth: clamped };
+}
+
+export function setOpenEditorsHeight(
+  state: WorkbenchState,
+  height: number,
+): WorkbenchState {
+  const clamped = clampOpenEditorsHeight(height);
+  return clamped === state.openEditorsHeight
+    ? state
+    : { ...state, openEditorsHeight: clamped };
 }
 
 // Capped append: at the bound the OLDEST entry gives way (openTab precedent)
@@ -382,6 +411,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     activeTab: state.activeTab,
     historyVisible: state.historyVisible,
     historyWidth: clampHistoryWidth(state.historyWidth),
+    openEditorsHeight: clampOpenEditorsHeight(state.openEditorsHeight),
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
@@ -429,6 +459,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawSidebarWidth = own("sidebarWidth");
   const rawHistoryVisible = own("historyVisible");
   const rawHistoryWidth = own("historyWidth");
+  const rawOpenEditorsHeight = own("openEditorsHeight");
   return {
     activeView: isViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
@@ -449,6 +480,10 @@ export function parseUiState(raw: unknown): WorkbenchState {
       typeof rawHistoryWidth === "number"
         ? clampHistoryWidth(rawHistoryWidth)
         : defaults.historyWidth,
+    openEditorsHeight:
+      typeof rawOpenEditorsHeight === "number"
+        ? clampOpenEditorsHeight(rawOpenEditorsHeight)
+        : defaults.openEditorsHeight,
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
