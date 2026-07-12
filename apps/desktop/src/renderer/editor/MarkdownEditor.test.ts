@@ -220,7 +220,7 @@ describe("MarkdownEditor slash command: math", () => {
 });
 
 describe("MarkdownEditor code block continuation", () => {
-  function makeEditor(markdown: string): Editor {
+  function makeEditor(markdown: string, editable = true): Editor {
     return new Editor({
       element: document.createElement("div"),
       extensions: [
@@ -232,6 +232,7 @@ describe("MarkdownEditor code block continuation", () => {
       ],
       content: markdown,
       contentType: "markdown",
+      editable,
     });
   }
 
@@ -297,6 +298,18 @@ describe("MarkdownEditor code block continuation", () => {
       followed.view.dom.querySelectorAll(".dohc-code-block-continuation"),
     ).toHaveLength(0);
     followed.destroy();
+  });
+
+  it("disables the continuation button in read-only views", () => {
+    const editor = makeEditor("```\ncode\n```", false);
+    editor.registerPlugin(makeCodeBlockChromePlugin());
+    const button = editor.view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-code-block-continuation .dohc-code-block-continue-btn",
+    );
+
+    expect(button).not.toBeNull();
+    expect(button?.disabled).toBe(true);
+    editor.destroy();
   });
 
   it("clicking anywhere on the continuation strip appends a paragraph", () => {
