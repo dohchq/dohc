@@ -41,6 +41,24 @@ describe("joinWorkspacePath", () => {
       "notes/assets/pic.png",
     );
   });
+
+  it("resolves `..` by popping the parent folder (global-folder attachments)", () => {
+    expect(joinWorkspacePath("notes/plan.md", "../attachments/pic.png")).toBe(
+      "attachments/pic.png",
+    );
+    expect(joinWorkspacePath("a/b/plan.md", "../../attachments/pic.png")).toBe(
+      "attachments/pic.png",
+    );
+  });
+
+  it("preserves leading `..` when a path climbs above the workspace root", () => {
+    // notes/ pops once, then the extra `..` underflows and is kept so callers
+    // can detect the escape.
+    expect(joinWorkspacePath("notes/plan.md", "../../escape.png")).toBe(
+      "../escape.png",
+    );
+    expect(joinWorkspacePath("plan.md", "../escape.png")).toBe("../escape.png");
+  });
 });
 
 describe("resolveWorkspaceImageSrc", () => {
@@ -62,5 +80,19 @@ describe("resolveWorkspaceImageSrc", () => {
     expect(
       resolveWorkspaceImageSrc(ctx, "https://example.com/x.png"),
     ).toBe("https://example.com/x.png");
+  });
+
+  it("resolves an upward-relative src to a dohc-file URL under the root", () => {
+    expect(resolveWorkspaceImageSrc(ctx, "../attachments/x.png")).toBe(
+      "dohc-file://ws1/attachments/x.png",
+    );
+  });
+
+  it("refuses to mint a URL for a src that escapes the workspace root", () => {
+    // notes/plan.md + ../../outside.png climbs above the root: the raw src is
+    // returned (renders nothing) rather than reaching the protocol layer.
+    expect(resolveWorkspaceImageSrc(ctx, "../../outside.png")).toBe(
+      "../../outside.png",
+    );
   });
 });

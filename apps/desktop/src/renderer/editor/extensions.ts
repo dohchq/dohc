@@ -150,11 +150,19 @@ function sanitizeImageSrc(src: string): string {
   // but the ORIGINAL (lossless) src is what we return — agents edit the .md.
   const forCheck = compact.replace(/\\/g, '/')
   // Reject protocol-relative ("//host") and absolute ("/abs") — both escape
-  // the document's folder.
+  // the document's folder and can never be a workspace-relative asset.
   if (forCheck.startsWith('/')) return ''
-  // Reject parent traversal so a relative src can never climb out of the
-  // document's folder (or the workspace root).
-  if (/(^|\/)\.\.(\/|$)/.test(forCheck)) return ''
+  // CONTRACT (kept in lockstep with packages/ydoc-projection): forward-slash
+  // parent traversal (`../foo`) is PRESERVED losslessly. Agents legitimately
+  // author upward-relative asset links — the global-folder attachment mode
+  // writes `../assets/x.png` so a nested doc can point at one folder at the
+  // workspace root. Containment is NOT enforced here; it lives downstream:
+  // the desktop resolver (imageSrc.ts) refuses to mint a dohc-file:// URL for
+  // any path that normalizes outside the workspace root, and readWorkspaceAsset
+  // / the dohc-file protocol re-check real-path containment. A BACKSLASH-
+  // obfuscated `..\` is never legitimate authored markdown, so it stays
+  // blocked (backslashes are folded to '/' first so it can't slip through).
+  if (compact.includes('\\') && /(^|\/)\.\.(\/|$)/.test(forCheck)) return ''
   return trimmed
 }
 

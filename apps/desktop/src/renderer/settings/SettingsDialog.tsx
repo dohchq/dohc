@@ -28,7 +28,7 @@ import {
 import { bridge } from "../bridge";
 import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
-import { SegmentedControl, SettingRow, SwitchControl } from "./SettingRow";
+import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -555,6 +555,87 @@ export function SettingsDialog(props: {
             >
               <span className="text-[11px] text-subtle">Stored in .dohc/ui-state.json</span>
             </SettingRow>
+          </div>
+        );
+      case "files":
+        return (
+          <div data-testid="settings-section-files">
+            <SettingRow
+              title="Attachments"
+              description="Where pasted images and files are saved."
+              modified={isModified(
+                workspaceSettings.files.attachmentLocation,
+                DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
+              )}
+              onReset={() =>
+                void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                  files: {
+                    ...workspaceSettings.files,
+                    attachmentLocation:
+                      DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
+                  },
+                }))
+              }
+              testId="settings-row-attachment-location"
+            >
+              <select
+                aria-label="Attachment location"
+                data-testid="attachment-location-select"
+                value={workspaceSettings.files.attachmentLocation}
+                onChange={(event) =>
+                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                    files: {
+                      ...workspaceSettings.files,
+                      attachmentLocation: event.target
+                        .value as WorkspaceSettings["files"]["attachmentLocation"],
+                    },
+                  }))
+                }
+                className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+              >
+                <option value="per-document">
+                  {`In a folder next to the document (${
+                    workspaceSettings.files.attachmentFolderName || "assets"
+                  }/)`}
+                </option>
+                <option value="global-folder">
+                  In one folder at the workspace root
+                </option>
+                <option value="same-folder">Next to the document</option>
+              </select>
+            </SettingRow>
+            {workspaceSettings.files.attachmentLocation !== "same-folder" ? (
+              <SettingRow
+                title="Attachment folder name"
+                description="Name of the folder attachments are saved into. A single folder name, no slashes."
+                modified={isModified(
+                  workspaceSettings.files.attachmentFolderName,
+                  DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                )}
+                onReset={() =>
+                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                    files: {
+                      ...workspaceSettings.files,
+                      attachmentFolderName:
+                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                    },
+                  }))
+                }
+                testId="settings-row-attachment-folder"
+              >
+                <TextControl
+                  label="Attachment folder name"
+                  value={workspaceSettings.files.attachmentFolderName}
+                  placeholder="assets"
+                  testId="attachment-folder-input"
+                  onChange={(attachmentFolderName) =>
+                    void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                      files: { ...workspaceSettings.files, attachmentFolderName },
+                    }))
+                  }
+                />
+              </SettingRow>
+            ) : null}
           </div>
         );
       case "privacy":

@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -77,6 +79,75 @@ test("in-editor image: subfolder doc renders a relative image under its folder",
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
     await openMarkdownDoc(page, "notes/plan.md");
     await expectEditorImagePainted(page);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("in-editor image: a subfolder doc renders an UPWARD-relative image from the workspace root", async () => {
+  // The global-folder attachment mode links a nested doc to one folder at the
+  // workspace root with `../`. This proves the whole path is live: the relaxed
+  // sanitizer preserves `..`, the resolver normalizes it back under the root,
+  // and the dohc-file protocol serves the bytes (naturalWidth > 0).
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "attachments/pic.png", contents: PNG_BYTES },
+      {
+        path: "notes/plan.md",
+        contents: "# Plan\n\n![pic](../attachments/pic.png)\n",
+      },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await openMarkdownDoc(page, "notes/plan.md");
+    await expectEditorImagePainted(page);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("in-editor image: a link escaping the workspace root does NOT render", async () => {
+  // `../../outside.png` from notes/ climbs above the workspace root. The
+  // resolver refuses to mint a dohc-file:// URL for it, so the <img> keeps its
+  // raw (unservable) src and never decodes — even though a real file exists at
+  // the escape target. Containment holds without depending on the protocol
+  // layer to reject the request.
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    // A real, decodable PNG planted OUTSIDE the workspace root (temp.baseDir is
+    // the parent of temp.rootPath) at the exact path the escape link targets.
+    await writeFile(join(temp.baseDir, "outside.png"), PNG_BYTES);
+    await writeWorkspaceFiles(temp, [
+      {
+        path: "notes/plan.md",
+        contents: "# Plan\n\n![escape](../../outside.png)\n",
+      },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await openMarkdownDoc(page, "notes/plan.md");
+
+    const img = page.locator(".dohc-editor-image");
+    await expect(img).toBeVisible({ timeout: 15_000 });
+    // The src is left as the raw path — never rewritten to the privileged
+    // dohc-file:// scheme — and the image never decodes.
+    await expect(img.first()).not.toHaveAttribute("src", /^dohc-file:\/\//);
+    await expect
+      .poll(
+        async () =>
+          await img
+            .first()
+            .evaluate((el) => (el as HTMLImageElement).naturalWidth),
+        { timeout: 5_000 },
+      )
+      .toBe(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

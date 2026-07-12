@@ -114,13 +114,20 @@ function assertSafeRelativePath(path: string): void {
 // app parses.
 export async function seedWorkspaceSettings(
   workspace: Pick<TempWorkspace, "rootPath">,
-  overrides: { experimental?: { workspaceEngineAlpha?: boolean } } = {},
+  overrides: {
+    experimental?: { workspaceEngineAlpha?: boolean };
+    files?: Partial<(typeof DEFAULT_WORKSPACE_SETTINGS)["files"]>;
+  } = {},
 ): Promise<void> {
   const settings = {
     ...DEFAULT_WORKSPACE_SETTINGS,
     experimental: {
       ...DEFAULT_WORKSPACE_SETTINGS.experimental,
       ...overrides.experimental,
+    },
+    files: {
+      ...DEFAULT_WORKSPACE_SETTINGS.files,
+      ...overrides.files,
     },
   };
   const dir = join(workspace.rootPath, ".dohc");

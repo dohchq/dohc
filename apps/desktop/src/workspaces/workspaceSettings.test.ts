@@ -69,6 +69,7 @@ describe("workspace settings model", () => {
     expect(parseWorkspaceSettings(oldShape)).toEqual({
       ...oldShape,
       experimental: { workspaceEngineAlpha: true },
+      files: { attachmentLocation: "per-document", attachmentFolderName: "assets" },
     });
   });
 
@@ -92,6 +93,32 @@ describe("workspace settings model", () => {
     });
     expect(optedOut.experimental.workspaceEngineAlpha).toBe(false);
     expect(workspaceSettingsModified(optedOut)).toBe(true);
+  });
+
+  it("defaults, merges, and round-trips the attachment-location (files) group", () => {
+    // Absent files group (old settings files) defaults to per-document/assets.
+    expect(DEFAULT_WORKSPACE_SETTINGS.files).toEqual({
+      attachmentLocation: "per-document",
+      attachmentFolderName: "assets",
+    });
+    const globalFolder = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
+      files: { attachmentLocation: "global-folder", attachmentFolderName: "attachments" },
+    });
+    expect(globalFolder.files).toEqual({
+      attachmentLocation: "global-folder",
+      attachmentFolderName: "attachments",
+    });
+    // Other groups are untouched, and the shape round-trips through a parse.
+    expect(globalFolder.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
+    expect(workspaceSettingsModified(globalFolder)).toBe(true);
+    expect(parseWorkspaceSettings(globalFolder)).toEqual(globalFolder);
+    // An empty folder name is accepted by the schema (sanitized to a safe
+    // segment at use time) rather than resetting the whole file.
+    const emptyName = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
+      files: { attachmentFolderName: "" },
+    });
+    expect(emptyName.files.attachmentFolderName).toBe("");
+    expect(parseWorkspaceSettings(emptyName)).toEqual(emptyName);
   });
 
   it("merges and round-trips the workspace engine opt-out", () => {

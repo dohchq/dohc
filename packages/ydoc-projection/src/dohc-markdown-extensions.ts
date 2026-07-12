@@ -129,11 +129,19 @@ function sanitizeImageSrc(src: string): string {
   // but the ORIGINAL (lossless) src is what we return — agents edit the .md.
   const forCheck = compact.replace(/\\/g, '/')
   // Reject protocol-relative ("//host") and absolute ("/abs") — both escape
-  // the document's folder.
+  // the document's folder and can never be a workspace-relative asset.
   if (forCheck.startsWith('/')) return ''
-  // Reject parent traversal so a relative src can never climb out of the
-  // document's folder (or the workspace root).
-  if (/(^|\/)\.\.(\/|$)/.test(forCheck)) return ''
+  // CONTRACT (kept in lockstep with apps/desktop/src/renderer/editor): forward-
+  // slash parent traversal (`../foo`) is PRESERVED losslessly. Agents
+  // legitimately author upward-relative asset links — the global-folder
+  // attachment mode writes `../assets/x.png` so a nested doc can point at one
+  // folder at the workspace root. This projection copy never paints to a
+  // screen; containment is enforced by the desktop resolver (imageSrc.ts,
+  // which refuses to mint a dohc-file:// URL outside the workspace root) and
+  // readWorkspaceAsset / the dohc-file protocol (real-path containment). A
+  // BACKSLASH-obfuscated `..\` is never legitimate authored markdown, so it
+  // stays blocked (backslashes are folded to '/' first).
+  if (compact.includes('\\') && /(^|\/)\.\.(\/|$)/.test(forCheck)) return ''
   return trimmed
 }
 

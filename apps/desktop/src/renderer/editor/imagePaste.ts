@@ -1,12 +1,78 @@
 import type { EditorView } from "@tiptap/pm/view";
-import { joinWorkspacePath } from "./imageSrc";
+import { documentDir } from "./imageSrc";
 
 // Paste & drop of image FILES into the WYSIWYG editor (desktop-only).
 //
-// Bytes are written into the workspace next to the current document under an
-// `assets/` folder, then an image node is inserted whose src is the
-// document-relative path (`assets/<name>`) — the same lossless form the
-// markdown stores and imageSrc resolves at render time.
+// Bytes are written into the workspace at a location chosen by the workspace's
+// attachment setting (see AttachmentSettings), then an image node is inserted
+// whose src is the path RELATIVE to the document's folder — the same lossless
+// form the markdown stores and imageSrc resolves at render time.
+
+// Where pasted/uploaded attachments are saved (workspace setting, modeled on
+// Obsidian's "Default location for new attachments"):
+//   per-document  — a subfolder next to the document (`<folder>/x.png`)
+//   global-folder — one folder at the workspace root (`../<folder>/x.png`)
+//   same-folder   — directly beside the document (`x.png`)
+export type AttachmentLocation = "per-document" | "global-folder" | "same-folder";
+
+export type AttachmentSettings = {
+  location: AttachmentLocation;
+  // Subfolder name (per-document) or root folder name (global-folder). Ignored
+  // for same-folder. Sanitized to a single safe path segment at use time.
+  folderName: string;
+};
+
+export const DEFAULT_ATTACHMENT_FOLDER = "assets";
+
+export const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
+  location: "per-document",
+  folderName: DEFAULT_ATTACHMENT_FOLDER,
+};
+
+// Coerces a stored folder name to a single safe path segment. Anything with a
+// separator, a `.`/`..` segment, or that is empty falls back to "assets" — so
+// a malformed setting can never widen the write target or climb directories.
+export function sanitizeAttachmentFolderName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return DEFAULT_ATTACHMENT_FOLDER;
+  if (trimmed === "." || trimmed === "..") return DEFAULT_ATTACHMENT_FOLDER;
+  if (/[/\\]/.test(trimmed)) return DEFAULT_ATTACHMENT_FOLDER;
+  return trimmed;
+}
+
+// Computes both paths a saved attachment needs, purely from the document's
+// path, the chosen filename, and the setting:
+//   - writePath:   workspace-relative path (from the root) the bytes land at,
+//                  the form writeWorkspaceAsset expects.
+//   - relativeSrc: the path RELATIVE to the document's folder that goes into
+//                  the image node / markdown (`assets/x.png`, `x.png`, or
+//                  `../attachments/x.png`).
+export function computeAttachmentPaths(
+  docPath: string,
+  filename: string,
+  settings: AttachmentSettings = DEFAULT_ATTACHMENT_SETTINGS,
+): { writePath: string; relativeSrc: string } {
+  const docDir = documentDir(docPath); // "notes/" or "" at the root
+  if (settings.location === "same-folder") {
+    return { writePath: `${docDir}${filename}`, relativeSrc: filename };
+  }
+  const folder = sanitizeAttachmentFolderName(settings.folderName);
+  if (settings.location === "global-folder") {
+    // One folder at the workspace root; a nested doc climbs to it with `..`.
+    const depth =
+      docDir === "" ? 0 : docDir.replace(/\/+$/, "").split("/").length;
+    const up = "../".repeat(depth);
+    return {
+      writePath: `${folder}/${filename}`,
+      relativeSrc: `${up}${folder}/${filename}`,
+    };
+  }
+  // per-document (default): a subfolder next to the document.
+  return {
+    writePath: `${docDir}${folder}/${filename}`,
+    relativeSrc: `${folder}/${filename}`,
+  };
+}
 
 // Refuse anything over 20MB: this matches the main-process asset write bound,
 // and images that large are almost never a paste the user meant.
@@ -46,6 +112,9 @@ export type ImagePasteContext = {
   // Current document's workspace-relative path (e.g. `notes/plan.md`).
   docPath: string;
   writeAsset: WriteWorkspaceAsset;
+  // Where saved attachments go. Absent → the per-document/"assets" default
+  // (the historical behavior), so callers that never set it keep working.
+  attachments?: AttachmentSettings;
 };
 
 // Slug of the original filename (sans extension): lowercase, non-alphanumerics
@@ -157,10 +226,13 @@ export async function placeImageFiles(
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) continue;
 
     const filename = generateAssetFilename(file.name, file.type, bytes);
-    // src stays document-relative (`assets/<name>`) — the lossless markdown
-    // form; the workspace write path joins it onto the document's folder.
-    const relativeSrc = `assets/${filename}`;
-    const writePath = joinWorkspacePath(context.docPath, relativeSrc);
+    // The setting picks the write target; the node/markdown src stays the
+    // document-relative (lossless) form the resolver rewrites at render time.
+    const { writePath, relativeSrc } = computeAttachmentPaths(
+      context.docPath,
+      filename,
+      context.attachments,
+    );
     try {
       await context.writeAsset(writePath, bytes);
     } catch (error) {

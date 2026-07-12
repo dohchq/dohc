@@ -109,6 +109,27 @@ export function SegmentedControl<T extends string>(props: {
   );
 }
 
+export function TextControl(props: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  testId?: string;
+}) {
+  return (
+    <input
+      type="text"
+      spellCheck={false}
+      aria-label={props.label}
+      value={props.value}
+      placeholder={props.placeholder}
+      data-testid={props.testId}
+      onChange={(event) => props.onChange(event.target.value)}
+      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink focus-visible:outline-none"
+    />
+  );
+}
+
 export function SwitchControl(props: {
   label: string;
   checked: boolean;

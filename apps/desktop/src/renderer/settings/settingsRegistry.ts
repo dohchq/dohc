@@ -1,6 +1,7 @@
 import {
   Bot,
   Cloud,
+  FolderOpen,
   Keyboard,
   MonitorCog,
   Settings,
@@ -41,6 +42,13 @@ export const SETTINGS_SECTIONS = [
     scope: "Workspace",
     keywords: ["layout", "tabs", "history", "sidebar", "recent"],
     Icon: SlidersHorizontal,
+  },
+  {
+    id: "files",
+    label: "Files",
+    scope: "Workspace",
+    keywords: ["attachment", "attachments", "image", "images", "assets", "paste", "upload", "folder"],
+    Icon: FolderOpen,
   },
   {
     id: "agents",

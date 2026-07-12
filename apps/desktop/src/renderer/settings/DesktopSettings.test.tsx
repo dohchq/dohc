@@ -783,4 +783,63 @@ describe("DesktopSettings", () => {
       ),
     );
   });
+
+  it("persists the attachment location and hides the folder name for same-folder", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+      />,
+    );
+
+    // Folder name is visible for the default (per-document) location.
+    expect(await screen.findByTestId("attachment-folder-input")).toBeTruthy();
+
+    await user.selectOptions(
+      screen.getByTestId("attachment-location-select"),
+      "global-folder",
+    );
+    expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      settings: expect.objectContaining({
+        files: expect.objectContaining({ attachmentLocation: "global-folder" }),
+      }),
+    });
+
+    // Switching to same-folder removes the (now meaningless) folder-name row.
+    await user.selectOptions(
+      screen.getByTestId("attachment-location-select"),
+      "same-folder",
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("attachment-folder-input")).toBeNull(),
+    );
+  });
+
+  it("persists an edited attachment folder name", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="files"
+        onClose={() => {}}
+      />,
+    );
+
+    const input = await screen.findByTestId("attachment-folder-input");
+    await user.clear(input);
+    await user.type(input, "media");
+    await waitFor(() =>
+      expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        settings: expect.objectContaining({
+          files: expect.objectContaining({ attachmentFolderName: "media" }),
+        }),
+      }),
+    );
+  });
 });

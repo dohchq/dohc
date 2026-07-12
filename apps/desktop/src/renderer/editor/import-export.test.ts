@@ -297,7 +297,7 @@ describe('desktop editor markdown round-trip', () => {
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
 
-  it('strips unsafe image protocols and escaping paths while preserving http and relative images', () => {
+  it('strips unsafe image protocols while PRESERVING relative parent-traversal (lossless), http, and relative images', () => {
     expectStableMarkdownRoundTrip(
       [
         '![relative](assets/diagram.png)',
@@ -305,7 +305,11 @@ describe('desktop editor markdown round-trip', () => {
         '![bad](javascript:alert)',
         '![case-variant](JavaScript:alert)',
         '![data](data:image/svg+xml;base64,PHN2Zz4=)',
+        // CONTRACT: forward-slash `..` traversal is now preserved verbatim —
+        // agents author upward-relative asset links (global-folder attachments).
+        // Rendering containment lives in the resolver, not the sanitizer.
         '![parent](../secret/diagram.png)',
+        '![escape](../../outside.png)',
         '![absolute](/etc/diagram.png)',
         '![protocol-relative](//evil.example.com/diagram.png)',
       ].join('\n'),
@@ -315,7 +319,8 @@ describe('desktop editor markdown round-trip', () => {
         '![bad]()',
         '![case-variant]()',
         '![data]()',
-        '![parent]()',
+        '![parent](../secret/diagram.png)',
+        '![escape](../../outside.png)',
         '![absolute]()',
         '![protocol-relative]()',
       ],
@@ -335,10 +340,11 @@ describe('desktop editor markdown round-trip', () => {
         ]),
       ),
     ).toBe('![split]()')
-    // Backslash traversal (a Windows-style `..\secret\pic.png`) must be
-    // folded to '/' before the parent-escape check, or a naive prefix test
-    // lets it climb out of the document's folder. Driven through the node
-    // attrs directly so the raw backslashes reach the sanitizer verbatim.
+    // Backslash traversal (a Windows-style `..\secret\pic.png`) stays BLOCKED:
+    // backslashes are folded to '/' before the check and a `..` backslash path
+    // is never legitimate authored markdown (unlike a forward-slash `../`,
+    // which is now preserved above). Driven through the node attrs directly so
+    // the raw backslashes reach the sanitizer verbatim.
     expect(
       yDocToMarkdown(
         yDocFromBody([

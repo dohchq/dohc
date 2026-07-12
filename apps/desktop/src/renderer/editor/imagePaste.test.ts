@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import {
+  computeAttachmentPaths,
   extractImageFiles,
   generateAssetFilename,
   handleImagePaste,
@@ -9,6 +10,7 @@ import {
   insertImageAtPosition,
   pickAndInsertImages,
   pickImageFiles,
+  sanitizeAttachmentFolderName,
   shortContentHash,
   slugifyBaseName,
 } from "./imagePaste";
@@ -57,6 +59,106 @@ describe("generateAssetFilename", () => {
       new Uint8Array([1, 2, 3, 4]),
     );
     expect(name).toMatch(/^my-photo-[0-9a-z]+\.png$/);
+  });
+});
+
+describe("sanitizeAttachmentFolderName", () => {
+  it("keeps a valid single segment", () => {
+    expect(sanitizeAttachmentFolderName("assets")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("  media  ")).toBe("media");
+  });
+
+  it("falls back to 'assets' for empty, separator, or dot-segment names", () => {
+    expect(sanitizeAttachmentFolderName("")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("   ")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("a/b")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("a\\b")).toBe("assets");
+    expect(sanitizeAttachmentFolderName("..")).toBe("assets");
+    expect(sanitizeAttachmentFolderName(".")).toBe("assets");
+  });
+});
+
+describe("computeAttachmentPaths", () => {
+  const file = "pic-abc.png";
+
+  it("per-document: a subfolder next to the document", () => {
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "per-document",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "notes/assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
+    // A root-level document has no folder prefix.
+    expect(
+      computeAttachmentPaths("plan.md", file, {
+        location: "per-document",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
+  });
+
+  it("same-folder: directly beside the document (folderName ignored)", () => {
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "same-folder",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "notes/pic-abc.png", relativeSrc: "pic-abc.png" });
+    expect(
+      computeAttachmentPaths("plan.md", file, {
+        location: "same-folder",
+        folderName: "assets",
+      }),
+    ).toEqual({ writePath: "pic-abc.png", relativeSrc: "pic-abc.png" });
+  });
+
+  it("global-folder: one folder at the root, climbed to with `..`", () => {
+    // Root doc: no climb needed.
+    expect(
+      computeAttachmentPaths("plan.md", file, {
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    ).toEqual({
+      writePath: "attachments/pic-abc.png",
+      relativeSrc: "attachments/pic-abc.png",
+    });
+    // One level deep: climb once.
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    ).toEqual({
+      writePath: "attachments/pic-abc.png",
+      relativeSrc: "../attachments/pic-abc.png",
+    });
+    // Deep nesting: climb once per folder segment.
+    expect(
+      computeAttachmentPaths("a/b/c/plan.md", file, {
+        location: "global-folder",
+        folderName: "attachments",
+      }),
+    ).toEqual({
+      writePath: "attachments/pic-abc.png",
+      relativeSrc: "../../../attachments/pic-abc.png",
+    });
+  });
+
+  it("defaults to per-document/assets when no setting is threaded", () => {
+    expect(computeAttachmentPaths("notes/plan.md", file)).toEqual({
+      writePath: "notes/assets/pic-abc.png",
+      relativeSrc: "assets/pic-abc.png",
+    });
+  });
+
+  it("sanitizes an invalid folderName back to 'assets'", () => {
+    expect(
+      computeAttachmentPaths("notes/plan.md", file, {
+        location: "per-document",
+        folderName: "../evil",
+      }),
+    ).toEqual({ writePath: "notes/assets/pic-abc.png", relativeSrc: "assets/pic-abc.png" });
   });
 });
 
@@ -189,6 +291,33 @@ describe("handleImagePaste", () => {
     expect(dispatched[0]!.node.attrs).toMatchObject({ alt: "" });
     expect(dispatched[0]!.node.attrs.src).toMatch(
       /^assets\/my-photo-[0-9a-z]+\.png$/,
+    );
+  });
+
+  it("writes to a global root folder and inserts an upward-relative src", async () => {
+    const { view, dispatched } = makeMockView();
+    const writeAsset = vi.fn().mockResolvedValue(undefined);
+    const file = fakeImageFile("Shot.png", "image/png", new Uint8Array([9, 8, 7]));
+    const event = {
+      clipboardData: { files: [file] },
+      preventDefault: vi.fn(),
+    } as unknown as ClipboardEvent;
+
+    handleImagePaste(view as never, event, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset,
+      attachments: { location: "global-folder", folderName: "attachments" },
+    });
+
+    await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
+    const [writePath] = writeAsset.mock.calls[0]!;
+    // Bytes land in the single root folder...
+    expect(writePath).toMatch(/^attachments\/shot-[0-9a-z]+\.png$/);
+    await vi.waitFor(() => expect(dispatched).toHaveLength(1));
+    // ...and the node src climbs to it from the nested doc's folder.
+    expect(dispatched[0]!.node.attrs.src).toMatch(
+      /^\.\.\/attachments\/shot-[0-9a-z]+\.png$/,
     );
   });
 

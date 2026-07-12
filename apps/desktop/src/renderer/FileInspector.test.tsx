@@ -9,6 +9,7 @@ import {
   markdownEditorBody,
   mergeMarkdownEditorBody,
 } from "./FileInspector";
+import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -130,6 +131,10 @@ describe("markdown editor unmount flush", () => {
     ),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
   };
 
   beforeEach(() => {
