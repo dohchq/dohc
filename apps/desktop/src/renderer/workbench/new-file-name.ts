@@ -5,7 +5,11 @@
 // "notes." becomes "notes.md". Renames never go through this helper: they
 // stay literal so users can strip or change extensions deliberately.
 export function withMarkdownDefault(relativePath: string): string {
-  const leaf = relativePath.slice(relativePath.lastIndexOf("/") + 1);
+  // Backend validation accepts "\" as a separator too (workspace-core
+  // paths.ts normalizes it to "/"), so derive the leaf on either one.
+  const leaf = relativePath.slice(
+    Math.max(relativePath.lastIndexOf("/"), relativePath.lastIndexOf("\\")) + 1,
+  );
   if (!leaf || leaf === "." || leaf === "..") return relativePath;
   const dot = leaf.lastIndexOf(".");
   if (dot === 0 && leaf.length > 1) return relativePath; // dotfile: .env
