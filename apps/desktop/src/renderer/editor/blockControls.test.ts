@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { createElement } from "react";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -260,15 +267,20 @@ describe("TurnIntoMenu dropdown rendering", () => {
     expect(first?.attrs?.level).toBe(1);
   });
 
-  it("closes on Escape", () => {
+  it("closes on Escape", async () => {
     const editor = track(makeEditor("Hello"));
     editor.commands.setTextSelection(3);
-    render(createElement(TurnIntoMenu, { editor }));
+    const { container } = render(createElement(TurnIntoMenu, { editor }));
+    container.append(editor.view.dom);
+    // jsdom has no Range geometry for TipTap's post-focus scrolling.
+    editor.view.setProps({ handleScrollToSelection: () => true });
 
     fireEvent.click(screen.getByTitle("Turn into"));
     const listbox = screen.getByRole("listbox", { name: "turn into" });
+    expect(editor.view.hasFocus()).toBe(false);
     fireEvent.keyDown(listbox, { key: "Escape" });
     expect(screen.queryByRole("listbox")).toBeNull();
+    await waitFor(() => expect(editor.view.hasFocus()).toBe(true));
   });
 });
 
