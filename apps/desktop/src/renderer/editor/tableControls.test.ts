@@ -52,7 +52,7 @@ function click(el: Element): void {
 // in a test; a small structural type is simpler than fighting that union.
 type JsonNode = {
   type: string;
-  attrs?: { align?: string | null };
+  attrs?: { align?: string | null; colspan?: number };
   content?: JsonNode[];
   text?: string;
 };
@@ -191,6 +191,27 @@ describe("table controls grips", () => {
     expect(columnAligns(editor, 0)).toEqual(["center", "center"]);
     expect(columnAligns(editor, 1)).toEqual(["center", "center"]);
     expect(columnAligns(editor, 2)).toEqual([null, null]);
+  });
+
+  it("column grip menu duplicates exactly one column from a spanning cell", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><th colspan="2">Span</th><th>C</th></tr><tr><td>a</td><td>b</td><td>c</td></tr></table>',
+    );
+
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Duplicate column"));
+
+    const rows = tableNode(editor).content ?? [];
+    const headerCells = rows[0]?.content ?? [];
+    const bodyCells = rows[1]?.content ?? [];
+    expect(bodyCells).toHaveLength(4);
+    expect(headerCells).toHaveLength(3);
+    expect(headerCells[1]?.attrs?.colspan).toBe(1);
+    expect(
+      headerCells.reduce((width, cell) => width + (cell.attrs?.colspan ?? 1), 0),
+    ).toBe(4);
   });
 
   it("table menu toggles the header row", () => {

@@ -158,9 +158,10 @@ function duplicateRow(view: EditorView, cellPos: number): void {
 // Duplicate the column containing `cellPos`, inserting the copy right after
 // it in every row (bottom-to-top so earlier insert positions stay valid).
 // The dedup set guards pasted-in rowspan cells — a spanning cell appears at
-// several TableMap slots but must be copied once; the copy inherits the span
-// attrs, so it covers the same rows. Any exotic pasted span layout this
-// misjudges is repaired by prosemirror-tables' own fixTables pass.
+// several TableMap slots but must be copied once; the copy keeps its rowspan
+// to cover the same rows. Normalizing colspans to one column below means every
+// row gains exactly one column — prosemirror-tables' fixTables repair pass is
+// unnecessary.
 function duplicateColumn(view: EditorView, cellPos: number): void {
   if (view.editable === false) return;
   const { state } = view;
@@ -177,7 +178,23 @@ function duplicateColumn(view: EditorView, cellPos: number): void {
     seen.add(offset);
     const cell = table.nodeAt(offset);
     if (!cell) continue;
-    tr = tr.insert(tableStart + offset + cell.nodeSize, cell.copy(cell.content));
+    let copy: PMNode;
+    if (cell.attrs.colspan > 1) {
+      const { left } = map.findCell(offset);
+      const colwidth = cell.attrs.colwidth as number[] | null;
+      copy = cell.type.create(
+        {
+          ...cell.attrs,
+          colspan: 1,
+          colwidth: colwidth ? [colwidth[col - left]] : null,
+        },
+        cell.content,
+        cell.marks,
+      );
+    } else {
+      copy = cell.copy(cell.content);
+    }
+    tr = tr.insert(tableStart + offset + cell.nodeSize, copy);
   }
   if (tr.docChanged) view.dispatch(tr);
   view.focus();
