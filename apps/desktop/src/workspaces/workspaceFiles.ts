@@ -238,8 +238,83 @@ export async function createFile(
   return validated.normalized;
 }
 
-// Imports copy external files into the workspace root by basename; existing
-// files are never overwritten (skipped, not errored — imports are additive).
+// Import outcome: what landed (workspace-relative paths, destination prefix
+// included) plus how many sources could NOT land — callers surface both, so
+// an import is never silently smaller than what the user handed us.
+export interface ImportCopyOutcome {
+  imported: string[];
+  skipped: number;
+}
+
+// Resolve + validate an import destination folder ("" / undefined = workspace
+// root). The folder must be a user-writable workspace-relative path (traversal
+// and reserved names refused by validateUserWritePath), must already EXIST as
+// a real directory — imports target folders the user can see, never mkdir —
+// and must be symlink-free: the final component by lstat, any ancestor by the
+// realpath containment check (a symlinked folder must not teleport an import
+// outside the workspace).
+export async function resolveImportDestination(
+  rootPath: string,
+  targetDir: string | undefined,
+): Promise<{ absDir: string; relDir: string }> {
+  const realRoot = await realpath(rootPath);
+  if (targetDir === undefined || targetDir === "") {
+    return { absDir: realRoot, relDir: "" };
+  }
+  const validated = validateUserWritePath(targetDir);
+  if (!validated.ok) {
+    throw new Error(`Invalid import destination (${validated.reason}): ${targetDir}`);
+  }
+  const absDir = join(realRoot, ...validated.normalized.split("/"));
+  const linkStat = await lstat(absDir).catch(() => null);
+  if (!linkStat || linkStat.isSymbolicLink() || !linkStat.isDirectory()) {
+    throw new Error(`Import destination is not a workspace folder: ${validated.normalized}`);
+  }
+  if (!isInside(realRoot, await realpath(absDir))) {
+    throw new Error(`Import destination escapes the workspace: ${validated.normalized}`);
+  }
+  return { absDir, relDir: validated.normalized };
+}
+
+// Collision budget: past this many "name (N).ext" variants the source counts
+// as skipped instead of probing forever.
+const MAX_COLLISION_RENAMES = 99;
+
+// "report.md" + attempt 2 -> "report (2).md". Dotfiles (".env") and
+// extensionless names suffix at the end (".env (2)", "Makefile (2)").
+function collisionVariant(name: string, attempt: number): string {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : "";
+  return `${stem} (${attempt})${extension}`;
+}
+
+// One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
+// through collision variants. Returns the basename that landed, or null when
+// the rename budget ran out. Non-EEXIST errors still throw — a permission or
+// IO failure is a real error, not a skip.
+async function copyWithoutOverwrite(
+  source: string,
+  absDir: string,
+  name: string,
+): Promise<string | null> {
+  for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
+    const candidate = attempt === 1 ? name : collisionVariant(name, attempt);
+    try {
+      await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
+      return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  return null;
+}
+
+// Imports copy external files by basename into a destination folder inside
+// the workspace (default: the root). Existing files are never overwritten;
+// a name collision retries as "name (2).ext" so imports are additive AND
+// lossless — a source only counts as skipped when its basename is invalid or
+// the collision budget runs out.
 // TRUSTS ITS CALLER: copyFile FOLLOWS symlinks and this does no lstat. Its only
 // trusted entrypoint is the main-process file-dialog import (paths the user
 // picked in a native dialog). The UNtrusted entrypoint (renderer-supplied OS
@@ -248,20 +323,26 @@ export async function createFile(
 export async function copyIntoWorkspace(
   rootPath: string,
   absolutePaths: string[],
-): Promise<string[]> {
+  targetDir?: string,
+): Promise<ImportCopyOutcome> {
+  const { absDir, relDir } = await resolveImportDestination(rootPath, targetDir);
   const imported: string[] = [];
+  let skipped = 0;
   for (const source of absolutePaths) {
     const name = basename(source);
     const validated = validateUserWritePath(name);
-    if (!validated.ok) continue;
-    try {
-      await copyFile(source, join(rootPath, validated.normalized), constants.COPYFILE_EXCL);
-      imported.push(validated.normalized);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!validated.ok) {
+      skipped += 1;
+      continue;
     }
+    const landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
+    if (landed === null) {
+      skipped += 1;
+      continue;
+    }
+    imported.push(relDir === "" ? landed : `${relDir}/${landed}`);
   }
-  return imported;
+  return { imported, skipped };
 }
 
 // Defense in depth beyond the zod cap (bridgeContract): the handler refuses an
@@ -301,7 +382,8 @@ export async function importDroppedPaths(
   rootPath: string,
   absolutePaths: string[],
   registeredRoots: string[],
-): Promise<string[]> {
+  targetDir?: string,
+): Promise<ImportCopyOutcome> {
   if (absolutePaths.length > MAX_IMPORT_PATHS) {
     throw new Error(`Too many files dropped at once (max ${MAX_IMPORT_PATHS})`);
   }
@@ -338,7 +420,14 @@ export async function importDroppedPaths(
     if (insideMetadata) continue;
     usable.push(real);
   }
-  return copyIntoWorkspace(rootPath, usable);
+  // Sources the screen refused (symlinks, directories, special files, .dohc
+  // metadata) are reported as skipped — the user dropped them and deserves to
+  // see they did not land, same as a collision-budget skip inside the copy.
+  const outcome = await copyIntoWorkspace(rootPath, usable, targetDir);
+  return {
+    imported: outcome.imported,
+    skipped: outcome.skipped + (absolutePaths.length - usable.length),
+  };
 }
 
 // Creates a folder (recursively) with the createFile containment sandwich:

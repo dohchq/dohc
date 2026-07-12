@@ -22,7 +22,7 @@ const bridge = {
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   listWorkspaceFiles: vi.fn(async () => ({ files: [] })),
   createWorkspaceFile: vi.fn(async () => ({ path: "notes/welcome.md" })),
-  importWorkspaceFiles: vi.fn(async () => ({ imported: [] })),
+  importWorkspaceFiles: vi.fn(async () => ({ imported: [], skipped: 0 })),
   cloudStatus: vi.fn(async () => ({ connected: false })),
   cloudJoinWorkspace: vi.fn(),
 };

@@ -513,18 +513,81 @@ describe("copyIntoWorkspace", () => {
   it("copies external files into the workspace root by basename", async () => {
     const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
     await writeFile(join(outside, "receipt.png"), "png-bytes");
-    const imported = await copyIntoWorkspace(root, [join(outside, "receipt.png")]);
-    expect(imported).toEqual(["receipt.png"]);
+    const outcome = await copyIntoWorkspace(root, [join(outside, "receipt.png")]);
+    expect(outcome).toEqual({ imported: ["receipt.png"], skipped: 0 });
     expect(await readFile(join(root, "receipt.png"), "utf8")).toBe("png-bytes");
   });
 
-  it("skips files that already exist instead of overwriting", async () => {
+  it("renames on collision instead of overwriting or dropping the file", async () => {
     const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
     await writeFile(join(outside, "notes.md"), "incoming");
     await writeFile(join(root, "notes.md"), "existing");
-    const imported = await copyIntoWorkspace(root, [join(outside, "notes.md")]);
-    expect(imported).toEqual([]);
+    const outcome = await copyIntoWorkspace(root, [join(outside, "notes.md")]);
+    expect(outcome).toEqual({ imported: ["notes (2).md"], skipped: 0 });
+    // The existing file is untouched; the import landed beside it.
     expect(await readFile(join(root, "notes.md"), "utf8")).toBe("existing");
+    expect(await readFile(join(root, "notes (2).md"), "utf8")).toBe("incoming");
+  });
+
+  it("keeps counting up when collision variants exist too", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "notes.md"), "third");
+    await writeFile(join(root, "notes.md"), "first");
+    await writeFile(join(root, "notes (2).md"), "second");
+    const outcome = await copyIntoWorkspace(root, [join(outside, "notes.md")]);
+    expect(outcome.imported).toEqual(["notes (3).md"]);
+    expect(await readFile(join(root, "notes (3).md"), "utf8")).toBe("third");
+  });
+
+  it("imports into a target folder when one is given", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    await mkdir(join(root, "inbox"), { recursive: true });
+    const outcome = await copyIntoWorkspace(
+      root,
+      [join(outside, "receipt.png")],
+      "inbox",
+    );
+    expect(outcome).toEqual({ imported: ["inbox/receipt.png"], skipped: 0 });
+    expect(await readFile(join(root, "inbox", "receipt.png"), "utf8")).toBe(
+      "png-bytes",
+    );
+  });
+
+  it("refuses a traversal target folder", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    await expect(
+      copyIntoWorkspace(root, [join(outside, "receipt.png")], "../elsewhere"),
+    ).rejects.toThrow(/Invalid import destination/);
+  });
+
+  it("refuses a reserved target folder (shared-with-me)", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    await mkdir(join(root, SHARED_WITH_ME_FOLDER), { recursive: true });
+    await expect(
+      copyIntoWorkspace(root, [join(outside, "receipt.png")], SHARED_WITH_ME_FOLDER),
+    ).rejects.toThrow(/Invalid import destination/);
+  });
+
+  it("refuses a target folder that does not exist (imports never mkdir)", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    await expect(
+      copyIntoWorkspace(root, [join(outside, "receipt.png")], "missing"),
+    ).rejects.toThrow(/not a workspace folder/);
+  });
+
+  it("refuses a symlinked target folder (must not teleport the import)", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    await writeFile(join(outside, "receipt.png"), "png-bytes");
+    const elsewhere = await mkdtemp(join(nativeTmpdir(), "dohc-elsewhere-"));
+    await symlink(elsewhere, join(root, "linked"), "dir");
+    await expect(
+      copyIntoWorkspace(root, [join(outside, "receipt.png")], "linked"),
+    ).rejects.toThrow(/not a workspace folder/);
+    expect(existsSync(join(elsewhere, "receipt.png"))).toBe(false);
   });
 });
 
@@ -535,7 +598,7 @@ describe("importDroppedPaths", () => {
     await mkdir(join(outside, "folder"), { recursive: true });
     await writeFile(join(outside, "target.md"), "via-link");
     await symlink(join(outside, "target.md"), join(outside, "alias.md"), "file");
-    const imported = await importDroppedPaths(
+    const outcome = await importDroppedPaths(
       root,
       [
         join(outside, "doc.md"),
@@ -546,8 +609,9 @@ describe("importDroppedPaths", () => {
       [root],
     );
     // Only the real regular file imports. The directory, the symlink (refused
-    // BEFORE it follows to target.md), and the relative path are all skipped.
-    expect(imported).toEqual(["doc.md"]);
+    // BEFORE it follows to target.md), and the relative path are all skipped —
+    // and the skip count says so instead of the batch silently shrinking.
+    expect(outcome).toEqual({ imported: ["doc.md"], skipped: 3 });
     expect(existsSync(join(root, "target.md"))).toBe(false);
   });
 
@@ -560,8 +624,8 @@ describe("importDroppedPaths", () => {
     await writeFile(join(secrets, "id_rsa"), "PRIVATE KEY");
     const stage = await mkdtemp(join(nativeTmpdir(), "dohc-stage-"));
     await symlink(join(secrets, "id_rsa"), join(stage, "innocent.txt"), "file");
-    const imported = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
-    expect(imported).toEqual([]);
+    const outcome = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
+    expect(outcome).toEqual({ imported: [], skipped: 1 });
     expect(existsSync(join(root, "innocent.txt"))).toBe(false);
     // Nothing landed in the workspace — the secret never left its directory.
     expect(await readdir(root)).toEqual([]);
@@ -583,12 +647,12 @@ describe("importDroppedPaths", () => {
     const otherRoot = await mkdtemp(join(nativeTmpdir(), "dohc-other-"));
     await mkdir(join(otherRoot, ".dohc"), { recursive: true });
     await writeFile(join(otherRoot, ".dohc", "credentials.json"), "secret");
-    const imported = await importDroppedPaths(
+    const outcome = await importDroppedPaths(
       root,
       [join(otherRoot, ".dohc", "credentials.json")],
       [root, otherRoot],
     );
-    expect(imported).toEqual([]);
+    expect(outcome).toEqual({ imported: [], skipped: 1 });
     expect(existsSync(join(root, "credentials.json"))).toBe(false);
   });
 
@@ -602,12 +666,26 @@ describe("importDroppedPaths", () => {
     await writeFile(join(otherRoot, ".dohc", "credentials.json"), "secret");
     const stage = await mkdtemp(join(nativeTmpdir(), "dohc-stage-"));
     await symlink(join(otherRoot, ".dohc"), join(stage, "alias"), "dir");
-    const imported = await importDroppedPaths(
+    const outcome = await importDroppedPaths(
       root,
       [join(stage, "alias", "credentials.json")],
       [root, otherRoot],
     );
-    expect(imported).toEqual([]);
+    expect(outcome).toEqual({ imported: [], skipped: 1 });
     expect(existsSync(join(root, "credentials.json"))).toBe(false);
+  });
+
+  it("drops into the target folder the user aimed at", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-drop-"));
+    await writeFile(join(outside, "doc.md"), "dropped");
+    await mkdir(join(root, "notes"), { recursive: true });
+    const outcome = await importDroppedPaths(
+      root,
+      [join(outside, "doc.md")],
+      [root],
+      "notes",
+    );
+    expect(outcome).toEqual({ imported: ["notes/doc.md"], skipped: 0 });
+    expect(await readFile(join(root, "notes", "doc.md"), "utf8")).toBe("dropped");
   });
 });

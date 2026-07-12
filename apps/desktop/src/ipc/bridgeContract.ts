@@ -219,13 +219,16 @@ export const ExportWorkspaceZipResult = z.object({
 export type ExportWorkspaceZipResult = z.infer<typeof ExportWorkspaceZipResult>;
 
 // Document export ("Copy as Markdown" ships purely through the renderer's own
-// clipboard call — no IPC needed). HTML/PDF export both land through this ONE
-// channel: the renderer always builds the same self-contained HTML (title +
-// rendered body + inline styles, no external assets); main either writes it
-// verbatim (`kind: "html"`) or renders it in a hidden offscreen window and
-// writes the resulting PDF bytes (`kind: "pdf"`). The output path — like
-// ExportWorkspaceZipPayload — comes from a MAIN-process save dialog outside
-// the workspace, since export is explicitly user-directed; null = cancelled.
+// clipboard call — no IPC needed). Markdown/HTML/PDF export all land through
+// this ONE channel. For `kind: "markdown"` the content is the document's raw
+// markdown (frontmatter included), written verbatim to a .md file — the
+// text-first export. For HTML/PDF the renderer builds the same self-contained
+// HTML (title + rendered body + inline styles, no external assets); main
+// either writes it verbatim (`kind: "html"`) or renders it in a hidden
+// offscreen window and writes the resulting PDF bytes (`kind: "pdf"`). The
+// output path — like ExportWorkspaceZipPayload — comes from a MAIN-process
+// save dialog outside the workspace, since export is explicitly
+// user-directed; null = cancelled.
 const EXPORT_DOCUMENT_SUGGESTED_NAME = z
   .string()
   .min(1)
@@ -237,11 +240,13 @@ const EXPORT_DOCUMENT_SUGGESTED_NAME = z
 export const ExportDocumentFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   suggestedName: EXPORT_DOCUMENT_SUGGESTED_NAME,
-  // The rendered, self-contained HTML document — for a PDF export this is the
-  // source main prints, not the output bytes. Bounded generously; a document
-  // this large has no business round-tripping through IPC as a single string.
+  // kind "markdown": the raw document markdown, written verbatim.
+  // kind "html"/"pdf": the rendered, self-contained HTML document — for a PDF
+  // export this is the source main prints, not the output bytes. Bounded
+  // generously; a document this large has no business round-tripping through
+  // IPC as a single string.
   content: z.string().min(1).max(20 * 1024 * 1024),
-  kind: z.enum(["html", "pdf"]),
+  kind: z.enum(["markdown", "html", "pdf"]),
 });
 export type ExportDocumentFilePayload = z.infer<typeof ExportDocumentFilePayload>;
 
@@ -290,6 +295,13 @@ export const ImportWorkspaceFilesPayload = z.object({
   // the picker-grade import path (importDroppedPaths: regular files only,
   // never a registered workspace's .dohc) and the count is capped here.
   droppedPaths: z.array(PATH_STRING).max(100).optional(),
+  // Destination folder for the import, workspace-relative ("" / absent =
+  // root). Files land where the user aimed: the folder that was dropped on,
+  // or the folder whose context menu ran "Import Files…". Renderer-supplied,
+  // so main re-validates it end to end (resolveImportDestination: lexical
+  // validation, must exist as a real non-symlink directory, realpath
+  // containment) before any copy.
+  targetDir: PATH_STRING.optional(),
 });
 export type ImportWorkspaceFilesPayload = z.infer<
   typeof ImportWorkspaceFilesPayload
@@ -297,6 +309,10 @@ export type ImportWorkspaceFilesPayload = z.infer<
 
 export const ImportWorkspaceFilesResult = z.object({
   imported: z.array(PATH_STRING),
+  // Sources that did not land (invalid basename, screened-out drop source,
+  // collision budget exhausted) — surfaced so the import summary can say
+  // "2 skipped" instead of the batch silently shrinking.
+  skipped: z.number().int().min(0),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult

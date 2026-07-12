@@ -8,7 +8,7 @@ type ExportDocumentFileCall = {
   workspaceId: string;
   suggestedName: string;
   content: string;
-  kind: "html" | "pdf";
+  kind: "markdown" | "html" | "pdf";
 };
 
 const writeText = vi.fn(async () => {});
@@ -61,6 +61,7 @@ describe("DocumentMenu", () => {
 
     expect(screen.getByRole("menu", { name: "Document actions" })).toBeTruthy();
     expect(screen.getByText("Copy as Markdown")).toBeTruthy();
+    expect(screen.getByText("Export as Markdown…")).toBeTruthy();
     expect(screen.getByText("Export as HTML…")).toBeTruthy();
     expect(screen.getByText("Export as PDF…")).toBeTruthy();
   });
@@ -102,7 +103,7 @@ describe("DocumentMenu", () => {
     ).toContain("is-selected");
     await user.keyboard("{ArrowDown}");
     expect(
-      screen.getByTestId("document-menu-item-export-html").className,
+      screen.getByTestId("document-menu-item-export-markdown").className,
     ).toContain("is-selected");
     await user.keyboard("{ArrowUp}");
     expect(
@@ -139,6 +140,21 @@ describe("DocumentMenu", () => {
     expect(call.kind).toBe("html");
     expect(call.content).toContain("<!doctype html>");
     expect(call.content).toContain("Plan");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("exports as Markdown through the bridge with the RAW document source", async () => {
+    const user = userEvent.setup();
+    renderMenu();
+    await user.click(screen.getByTestId("document-menu-trigger"));
+
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+
+    await waitFor(() => expect(exportDocumentFile).toHaveBeenCalledTimes(1));
+    const call = exportDocumentFile.mock.calls[0]![0];
+    expect(call.kind).toBe("markdown");
+    // Verbatim source, frontmatter included — no HTML rendering involved.
+    expect(call.content).toBe(MARKDOWN);
     expect(screen.queryByRole("menu")).toBeNull();
   });
 

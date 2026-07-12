@@ -2459,20 +2459,36 @@ function registerIpcHandlers(): void {
     // exportWorkspaceZip above.
     requireWorkspace(input.workspaceId);
 
-    const extension = input.kind === "pdf" ? "pdf" : "html";
+    const exportKinds: Record<
+      typeof input.kind,
+      { extension: string; title: string; filter: Electron.FileFilter }
+    > = {
+      markdown: {
+        extension: "md",
+        title: "Export as Markdown",
+        filter: { name: "Markdown document", extensions: ["md"] },
+      },
+      html: {
+        extension: "html",
+        title: "Export as HTML",
+        filter: { name: "HTML document", extensions: ["html"] },
+      },
+      pdf: {
+        extension: "pdf",
+        title: "Export as PDF",
+        filter: { name: "PDF document", extensions: ["pdf"] },
+      },
+    };
+    const exportKind = exportKinds[input.kind];
     const testSave = process.env.DOHC_TEST_SAVE_PATH;
     let target: string | null;
     if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testSave) {
       target = testSave;
     } else {
       const result = await dialog.showSaveDialog({
-        title: input.kind === "pdf" ? "Export as PDF" : "Export as HTML",
-        defaultPath: `${input.suggestedName}.${extension}`,
-        filters: [
-          input.kind === "pdf"
-            ? { name: "PDF document", extensions: ["pdf"] }
-            : { name: "HTML document", extensions: ["html"] },
-        ],
+        title: exportKind.title,
+        defaultPath: `${input.suggestedName}.${exportKind.extension}`,
+        filters: [exportKind.filter],
       });
       target = result.canceled ? null : (result.filePath ?? null);
     }
@@ -2481,6 +2497,8 @@ function registerIpcHandlers(): void {
       if (input.kind === "pdf") {
         await writeFile(target, await renderHtmlToPdf(input.content));
       } else {
+        // Markdown and HTML both arrive as the exact text to persist —
+        // markdown is the raw document source, HTML the self-contained render.
         await writeFile(target, input.content, "utf8");
       }
     }
@@ -2551,6 +2569,10 @@ function registerIpcHandlers(): void {
                 ? [
                     item("New File", "new-file"),
                     item("New Folder", "new-folder"),
+                    // Folder-targeted import: files land IN this folder (the
+                    // renderer passes the folder as importWorkspaceFiles'
+                    // targetDir, re-validated main-side before any copy).
+                    item("Import Files…", "import-files"),
                     separator,
                   ]
                 : []),
@@ -2662,14 +2684,17 @@ function registerIpcHandlers(): void {
     assertWritableWorkspace(workspace);
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
     // note on the payload) re-validated by importDroppedPaths — regular
-    // files only, never any registered workspace's .dohc metadata.
+    // files only, never any registered workspace's .dohc metadata. The
+    // renderer-supplied targetDir is re-validated inside the import path
+    // (resolveImportDestination) before any copy.
     if (input.droppedPaths !== undefined) {
-      const imported = await importDroppedPaths(
+      const outcome = await importDroppedPaths(
         workspace.rootPath,
         input.droppedPaths,
         listWorkspaces().map((ws) => ws.rootPath),
+        input.targetDir,
       );
-      return ImportWorkspaceFilesResult.parse({ imported });
+      return ImportWorkspaceFilesResult.parse(outcome);
     }
     const picked = testImportPaths();
     const result =
@@ -2679,10 +2704,10 @@ function registerIpcHandlers(): void {
             title: "Import files into workspace",
           })
         : { canceled: false, filePaths: picked };
-    const imported = result.canceled
-      ? []
-      : await copyIntoWorkspace(workspace.rootPath, result.filePaths);
-    return ImportWorkspaceFilesResult.parse({ imported });
+    const outcome = result.canceled
+      ? { imported: [], skipped: 0 }
+      : await copyIntoWorkspace(workspace.rootPath, result.filePaths, input.targetDir);
+    return ImportWorkspaceFilesResult.parse(outcome);
   });
 
   // Site preview SDK reads use the combined helper to make the main-process
