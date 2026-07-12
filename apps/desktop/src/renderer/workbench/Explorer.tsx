@@ -229,6 +229,15 @@ function IndentGuides({ depth }: { depth: number }) {
   );
 }
 
+// The rendered Open Editors cap is additionally bounded to a fraction of the
+// viewport: a height saved in a tall window must never push the Files section
+// and the resize handle below the fold of a shorter one (the list is its own
+// overscroll-contained scroller — wheel scrolling would trap inside it).
+const OPEN_EDITORS_VIEWPORT_FRACTION = 0.6;
+function viewportOpenEditorsCap(): number {
+  return Math.round(window.innerHeight * OPEN_EDITORS_VIEWPORT_FRACTION);
+}
+
 // Memoized row: primitives + stable callbacks only, so a selection change
 // re-renders the rows whose state changed, not the whole tree.
 const TreeRow = memo(function TreeRow(props: {
@@ -359,6 +368,7 @@ export function Explorer(props: ExplorerProps) {
   } = props;
   const [pending, setPending] = useState<PendingTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
+  const [viewportCap, setViewportCap] = useState(viewportOpenEditorsCap);
   const [filesExpanded, setFilesExpanded] = useState(true);
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -386,6 +396,12 @@ export function Explorer(props: ExplorerProps) {
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
   const hoverExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const onResize = () => setViewportCap(viewportOpenEditorsCap());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // Prune pending changes the authoritative refresh has confirmed.
   useEffect(() => {
@@ -417,7 +433,13 @@ export function Explorer(props: ExplorerProps) {
     } else if (rowRect.bottom > listRect.bottom) {
       list.scrollTop += rowRect.bottom - listRect.bottom;
     }
-  }, [props.activeTab, props.openTabs, openEditorsExpanded, props.openEditorsHeight]);
+  }, [
+    props.activeTab,
+    props.openTabs,
+    openEditorsExpanded,
+    props.openEditorsHeight,
+    viewportCap,
+  ]);
 
   // A drag abandoned mid-hover must not expand a folder after unmount.
   useEffect(
@@ -1257,8 +1279,9 @@ export function Explorer(props: ExplorerProps) {
                 data-testid="open-editors-list"
                 // Bounded, internally scrolling list (VS Code-style Open
                 // Editors pane). The cap is workbench state: the section's
-                // bottom-edge handle resizes it and the value persists.
-                style={{ maxHeight: props.openEditorsHeight }}
+                // bottom-edge handle resizes it and the value persists — the
+                // render additionally bounds it to the viewport cap.
+                style={{ maxHeight: Math.min(props.openEditorsHeight, viewportCap) }}
                 className="m-0 list-none overflow-y-auto overscroll-contain p-0"
               >
                 {props.openTabs.map((tab) => {
@@ -1329,9 +1352,12 @@ export function Explorer(props: ExplorerProps) {
                 // Left button only — a right/middle press must never start a
                 // resize (SidePanel hardening).
                 if (event.button !== 0) return;
+                // Drag starts from the RENDERED cap — from an oversized
+                // saved cap the drag would otherwise have a huge dead zone
+                // before anything visibly moves.
                 openEditorsDrag.current = {
                   startY: event.clientY,
-                  startHeight: props.openEditorsHeight,
+                  startHeight: Math.min(props.openEditorsHeight, viewportCap),
                 };
                 event.currentTarget.setPointerCapture(event.pointerId);
               }}

@@ -797,6 +797,57 @@ describe("open editors", () => {
       expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_MIN_HEIGHT}px`);
     });
   });
+
+  it("clamps the rendered open editors height to the viewport", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const original = window.innerHeight;
+    try {
+      const user = userEvent.setup();
+      renderShell(makeBridge(Promise.resolve(null)));
+
+      const treeRows = await screen.findAllByTestId("tree-row");
+      const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+      await user.click(rowA);
+      await screen.findByTestId("tab-a.md");
+
+      const list = screen.getByTestId("open-editors-list");
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: 150,
+      });
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => expect(list.style.maxHeight).toBe("90px"));
+
+      const handle = screen.getByTestId("open-editors-resize");
+      fireEvent.pointerDown(handle, {
+        button: 0,
+        buttons: 1,
+        clientY: 100,
+        pointerId: 1,
+      });
+      fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+      expect(list.style.maxHeight).toBe("90px");
+
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: 768,
+      });
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => expect(list.style.maxHeight).toBe("190px"));
+    } finally {
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+      window.dispatchEvent(new Event("resize"));
+    }
+  });
 });
 
 describe("history rail", () => {
