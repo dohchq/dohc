@@ -6,6 +6,7 @@ import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { ShareMountRecord } from "./registryStore";
 import {
   refreshSharedViewOnce,
+  repairSharedViewProjection,
   type RefreshSharedViewOutcome,
 } from "./sharedView";
 
@@ -146,12 +147,23 @@ export async function refreshShareMountOnce(input: {
 }): Promise<RefreshSharedViewOutcome> {
   const rootDir = mountRootFor(input.hostRoot, input.mount.label);
   await assertRealMountRoot(input.hostRoot, input.mount.label);
-  return refreshSharedViewOnce({
+  const storeWorkspaceId = mountStoreWorkspaceIdFor(input.mount.shareId);
+  const outcome = await refreshSharedViewOnce({
     rootDir,
-    workspaceId: mountStoreWorkspaceIdFor(input.mount.shareId),
+    workspaceId: storeWorkspaceId,
     relay: input.relay,
     shareId: input.mount.shareId,
   });
+  // Repair local drift even when the relay had nothing new: the pull only
+  // replays deltas, so a file tampered on disk (rogue tool — every dohc
+  // surface refuses these writes) must be re-projected from the mount's
+  // store or refreshes would report "unchanged" over broken content.
+  const repaired = await repairSharedViewProjection(rootDir, storeWorkspaceId);
+  if (repaired === 0) return outcome;
+  return {
+    status: outcome.status === "ended" ? "ended" : "updated",
+    changedPaths: outcome.changedPaths + repaired,
+  };
 }
 
 // Unmount: delete the projection folder (nested engine store included). The

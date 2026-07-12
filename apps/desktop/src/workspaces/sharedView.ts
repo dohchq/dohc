@@ -1,4 +1,5 @@
-import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import {
   ShareUnavailableError,
@@ -92,6 +93,57 @@ export async function materializeSharedViewPaths(
   } finally {
     await store.close();
   }
+}
+
+// Verify the materialized projection against the local store and repair any
+// drift. The pull only replays NEW relay deltas, so a mounted file modified
+// or deleted locally (a rogue tool writing straight to disk — every dohc
+// surface refuses) would otherwise persist while refreshes report
+// "unchanged", breaking the read-only live-copy contract. Returns how many
+// paths were re-materialized. Local ADDITIONS are left alone: they are
+// indistinguishable from user data and harmless to the projection contract.
+export async function repairSharedViewProjection(
+  rootDir: string,
+  workspaceId: string,
+): Promise<number> {
+  const store = createVersionedTextStore(rootDir);
+  let damaged: ShareViewChangedPath[] = [];
+  try {
+    const main = await store.ensureMainVersion({ workspaceId });
+    const snapshots = await store.listTextFiles({
+      workspaceId,
+      versionId: main.id,
+    });
+    for (const snapshot of snapshots) {
+      const target = containedTarget(rootDir, snapshot.path);
+      const contentKind = snapshot.contentKind === "binary" ? "binary" : "text";
+      let intact = false;
+      try {
+        // lstat first: a symlink is damage regardless of what it points at.
+        const stat = await lstat(target);
+        if (stat.isFile()) {
+          const bytes = await readFile(target);
+          if (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0) {
+            intact =
+              createHash("sha256").update(bytes).digest("hex") === snapshot.sha256;
+          } else {
+            intact = bytes.toString("utf8") === snapshot.text;
+          }
+        }
+      } catch {
+        intact = false; // missing or unreadable — re-materialize
+      }
+      if (!intact) {
+        damaged.push({ path: snapshot.path, operation: "write", contentKind });
+      }
+    }
+  } finally {
+    await store.close();
+  }
+  if (damaged.length > 0) {
+    await materializeSharedViewPaths(rootDir, workspaceId, damaged);
+  }
+  return damaged.length;
 }
 
 // One refresh pass: pull the share's filtered ops into the local store,

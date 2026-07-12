@@ -295,6 +295,47 @@ describe("refreshShareMountOnce", () => {
     expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
   });
 
+  it("repairs local tampering on refresh even when the relay has nothing new", async () => {
+    const host = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "authoritative");
+    await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    const mounted = join(host, SHARED_WITH_ME_FOLDER, "alex", "docs/brief.md");
+
+    // A rogue tool edits the mounted file directly; the relay is unchanged.
+    await writeFile(mounted, "defaced");
+    const repaired = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(repaired.status).toBe("updated");
+    expect(repaired.changedPaths).toBe(1);
+    expect(await readFile(mounted, "utf8")).toBe("authoritative");
+
+    // Deleting the file locally is repaired the same way.
+    await rm(mounted);
+    const restored = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(restored.changedPaths).toBe(1);
+    expect(await readFile(mounted, "utf8")).toBe("authoritative");
+
+    // An untouched projection stays "unchanged" — no busy repainting.
+    const quiet = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(quiet).toEqual({ status: "unchanged", changedPaths: 0 });
+  });
+
   it("routes DELETE ops through the same real-parent containment", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
