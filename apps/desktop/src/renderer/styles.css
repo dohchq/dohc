@@ -812,8 +812,7 @@ body {
 }
 
 .dohc-code-language-select,
-.dohc-code-copy-btn,
-.dohc-code-block-continue-btn {
+.dohc-code-copy-btn {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -826,8 +825,7 @@ body {
 }
 
 .dohc-code-language-select:hover,
-.dohc-code-copy-btn:hover,
-.dohc-code-block-continue-btn:hover {
+.dohc-code-copy-btn:hover {
   border-color: var(--dohc-line);
   background: var(--dohc-line);
   color: var(--dohc-ink);
@@ -837,14 +835,54 @@ body {
   padding: 2px 7px;
 }
 
+/* Rendered only after a terminal code block (nothing below it): a quiet
+ * strip for getting a cursor under the block. The whole strip is the click
+ * target; hovering it reveals a gutter-style "+" that matches the
+ * block-controls affordances (18px box, 120ms fade, --dohc-line fill). */
 .dohc-code-block-continuation {
+  display: flex;
+  align-items: center;
   max-width: var(--dohc-editor-measure);
+  height: 26px;
+  margin-top: -4px;
+  cursor: text;
+}
+
+.dohc-code-block-continuation:has(> .dohc-code-block-continue-btn:disabled) {
+  display: none;
 }
 
 .dohc-code-block-continue-btn {
-  margin: 2px 0 10px;
-  width: 22px;
-  height: 20px;
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background-color 100ms ease-out,
+    border-color 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-code-block-continuation:hover .dohc-code-block-continue-btn,
+.dohc-code-block-continue-btn:focus-visible {
+  opacity: 1;
+}
+
+.dohc-code-block-continue-btn:hover,
+.dohc-code-block-continue-btn:focus-visible {
+  border-color: var(--dohc-line);
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
 }
 
 /* Shared popover box treatment. `overflow` is deliberately NOT shared: the
