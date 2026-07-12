@@ -32,8 +32,9 @@ test("flagged workspace shows engine moments and restores a file end-to-end", as
       { path: "notes/plan.md", contents: "first draft\n" },
     ]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
-    // The first edit lands as an engine moment in the (default-visible)
-    // history rail with calm product copy.
+    // History lives in the left History view (the right panel is Chats now):
+    // open it, then the first edit shows as an engine moment with calm copy.
+    await page.getByTestId("activity-history").click();
     const momentRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );
@@ -134,10 +135,13 @@ test("explicit opt-out: app works, nothing records anywhere, and the app says hi
       )
       .toBe("no history here — edited\n");
 
-    // The history rail says history is off; engine surfaces never mount.
+    // The History view says history is off; engine surfaces never mount,
+    // and the Chats panel toggle does not exist for unflagged workspaces.
+    await page.getByTestId("activity-history").click();
     await expect(page.getByTestId("history-off-placeholder")).toBeVisible();
     await expect(page.getByTestId("engine-history-list")).toHaveCount(0);
-    await expect(page.getByTestId("rail-tab-chats")).toHaveCount(0);
+    await expect(page.getByTestId("activity-chats")).toHaveCount(0);
+    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
 
     // The persistent notice is present (reuses the capture-failure pattern).
     await page.getByTestId("notice-center-toggle").click();

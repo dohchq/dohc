@@ -38,7 +38,7 @@ const STATE = {
   sidebarWidth: 320,
   tabs: ["notes/a.md"],
   activeTab: "notes/a.md",
-  historyVisible: true,
+  chatsVisible: false,
 };
 
 

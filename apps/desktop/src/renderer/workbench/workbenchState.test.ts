@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   activateTab,
-  clampHistoryWidth,
+  clampChatsWidth,
   clampOpenEditorsHeight,
   clampSidebarWidth,
   closeTab,
   defaultWorkbenchState,
-  HISTORY_DEFAULT_WIDTH,
+  CHATS_DEFAULT_WIDTH,
   historyDiffTabPath,
-  HISTORY_MAX_WIDTH,
-  HISTORY_MIN_WIDTH,
+  CHATS_MAX_WIDTH,
+  CHATS_MIN_WIDTH,
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
   isChatsTabPath,
@@ -30,7 +30,7 @@ import {
   parseUiState,
   serializeUiState,
   setSidebarWidth,
-  setHistoryWidth,
+  setChatsWidth,
   setOpenEditorsHeight,
   setView,
   OPEN_EDITORS_DEFAULT_HEIGHT,
@@ -39,7 +39,7 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
-  toggleHistory,
+  toggleChats,
   toggleSidebar,
   MAX_OPEN_TABS,
   MAX_EXPANDED_FOLDERS,
@@ -220,11 +220,14 @@ describe("views and panels", () => {
     expect(setView(collapsed, "explorer").sidebarVisible).toBe(true);
   });
 
-  it("toggleSidebar and toggleHistory flip independently", () => {
+  it("toggleSidebar and toggleChats flip independently", () => {
     const state = toggleSidebar(defaultWorkbenchState());
     expect(state.sidebarVisible).toBe(false);
-    expect(state.historyVisible).toBe(true);
-    expect(toggleHistory(state).historyVisible).toBe(false);
+    // The Chats panel is HIDDEN by default (VS Code secondary-sidebar
+    // grammar) — unlike the old always-on history rail.
+    expect(state.chatsVisible).toBe(false);
+    expect(toggleChats(state).chatsVisible).toBe(true);
+    expect(toggleChats(state).sidebarVisible).toBe(false);
   });
 });
 
@@ -238,13 +241,13 @@ describe("rail widths", () => {
     expect(clampSidebarWidth(Number.POSITIVE_INFINITY)).toBe(SIDEBAR_DEFAULT_WIDTH);
   });
 
-  it("clamps history into the same generous resize range", () => {
-    expect(clampHistoryWidth(10)).toBe(HISTORY_MIN_WIDTH);
-    expect(clampHistoryWidth(9999)).toBe(HISTORY_MAX_WIDTH);
-    expect(clampHistoryWidth(1200)).toBe(1200);
-    expect(clampHistoryWidth(300.6)).toBe(301);
-    expect(clampHistoryWidth(Number.NaN)).toBe(HISTORY_DEFAULT_WIDTH);
-    expect(clampHistoryWidth(Number.POSITIVE_INFINITY)).toBe(HISTORY_DEFAULT_WIDTH);
+  it("clamps the chats panel into the same generous resize range", () => {
+    expect(clampChatsWidth(10)).toBe(CHATS_MIN_WIDTH);
+    expect(clampChatsWidth(9999)).toBe(CHATS_MAX_WIDTH);
+    expect(clampChatsWidth(1200)).toBe(1200);
+    expect(clampChatsWidth(300.6)).toBe(301);
+    expect(clampChatsWidth(Number.NaN)).toBe(CHATS_DEFAULT_WIDTH);
+    expect(clampChatsWidth(Number.POSITIVE_INFINITY)).toBe(CHATS_DEFAULT_WIDTH);
   });
 
   it("setSidebarWidth stores the clamped width and no-ops on no change", () => {
@@ -253,10 +256,10 @@ describe("rail widths", () => {
     expect(setSidebarWidth(state, SIDEBAR_DEFAULT_WIDTH)).toBe(state);
   });
 
-  it("setHistoryWidth stores the clamped width and no-ops on no change", () => {
+  it("setChatsWidth stores the clamped width and no-ops on no change", () => {
     const state = defaultWorkbenchState();
-    expect(setHistoryWidth(state, 360).historyWidth).toBe(360);
-    expect(setHistoryWidth(state, HISTORY_DEFAULT_WIDTH)).toBe(state);
+    expect(setChatsWidth(state, 360).chatsWidth).toBe(360);
+    expect(setChatsWidth(state, CHATS_DEFAULT_WIDTH)).toBe(state);
   });
 
   it("clamps the open-editors height into bounds and rounds; non-finite resets to the default", () => {
@@ -282,9 +285,9 @@ describe("ui-state persistence round-trip", () => {
     let state = withTabs("notes/a.md", "notes/b.md");
     state = setView(state, "history");
     state = setSidebarWidth(state, 333);
-    state = setHistoryWidth(state, 444);
+    state = setChatsWidth(state, 444);
     state = setOpenEditorsHeight(state, 210);
-    state = toggleHistory(state);
+    state = toggleChats(state);
     expect(parseUiState(serializeUiState(state))).toEqual(state);
   });
 
@@ -307,15 +310,36 @@ describe("ui-state persistence round-trip", () => {
     );
   });
 
+  it("a pre-panel ui-state (history rail fields, retired 'chats' view) parses field-by-field", () => {
+    // A file written before the Chats panel existed: the rail fields are
+    // ignored (they must NOT force the panel open), the retired left-panel
+    // "chats" view maps to the default view, and everything else survives.
+    const state = parseUiState({
+      version: 1,
+      activeView: "chats",
+      sidebarVisible: true,
+      sidebarWidth: 320,
+      tabs: ["a.md"],
+      activeTab: "a.md",
+      historyVisible: true,
+      historyWidth: 360,
+    });
+    expect(state.activeView).toBe("explorer");
+    expect(state.chatsVisible).toBe(false);
+    expect(state.chatsWidth).toBe(CHATS_DEFAULT_WIDTH);
+    expect(state.sidebarWidth).toBe(320);
+    expect(state.tabs.map((tab) => tab.path)).toEqual(["a.md"]);
+  });
+
   it("parse clamps width, dedupes tabs, drops junk entries, bounds the count", () => {
     const state = parseUiState({
       sidebarWidth: 5,
-      historyWidth: 9999,
+      chatsWidth: 9999,
       tabs: ["a.md", "a.md", 42, "", "b.md"],
       activeTab: "missing.md",
     });
     expect(state.sidebarWidth).toBe(SIDEBAR_MIN_WIDTH);
-    expect(state.historyWidth).toBe(HISTORY_MAX_WIDTH);
+    expect(state.chatsWidth).toBe(CHATS_MAX_WIDTH);
     expect(state.tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     // An activeTab that no surviving tab carries falls back to the first tab.
     expect(state.activeTab).toBe("a.md");
@@ -337,7 +361,7 @@ describe("ui-state persistence round-trip", () => {
         sidebarWidth: 480,
         tabs: ["evil.md"],
         activeTab: "evil.md",
-        historyVisible: false,
+        chatsVisible: true,
       }),
     );
     expect(inherited).toEqual(defaultWorkbenchState());

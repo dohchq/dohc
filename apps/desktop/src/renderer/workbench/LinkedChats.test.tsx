@@ -65,9 +65,9 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// Mirrors the Shell's rail: searchChatThread state feeding initialThread,
-// cleared by onInitialThreadConsumed, with the panel swapped out for a
-// History placeholder (full unmount) and back.
+// Mirrors the Shell's Chats panel: searchChatThread state feeding
+// initialThread, cleared by onInitialThreadConsumed, with the panel swapped
+// out for the other panel tab's surface (full unmount) and back.
 function RailHarness() {
   const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(
     searchThread,

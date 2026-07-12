@@ -265,7 +265,7 @@ describe("workspace UI state IPC contract", () => {
     sidebarWidth: 320,
     tabs: ["notes/a.md"],
     activeTab: "notes/a.md",
-    historyVisible: true,
+    chatsVisible: true,
   };
 
   it("drops invalid open editor heights without rejecting the saved state", () => {

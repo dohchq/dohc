@@ -8,8 +8,8 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
-  HISTORY_MAX_WIDTH,
-  HISTORY_MIN_WIDTH,
+  CHATS_MAX_WIDTH,
+  CHATS_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
@@ -2159,8 +2159,12 @@ export const WorkspaceUiState = z.object({
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
   activeTab: PATH_STRING.nullable(),
-  historyVisible: z.boolean(),
-  historyWidth: z.number().int().min(HISTORY_MIN_WIDTH).max(HISTORY_MAX_WIDTH).optional(),
+  // The right-hand Chats panel (replaced the history rail's historyVisible/
+  // historyWidth). Optional, still version 1: files written before the panel
+  // existed keep parsing (their history fields are dropped as unknown keys)
+  // instead of nulling every tab/pin/fold the user had.
+  chatsVisible: z.boolean().optional(),
+  chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
   // Additive (resizable Open Editors section), still version 1. It must NEVER
   // null the whole saved state: serializeUiState clamps every write, so this
   // catch only handles foreign/hand-edited files.

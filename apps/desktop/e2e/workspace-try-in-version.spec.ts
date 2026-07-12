@@ -6,6 +6,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   seedWorkspaceSettings,
   waitForWorkspaceFile,
@@ -230,6 +231,8 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
     );
 
     // History attributes the agent's edits (0N-1, signed out => "You's agent").
+    // History lives in the left History view (the right panel is Chats now).
+    await openHistoryView(page);
     const agentRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/summary.md"]',
     );
