@@ -11,6 +11,7 @@ import {
 } from "../security/electronSecurity";
 import { isLoopbackHostname } from "../security/loopback";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
+import { installRendererCrashRecovery } from "./rendererCrashRecovery";
 import {
   createDebouncedSaver,
   DEFAULT_WINDOW_SIZE,
@@ -184,6 +185,10 @@ export function createMainWindow(): BrowserWindow {
 
   if (placement.isMaximized) window.maximize();
   trackWindowState(window);
+
+  // A crashed renderer reloads instead of leaving a permanently blank window
+  // (crash-loop guarded) — see rendererCrashRecovery.ts.
+  installRendererCrashRecovery(window.webContents);
 
   // window.open is a pure deny with NO side effects: renderer content (file
   // views today, app iframes in 7b) must never reach the OS browser except

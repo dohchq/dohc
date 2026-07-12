@@ -119,9 +119,15 @@ function isSafeWorkspaceRelativePath(path: string): boolean {
 }
 
 function siteFrameUrl(url: string): string {
-  const framed = new URL(url);
-  framed.searchParams.set("dohcHostOrigin", window.location.origin);
-  return framed.href;
+  // Called during render: a malformed preview URL must degrade to a frame
+  // that fails to load, never a `new URL` throw that takes the render down.
+  try {
+    const framed = new URL(url);
+    framed.searchParams.set("dohcHostOrigin", window.location.origin);
+    return framed.href;
+  } catch {
+    return url;
+  }
 }
 
 export function SitePreviewPage(props: {
