@@ -57,6 +57,7 @@ import {
   addColumnBefore,
   addRowAfter,
   addRowBefore,
+  cellAround,
   CellSelection,
   deleteColumn,
   deleteRow,
@@ -441,8 +442,8 @@ function buildTableMenuButton(view: EditorView, cellPos: number): HTMLElement {
 // the row) so it tracks the live-resized table box the same way the grips
 // do, and floats into the outer margin via negative CSS offsets. A
 // cell-anchored widget can only span its own cell via CSS, so
-// sizeAppendStrips (called from the plugin's hover tracking) stretches each
-// strip to the full table edge with inline offsets.
+// sizeAppendStrips stretches each strip to the full table edge with inline
+// offsets.
 function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -598,6 +599,15 @@ function sizeAppendStrips(table: HTMLElement): void {
   }
 }
 
+// The CSS fallback only spans the anchor corner cell, so size every append
+// strip before edge hover. Otherwise a tall/wide table approached straight
+// from the right/bottom margin has no full-edge "+" target yet.
+function sizeAllAppendStrips(view: EditorView): void {
+  view.dom.querySelectorAll<HTMLElement>("table").forEach((table) => {
+    if (table.querySelector(".dohc-table-append")) sizeAppendStrips(table);
+  });
+}
+
 type HoveredTable = { table: HTMLElement; col: number; row: number };
 
 export function makeTableControlsPlugin(): Plugin {
@@ -659,18 +669,23 @@ export function makeTableControlsPlugin(): Plugin {
       clearHover();
       return false;
     }
-    // Column index = sum of preceding colspans (matches the TableMap column
-    // the grip was anchored at — dedup there keeps the span-start cell).
-    // Row index = tr position; pasted rowspans can skew it, in which case
-    // that row's handle simply doesn't light up.
-    let col = 0;
-    for (let el = cell.previousElementSibling; el; el = el.previousElementSibling) {
-      col += el instanceof HTMLTableCellElement ? el.colSpan : 1;
+    // Grips carry TableMap indices, so hover must use the same map: DOM
+    // sibling counting drifts when a rowspan from above covers earlier
+    // slots. A spanning cell activates its anchor row/column handle.
+    const pos = view.posAtDOM(cell, 0);
+    if (pos < 0) {
+      clearHover();
+      return false;
     }
-    let row = 0;
-    for (let el = cell.parentElement?.previousElementSibling; el; el = el.previousElementSibling) {
-      row += 1;
+    const $cell = cellAround(view.state.doc.resolve(pos));
+    if (!$cell) {
+      clearHover();
+      return false;
     }
+    const tableNode = $cell.node(-1);
+    const rect = TableMap.get(tableNode).findCell($cell.pos - $cell.start(-1));
+    const col = rect.left;
+    const row = rect.top;
     if (!hovered || hovered.table !== table || hovered.col !== col || hovered.row !== row) {
       clearHover();
       hovered = { table, col, row };
@@ -697,13 +712,20 @@ export function makeTableControlsPlugin(): Plugin {
       },
       handleDOMEvents: {
         mousemove: onMouseMove,
+        mouseenter: (view) => {
+          sizeAllAppendStrips(view);
+          return false;
+        },
         mouseleave: () => {
           clearHover();
           return false;
         },
       },
     },
-    view() {
+    view(view) {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => sizeAllAppendStrips(view));
+      }
       return {
         // An open grip menu closes over a raw cell position (see
         // columnMenuItems). If the doc shifts while it's open — e.g. a remote
@@ -712,21 +734,22 @@ export function makeTableControlsPlugin(): Plugin {
         // detached body element, not a decoration, so it isn't rebuilt with the
         // grips; tear it down on any doc change instead.
         update(view, prevState) {
-          if (closeOpenMenu && !view.state.doc.eq(prevState.doc)) {
+          const docChanged = !view.state.doc.eq(prevState.doc);
+          if (closeOpenMenu && docChanged) {
             closeOpenMenu();
             closeOpenMenu = null;
           }
           // Doc changes rebuild the grip widgets (dropping `is-active`) and
-          // can change the table box (added/removed rows): restore the
-          // hovered handles and re-stretch the strips without waiting for
-          // the next mousemove.
+          // can change table boxes (added/removed rows): re-stretch every
+          // strip and restore the hovered handles without waiting for the
+          // next mousemove.
+          if (docChanged) sizeAllAppendStrips(view);
           if (hovered) {
             if (!hovered.table.isConnected) {
               hovered = null;
               return;
             }
             applyHover();
-            sizeAppendStrips(hovered.table);
           }
         },
         destroy() {

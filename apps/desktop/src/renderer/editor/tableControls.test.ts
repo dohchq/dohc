@@ -19,15 +19,19 @@ const testTableControls = Extension.create({
   },
 });
 
-function createTableEditor(rows = 2, cols = 2): Editor {
-  const editor = new Editor({
+function createEditor(content: string): Editor {
+  return new Editor({
     extensions: [
       StarterKit,
       TableKit.configure({ table: { resizable: true } }),
       testTableControls,
     ],
-    content: "<p></p>",
+    content,
   });
+}
+
+function createTableEditor(rows = 2, cols = 2): Editor {
+  const editor = createEditor("<p></p>");
   editor.commands.insertTable({ rows, cols, withHeaderRow: true });
   return editor;
 }
@@ -101,6 +105,24 @@ describe("table controls grips", () => {
     expect(activeRows).toHaveLength(1);
     expect(activeCols[0]?.dataset.col).toBe("1");
     expect(activeRows[0]?.dataset.row).toBe("1");
+  });
+
+  it("hovered column handle uses TableMap coordinates when a rowspan precedes the cell", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><td rowspan="2">R</td><td>A</td></tr><tr><td>B</td></tr></table>',
+    );
+    const dom = editor.view.dom;
+    const cells = dom.querySelectorAll("td");
+    const cell = cells[cells.length - 1] as HTMLElement;
+    cell.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    const activeCols = dom.querySelectorAll<HTMLElement>(".dohc-table-grip--col.is-active");
+    expect(activeCols).toHaveLength(1);
+    expect(activeCols[0]?.dataset.col).toBe("1");
+    // Row 1's col-0 slot is covered by the rowspan, so the decoration
+    // builder dedups away row 1's grip — there is nothing to activate.
+    expect(dom.querySelectorAll(".dohc-table-grip--row.is-active")).toHaveLength(0);
   });
 
   it("mousemove outside the table clears the active handles", () => {
@@ -382,6 +404,22 @@ describe("table controls grips", () => {
     click(appendCol);
 
     expect(tableNode(editor).content?.[0]?.content).toHaveLength(3);
+  });
+
+  it("append strips are sized on editor mouseenter before any cell hover", () => {
+    editor = createEditor(
+      "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr><tr><td>E</td><td>F</td></tr></table>",
+    );
+    const dom = editor.view.dom;
+    const colStrip = dom.querySelector(".dohc-table-append--col") as HTMLElement;
+    const rowStrip = dom.querySelector(".dohc-table-append--row") as HTMLElement;
+    expect(colStrip.style.height).toBe("");
+
+    // mouseenter does not bubble; ProseMirror binds it on the editor root.
+    dom.dispatchEvent(new MouseEvent("mouseenter"));
+
+    expect(colStrip.style.height).toBe("0px");
+    expect(rowStrip.style.width).toBe("0px");
   });
 
   it("append-row button adds a row at the bottom edge", () => {
