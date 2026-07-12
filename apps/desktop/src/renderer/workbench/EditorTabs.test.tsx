@@ -12,11 +12,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 const noop = () => {};
+const tabs = [{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }];
 
 function renderTabs(activeTab: string) {
   return render(
     <EditorTabs
-      tabs={[{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }]}
+      tabs={tabs}
       activeTab={activeTab}
       activeTabDirty={false}
       onActivate={noop}
@@ -45,7 +46,7 @@ describe("EditorTabs strip scrolling", () => {
 
     rerender(
       <EditorTabs
-        tabs={[{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }]}
+        tabs={tabs}
         activeTab="c.md"
         activeTabDirty={false}
         onActivate={noop}
@@ -121,6 +122,48 @@ describe("EditorTabs overlay scrollbar", () => {
     fireEvent.scroll(strip);
     const translate = /translateX\(([\d.]+)px\)/.exec(thumb.style.transform);
     expect(parseFloat(translate?.[1] ?? "")).toBeCloseTo(100 / 3, 1);
+  });
+
+  it("translates a vertical wheel over the thumb into horizontal scroll", () => {
+    const strip = overflowStrip();
+    const thumb = screen.getByTestId("tab-strip-scrollbar");
+    const wheel = new WheelEvent("wheel", { deltaY: 40, cancelable: true });
+    thumb.dispatchEvent(wheel);
+    expect(strip.scrollLeft).toBe(40);
+    expect(wheel.defaultPrevented).toBe(true);
+  });
+
+  it("clamps the thumb to a narrow track", () => {
+    renderTabs("a.md");
+    const strip = screen.getByRole("tablist");
+    Object.defineProperty(strip, "scrollWidth", { value: 100 });
+    Object.defineProperty(strip, "clientWidth", { value: 20 });
+    fireEvent.scroll(strip);
+    const thumb = screen.getByTestId("tab-strip-scrollbar");
+    expect(parseFloat(thumb.style.width)).toBe(20);
+    expect(thumb.style.transform).toBe("translateX(0px)");
+  });
+
+  it("re-measures when the active tab becomes dirty", () => {
+    const { rerender } = renderTabs("a.md");
+    const strip = screen.getByRole("tablist");
+    const thumb = screen.getByTestId("tab-strip-scrollbar");
+    Object.defineProperty(strip, "scrollWidth", { value: 600 });
+    Object.defineProperty(strip, "clientWidth", { value: 200 });
+    expect(thumb.style.display).toBe("none");
+
+    rerender(
+      <EditorTabs
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+      />,
+    );
+    expect(thumb.style.display).toBe("");
   });
 
   it("scrolls the strip when the thumb is dragged", () => {
