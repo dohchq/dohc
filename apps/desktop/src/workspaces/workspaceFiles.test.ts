@@ -529,6 +529,22 @@ describe("copyIntoWorkspace", () => {
     expect(await readFile(join(root, "notes (2).md"), "utf8")).toBe("incoming");
   });
 
+  it("fits collision variants within NAME_MAX for near-limit basenames (codex P2)", async () => {
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
+    // 251 chars + ".md" = 254 bytes — legal, but stem + " (2)" would exceed
+    // NAME_MAX without truncation and abort the batch with ENAMETOOLONG.
+    const longName = `${"a".repeat(251)}.md`;
+    await writeFile(join(outside, longName), "incoming");
+    await writeFile(join(root, longName), "existing");
+    const outcome = await copyIntoWorkspace(root, [join(outside, longName)]);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.imported).toHaveLength(1);
+    const landed = outcome.imported[0]!;
+    expect(Buffer.byteLength(landed, "utf8")).toBeLessThanOrEqual(255);
+    expect(landed.endsWith(" (2).md")).toBe(true);
+    expect(await readFile(join(root, landed), "utf8")).toBe("incoming");
+  });
+
   it("keeps counting up when collision variants exist too", async () => {
     const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
     await writeFile(join(outside, "notes.md"), "third");

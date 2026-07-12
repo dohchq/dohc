@@ -282,17 +282,23 @@ const MAX_COLLISION_RENAMES = 99;
 
 // "report.md" + attempt 2 -> "report (2).md". Dotfiles (".env") and
 // extensionless names suffix at the end (".env (2)", "Makefile (2)").
+// The stem is byte-truncated so the variant never exceeds NAME_MAX — a
+// near-255-byte basename colliding must degrade to a shorter variant, not
+// abort the whole import with ENAMETOOLONG (codex P2).
 function collisionVariant(name: string, attempt: number): string {
   const dot = name.lastIndexOf(".");
   const stem = dot > 0 ? name.slice(0, dot) : name;
   const extension = dot > 0 ? name.slice(dot) : "";
-  return `${stem} (${attempt})${extension}`;
+  const marker = ` (${attempt})`;
+  return `${fitWithinNameMax(stem, marker + extension)}${marker}${extension}`;
 }
 
 // One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
 // through collision variants. Returns the basename that landed, or null when
 // the rename budget ran out. Non-EEXIST errors still throw — a permission or
-// IO failure is a real error, not a skip.
+// IO failure is a real error, not a skip — with one exception: a name the
+// filesystem cannot hold (ENAMETOOLONG, e.g. an extension longer than the
+// variant budget) skips that source instead of aborting the whole batch.
 async function copyWithoutOverwrite(
   source: string,
   absDir: string,
@@ -304,7 +310,9 @@ async function copyWithoutOverwrite(
       await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
       return candidate;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENAMETOOLONG") return null;
+      if (code !== "EEXIST") throw error;
     }
   }
   return null;
