@@ -61,9 +61,9 @@ describe("crashLoopPolicy", () => {
 });
 
 describe("isCleanRendererExit", () => {
-  it("treats intentional teardowns as clean and crashes as not", () => {
+  it("treats only clean-exit as clean — a killed renderer blanks the window like a crash", () => {
     expect(isCleanRendererExit("clean-exit")).toBe(true);
-    expect(isCleanRendererExit("killed")).toBe(true);
+    expect(isCleanRendererExit("killed")).toBe(false);
     expect(isCleanRendererExit("crashed")).toBe(false);
     expect(isCleanRendererExit("oom")).toBe(false);
     expect(isCleanRendererExit("launch-failed")).toBe(false);
@@ -85,12 +85,18 @@ describe("installRendererCrashRecovery", () => {
     expect(fake.reloads).toHaveLength(1);
   });
 
-  it("ignores clean exits", () => {
+  it("ignores intentional clean exits", () => {
     const fake = fakeWebContents();
     installRendererCrashRecovery(fake.contents, () => 1_000);
     fake.crash("clean-exit", 0);
-    fake.crash("killed", 0);
     expect(fake.reloads).toHaveLength(0);
+  });
+
+  it("reloads for an externally killed renderer — it blanks the window like a crash", () => {
+    const fake = fakeWebContents();
+    installRendererCrashRecovery(fake.contents, () => 1_000);
+    fake.crash("killed", 0);
+    expect(fake.reloads).toHaveLength(1);
   });
 
   it("stops reloading after a crash loop inside the window", () => {

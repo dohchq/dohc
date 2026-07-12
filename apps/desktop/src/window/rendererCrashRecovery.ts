@@ -5,9 +5,14 @@
 // small crash-loop guard so a renderer that dies immediately on every load
 // doesn't spin reload-crash-reload forever.
 
-// Exit reasons that are not crashes: an intentional teardown must not trigger
-// a reload (quitting the app kills renderers with these reasons).
-const CLEAN_REASONS = new Set(["clean-exit", "killed"]);
+// The one exit reason that is not a crash: an intentional teardown
+// (clean-exit) must not trigger a reload. "killed" is deliberately NOT
+// excluded — Electron reports it for a renderer terminated externally (an OS
+// task-killer, forcefullyCrashRenderer on some platforms), which leaves the
+// window exactly as blank as a crash and must reload too. App-quit teardown
+// races stay harmless: the isDestroyed() guard skips destroyed contents and
+// the crash-loop cap bounds the worst case.
+const CLEAN_REASONS = new Set(["clean-exit"]);
 
 export const CRASH_LOOP_WINDOW_MS = 30_000;
 export const CRASH_LOOP_MAX_RELOADS = 3;
