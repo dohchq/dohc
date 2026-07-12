@@ -305,17 +305,22 @@ describe("mcp tool path containment", () => {
         join(ctx.root, "shared-with-me", "alex", "site", "index.html"),
         "<!doctype html><title>shared</title>",
       );
-      for (const run of [
-        () => testSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
-        () => buildSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
-        () => previewSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
-        () => publishSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
-        () => addSiteSdk(ctx, { siteRoot: "shared-with-me/alex/site" }),
-      ]) {
-        await expect(run()).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("mounted share"),
-        });
+      // Case variants name the same directory on case-insensitive
+      // filesystems — the guard must hold for them too, not just the
+      // canonical casing.
+      for (const siteRoot of ["shared-with-me/alex/site", "Shared-With-Me/alex/site"]) {
+        for (const run of [
+          () => testSite(ctx, { siteRoot }),
+          () => buildSite(ctx, { siteRoot }),
+          () => previewSite(ctx, { siteRoot }),
+          () => publishSite(ctx, { siteRoot }),
+          () => addSiteSdk(ctx, { siteRoot }),
+        ]) {
+          await expect(run()).resolves.toMatchObject({
+            ok: false,
+            reason: expect.stringContaining("mounted share"),
+          });
+        }
       }
     });
   });

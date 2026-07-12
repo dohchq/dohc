@@ -105,6 +105,30 @@ describe("OpenSharedView", () => {
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 
+  it("surfaces a mount failure in the dialog error slot", async () => {
+    const user = userEvent.setup();
+    bridgeMock.mountShare.mockRejectedValue(
+      new Error("This share is already added to this workspace."),
+    );
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        mountInto={{ workspaceId: "ws-host", onMounted: () => {} }}
+      />,
+    );
+
+    await user.type(
+      await screen.findByTestId("open-share-code"),
+      "dohc-share:share-1:http://localhost:1788",
+    );
+    await user.click(screen.getByTestId("open-share-start"));
+
+    expect(
+      (await screen.findByTestId("open-share-error")).textContent,
+    ).toContain("already added to this workspace");
+  });
+
   it("can still open a separate read-only view from inside a workspace", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();

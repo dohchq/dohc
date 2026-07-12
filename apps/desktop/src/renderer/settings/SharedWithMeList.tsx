@@ -80,6 +80,7 @@ export function SharedWithMeList(props: {
   }, [props.workspaceId]);
 
   async function mount(share: RelayShareReceivedRow) {
+    const token = refreshToken.current;
     setBusyShareId(share.shareId);
     try {
       await bridge().mountShare({
@@ -89,20 +90,27 @@ export function SharedWithMeList(props: {
       await refresh();
       props.onWorkspaceFilesChanged?.();
     } catch (cause) {
-      setLoad({ status: "error", message: errorMessage(cause) });
+      // Same token rule as refresh(): a rejection from a previous workspace
+      // must not surface after a switch.
+      if (token === refreshToken.current) {
+        setLoad({ status: "error", message: errorMessage(cause) });
+      }
     } finally {
       setBusyShareId(null);
     }
   }
 
   async function unmount(shareId: string) {
+    const token = refreshToken.current;
     setBusyShareId(shareId);
     try {
       await bridge().unmountShare({ workspaceId: props.workspaceId, shareId });
       await refresh();
       props.onWorkspaceFilesChanged?.();
     } catch (cause) {
-      setLoad({ status: "error", message: errorMessage(cause) });
+      if (token === refreshToken.current) {
+        setLoad({ status: "error", message: errorMessage(cause) });
+      }
     } finally {
       setBusyShareId(null);
     }

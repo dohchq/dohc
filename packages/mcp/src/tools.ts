@@ -27,6 +27,7 @@ import {
   type SiteKind,
   type SiteScripts,
   type WorkspaceSite,
+  isSharedWithMePath,
 } from "@dohc/workspace-core";
 import {
   LinkedChatStoreError,
@@ -1861,8 +1862,11 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   // Mounted shares (shared-with-me/) are readable, but site tools execute
   // or mutate the site (test/build/preview/publish/add-sdk) — running
   // someone else's shared code with workspace access is refused. Copying
-  // the site into the user's own files makes it runnable.
-  if (root.normalized === "shared-with-me" || root.normalized.startsWith("shared-with-me/")) {
+  // the site into the user's own files makes it runnable. The check is the
+  // shared case-insensitive/alias-normalizing predicate, NOT a literal
+  // compare: normalized paths preserve casing, and "Shared-With-Me/…" names
+  // the same directory on case-insensitive filesystems (CodeRabbit).
+  if (isSharedWithMePath(root.normalized)) {
     return {
       ok: false as const,
       reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
@@ -2129,7 +2133,7 @@ export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) 
     review: {
       siteRoot: site.root,
       modes: previewModesForSite(site),
-      includesSharedWithMe: site.root === "shared-with-me" || site.root.startsWith("shared-with-me/"),
+      includesSharedWithMe: isSharedWithMePath(site.root),
     },
     checks: tested.checks,
   };

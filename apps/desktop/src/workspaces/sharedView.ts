@@ -53,7 +53,7 @@ export async function materializeSharedViewPaths(
     if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
       throw new Error(`Shared view parent escapes the workspace: ${target}`);
     }
-    await rm(target, { force: true });
+    await rm(target, { recursive: true, force: true });
     return target;
   }
   try {
@@ -70,7 +70,10 @@ export async function materializeSharedViewPaths(
         if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
           throw new Error(`Shared view parent escapes the workspace: ${target}`);
         }
-        await rm(target, { force: true });
+        // recursive: a locally tampered DIRECTORY at the target must not
+        // wedge the refresh with EISDIR. Node's rm removes a symlink as a
+        // link either way — it never recurses through one.
+        await rm(target, { recursive: true, force: true });
         continue;
       }
       await preparedTarget(target);

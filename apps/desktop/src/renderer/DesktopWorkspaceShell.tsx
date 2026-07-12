@@ -1552,9 +1552,16 @@ export function DesktopWorkspaceShell(props: {
   // state updater side-effectful (StrictMode replays updaters).
   const shareMountsRef = useRef(shareMounts);
   shareMountsRef.current = shareMounts;
+  // Latest-wins token (cloudStatusToken/engineHistoryToken precedent): a
+  // slower, earlier-started reload must never clobber a fresher one — a
+  // stale registry snapshot could resurrect a just-removed mount or fire a
+  // spurious delete-folder projection against a still-valid one.
+  const shareMountsToken = useRef(0);
   const reloadShareMounts = useCallback(async () => {
+    const token = ++shareMountsToken.current;
     try {
       const registry = await bridge().getWorkspaceRegistry();
+      if (token !== shareMountsToken.current) return;
       const entry = registry.workspaces.find(
         (candidate) => candidate.workspaceId === workspaceId,
       );

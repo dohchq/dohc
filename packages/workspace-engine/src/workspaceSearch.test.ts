@@ -670,6 +670,16 @@ describe("engine file path classifier (shared by search and capture)", () => {
     expect(classifyEngineFilePathForRead("shared-with-me/alex/config/prod.env")).toEqual({
       kind: "secret",
     });
+    // Encoded and Windows-alias disguises classify secret inside mounts too.
+    expect(classifyEngineFilePathForRead("shared-with-me/alex/%2eenv")).toEqual({
+      kind: "secret",
+    });
+    expect(classifyEngineFilePathForRead("shared-with-me/alex/prod.env ")).toEqual({
+      kind: "secret",
+    });
+    expect(classifyEngineFilePathForRead("Shared-With-Me/alex/.env")).toEqual({
+      kind: "secret",
+    });
     expect(classifyEngineFilePathForRead("shared-with-me/alex/brief.md")).toEqual({
       kind: "tracked",
     });
