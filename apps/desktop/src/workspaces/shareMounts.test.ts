@@ -336,6 +336,45 @@ describe("refreshShareMountOnce", () => {
     expect(quiet).toEqual({ status: "unchanged", changedPaths: 0 });
   });
 
+  it("creates NOTHING outside the workspace when a dir symlink sits on a deep write path", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/top.md", "v1");
+    await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
+    await rm(join(mountRoot, "docs"), { recursive: true, force: true });
+    await symlink(elsewhere, join(mountRoot, "docs"), "dir");
+    // The granter writes a DEEP path: recursive mkdir must not create
+    // "deep/" through the planted link before containment runs.
+    relay.addWrite("docs/deep/file.md", "payload");
+    await expect(
+      refreshShareMountOnce({
+        hostRoot: host,
+        mount: { shareId: SHARE_ID, label: "alex" },
+        relay: relay.connection(),
+      }),
+    ).rejects.toThrow(/escapes the workspace/);
+    expect(existsSync(join(elsewhere, "deep"))).toBe(false);
+  });
+
+  it("unmount removes a tampered symlinked mount root as a link (never through it)", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    await writeFile(join(elsewhere, "victim.md"), "untouched");
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER), { recursive: true });
+    await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER, "alex"), "dir");
+
+    await removeMountFolder(host, "alex");
+
+    expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "alex"))).toBe(false);
+    expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
+  });
+
   it("routes DELETE ops through the same real-parent containment", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();

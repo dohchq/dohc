@@ -684,6 +684,19 @@ describe("engine file path classifier (shared by search and capture)", () => {
       kind: "tracked",
     });
     expect(classifyEngineFilePathForRead("shared-with-me")).toEqual({ kind: "tracked" });
+    // Root-level entries are NOT assumed to be mount labels: a planted
+    // shared-with-me/.env stays secret, and a secret-shaped label taints
+    // everything beneath it. Healthy labels stay tracked.
+    expect(classifyEngineFilePathForRead("shared-with-me/.env")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePathForRead("shared-with-me/prod.env")).toEqual({
+      kind: "secret",
+    });
+    expect(classifyEngineFilePathForRead("shared-with-me/.env/notes.md")).toEqual({
+      kind: "secret",
+    });
+    expect(classifyEngineFilePathForRead("shared-with-me/alex")).toEqual({
+      kind: "tracked",
+    });
     // Outside mounts the two classifiers agree.
     expect(classifyEngineFilePathForRead(".env")).toEqual({ kind: "secret" });
     expect(classifyEngineFilePathForRead("notes/today.md")).toEqual({ kind: "tracked" });

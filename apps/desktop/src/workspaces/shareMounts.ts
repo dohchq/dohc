@@ -174,7 +174,25 @@ export async function removeMountFolder(
   hostRoot: string,
   label: string,
 ): Promise<void> {
-  const rootDir = mountRootFor(hostRoot, label);
-  await assertRealMountRoot(hostRoot, label);
-  await rm(rootDir, { recursive: true, force: true });
+  mountRootFor(hostRoot, label); // label validation + lexical containment
+  const realHost = await realpath(hostRoot);
+  const container = join(realHost, SHARED_WITH_ME_FOLDER);
+  const containerStat = await lstat(container).catch(() => null);
+  if (containerStat === null) return; // nothing to remove
+  if (containerStat.isSymbolicLink() || !containerStat.isDirectory()) {
+    throw new Error(
+      `Share mount path is not a real directory: ${SHARED_WITH_ME_FOLDER}`,
+    );
+  }
+  const leaf = join(container, label);
+  const leafStat = await lstat(leaf).catch(() => null);
+  if (leafStat === null) return; // already gone
+  if (leafStat.isSymbolicLink()) {
+    // A tampered symlinked mount root is removed AS A LINK — rm without
+    // `recursive` unlinks the entry itself, never following it — so unmount
+    // always succeeds instead of wedging the share in Settings/Explorer.
+    await rm(leaf, { force: true });
+    return;
+  }
+  await rm(leaf, { recursive: true, force: true });
 }

@@ -49,8 +49,17 @@ export function SharedWithMeList(props: {
   async function refresh() {
     const token = ++refreshToken.current;
     try {
-      const [shares, registry] = await Promise.all([
-        bridge().listRelayShares(),
+      // The registry is local and must render even when the relay listing
+      // fails (signed out, offline, different relay) — otherwise the
+      // "Remove from workspace" path disappears exactly when the relay
+      // can't confirm anything. A failed relay listing renders as an empty
+      // received set; the registry-only rows already say the share is not
+      // listed by the relay right now.
+      const [sharesResult, registry] = await Promise.all([
+        bridge()
+          .listRelayShares()
+          .then((result) => ({ ok: true as const, received: result.received }))
+          .catch(() => ({ ok: false as const, received: [] })),
         bridge().getWorkspaceRegistry(),
       ]);
       if (token !== refreshToken.current) return;
@@ -59,7 +68,7 @@ export function SharedWithMeList(props: {
       );
       setLoad({
         status: "ready",
-        shares: shares.received,
+        shares: sharesResult.received,
         mounts: workspace?.shareMounts ?? [],
       });
     } catch (cause) {

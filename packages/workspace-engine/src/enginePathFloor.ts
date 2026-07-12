@@ -63,9 +63,19 @@ export function classifyEngineFilePathForRead(
   if (!read.ok || hasIgnoredSegment(path)) return { kind: "ignored" };
   const candidate = read.normalized;
   if (isSharedWithMePath(candidate)) {
-    const remainder = candidate.split("/").slice(2).join("/");
-    // The projection root and the label folders carry no content themselves.
-    return remainder.length === 0 ? { kind: "tracked" } : classifyEngineFilePath(remainder);
+    const segments = candidate.split("/");
+    // The projection root itself carries no content.
+    if (segments.length === 1) return { kind: "tracked" };
+    // Direct children are mount-label directories in a healthy projection,
+    // but nothing guarantees that: a planted shared-with-me/.env must stay
+    // secret, so the entry name classifies as itself.
+    const label = segments[1] ?? "";
+    if (segments.length === 2) return classifyEngineFilePath(label);
+    // Deeper paths: a secret-shaped label directory (a tampered registry
+    // could name one ".env") taints everything beneath it; otherwise the
+    // mount-relative remainder classifies as the mount sees it.
+    if (classifyEngineFilePath(label).kind === "secret") return { kind: "secret" };
+    return classifyEngineFilePath(segments.slice(2).join("/"));
   }
   return classifyEngineFilePath(candidate);
 }

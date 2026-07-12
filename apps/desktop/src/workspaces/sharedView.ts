@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
+import { existingAncestor } from "./workspaceFiles";
 import {
   ShareUnavailableError,
   createVersionedTextStore,
@@ -48,6 +49,14 @@ export async function materializeSharedViewPaths(
   // target itself is removed then recreated exclusively so a final-component
   // link is deleted, never followed (gpt-5.6-sol P1).
   async function preparedTarget(target: string): Promise<string> {
+    // Containment BEFORE mkdir, not just after: a planted directory symlink
+    // on the write path would otherwise have recursive mkdir create real
+    // directories outside the projection before the post-check throws. The
+    // deepest existing ancestor must already be inside the root.
+    const realAncestor = await realpath(await existingAncestor(dirname(target)));
+    if (realAncestor !== realRoot && !realAncestor.startsWith(`${realRoot}${sep}`)) {
+      throw new Error(`Shared view parent escapes the workspace: ${target}`);
+    }
     await mkdir(dirname(target), { recursive: true });
     const realParent = await realpath(dirname(target));
     if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
