@@ -700,6 +700,7 @@ function MarkdownView(props: {
     const doc = engine.doc;
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string) | null = null;
+    let frame: number | null = null;
     const recompute = () => {
       if (cancelled || !serialize) return;
       setSourceMarkdown(serialize(doc));
@@ -709,13 +710,21 @@ function MarkdownView(props: {
       recompute();
     });
     // Live: agent edits / co-editors keep flowing into the mirror doc while
-    // the source view is up — re-project on every update. Updates are remote
-    // ones only (the local editor is unmounted in source view), so no
-    // per-keystroke serialize churn to debounce.
-    doc.on("update", recompute);
+    // the source view is up — re-project on updates. A co-editor's keystroke
+    // burst forwards one delta per keystroke, so coalesce to one full-document
+    // serialize per frame instead of one per delta.
+    const scheduleRecompute = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        recompute();
+      });
+    };
+    doc.on("update", scheduleRecompute);
     return () => {
       cancelled = true;
-      doc.off("update", recompute);
+      if (frame !== null) cancelAnimationFrame(frame);
+      doc.off("update", scheduleRecompute);
     };
   }, [showSource, engine.doc]);
 
@@ -729,7 +738,21 @@ function MarkdownView(props: {
       return;
     }
     if (readOnly) return;
-    switchMode(mode === "source" ? "wysiwyg" : "source");
+    if (mode === "source") {
+      // Leaving editable source with an autosave still pending: flush the RAW
+      // draft first (header-toggle parity). Switching mode re-points
+      // serializeDraftRef at the Tiptap parse, which is lossy for constructs
+      // the editor doesn't model (e.g. HTML comments) — the late timer would
+      // otherwise overwrite the file with that parse instead of the typed
+      // source.
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        void saveNow();
+      }
+      switchMode("wysiwyg");
+      return;
+    }
+    switchMode("source");
   }
   const toggleSourceViewRef = useRef(toggleSourceView);
   toggleSourceViewRef.current = toggleSourceView;
@@ -973,14 +996,10 @@ function MarkdownView(props: {
               <DocumentMenu
                 workspaceId={props.workspaceId}
                 suggestedName={filenameStem(props.path)}
-                // In source view the WYSIWYG editor is unmounted (its ref is
-                // null), so copy/export read the projection instead — the same
-                // markdown the source pane shows.
-                getMarkdown={() =>
-                  showSource && sourceMarkdown !== null
-                    ? sourceMarkdown
-                    : serializeEngineDraft()
-                }
+                // Always live, even in source view: the WYSIWYG editor stays
+                // MOUNTED (hidden) while source is shown, so its ref keeps
+                // serializing the current Y.Doc state at click time.
+                getMarkdown={() => serializeEngineDraft()}
               />
             </>
           }
@@ -989,7 +1008,7 @@ function MarkdownView(props: {
         {showSource ? (
           // Raw markdown, monospaced and read-only — frontmatter included, so
           // the top-matter zone (which renders the same metadata as chrome)
-          // stays hidden here, like the legacy editor's source mode.
+          // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
               <span>Read-only markdown source — switch back to Editor to make changes.</span>
@@ -1019,58 +1038,64 @@ function MarkdownView(props: {
               </Suspense>
             )}
           </div>
-        ) : (
-          /* data-dohc-doc-pane: the WHOLE pane is the editor's image drop zone,
-             top-matter included — MarkdownEditor finds it with closest(). See
-             the drop-zone comment in imagePaste.ts. */
-          <div
-            data-testid="view-markdown"
-            data-dohc-doc-pane=""
-            className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
-          >
-            {/* Title + inline properties are one top-matter zone (hovering it
-                reveals the quiet "Add a property" affordance on empty docs). */}
-            <div className="dohc-page-topmatter">
-              <PageIdentity
-                ydoc={engine.doc}
-                filenameStem={filenameStem(props.path)}
-                onEnterBody={() => wysiwygRef.current?.focus("start")}
-              />
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={engine.doc} />
-              </Suspense>
-            </div>
-            <Suspense
-              fallback={
-                <div className="flex h-full items-center justify-center text-xs text-subtle">
-                  Loading editor...
-                </div>
-              }
-            >
-              <LazyMarkdownEditor
-                ref={wysiwygRef}
-                value={props.body}
-                onDirty={() => undefined}
-                workspaceId={props.workspaceId}
-                path={props.path}
-                knownFiles={knownFiles}
-                onOpenWikilink={openWikilink}
-                pendingUndo={editorPendingUndo}
-                onPendingUndoConsumed={props.onPendingUndoConsumed}
-                collab={{
-                  ydoc: engine.doc,
-                  // Solo engine editing shows the settle indicator, not presence
-                  // chrome — "disabled" hides the in-editor presence bar while the
-                  // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
-                  status: "disabled",
-                  peerCount: 0,
-                  synced: true,
-                }}
-              />
+        ) : null}
+        {/* data-dohc-doc-pane: the WHOLE pane is the editor's image drop zone,
+            top-matter included — MarkdownEditor finds it with closest(). See
+            the drop-zone comment in imagePaste.ts.
+
+            HIDDEN (not unmounted) while source is shown: unmounting Tiptap
+            destroys the Collaboration extension's Yjs UndoManager and the
+            cursor/selection, and would leave the DocumentMenu serializing a
+            stale mount-time body. The hidden editor stays bound to the Y.Doc,
+            so toggling back restores the exact editing state. */}
+        <div
+          data-testid="view-markdown"
+          data-dohc-doc-pane=""
+          hidden={showSource}
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
+        >
+          {/* Title + inline properties are one top-matter zone (hovering it
+              reveals the quiet "Add a property" affordance on empty docs). */}
+          <div className="dohc-page-topmatter">
+            <PageIdentity
+              ydoc={engine.doc}
+              filenameStem={filenameStem(props.path)}
+              onEnterBody={() => wysiwygRef.current?.focus("start")}
+            />
+            <Suspense fallback={<PropertiesFallback />}>
+              <LazyPropertiesPanel ydoc={engine.doc} />
             </Suspense>
-            {backlinks}
           </div>
-        )}
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-xs text-subtle">
+                Loading editor...
+              </div>
+            }
+          >
+            <LazyMarkdownEditor
+              ref={wysiwygRef}
+              value={props.body}
+              onDirty={() => undefined}
+              workspaceId={props.workspaceId}
+              path={props.path}
+              knownFiles={knownFiles}
+              onOpenWikilink={openWikilink}
+              pendingUndo={editorPendingUndo}
+              onPendingUndoConsumed={props.onPendingUndoConsumed}
+              collab={{
+                ydoc: engine.doc,
+                // Solo engine editing shows the settle indicator, not presence
+                // chrome — "disabled" hides the in-editor presence bar while the
+                // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
+                status: "disabled",
+                peerCount: 0,
+                synced: true,
+              }}
+            />
+          </Suspense>
+          {backlinks}
+        </div>
       </div>
     );
   }

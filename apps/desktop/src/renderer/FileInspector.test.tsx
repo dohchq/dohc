@@ -221,6 +221,35 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
   });
 
+  it("palette source toggle flushes a pending raw draft before leaving source mode", async () => {
+    // codex P1: leaving editable source through the palette command must flush
+    // the RAW draft like the header toggle does — a timer firing after the
+    // mode switch would re-serialize through the (lossy) Tiptap parse.
+    const user = userEvent.setup();
+    let registered: (() => void) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          registered = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => registered?.()); // wysiwyg -> editable source (legacy branch)
+    await user.type(screen.getByTestId("markdown-editor"), "Raw!");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    act(() => registered?.()); // source -> wysiwyg: flushes inside the window
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "a.md",
+        text: "# Hello\nRaw!",
+      }),
+    );
+  });
+
   it("edits markdown frontmatter properties through the same save seam", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
@@ -594,17 +623,17 @@ describe("engine markdown source view", () => {
       expect(sourceView.textContent).toContain("# Plan");
       expect(sourceView.textContent).toContain("title: Plan");
     });
-    // READ-ONLY: CodeMirror's content is not editable and the WYSIWYG surface
-    // (with its top-matter chrome) is gone while source is shown.
+    // READ-ONLY: CodeMirror's content is not editable, and the WYSIWYG pane is
+    // HIDDEN — not unmounted (unmounting would destroy the Collaboration
+    // extension's undo stack and leave copy/export serializing stale state).
     const content = sourceView.querySelector(".cm-content");
     expect(content?.getAttribute("contenteditable")).toBe("false");
-    expect(screen.queryByTestId("view-markdown")).toBeNull();
-    expect(screen.queryByTestId("page-identity")).toBeNull();
+    expect(screen.getByTestId("view-markdown").hidden).toBe(true);
     expect(screen.getByTestId("markdown-source-toggle").textContent).toBe("Editor");
 
     // Toggling back restores the document surface.
     await user.click(screen.getByTestId("markdown-source-toggle"));
-    await screen.findByTestId("view-markdown");
+    expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
   });
 
@@ -643,9 +672,10 @@ describe("engine markdown source view", () => {
     expect(registered).not.toBeNull();
     act(() => registered?.());
     await screen.findByTestId("markdown-source-view", {}, { timeout: 5_000 });
+    expect(screen.getByTestId("view-markdown").hidden).toBe(true);
 
     act(() => registered?.());
-    await screen.findByTestId("view-markdown");
+    expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
   });
 });

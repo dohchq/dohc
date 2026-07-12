@@ -122,8 +122,11 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
       "contenteditable",
       "false",
     );
+    // The WYSIWYG editor is hidden, not unmounted (undo/cursor survive).
+    await expect(page.getByTestId("markdown-editor")).toBeHidden();
     // Toggling back restores the WYSIWYG editor with the same content.
     await page.getByTestId("markdown-source-toggle").click();
+    await expect(page.getByTestId("markdown-editor")).toBeVisible();
     await expect(page.getByTestId("markdown-editor")).toContainText(sentinel);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
