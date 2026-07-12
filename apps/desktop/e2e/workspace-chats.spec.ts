@@ -179,6 +179,10 @@ test("flagged: expand opens chats as an editor tab on the current conversation",
     await newThreadComposer.press("Enter");
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
 
+    // An unsent reply draft rides the expand handoff instead of vanishing
+    // with the unmounted panel instance.
+    await page.getByTestId("chats-composer").fill("draft in flight");
+
     // Expand: a "Chats" editor tab opens ON the same thread, page variant.
     await page.getByTestId("chats-open-tab").click();
     const chatsTab = page.getByTestId("tab-dohc://chats");
@@ -191,19 +195,28 @@ test("flagged: expand opens chats as an editor tab on the current conversation",
     await expect(
       pageThreadView.getByTestId("chats-thread-post-title"),
     ).toHaveText("Expand me into a tab.");
+    await expect(page.getByTestId("chats-composer")).toHaveValue(
+      "draft in flight",
+    );
 
     // Chats is ONE live surface: while the tab is active the panel defers
     // (no second presence lease or duplicate composer ids) and the expand
-    // button hides.
+    // button hides. Exactly ONE reply composer exists in the document.
     await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
     await expect(page.getByTestId("chats-open-tab")).toHaveCount(0);
+    await expect(page.getByTestId("chats-composer")).toHaveCount(1);
 
-    // Switching to a document tab hands the conversation back to the panel;
-    // re-activating the Chats tab defers the panel again.
+    // Switching to a document tab hands the conversation back to the panel
+    // (draft included) and the expand button returns; re-activating the
+    // Chats tab defers the panel again.
     await page.getByTestId("tab-notes.md").click();
     await expect(
       page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
     ).toBeVisible();
+    await expect(page.getByTestId("chats-open-tab")).toBeVisible();
+    await expect(page.getByTestId("chats-composer")).toHaveValue(
+      "draft in flight",
+    );
     await chatsTab.click();
     await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
     await expect(pageThreadView).toBeVisible();

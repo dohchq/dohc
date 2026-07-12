@@ -111,6 +111,17 @@ export type ChatsNav =
 
 type Nav = ChatsNav;
 
+// Unsent input, one field per composer surface. Part of the expand-to-tab
+// handoff: the shell mirrors the live instance's drafts (onDraftsChange) and
+// seeds the next mount with them, so expanding or collapsing chats never
+// discards something the user typed.
+export interface ChatsDrafts {
+  composer: string;
+  newThreadBody: string;
+  dmRecipients: string;
+  dmDraft: string;
+}
+
 type FeedOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
   "reactions"
@@ -620,11 +631,17 @@ export function ChatsView(props: {
   // next, so panel and tab feel like ONE chats surface. Applied once per
   // mount; workspace switches and later navigation behave exactly as before.
   initialNav?: ChatsNav;
+  // Unsent drafts to restore alongside initialNav (same handoff, same
+  // apply-once timing).
+  initialDrafts?: ChatsDrafts;
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
+  // Reports every draft edit (ref-cheap in the shell) so unsent input
+  // survives the panel/tab handoff.
+  onDraftsChange?: (drafts: ChatsDrafts) => void;
 }) {
-  const { workspaceId, onNavChange } = props;
+  const { workspaceId, onNavChange, onDraftsChange } = props;
   const collaboration = props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
   const variant = props.variant ?? "panel";
@@ -1290,35 +1307,57 @@ export function ChatsView(props: {
     [loadDmConversation, props],
   );
 
-  // Expand-to-tab seam, outbound: report where this view is so the shell can
-  // seed the next mount with this instance's current conversation. While a
-  // seed is still PENDING the report is suppressed — nav starts as the
-  // default "channels", and reporting that on mount would overwrite the very
-  // position the seed is about to restore (closing the tab while the
-  // overview is still loading would then hand "channels" back to the panel).
-  const navReportBlocked = useRef(props.initialNav !== undefined);
+  // Expand-to-tab seam, outbound: report where this view is (and what's
+  // typed) so the shell can seed the next mount with this instance's current
+  // conversation and unsent drafts. While a seed is still PENDING the
+  // reports are suppressed — nav/drafts start as mount defaults, and
+  // reporting those would overwrite the very state the seed is about to
+  // restore (closing the tab while the overview is still loading would then
+  // hand "channels" and empty drafts back to the panel).
+  const handoffReportBlocked = useRef(props.initialNav !== undefined);
   useEffect(() => {
-    if (navReportBlocked.current) return;
+    if (handoffReportBlocked.current) return;
     onNavChange?.(nav);
   }, [nav, onNavChange]);
+  useEffect(() => {
+    if (handoffReportBlocked.current) return;
+    onDraftsChange?.({ composer, newThreadBody, dmRecipients, dmDraft });
+  }, [composer, dmDraft, dmRecipients, newThreadBody, onDraftsChange]);
 
   // Expand-to-tab seam, inbound: once the overview is ready, jump to the
   // seeded conversation exactly the way a click would (same loaders, same
-  // token discipline). Waiting for "ready" matters — the open* navigations
-  // advance the shared liveness token, so seeding earlier would cancel the
-  // initial overview load. Applied once per mount (the ref guard): workspace
-  // switches and later navigation never re-apply a stale seed.
+  // token discipline) and restore the unsent drafts. Waiting for "ready"
+  // matters — the open* navigations advance the shared liveness token, so
+  // seeding earlier would cancel the initial overview load. Applied once per
+  // mount (the ref guard): workspace switches and later navigation never
+  // re-apply a stale seed.
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     seededRef.current = true;
-    navReportBlocked.current = false;
+    handoffReportBlocked.current = false;
     const seed = props.initialNav;
-    if (!seed) return;
-    if (seed.level === "channel") void openChannel(seed.channel);
-    else if (seed.level === "thread") void openThread(seed.channel, seed.thread);
-    else if (seed.level === "dm") void openDm(seed.dm);
-  }, [openChannel, openDm, openThread, overview.status, props.initialNav]);
+    if (seed) {
+      if (seed.level === "channel") void openChannel(seed.channel);
+      else if (seed.level === "thread") void openThread(seed.channel, seed.thread);
+      else if (seed.level === "dm") void openDm(seed.dm);
+      else if (seed.level === "dm-new") setNav({ level: "dm-new" });
+    }
+    const drafts = props.initialDrafts;
+    if (drafts) {
+      setComposer(drafts.composer);
+      setNewThreadBody(drafts.newThreadBody);
+      setDmRecipients(drafts.dmRecipients);
+      setDmDraft(drafts.dmDraft);
+    }
+  }, [
+    openChannel,
+    openDm,
+    openThread,
+    overview.status,
+    props.initialDrafts,
+    props.initialNav,
+  ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers')
   // then reload the conversation. Token-guarded so a stale response never

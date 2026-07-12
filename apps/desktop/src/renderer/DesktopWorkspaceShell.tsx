@@ -94,7 +94,7 @@ import {
   TryInVersionReviewCard,
 } from "./workbench/TryInVersion";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
-import type { ChatsNav } from "./workbench/ChatsView";
+import type { ChatsDrafts, ChatsNav } from "./workbench/ChatsView";
 import {
   activateTab,
   closeTab,
@@ -1296,6 +1296,13 @@ export function DesktopWorkspaceShell(props: {
   const onChatsNav = useCallback((nav: ChatsNav) => {
     chatsNav.current = nav;
   }, []);
+  // Unsent drafts ride the same handoff: mirrored live (a ref write per
+  // keystroke, no re-render) and seeded into the next mount, so expanding
+  // or collapsing chats never discards what the user typed.
+  const chatsDrafts = useRef<ChatsDrafts | null>(null);
+  const onChatsDrafts = useCallback((drafts: ChatsDrafts) => {
+    chatsDrafts.current = drafts;
+  }, []);
   const openChatsTab = useCallback(() => {
     mutateWb((state) => openTab(state, CHATS_TAB_PATH));
   }, [mutateWb]);
@@ -1962,6 +1969,24 @@ export function DesktopWorkspaceShell(props: {
     </>
   );
 
+  // ONE prop bundle for both ChatsView mounts (panel and page) so the live,
+  // presence-bearing surface can never drift between the two call sites —
+  // they differ only by `variant`.
+  const chatsViewProps = {
+    workspaceId,
+    initialNav: chatsNav.current ?? undefined,
+    initialDrafts: chatsDrafts.current ?? undefined,
+    onNavChange: onChatsNav,
+    onDraftsChange: onChatsDrafts,
+    onOpenFileChat: openFileChatInRail,
+    onOpenPath: openFile,
+    onError: setShellError,
+    mentionCandidates,
+    addressedToMe,
+    onOpenAddressed: openAgentNotification,
+    collaboration: chatCollaboration,
+  } as const;
+
   return (
     <div
       data-testid="workspace-shell"
@@ -2153,18 +2178,7 @@ export function DesktopWorkspaceShell(props: {
                   </div>
                 ) : (
                   <Suspense fallback={<PanelLoading label="Chats" />}>
-                    <LazyChatsView
-                      workspaceId={workspaceId}
-                      initialNav={chatsNav.current ?? undefined}
-                      onNavChange={onChatsNav}
-                      onOpenFileChat={openFileChatInRail}
-                      onOpenPath={openFile}
-                      onError={(message) => setShellError(message)}
-                      mentionCandidates={mentionCandidates}
-                      addressedToMe={addressedToMe}
-                      onOpenAddressed={openAgentNotification}
-                      collaboration={chatCollaboration}
-                    />
+                    <LazyChatsView {...chatsViewProps} />
                   </Suspense>
                 )
               ) : (
@@ -2323,19 +2337,7 @@ export function DesktopWorkspaceShell(props: {
             ) : isChatsTabPath(wb.activeTab) ? (
               versionsEnabled ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView
-                    workspaceId={workspaceId}
-                    variant="page"
-                    initialNav={chatsNav.current ?? undefined}
-                    onNavChange={onChatsNav}
-                    onOpenFileChat={openFileChatInRail}
-                    onOpenPath={openFile}
-                    onError={(message) => setShellError(message)}
-                    mentionCandidates={mentionCandidates}
-                    addressedToMe={addressedToMe}
-                    onOpenAddressed={openAgentNotification}
-                    collaboration={chatCollaboration}
-                  />
+                  <LazyChatsView {...chatsViewProps} variant="page" />
                 </Suspense>
               ) : (
                 <div
