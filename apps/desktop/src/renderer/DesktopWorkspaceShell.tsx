@@ -45,6 +45,7 @@ import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
+  classifyForView,
   FileInspector,
   preloadMarkdownEditor,
   type ScrollTarget,
@@ -828,6 +829,14 @@ export function DesktopWorkspaceShell(props: {
   const activeUndoRef = useRef<ActiveUndoHandler | null>(null);
   const registerActiveUndo = useCallback((handler: ActiveUndoHandler | null) => {
     activeUndoRef.current = handler;
+  }, []);
+
+  // The mounted markdown view's "view source" toggle (registered like the
+  // draft flush above) — the palette's toggle-markdown-source command routes
+  // through it. Null whenever the active tab is not a mounted markdown doc.
+  const sourceToggleRef = useRef<(() => void) | null>(null);
+  const registerSourceToggle = useCallback((toggle: (() => void) | null) => {
+    sourceToggleRef.current = toggle;
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
@@ -1767,6 +1776,17 @@ export function DesktopWorkspaceShell(props: {
         label: "Close tab",
         run: closeActiveTab,
       },
+      // Only offered while a markdown document is the active tab — on every
+      // other tab the toggle has nothing to act on, so the palette hides it.
+      ...(activeDocumentPath && classifyForView(activeDocumentPath) === "markdown"
+        ? [
+            {
+              id: "toggle-markdown-source",
+              label: "Toggle markdown source view",
+              run: () => sourceToggleRef.current?.(),
+            },
+          ]
+        : []),
       {
         id: "toggle-history",
         label: "Toggle history rail",
@@ -1816,6 +1836,7 @@ export function DesktopWorkspaceShell(props: {
       },
     ],
     [
+      activeDocumentPath,
       openWorkspaceFolder,
       closeActiveTab,
       importFiles,
@@ -2301,6 +2322,7 @@ export function DesktopWorkspaceShell(props: {
                 onScrollConsumed={consumeScrollTarget}
                 onSaveStateChange={onSaveStateChange}
                 registerDraftFlush={registerDraftFlush}
+                registerSourceToggle={registerSourceToggle}
                 knownMarkdownFiles={markdownWikilinkFiles}
                 readOnly={!!shareView}
                 {...(shareView
