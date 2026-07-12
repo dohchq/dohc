@@ -1445,6 +1445,8 @@ body {
  * mousemove tracking, so exactly one column handle and one row handle show
  * at a time — not a bar on every row and column at once. */
 .dohc-table-grip {
+  /* Invisible handles must not eat clicks meant for the table margins. */
+  pointer-events: none;
   background: var(--dohc-line);
   border-radius: 999px;
   cursor: pointer;
@@ -1452,6 +1454,7 @@ body {
 
 .dohc-table-grip.is-active,
 .dohc-table-grip:focus-visible {
+  pointer-events: auto;
   opacity: 1;
 }
 

@@ -52,7 +52,7 @@ function click(el: Element): void {
 // in a test; a small structural type is simpler than fighting that union.
 type JsonNode = {
   type: string;
-  attrs?: { align?: string | null; colspan?: number };
+  attrs?: { align?: string | null; colspan?: number; rowspan?: number };
   content?: JsonNode[];
   text?: string;
 };
@@ -179,6 +179,50 @@ describe("table controls grips", () => {
     expect(rows[1]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("Head");
   });
 
+  it("row grip menu widens a rowspan crossing the duplicated row", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><td rowspan="2">R</td><td>b1</td></tr><tr><td>b2</td></tr></table>',
+    );
+
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--row") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Duplicate row"));
+
+    const rows = tableNode(editor).content ?? [];
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.content?.[0]?.attrs?.rowspan).toBe(3);
+    expect(rows[1]?.content).toHaveLength(1);
+    expect(rows[1]?.content?.[0]?.attrs?.rowspan).toBe(1);
+    expect(rows[1]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("b1");
+    expect(rows[2]?.content).toHaveLength(1);
+    expect(rows[2]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("b2");
+  });
+
+  it("row grip menu copies a rowspan that ends at the duplicated row", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><td>a</td><td rowspan="2">R</td></tr><tr><td>b</td></tr></table>',
+    );
+
+    const grips = editor.view.dom.querySelectorAll<HTMLElement>(
+      ".dohc-table-grip--row",
+    );
+    expect(grips).toHaveLength(2);
+    click(grips[1] as HTMLElement);
+    click(menuItemByLabel("Duplicate row"));
+
+    const rows = tableNode(editor).content ?? [];
+    const copy = rows[2]?.content ?? [];
+    expect(rows).toHaveLength(3);
+    expect(copy).toHaveLength(2);
+    expect(copy.every((cell) => cell.attrs?.rowspan === 1)).toBe(true);
+    expect(copy.map((cell) => cell.content?.[0]?.content?.[0]?.text)).toEqual([
+      "b",
+      "R",
+    ]);
+  });
+
   it("column grip menu duplicates the column, alignment included", () => {
     editor = createTableEditor(2, 2);
     const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
@@ -207,11 +251,17 @@ describe("table controls grips", () => {
     const headerCells = rows[0]?.content ?? [];
     const bodyCells = rows[1]?.content ?? [];
     expect(bodyCells).toHaveLength(4);
-    expect(headerCells).toHaveLength(3);
-    expect(headerCells[1]?.attrs?.colspan).toBe(1);
+    expect(headerCells).toHaveLength(2);
+    expect(headerCells[0]?.attrs?.colspan).toBe(3);
     expect(
       headerCells.reduce((width, cell) => width + (cell.attrs?.colspan ?? 1), 0),
     ).toBe(4);
+    expect(bodyCells.map((cell) => cell.content?.[0]?.content?.[0]?.text)).toEqual([
+      "a",
+      "a",
+      "b",
+      "c",
+    ]);
   });
 
   it("table menu toggles the header row", () => {

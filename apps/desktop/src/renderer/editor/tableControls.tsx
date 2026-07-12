@@ -133,35 +133,70 @@ function setColumnAlign(view: EditorView, cellPos: number, align: CellAlign): vo
 }
 
 // Duplicate the row containing `cellPos`, inserting the copy right below.
-// Header cells are duplicated as BODY cells: GFM expresses exactly one header
-// row, so a second `th` row would not survive the markdown round-trip (see
-// the file-top caveat). This matches Notion, where duplicating the header
-// yields a normal row.
+// Pasted/imported rowspans follow prosemirror-tables' addRowAfter boundary
+// rule: a cell whose span crosses the insertion boundary is widened by one
+// row, so the duplicate shares the merged cell spreadsheet-style. A cell
+// whose span ends at the duplicated row is copied with rowspan normalized to
+// one — neighboring-row geometry never changes and no fixTables repair is
+// needed. Header cells are duplicated as BODY cells: GFM expresses exactly
+// one header row, so a second `th` row would not survive the markdown
+// round-trip (see the file-top caveat). This matches Notion, where
+// duplicating the header yields a normal row.
 function duplicateRow(view: EditorView, cellPos: number): void {
   if (view.editable === false) return;
   const { state } = view;
   const $cell = state.doc.resolve(cellPos);
-  const row = $cell.parent;
+  const table = $cell.node(-1);
+  const tableStart = $cell.start(-1);
+  const map = TableMap.get(table);
+  const { top: r } = map.findCell(cellPos - tableStart);
+  const rowNode = table.child(r);
   const cellType = state.schema.nodes.tableCell;
   const cells: PMNode[] = [];
-  row.forEach((cell) => {
+  const seen = new Set<number>();
+  let tr = state.tr;
+  for (let col = 0; col < map.width; col += 1) {
+    const offset = map.map[r * map.width + col];
+    if (seen.has(offset)) continue;
+    seen.add(offset);
+    const cell = table.nodeAt(offset);
+    if (!cell) continue;
+    if (map.findCell(offset).bottom - 1 > r) {
+      tr = tr.setNodeMarkup(tableStart + offset, undefined, {
+        ...cell.attrs,
+        rowspan: cell.attrs.rowspan + 1,
+      });
+      continue;
+    }
+    const copyType =
+      cell.type.name === "tableHeader" && cellType ? cellType : cell.type;
     cells.push(
-      cell.type.name === "tableHeader" && cellType
-        ? cellType.create(cell.attrs, cell.content, cell.marks)
-        : cell.copy(cell.content),
+      copyType.create(
+        { ...cell.attrs, rowspan: 1 },
+        cell.content,
+        cell.marks,
+      ),
     );
-  });
-  view.dispatch(state.tr.insert($cell.after(), row.copy(Fragment.from(cells))));
+  }
+
+  let insertPos = tableStart;
+  for (let row = 0; row <= r; row += 1) {
+    insertPos += table.child(row).nodeSize;
+  }
+  tr = tr.insert(insertPos, rowNode.copy(Fragment.from(cells)));
+  if (tr.docChanged) view.dispatch(tr);
   view.focus();
 }
 
-// Duplicate the column containing `cellPos`, inserting the copy right after
-// it in every row (bottom-to-top so earlier insert positions stay valid).
+// Duplicate the logical column containing `cellPos`, inserting the copy right
+// after it in every row (bottom-to-top so earlier insert positions stay
+// valid). Pasted/imported colspans follow prosemirror-tables' addColumn
+// convention: a spanning cell covering the selected column is widened at
+// that boundary, with its matching colwidth entry duplicated in place — so
+// every row gains the same logical column and merged headers remain aligned.
 // The dedup set guards pasted-in rowspan cells — a spanning cell appears at
-// several TableMap slots but must be copied once; the copy keeps its rowspan
-// to cover the same rows. Normalizing colspans to one column below means every
-// row gains exactly one column — prosemirror-tables' fixTables repair pass is
-// unnecessary.
+// several TableMap slots but must be copied or widened once; its operation
+// covers the same rows.
 function duplicateColumn(view: EditorView, cellPos: number): void {
   if (view.editable === false) return;
   const { state } = view;
@@ -178,23 +213,21 @@ function duplicateColumn(view: EditorView, cellPos: number): void {
     seen.add(offset);
     const cell = table.nodeAt(offset);
     if (!cell) continue;
-    let copy: PMNode;
     if (cell.attrs.colspan > 1) {
       const { left } = map.findCell(offset);
       const colwidth = cell.attrs.colwidth as number[] | null;
-      copy = cell.type.create(
-        {
-          ...cell.attrs,
-          colspan: 1,
-          colwidth: colwidth ? [colwidth[col - left]] : null,
-        },
-        cell.content,
-        cell.marks,
-      );
+      const i = col - left;
+      const nextColwidth = colwidth
+        ? [...colwidth.slice(0, i + 1), colwidth[i], ...colwidth.slice(i + 1)]
+        : null;
+      tr = tr.setNodeMarkup(tableStart + offset, undefined, {
+        ...cell.attrs,
+        colspan: cell.attrs.colspan + 1,
+        colwidth: nextColwidth,
+      });
     } else {
-      copy = cell.copy(cell.content);
+      tr = tr.insert(tableStart + offset + cell.nodeSize, cell.copy(cell.content));
     }
-    tr = tr.insert(tableStart + offset + cell.nodeSize, copy);
   }
   if (tr.docChanged) view.dispatch(tr);
   view.focus();
