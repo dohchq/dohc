@@ -246,6 +246,21 @@ describe("mcp tool path containment", () => {
       });
       expect(found).toMatchObject({ ok: true });
 
+      // The secret floor holds INSIDE mounts: a mounted .env is denied to
+      // reads and searches even though the mount itself is readable.
+      await writeFile(join(ctx.root, "shared-with-me", "alex", ".env"), "API_KEY=x");
+      await expect(
+        readWorkspaceFile(ctx, { path: "shared-with-me/alex/.env" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
+      const secretSearch = await searchWorkspaceFiles(ctx, {
+        path: "shared-with-me/alex",
+        query: "API_KEY",
+      });
+      expect(secretSearch).toMatchObject({ ok: true });
+      if (secretSearch.ok) {
+        expect(JSON.stringify(secretSearch)).not.toContain("API_KEY=x");
+      }
+
       // Read-side resolution also covers open + database query paths.
       const opened = await openInDohc(ctx, { path: "shared-with-me/alex/brief.md" });
       expect(opened).toMatchObject({ ok: true });

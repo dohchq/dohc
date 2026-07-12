@@ -32,7 +32,7 @@ export type {
 // The classifier lives in its own leaf module (enginePathFloor) so the
 // versioned text store and secret file store can enforce the SAME floor
 // without an import cycle; this re-export keeps the historical API surface.
-export { classifyEngineFilePath } from "./enginePathFloor";
+export { classifyEngineFilePath, classifyEngineFilePathForRead } from "./enginePathFloor";
 
 function normalizeQuery(query: string): string {
   return query.trim().toLowerCase();

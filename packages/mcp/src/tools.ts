@@ -31,6 +31,7 @@ import {
 import {
   LinkedChatStoreError,
   classifyEngineFilePath,
+  classifyEngineFilePathForRead,
   createLinkedChatStore,
   createVersionedTextStore,
   type ChatMessage,
@@ -507,7 +508,10 @@ const SECRET_READ_DENIED_REASON =
   "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
 
 function isSecretWorkspacePath(normalizedPath: string): boolean {
-  return classifyEngineFilePath(normalizedPath).kind === "secret";
+  // Read-aware: a mounted `shared-with-me/alex/.env` classifies as the mount
+  // sees it (secret), where the write-side classifier would say "ignored"
+  // and wave it through the floor.
+  return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
 }
 
 export async function readWorkspaceFile(

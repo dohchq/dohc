@@ -531,6 +531,17 @@ describe("collectZipEntries", () => {
     expect(entries.map((entry) => entry.path).sort()).toEqual(["notes.md"]);
   });
 
+  it("keeps secrets out of MOUNTED-share exports too (read-aware floor)", async () => {
+    await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
+    await writeFile(join(root, SHARED_WITH_ME_FOLDER, "alex", "brief.md"), "fine");
+    await writeFile(join(root, SHARED_WITH_ME_FOLDER, "alex", ".env"), "API_KEY=x");
+    const { entries } = await collectZipEntries(root, `${SHARED_WITH_ME_FOLDER}/alex`);
+    expect(entries.map((entry) => entry.path)).toEqual(["alex/brief.md"]);
+    await expect(
+      collectZipEntries(root, `${SHARED_WITH_ME_FOLDER}/alex/.env`),
+    ).rejects.toThrow(/Secret files never leave the workspace/);
+  });
+
   it("keeps secrets out of SUBFOLDER exports and refuses an explicit secret target", async () => {
     await mkdir(join(root, "config"), { recursive: true });
     await writeFile(join(root, "config", "app.md"), "fine");

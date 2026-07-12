@@ -1,6 +1,8 @@
 import {
   hasIgnoredSegment,
+  isSharedWithMePath,
   stripWindowsAliasSuffix,
+  validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import type { EngineFilePathClassification } from "@dohc/workspace-contracts/engine";
@@ -43,4 +45,27 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
     return { kind: "secret" };
   }
   return { kind: "tracked" };
+}
+
+// READ-surface classification. The write-side classifier above calls
+// everything under shared-with-me/ "ignored" — correct for capture and the
+// write gates (the projection is not the host's data), but a read surface
+// using it as a secret floor would wave a mounted `.env` straight through
+// ("ignored" is not "secret"), and a read surface using it for visibility
+// would hide every mounted file. Here shared-with-me paths classify as the
+// MOUNT sees them: the secret rules re-run on the mount-relative remainder,
+// so `shared-with-me/alex/.env` is secret and `shared-with-me/alex/brief.md`
+// is tracked. Everything else matches classifyEngineFilePath exactly.
+export function classifyEngineFilePathForRead(
+  path: string,
+): EngineFilePathClassification {
+  const read = validateUserReadPath(path);
+  if (!read.ok || hasIgnoredSegment(path)) return { kind: "ignored" };
+  const candidate = read.normalized;
+  if (isSharedWithMePath(candidate)) {
+    const remainder = candidate.split("/").slice(2).join("/");
+    // The projection root and the label folders carry no content themselves.
+    return remainder.length === 0 ? { kind: "tracked" } : classifyEngineFilePath(remainder);
+  }
+  return classifyEngineFilePath(candidate);
 }

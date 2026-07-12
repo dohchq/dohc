@@ -1,5 +1,5 @@
 import { hasIgnoredSegment, validateUserReadPath } from "@dohc/workspace-core";
-import { classifyEngineFilePath } from "@dohc/workspace-engine";
+import { classifyEngineFilePathForRead } from "@dohc/workspace-engine";
 import { spawn } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -166,7 +166,8 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   if (hasIgnoredSegment(validated.normalized)) return [];
   // Secret-floor backstop (PR 08): even if a user include glob out-votes the
   // CLI exclusions, a secret-classified path never crosses to the renderer.
-  if (classifyEngineFilePath(validated.normalized).kind === "secret") return [];
+  // Read-aware: a mounted shared-with-me/<label>/.env classifies secret too.
+  if (classifyEngineFilePathForRead(validated.normalized).kind === "secret") return [];
   const submatches = Array.isArray(data.submatches) ? data.submatches : [];
   const line = rawLine.replace(/\r?\n$/, "");
   const lineBytes = Buffer.from(line, "utf8");

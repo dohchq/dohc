@@ -1586,6 +1586,13 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
   );
 
+  // The workspace prop is DesktopRoot's boot-time registry snapshot — a
+  // shell that remounts after workspace switching needs a fresh read or a
+  // mount added/removed in the previous visit is invisible (codex P2).
+  useEffect(() => {
+    void reloadShareMounts();
+  }, [reloadShareMounts]);
+
   // Mounts follow their shares while the workspace is open: one pull on
   // open, then a slow poll. Manual refresh stays available in the explorer
   // context menu.

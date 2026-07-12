@@ -7,7 +7,11 @@ import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { createLinkedChatStore, linkedChatProjectionPath } from "./linkedChatStore";
 import { VERSIONED_TEXT_STORE_RELATIVE_PATH, createVersionedTextStore } from "./versionedTextStore";
 import { resolveEffectivePolicy, type FilesPolicyRule } from "./effectivePolicy";
-import { classifyEngineFilePath, searchWorkspaceEngine } from "./workspaceSearch";
+import {
+  classifyEngineFilePath,
+  classifyEngineFilePathForRead,
+  searchWorkspaceEngine,
+} from "./workspaceSearch";
 
 interface RawSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
@@ -653,6 +657,30 @@ describe("engine file path classifier (shared by search and capture)", () => {
   it("tracks ordinary workspace text paths", () => {
     expect(classifyEngineFilePath("notes/today.md")).toEqual({ kind: "tracked" });
     expect(classifyEngineFilePath("environment.md")).toEqual({ kind: "tracked" });
+  });
+
+  it("read classification sees mounted shares as the mount does", () => {
+    // Write-side: everything under shared-with-me is ignored (not captured).
+    expect(classifyEngineFilePath("shared-with-me/alex/.env")).toEqual({ kind: "ignored" });
+    // Read-side: the secret floor holds INSIDE mounts, and mounted content
+    // is visible/tracked for read surfaces (graph, search backstops).
+    expect(classifyEngineFilePathForRead("shared-with-me/alex/.env")).toEqual({
+      kind: "secret",
+    });
+    expect(classifyEngineFilePathForRead("shared-with-me/alex/config/prod.env")).toEqual({
+      kind: "secret",
+    });
+    expect(classifyEngineFilePathForRead("shared-with-me/alex/brief.md")).toEqual({
+      kind: "tracked",
+    });
+    expect(classifyEngineFilePathForRead("shared-with-me")).toEqual({ kind: "tracked" });
+    // Outside mounts the two classifiers agree.
+    expect(classifyEngineFilePathForRead(".env")).toEqual({ kind: "secret" });
+    expect(classifyEngineFilePathForRead("notes/today.md")).toEqual({ kind: "tracked" });
+    expect(classifyEngineFilePathForRead(".dohc/engine/engine.db")).toEqual({
+      kind: "ignored",
+    });
+    expect(classifyEngineFilePathForRead("../escape.md")).toEqual({ kind: "ignored" });
   });
 
   it("classifies .env-style secret paths at any depth or case", () => {

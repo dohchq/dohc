@@ -3641,11 +3641,15 @@ function registerIpcHandlers(): void {
       recipientEmail: credentials.email ?? null,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
-    setWorkspaceShareMounts(workspace.workspaceId, [
-      ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
-      mount,
-    ]);
     try {
+      // Inside the rollback scope: a failed registry write (ENOSPC, perms)
+      // must also remove the just-created folder — the app deliberately
+      // refuses to adopt or delete unrecorded shared-with-me folders, so an
+      // orphan here would be permanent (codex P2).
+      setWorkspaceShareMounts(workspace.workspaceId, [
+        ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
+        mount,
+      ]);
       const outcome = await refreshShareMountOnce({
         hostRoot: workspace.rootPath,
         mount,
