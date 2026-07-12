@@ -1498,3 +1498,32 @@ describe("ChatsView expand-to-tab", () => {
     );
   });
 });
+
+// The seed is one-shot ACROSS mounts too: ChatsView announces consumption so
+// the shell clears it — a tab remount (switch away, switch back) must start
+// at the overview instead of replaying the expand-time conversation.
+describe("ChatsView initialNav consumption", () => {
+  it("announces consumption of a seeded conversation exactly once", async () => {
+    const onInitialNavConsumed = vi.fn();
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "thread", channel: channel(), thread: thread() },
+      onInitialNavConsumed,
+    });
+
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(onInitialNavConsumed).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not announce consumption when there is no seed", async () => {
+    const onInitialNavConsumed = vi.fn();
+    renderView(vi.fn(), vi.fn(), { variant: "page", onInitialNavConsumed });
+
+    await screen.findByTestId("chats-view");
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannels).toHaveBeenCalled(),
+    );
+    expect(onInitialNavConsumed).not.toHaveBeenCalled();
+  });
+});

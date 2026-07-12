@@ -1300,6 +1300,13 @@ export function DesktopWorkspaceShell(props: {
     setChatsTabSeed((seed) => ({ nav: chatsPanelNav.current, nonce: seed.nonce + 1 }));
     mutateWb((state) => openTab(state, CHATS_TAB_PATH));
   }, [mutateWb]);
+  // The tab clears the seed once applied: switching away unmounts the page
+  // (only the active tab renders), so a later re-activation remounts it and
+  // starts fresh at the overview — it must not replay the conversation
+  // captured at expand time.
+  const consumeChatsTabSeed = useCallback(() => {
+    setChatsTabSeed((seed) => (seed.nav === null ? seed : { ...seed, nav: null }));
+  }, []);
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -2314,6 +2321,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     variant="page"
                     initialNav={chatsTabSeed.nav ?? undefined}
+                    onInitialNavConsumed={consumeChatsTabSeed}
                     onOpenFileChat={openFileChatInRail}
                     onOpenPath={openFile}
                     onError={(message) => setShellError(message)}

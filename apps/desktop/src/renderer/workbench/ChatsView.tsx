@@ -619,6 +619,10 @@ export function ChatsView(props: {
   // (the panel's position when the user expanded). Consumed exactly once —
   // workspace switches and later navigation behave exactly as before.
   initialNav?: ChatsNav;
+  // Fires when initialNav is consumed so the owner can clear it — a later
+  // remount (tab re-activation) must not re-apply a stale seed
+  // (LinkedChatsPanel's onInitialThreadConsumed precedent).
+  onInitialNavConsumed?: () => void;
   // Reports every navigation so the shell can seed an expanded tab with the
   // panel's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
@@ -1302,6 +1306,7 @@ export function ChatsView(props: {
   // initial overview load. Consumed once: workspace switches and later
   // navigation never re-apply a stale seed.
   const seededRef = useRef(false);
+  const { onInitialNavConsumed } = props;
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     seededRef.current = true;
@@ -1310,7 +1315,15 @@ export function ChatsView(props: {
     if (seed.level === "channel") void openChannel(seed.channel);
     else if (seed.level === "thread") void openThread(seed.channel, seed.thread);
     else if (seed.level === "dm") void openDm(seed.dm);
-  }, [openChannel, openDm, openThread, overview.status, props.initialNav]);
+    onInitialNavConsumed?.();
+  }, [
+    onInitialNavConsumed,
+    openChannel,
+    openDm,
+    openThread,
+    overview.status,
+    props.initialNav,
+  ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers')
   // then reload the conversation. Token-guarded so a stale response never
