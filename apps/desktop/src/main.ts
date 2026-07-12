@@ -4801,7 +4801,8 @@ function registerIpcHandlers(): void {
       session?.runId === input.runId &&
       ["starting", "ready", "running", "waiting-permission"].includes(session.status)
     ) {
-      await cachedAgentSessions.stopSession(input.workspaceId);
+      // Keep the caller's explicit outcome (e.g. "failed") on the record.
+      await cachedAgentSessions.stopSession(input.workspaceId, input.status);
       return;
     }
     await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");

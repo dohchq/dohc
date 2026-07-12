@@ -39,13 +39,13 @@ function request(overrides: Partial<AgentPermissionRequest> = {}): AgentPermissi
 
 describe("AgentPermissionRequests", () => {
   it("renders nothing without pending requests", () => {
-    render(<AgentPermissionRequests workspaceId="ws-1" requests={[]} />);
+    render(<AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[]} />);
     expect(screen.queryByTestId("agent-permission-requests")).toBeNull();
   });
 
   it("shows the ask with its locations and answers it", async () => {
     const user = userEvent.setup();
-    render(<AgentPermissionRequests workspaceId="ws-1" requests={[request()]} />);
+    render(<AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[request()]} />);
 
     const card = screen.getByTestId("agent-permission-request");
     expect(card.textContent).toContain("Write notes/plan.md");
@@ -69,7 +69,7 @@ describe("AgentPermissionRequests", () => {
   it("releases an answered id once the poll drops it, so a reused id can ask again", async () => {
     const user = userEvent.setup();
     const { rerender } = render(
-      <AgentPermissionRequests workspaceId="ws-1" requests={[request()]} />,
+      <AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[request()]} />,
     );
     await user.click(screen.getByTestId("agent-permission-allow_once"));
     await waitFor(() =>
@@ -78,10 +78,35 @@ describe("AgentPermissionRequests", () => {
 
     // Poll confirms the answer (request gone), then a LATER ask reuses the
     // provider request id — it must render, not stay hidden forever.
-    rerender(<AgentPermissionRequests workspaceId="ws-1" requests={[]} />);
+    rerender(<AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[]} />);
     rerender(
       <AgentPermissionRequests
         workspaceId="ws-1"
+        runId="run-1"
+        requests={[request({ title: "Run: rm old.md" })]}
+      />,
+    );
+    expect(screen.getByTestId("agent-permission-request").textContent).toContain(
+      "Run: rm old.md",
+    );
+  });
+
+  it("scopes optimistic hides by run: a new run reusing a request id asks again", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[request()]} />,
+    );
+    await user.click(screen.getByTestId("agent-permission-allow_once"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("agent-permission-request")).toBeNull(),
+    );
+
+    // A LATER session reuses the provider request id WITHOUT the poll ever
+    // observing an empty list — the run changed, so it must ask again.
+    rerender(
+      <AgentPermissionRequests
+        workspaceId="ws-1"
+        runId="run-2"
         requests={[request({ title: "Run: rm old.md" })]}
       />,
     );
@@ -93,7 +118,7 @@ describe("AgentPermissionRequests", () => {
   it("restores the card with an error when answering fails", async () => {
     answerAgentPermission.mockRejectedValueOnce(new Error("run already ended"));
     const user = userEvent.setup();
-    render(<AgentPermissionRequests workspaceId="ws-1" requests={[request()]} />);
+    render(<AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[request()]} />);
 
     await user.click(screen.getByTestId("agent-permission-reject_once"));
     await screen.findByTestId("agent-permission-error");

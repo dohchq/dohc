@@ -32,6 +32,9 @@ export interface UseAgentNotifications {
   notifications: AgentNotification[];
   // The active session's unanswered permission requests (current workspace).
   pendingPermissions: AgentPermissionRequest[];
+  // The run those asks belong to — the card scopes its optimistic-hide keys
+  // by run, so a LATER session reusing a provider request id can ask again.
+  pendingPermissionsRunId: string | null;
   dismiss: (id: string) => void;
 }
 
@@ -54,8 +57,9 @@ export function useAgentNotifications(params: {
   // card that would answer them against workspace B.
   const [pendingAsks, setPendingAsks] = useState<{
     workspaceId: string;
+    runId: string | null;
     requests: AgentPermissionRequest[];
-  }>({ workspaceId, requests: [] });
+  }>({ workspaceId, runId: null, requests: [] });
   // Dismissed state keys, KEYED BY workspace. A flat set cleared on switch let
   // switching away/back re-raise a dismissed run; per-workspace sets that
   // persist across switches never do. Each notice carries its workspaceId, so
@@ -87,7 +91,11 @@ export function useAgentNotifications(params: {
         return; // transient IPC failure — try again next tick
       }
       if (cancelled) return;
-      setPendingAsks({ workspaceId, requests: panel.session?.pendingPermissions ?? [] });
+      setPendingAsks({
+        workspaceId,
+        runId: panel.session?.runId ?? null,
+        requests: panel.session?.pendingPermissions ?? [],
+      });
       const activity = deriveAgentActivity({
         workspaceId,
         workspaceName: metaRef.current.workspaceName,
@@ -139,6 +147,8 @@ export function useAgentNotifications(params: {
   return {
     notifications: currentWorkspaceNotifications,
     pendingPermissions,
+    pendingPermissionsRunId:
+      pendingAsks.workspaceId === workspaceId ? pendingAsks.runId : null,
     dismiss,
   };
 }

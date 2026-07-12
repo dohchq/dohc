@@ -1,5 +1,5 @@
 import { Check, ShieldAlert, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentPermissionDecision } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { AgentPermissionRequest } from "./useAgentNotifications";
@@ -26,9 +26,13 @@ function permissionDecision(kind: string): AgentPermissionDecision {
 
 export function AgentPermissionRequests(props: {
   workspaceId: string;
+  // The run the requests belong to (session runId). Optimistic-hide keys are
+  // scoped by it: a LATER run reusing a provider request id must ask again,
+  // never inherit an old answer.
+  runId: string | null;
   requests: readonly AgentPermissionRequest[];
 }) {
-  const { workspaceId, requests } = props;
+  const { workspaceId, runId, requests } = props;
   // Optimistic hide: an answered request disappears immediately; the session
   // poll confirms within a tick. A failed answer restores the card with the
   // error, and every async result is epoch-gated so a slow response for
@@ -36,28 +40,32 @@ export function AgentPermissionRequests(props: {
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const epochRef = useRef(0);
+  const keyOf = useCallback(
+    (requestId: string) => `${runId ?? ""}\0${requestId}`,
+    [runId],
+  );
   useEffect(() => {
     epochRef.current += 1;
     setAnswered(new Set());
     setError(null);
   }, [workspaceId]);
-  // Release an answered id once the poll confirms the request is gone —
-  // provider request ids are not guaranteed unique across sessions, so a
-  // kept id could silently hide a future ask forever.
+  // Release an answered key once the poll confirms the request is gone (or
+  // the run changed) — a kept key could silently hide a future ask forever.
   useEffect(() => {
     setAnswered((prev) => {
-      const live = new Set(requests.map((request) => request.requestId));
-      const next = new Set([...prev].filter((id) => live.has(id)));
+      const live = new Set(requests.map((request) => keyOf(request.requestId)));
+      const next = new Set([...prev].filter((key) => live.has(key)));
       return next.size === prev.size ? prev : next;
     });
-  }, [requests]);
+  }, [requests, keyOf]);
 
-  const visible = requests.filter((request) => !answered.has(request.requestId));
+  const visible = requests.filter((request) => !answered.has(keyOf(request.requestId)));
   if (visible.length === 0) return null;
 
   async function answer(requestId: string, decision: AgentPermissionDecision) {
     const epoch = epochRef.current;
-    setAnswered((prev) => new Set(prev).add(requestId));
+    const key = keyOf(requestId);
+    setAnswered((prev) => new Set(prev).add(key));
     setError(null);
     try {
       await bridge().answerAgentPermission({ workspaceId, requestId, decision });
@@ -65,7 +73,7 @@ export function AgentPermissionRequests(props: {
       if (epoch !== epochRef.current) return;
       setAnswered((prev) => {
         const next = new Set(prev);
-        next.delete(requestId);
+        next.delete(key);
         return next;
       });
       setError(cause instanceof Error ? cause.message : "Could not answer the request.");

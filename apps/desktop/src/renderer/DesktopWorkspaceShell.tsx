@@ -2395,6 +2395,7 @@ export function DesktopWorkspaceShell(props: {
           answering resumes the run. */}
       <AgentPermissionRequests
         workspaceId={workspaceId}
+        runId={agentNotifs.pendingPermissionsRunId}
         requests={agentNotifs.pendingPermissions}
       />
 
