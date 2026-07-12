@@ -250,6 +250,36 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
+    // codex P3 follow-up: a read-only doc can't EDIT, but viewing raw source
+    // is still a view — the palette toggle opens the source textarea with the
+    // readOnly attribute and never writes.
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Big\n",
+      truncated: true,
+    });
+    let registered: (() => void) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="large.md"
+        registerSourceToggle={(toggle) => {
+          registered = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => registered?.());
+    const textarea = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(true);
+    expect(textarea.value).toContain("# Big");
+    act(() => registered?.());
+    await screen.findByTestId("view-markdown");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("edits markdown frontmatter properties through the same save seam", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",

@@ -730,14 +730,15 @@ function MarkdownView(props: {
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
-  // legacy autosave editor switches its existing editable source mode — there
-  // the .md on disk IS the source of truth, so editing raw is honest.
+  // legacy autosave editor switches its existing source mode — editable where
+  // the .md on disk IS the source of truth, readOnly-textarea on read-only
+  // docs (shared views / truncated reads), so "view source" works everywhere
+  // a markdown document renders.
   function toggleSourceView() {
     if (engineMode) {
       setShowSource((current) => !current);
       return;
     }
-    if (readOnly) return;
     if (mode === "source") {
       // Leaving editable source with an autosave still pending: flush the RAW
       // draft first (header-toggle parity). Switching mode re-points
@@ -749,7 +750,7 @@ function MarkdownView(props: {
         clearTimeout(saveTimer.current);
         void saveNow();
       }
-      switchMode("wysiwyg");
+      switchMode(readOnly ? "read" : "wysiwyg");
       return;
     }
     switchMode("source");
@@ -854,7 +855,11 @@ function MarkdownView(props: {
   }
 
   function switchMode(next: "read" | "wysiwyg" | "source") {
-    if (readOnly && next !== "read") return;
+    // Read-only docs (shared views, truncated reads) still allow SOURCE — the
+    // textarea renders with the readOnly attribute, so it is a view, not an
+    // edit surface (search jumps already force source mode this way). Only
+    // the editable WYSIWYG mode is off-limits.
+    if (readOnly && next === "wysiwyg") return;
     const current =
       mode === "wysiwyg" && !unsavedDraft.current
         ? latestDraft.current
@@ -883,12 +888,12 @@ function MarkdownView(props: {
       event.preventDefault();
       // Engine mode: the same keystroke drives the source-view toggle (the
       // legacy mode cycle is meaningless there — the CRDT editor is the only
-      // editing surface).
-      if (engineMode) {
+      // editing surface). Read-only legacy docs get the source toggle too —
+      // the edit-mode cycle is off-limits, viewing raw source is not.
+      if (engineMode || readOnly) {
         toggleSourceView();
         return;
       }
-      if (readOnly) return;
       toggleEditorMode();
     }
     window.addEventListener("keydown", onKeyDown);
