@@ -10,6 +10,8 @@ import {
   HISTORY_MAX_WIDTH,
   HISTORY_MIN_WIDTH,
   HISTORY_TAB_PATH,
+  CHATS_TAB_PATH,
+  isChatsTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
@@ -90,6 +92,13 @@ describe("tabs", () => {
     expect(isHistoryTabPath(HISTORY_TAB_PATH)).toBe(true);
     expect(isVirtualTabPath(HISTORY_TAB_PATH)).toBe(true);
     expect(isVirtualTabPath("notes/today.md")).toBe(false);
+  });
+
+  it("recognizes chats as a virtual workbench tab", () => {
+    expect(isChatsTabPath(CHATS_TAB_PATH)).toBe(true);
+    expect(isChatsTabPath("dohc://chats/extra")).toBe(false);
+    expect(isChatsTabPath(null)).toBe(false);
+    expect(isVirtualTabPath(CHATS_TAB_PATH)).toBe(true);
   });
 
   it("recognizes history file diffs as virtual tabs with encoded file identity", () => {

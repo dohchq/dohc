@@ -725,6 +725,25 @@ describe("open editors", () => {
     await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
     expect(editorRows().map((row) => row.getAttribute("data-path"))).toEqual(["b.md"]);
   });
+
+  it("caps the open editors list height so it scrolls instead of growing unbounded", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const treeRows = await screen.findAllByTestId("tree-row");
+    const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+    await user.click(rowA);
+    await screen.findByTestId("tab-a.md");
+
+    // The list is bounded and scrolls internally (VS Code-style Open Editors)
+    // instead of growing without limit as more editors open. The scroll-to-
+    // active behavior needs real layout and is covered by the desktop e2e
+    // spec (workspace-open-editors.spec.ts).
+    const list = screen.getByTestId("open-editors-list");
+    expect(list.className).toContain("max-h-[238px]");
+    expect(list.className).toContain("overflow-y-auto");
+  });
 });
 
 describe("history rail", () => {

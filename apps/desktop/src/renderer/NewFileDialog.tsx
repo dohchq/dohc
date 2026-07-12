@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
+import { withMarkdownDefault } from "./workbench/new-file-name";
 
 export function NewFileDialog(props: {
   workspaceId: string;
@@ -18,7 +19,7 @@ export function NewFileDialog(props: {
   }, []);
 
   async function create() {
-    const relativePath = name.trim();
+    const relativePath = withMarkdownDefault(name.trim());
     if (!relativePath || pendingRef.current) return;
     pendingRef.current = true;
     setPending(true);
@@ -44,6 +45,7 @@ export function NewFileDialog(props: {
           <h2 className="m-0 text-sm font-semibold text-ink">New file</h2>
           <p className="m-0 text-xs text-muted">
             Name it like a path — any folders you name are created for you.
+            No extension means markdown (.md).
           </p>
         </div>
         <input
