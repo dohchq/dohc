@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dohc — the quiet AI workspace</title>
+<meta name="description" content="dohc is a workspace where your agents build and keep the structure around your real work — documents, data, dashboards, decisions — as plain text you can read, inspect, and own." />
+<meta property="og:title" content="dohc — the quiet AI workspace" />
+<meta property="og:description" content="Work you can read. Agents build and maintain the workspace around your real work, all of it plain text you own." />
+<meta property="og:type" content="website" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2096%20104'%3E%3Cpath%20d='M48%2010c14%200%2025%209%2025%2023%200%205-2%209-4%2013%2010%205%2017%2015%2017%2027%200%2016-12%2027-29%2027-12%200-22-5-31-12L12%2078C8%2068%207%2056%2010%2044%2015%2023%2029%2010%2048%2010Z'%20fill='none'%20stroke='%232d342e'%20stroke-width='8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='38'%20cy='58'%20r='9'%20fill='%232d342e'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Homemade+Apple&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+<script>
+  // Set theme before first paint to avoid a flash.
+  (function () {
+    var saved = localStorage.getItem('dohc-theme');
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="#top" aria-label="dohc — home">
+    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+      <circle cx="38" cy="58" r="9" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">dohc</span>
+  </a>
+  <nav class="nav-links" aria-label="Site">
+    <a href="#note">the note</a>
+    <a href="#onboard">on board</a>
+    <a href="#convictions">convictions</a>
+  </nav>
+  <div class="nav-end">
+    <button class="theme-toggle" type="button" aria-label="Toggle dark mode">
+      <span class="tt-light">dark</span><span class="tt-dark">light</span>
+    </button>
+    <a class="btn btn-small" href="#deal">download</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ hero ============ -->
+  <section class="hero">
+    <p class="eyebrow reveal">dohc&ensp;·&ensp;the quiet AI workspace&ensp;·&ensp;spoken “dock”</p>
+    <h1 class="reveal d1">Work you can<br /><em class="underlined">read.<svg class="hand-underline" viewBox="0 0 220 22" preserveAspectRatio="none" aria-hidden="true"><path d="M6 14 C 60 4, 140 20, 214 9" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg></em></h1>
+    <p class="hero-sub reveal d2">
+      dohc is a workspace where your agents build and keep the structure around
+      your real work — documents, data, dashboards, decisions — as plain text
+      you can inspect, correct, and own.
+    </p>
+    <div class="hero-cta reveal d3">
+      <a class="btn btn-primary" href="#deal">Download for desktop</a>
+      <a class="btn btn-ghost" href="#note">Why text? — the note&ensp;↓</a>
+    </div>
+    <div class="hero-annotation reveal d4" aria-hidden="true">
+      <svg class="hand-arrow" viewBox="0 0 90 70"><path d="M82 6 C 60 30, 40 44, 14 56 M26 47 L 12 57 L 30 61" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="hand">no hidden state. that’s the whole trick(</span>
+    </div>
+  </section>
+
+  <!-- ============ 01 · the note ============ -->
+  <section class="section" id="note">
+    <div class="section-head reveal">
+      <span class="index">01 · the inspiration</span>
+      <h2>One page was enough.</h2>
+      <p class="section-lede">
+        In 1976, Steve Jobs described the entire Apple-1 on a single handwritten
+        page — the chips, the memory, the terminal, the price. Anyone could read
+        it. Nothing was hidden. The spec <em>was</em> the product.
+      </p>
+      <p class="section-lede">
+        Fifty years later, your work is scattered across a hundred tabs, ten
+        tools, and one inbox — and now your agents work in places you can’t see
+        at all. dohc is our answer: put the whole workspace back on the page.
+      </p>
+    </div>
+
+    <div class="notes">
+      <figure class="artifact reveal" data-tilt="left">
+        <img src="assets/apple-1-note.jpg" width="488" height="628"
+             alt="Steve Jobs’s handwritten 1976 note describing the Apple-1 computer: chips used, 8K bytes of RAM, full CRT terminal, fully expandable, board only plus manual for $75 — “a real deal”." />
+        <figcaption><span class="mono">1976</span> — the Apple-1, one page. <span class="cap-muted">Steve Jobs, ballpoint.</span></figcaption>
+      </figure>
+
+      <figure class="artifact reveal d1" data-tilt="right">
+        <div class="paper" role="img" aria-label="A handwritten note in the same style, describing dohc: uses plain text, markdown, your own files. On board: documents, dashboards, full history of every edit. Agent terminal — input: what you mean, output: work you can read. Fully expandable via your agents. Zero lock-in, your files on your disk. Review gates for agent edits included. Sync and sharing on the way. App plus your workspace: free. A real deal.">
+          <span class="hole h1"></span><span class="hole h2"></span><span class="hole h3"></span>
+          <div class="paper-ink" aria-hidden="true">
+            <p class="p-title">dohc &nbsp;<span class="p-small">(spoken “dock”)</span></p>
+            <p>uses&nbsp; plain text, markdown,<br /><span class="ind1">your own files</span> <span class="p-aside">(recommended<br />because agents<br />already speak it)</span></p>
+            <p><span class="p-u">on board</span>: &nbsp;documents, dashboards,<br /><span class="ind2">full history of every edit</span> <span class="p-small">(yours + your agents’)</span></p>
+            <p>agent terminal — <span class="p-small">input: what you mean<br /><span class="ind3">output: work you can read</span></span></p>
+            <p>fully expandable <span class="p-small">via your agents</span> — CRM,<br /><span class="ind1">trackers, dashboards, anything !!</span></p>
+            <p>review gates <span class="p-small">(for agent edits on board)</span> included.</p>
+            <p class="p-faded">sync + sharing&nbsp; on the way</p>
+            <p class="p-price"><span class="ind2">app + your workspace &nbsp;&nbsp;free.</span><br /><span class="ind3">a real deal(</span></p>
+            <p class="p-sig"><span class="ind2">dohc<br />your files, your disk<br />built with agents, for you</span></p>
+          </div>
+        </div>
+        <figcaption><span class="mono">2026</span> — dohc, one page. <span class="cap-muted">The whole idea still fits.</span></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============ 02 · on board ============ -->
+  <section class="section" id="onboard">
+    <div class="section-head reveal">
+      <span class="index">02 · on board</span>
+      <h2>The primitives, not the apps.</h2>
+      <p class="section-lede">
+        dohc doesn’t ship a CRM, a tracker, or a dashboard product. It ships the
+        sturdy pieces — and your agent assembles the workspace <em>you</em>
+        actually need out of them.
+      </p>
+    </div>
+    <dl class="spec">
+      <div class="spec-row reveal"><dt><span class="mono">a</span> documents</dt><dd>Plain-text first. Everything you and your agents make is a page you can open, diff, and edit.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">b</span> entities &amp; links</dt><dd>People, projects, deals, anything — typed records that link into your documents and back.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">c</span> dashboards &amp; views</dt><dd>Source-backed views over your real text. No second copy of the truth to keep in sync.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">d</span> history &amp; provenance</dt><dd>Every edit is recorded — who, when, and why, whether it was you or an agent.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">e</span> review gates</dt><dd>Agents propose; you approve. Locks and gates keep the pen in your hand.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">f</span> skills</dt><dd>When an agent handles something well once, keep it. Repeated work becomes a playbook.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">g</span> search</dt><dd>One index across documents, entities, history, and chats — because it’s all text.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">h</span> local-first</dt><dd>Workspaces are folders on your disk. No backend required. Leave anytime with everything.</dd></div>
+    </dl>
+  </section>
+
+  <!-- ============ 03 · convictions ============ -->
+  <section class="section" id="convictions">
+    <div class="section-head reveal">
+      <span class="index">03 · convictions</span>
+      <h2>What we refuse to hide.</h2>
+    </div>
+    <div class="convictions">
+      <article class="conviction reveal">
+        <h3>Text is the primitive.</h3>
+        <p>A folder of well-structured text files and a capable agent could recreate most of dohc. dohc exists to make that easy, reliable, and powerful — the magic is a shared substrate humans and agents can both trust, not hidden state.</p>
+      </article>
+      <article class="conviction reveal d1">
+        <h3>Agents wrap tools, not the other way around.</h3>
+        <p>Deterministic software provides the sturdy pieces — storage, sync, permissions, history. Your agent uses them to build the workspace around your intent. Not old software with AI sprinkled in.</p>
+      </article>
+      <article class="conviction reveal">
+        <h3>Individual first.</h3>
+        <p>If dohc only works after a whole company adopts it, we built the wrong thing. It should feel valuable when the entire “organization” is one human and their agents.</p>
+      </article>
+      <article class="conviction reveal d1">
+        <h3>Open when shared, private when personal.</h3>
+        <p>Visibility comes from explicit boundaries, sharing, and consent — never accidental leakage. Your personal workspace is yours.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ 04 · a real deal ============ -->
+  <section class="section deal" id="deal">
+    <div class="deal-inner reveal">
+      <span class="index">04 · the price line</span>
+      <h2>app + your workspace&ensp;&ensp;free.</h2>
+      <p class="deal-hand hand" aria-hidden="true">a real deal(</p>
+      <p class="section-lede deal-lede">
+        dohc is in early development — local-first on your desktop, no account,
+        no backend, your files on your disk. Follow along while we build it.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="https://github.com/dohc-ai">Follow the build on GitHub</a>
+        <a class="btn btn-ghost" href="#top">Back to the top&ensp;↑</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-brand">
+    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+      <circle cx="38" cy="58" r="9" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">dohc</span>
+  </div>
+  <p class="footer-line">the quiet AI workspace · built by humans + agents · <span id="year">2026</span></p>
+  <p class="footer-fine">The 1976 Apple-1 note appears as historical inspiration. Apple is a trademark of Apple Inc.; dohc is not affiliated with Apple.</p>
+</footer>
+
+<script src="site.js" defer></script>
+</body>
+</html>
