@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { RelayShareReceivedRow } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
@@ -36,13 +36,19 @@ export function SharedWithMeList(props: {
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
+  // Response token (repo invariant for workspace-scoped async loads): a
+  // slower older refresh must never overwrite a newer list, and nothing may
+  // set state after unmount or a workspace switch.
+  const refreshToken = useRef(0);
 
   async function refresh() {
+    const token = ++refreshToken.current;
     try {
       const [shares, registry] = await Promise.all([
         bridge().listRelayShares(),
         bridge().getWorkspaceRegistry(),
       ]);
+      if (token !== refreshToken.current) return;
       const workspace = registry.workspaces.find(
         (entry) => entry.workspaceId === props.workspaceId,
       );
@@ -52,15 +58,21 @@ export function SharedWithMeList(props: {
         mounts: workspace?.shareMounts ?? [],
       });
     } catch (cause) {
+      if (token !== refreshToken.current) return;
       setLoad({ status: "error", message: errorMessage(cause) });
     }
   }
 
   useEffect(() => {
     void refresh();
-    // Load once per mount; mount/unmount refresh explicitly.
+    return () => {
+      // Invalidate in-flight responses on unmount / workspace switch.
+      refreshToken.current += 1;
+    };
+    // Loads once per mount and re-arms per workspace; mount/unmount actions
+    // refresh explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [props.workspaceId]);
 
   async function mount(share: RelayShareReceivedRow) {
     setBusyShareId(share.shareId);

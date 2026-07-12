@@ -1512,6 +1512,10 @@ export function DesktopWorkspaceShell(props: {
   const [shareMounts, setShareMounts] = useState(
     props.workspace.shareMounts ?? [],
   );
+  // Bumped whenever a share pull changed files: mounted content has no host
+  // history, so the open-file refresh key needs its own signal or an open
+  // mounted tab keeps showing pre-pull content (codex P2).
+  const [mountContentEpoch, setMountContentEpoch] = useState(0);
   // Ref mirror so reloads diff against the CURRENT set without making the
   // state updater side-effectful (StrictMode replays updaters).
   const shareMountsRef = useRef(shareMounts);
@@ -1561,7 +1565,10 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
-      if (changed > 0) await refreshFiles().catch(() => undefined);
+      if (changed > 0) {
+        setMountContentEpoch((epoch) => epoch + 1);
+        await refreshFiles().catch(() => undefined);
+      }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
       if (announce) {
         const ended = results.filter((row) => row.status === "ended");
@@ -2469,9 +2476,9 @@ export function DesktopWorkspaceShell(props: {
                 key={wb.activeTab}
                 workspaceId={workspaceId}
                 path={wb.activeTab}
-                // History growth AND version switches both re-read the open
-                // file (both counters only ever increase).
-                refreshKey={historyRefreshCounter + versionEpoch}
+                // History growth, version switches, AND share-mount pulls all
+                // re-read the open file (every counter only ever increases).
+                refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
                 // G2-C-3: the engine editor re-binds to the new version's Y.Doc
                 // lineage ONLY on an active-version change — versionEpoch alone,
                 // NOT history growth (which must not churn the live session).

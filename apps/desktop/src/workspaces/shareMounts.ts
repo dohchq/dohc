@@ -1,4 +1,4 @@
-import { lstat, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { SyncRelayConnection } from "@dohc/workspace-engine";
@@ -93,6 +93,38 @@ async function assertRealMountRoot(hostRoot: string, label: string): Promise<voi
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error(`Share mount path is not a real directory: ${relative}`);
     }
+  }
+}
+
+// Creates the mount directory, guarding the container FIRST: a symlinked
+// shared-with-me must be refused before mkdir would follow it and create the
+// label outside the workspace (codex P2 — the refresh guard alone ran after
+// this write). The label directory itself is created EXCLUSIVELY: a mount
+// only ever owns a directory it created — a leftover or hand-made folder
+// must never be adopted (pulls would overwrite it; rollback/unmount would
+// delete it).
+export async function createMountDirectory(
+  hostRoot: string,
+  label: string,
+): Promise<void> {
+  const rootDir = mountRootFor(hostRoot, label);
+  await assertRealMountRoot(hostRoot, label);
+  const container = join(await realpath(hostRoot), SHARED_WITH_ME_FOLDER);
+  await mkdir(container, { recursive: true });
+  await mkdir(rootDir); // NOT recursive: EEXIST refuses adoption
+}
+
+// A mount needs file content to follow: a selector with no paths and no
+// version is a different grant kind (a chat-channel share) that must be
+// joined from Chats, not mounted as an (empty) folder.
+export function assertMountableSelector(selector: {
+  paths: readonly string[];
+  versionId: string | null;
+}): void {
+  if (selector.paths.length === 0 && selector.versionId === null) {
+    throw new Error(
+      "This code is for a shared chat channel — join it from Chats instead of mounting it.",
+    );
   }
 }
 

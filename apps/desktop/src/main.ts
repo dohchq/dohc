@@ -288,8 +288,9 @@ import {
 } from "./workspaces/syncCode";
 import { refreshSharedViewOnce } from "./workspaces/sharedView";
 import {
+  assertMountableSelector,
+  createMountDirectory,
   mountLabelFor,
-  mountRootFor,
   refreshShareMountOnce,
   removeMountFolder,
 } from "./workspaces/shareMounts";
@@ -3551,6 +3552,25 @@ function registerIpcHandlers(): void {
   });
 
   // ---- Share mounts ----
+  // ONE mount operation at a time per workspace: mount, bulk refresh, and
+  // unmount all interleave at their awaits, and unserialized they can drop
+  // each other's registry rows (stale replace-the-set snapshots) or
+  // re-materialize a folder the unmount just deleted (codex P2 pair). A
+  // simple promise chain is enough — operations are short and rare.
+  const shareMountLocks = new Map<string, Promise<unknown>>();
+  function withShareMountLock<T>(
+    workspaceId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previous = shareMountLocks.get(workspaceId) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    shareMountLocks.set(
+      workspaceId,
+      next.catch(() => undefined),
+    );
+    return next;
+  }
+
   // The receive side materialized INSIDE a host workspace: the share's
   // filtered files arrive under shared-with-me/<label>/ as ordinary
   // read-only files (agent-readable through normal tools). The mount's pull
@@ -3565,6 +3585,7 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     // A mount changes the host tree — shared views cannot host mounts.
     assertWritableWorkspace(workspace);
+    return withShareMountLock(workspace.workspaceId, async () => {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
       throw new Error("That doesn't look like a share code. Copy it again and retry.");
@@ -3599,11 +3620,14 @@ function registerIpcHandlers(): void {
       }
       throw error;
     }
+    // A chat-channel code has no file content to mount — send the user to
+    // the right surface instead of creating an empty folder.
+    assertMountableSelector(info.selector);
     // Label dedupe considers BOTH registry mounts and whatever is already on
     // disk under shared-with-me — a leftover or hand-made folder must never
     // be adopted (its contents would be overwritten by the pull and deleted
-    // by rollback/unmount). The mkdir below is EXCLUSIVE for the same reason:
-    // a mount only ever owns a directory it created (gpt-5.6-sol P1).
+    // by rollback/unmount). createMountDirectory guards the container
+    // against symlinks BEFORE any mkdir and creates the label EXCLUSIVELY.
     const sharedWithMeDir = join(workspace.rootPath, SHARED_WITH_ME_FOLDER);
     const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
     const mount = {
@@ -3616,9 +3640,11 @@ function registerIpcHandlers(): void {
       relayUrl: credentials.relayUrl,
       recipientEmail: credentials.email ?? null,
     };
-    await mkdir(sharedWithMeDir, { recursive: true });
-    await mkdir(mountRootFor(workspace.rootPath, mount.label));
-    setWorkspaceShareMounts(workspace.workspaceId, [...existing, mount]);
+    await createMountDirectory(workspace.rootPath, mount.label);
+    setWorkspaceShareMounts(workspace.workspaceId, [
+      ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
+      mount,
+    ]);
     try {
       const outcome = await refreshShareMountOnce({
         hostRoot: workspace.rootPath,
@@ -3639,9 +3665,14 @@ function registerIpcHandlers(): void {
       });
     } catch (error) {
       // Rollback both sides — a failed mount leaves no record and no folder.
+      // The record removal filters the CURRENT set (never a stale snapshot).
       console.error(`[desktop] mount-share rollback for ${mount.label}:`, error);
       try {
-        setWorkspaceShareMounts(workspace.workspaceId, existing);
+        const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+        setWorkspaceShareMounts(
+          workspace.workspaceId,
+          current.filter((m) => m.shareId !== mount.shareId),
+        );
       } catch {}
       await removeMountFolder(workspace.rootPath, mount.label).catch(() => undefined);
       notifyRenderer();
@@ -3654,12 +3685,14 @@ function registerIpcHandlers(): void {
         "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
       );
     }
+    });
   });
 
   ipcMain.handle(CHANNELS.refreshShareMounts, async (event, payload) => {
     assertTrustedSender(event);
     const input = RefreshShareMountsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    return withShareMountLock(workspace.workspaceId, async () => {
     const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     const results: Array<{
       shareId: string;
@@ -3722,6 +3755,7 @@ function registerIpcHandlers(): void {
     }
     notifyRenderer();
     return RefreshShareMountsResult.parse({ results });
+    });
   });
 
   ipcMain.handle(CHANNELS.unmountShare, async (event, payload) => {
@@ -3729,21 +3763,26 @@ function registerIpcHandlers(): void {
     const input = UnmountSharePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
+    return withShareMountLock(workspace.workspaceId, async () => {
     const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     const mount = mounts.find((m) => m.shareId === input.shareId);
     if (!mount) throw new Error("This share is not added to this workspace.");
     // Disk first, record second: a crash between the two leaves a record
     // whose folder is gone — refresh simply re-materializes or reports
-    // ended — never an orphaned folder that looks like local files.
+    // ended — never an orphaned folder that looks like local files. The
+    // record removal filters the CURRENT set (the lock serializes mount
+    // operations, so no writer can interleave here anyway).
     await removeMountFolder(workspace.rootPath, mount.label);
+    const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     setWorkspaceShareMounts(
       workspace.workspaceId,
-      mounts.filter((m) => m.shareId !== mount.shareId),
+      current.filter((m) => m.shareId !== mount.shareId),
     );
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
     return UnmountShareResult.parse({
       workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+    });
     });
   });
 

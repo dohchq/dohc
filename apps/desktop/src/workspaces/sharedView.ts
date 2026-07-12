@@ -60,6 +60,15 @@ export async function materializeSharedViewPaths(
     for (const change of changedPaths) {
       const target = containedTarget(rootDir, change.path);
       if (change.operation === "delete") {
+        // Deletes get the same REAL-parent containment as writes: a planted
+        // directory symlink must not route the unlink outside the root. The
+        // final component is safe either way — rm without `recursive`
+        // removes a link as a link, never through it.
+        const realParent = await realpath(dirname(target)).catch(() => null);
+        if (realParent === null) continue; // parent gone — nothing to delete
+        if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
+          throw new Error(`Shared view parent escapes the workspace: ${target}`);
+        }
         await rm(target, { force: true });
         continue;
       }

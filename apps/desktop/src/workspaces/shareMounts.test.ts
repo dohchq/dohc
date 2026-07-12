@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  assertMountableSelector,
+  createMountDirectory,
   mountLabelFor,
   mountRootFor,
   refreshShareMountOnce,
@@ -64,6 +66,31 @@ class FakeShareRelay {
         payloadAfterPath: path,
         metadata: { origin: "local-file" },
         beforePresent: "null",
+      },
+      recordedAtMs: 1000 + relaySeq,
+    });
+  }
+
+  addDelete(path: string): void {
+    const relaySeq = this.nextSeq++;
+    this.ops.push({
+      relaySeq,
+      originId: "origin-granter",
+      originSeq: relaySeq,
+      opKind: "moment.append",
+      payload: {
+        momentId: `moment-${relaySeq}`,
+        versionId: "main",
+        objectId: `object-${path}`,
+        path,
+        recordedAtMs: 1000 + relaySeq,
+        operation: "delete",
+        payloadBeforeBlobSha256: null,
+        payloadBeforePath: null,
+        payloadAfterBlobSha256: sha256(""),
+        payloadAfterPath: path,
+        metadata: { origin: "local-file" },
+        beforePresent: "present",
       },
       recordedAtMs: 1000 + relaySeq,
     });
@@ -266,6 +293,65 @@ describe("refreshShareMountOnce", () => {
       }),
     ).rejects.toThrow(/escapes the workspace/);
     expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
+  });
+
+  it("routes DELETE ops through the same real-parent containment", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "v1");
+    await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
+
+    // Plant a directory symlink where the granter's delete will point: the
+    // unlink must not route through it to a file outside the workspace.
+    await writeFile(join(elsewhere, "brief.md"), "victim");
+    await rm(join(mountRoot, "docs"), { recursive: true, force: true });
+    await symlink(elsewhere, join(mountRoot, "docs"), "dir");
+    relay.addDelete("docs/brief.md");
+    await expect(
+      refreshShareMountOnce({
+        hostRoot: host,
+        mount: { shareId: SHARE_ID, label: "alex" },
+        relay: relay.connection(),
+      }),
+    ).rejects.toThrow(/escapes the workspace/);
+    expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
+  });
+
+  it("createMountDirectory refuses a symlinked container BEFORE any write", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
+    await expect(createMountDirectory(host, "alex")).rejects.toThrow(
+      /not a real directory/,
+    );
+    // The guard ran before mkdir: nothing was created through the link.
+    expect(existsSync(join(elsewhere, "alex"))).toBe(false);
+  });
+
+  it("createMountDirectory never adopts an existing folder (exclusive create)", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
+    await expect(createMountDirectory(host, "alex")).rejects.toThrow();
+    await createMountDirectory(host, "sam");
+    expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "sam"))).toBe(true);
+  });
+
+  it("refuses to mount a selector with no file content (chat-channel codes)", () => {
+    expect(() => assertMountableSelector({ paths: [], versionId: null })).toThrow(
+      /shared chat channel/,
+    );
+    expect(() =>
+      assertMountableSelector({ paths: ["docs"], versionId: null }),
+    ).not.toThrow();
+    expect(() =>
+      assertMountableSelector({ paths: [], versionId: "main" }),
+    ).not.toThrow();
   });
 
   it("refuses to refresh a mount whose registry label was tampered into traversal", async () => {
