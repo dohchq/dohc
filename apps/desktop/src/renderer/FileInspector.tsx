@@ -1880,6 +1880,7 @@ export function FileInspector(props: {
             path={props.path}
             refreshKey={props.refreshKey}
             onSharePath={props.onSharePath}
+            readOnly={props.readOnly}
           />
         </Suspense>
       );

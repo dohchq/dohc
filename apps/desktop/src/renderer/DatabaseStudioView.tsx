@@ -80,6 +80,10 @@ export function DatabaseStudioView(props: {
   path: string;
   refreshKey?: number;
   onSharePath?: (path: string) => void;
+  // Mounted shares (and other read-only surfaces): cells never enter edit
+  // mode — main refuses the write anyway, but the grid must not offer an
+  // edit that can only fail on commit.
+  readOnly?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -414,6 +418,7 @@ export function DatabaseStudioView(props: {
                   })
                 }
                 onBeginEdit={(cell, value) => {
+                  if (props.readOnly) return;
                   setDraft(value);
                   setEditing(cell);
                 }}

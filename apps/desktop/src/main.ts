@@ -19,7 +19,7 @@ import {
   type IpcMainInvokeEvent,
 } from "electron";
 import { existsSync, statSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
@@ -238,6 +238,7 @@ import {
 import {
   createWorkspaceFolder,
   resetFailedJoinFolder,
+  SHARED_WITH_ME_FOLDER,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
@@ -288,6 +289,7 @@ import {
 import { refreshSharedViewOnce } from "./workspaces/sharedView";
 import {
   mountLabelFor,
+  mountRootFor,
   refreshShareMountOnce,
   removeMountFolder,
 } from "./workspaces/shareMounts";
@@ -3597,12 +3599,25 @@ function registerIpcHandlers(): void {
       }
       throw error;
     }
+    // Label dedupe considers BOTH registry mounts and whatever is already on
+    // disk under shared-with-me — a leftover or hand-made folder must never
+    // be adopted (its contents would be overwritten by the pull and deleted
+    // by rollback/unmount). The mkdir below is EXCLUSIVE for the same reason:
+    // a mount only ever owns a directory it created (gpt-5.6-sol P1).
+    const sharedWithMeDir = join(workspace.rootPath, SHARED_WITH_ME_FOLDER);
+    const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
     const mount = {
       shareId: parsed.shareId,
-      label: mountLabelFor(info.granterEmail, existing.map((m) => m.label)),
+      label: mountLabelFor(info.granterEmail, [
+        ...existing.map((m) => m.label),
+        ...onDisk,
+      ]),
       granterEmail: info.granterEmail,
       relayUrl: credentials.relayUrl,
+      recipientEmail: credentials.email ?? null,
     };
+    await mkdir(sharedWithMeDir, { recursive: true });
+    await mkdir(mountRootFor(workspace.rootPath, mount.label));
     setWorkspaceShareMounts(workspace.workspaceId, [...existing, mount]);
     try {
       const outcome = await refreshShareMountOnce({
@@ -3656,16 +3671,26 @@ function registerIpcHandlers(): void {
       return RefreshShareMountsResult.parse({ results });
     }
     await warmCredentialCache().catch(() => undefined);
-    const relayUrl = cachedCredentials?.relayUrl;
+    // ONE credentials snapshot for the whole loop: a sign-out/sign-in while
+    // an awaited refresh runs must never pair the old relay URL with a new
+    // account's token (gpt-5.6-sol P1).
+    const credentials = cachedCredentials;
     for (const mount of mounts) {
       if (mount.ended) {
         results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
         continue;
       }
-      // Offline, signed out, or signed into a DIFFERENT relay: skip — a 404
-      // from the wrong server must never flip a mount to ended (same
-      // origin-relay pin as refreshSharedView).
-      if (!relayUrl || !relayUrlsMatch(relayUrl, mount.relayUrl)) {
+      // Offline, signed out, signed into a DIFFERENT relay, or signed into a
+      // different ACCOUNT: skip — recipient routes 404 identically for "not
+      // yours" and "revoked", so refreshing under the wrong identity would
+      // permanently (and wrongly) stamp the mount ended.
+      if (
+        !credentials?.relayUrl ||
+        !relayUrlsMatch(credentials.relayUrl, mount.relayUrl) ||
+        (mount.recipientEmail != null &&
+          credentials.email != null &&
+          credentials.email !== mount.recipientEmail)
+      ) {
         results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
         continue;
       }
@@ -3673,7 +3698,7 @@ function registerIpcHandlers(): void {
         const outcome = await refreshShareMountOnce({
           hostRoot: workspace.rootPath,
           mount,
-          relay: { baseUrl: relayUrl, token: cachedCredentials!.token },
+          relay: { baseUrl: credentials.relayUrl, token: credentials.token },
         });
         if (outcome.status === "ended") {
           const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
@@ -3793,6 +3818,14 @@ function registerIpcHandlers(): void {
     const input = StartSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertSitePreviewMode(workspace.workspaceId, input.mode);
+    // Mounted shares are someone else's code AND previews carry host-scoped
+    // SDK reads, so EVERY preview mode is refused for shared-with-me roots
+    // (stricter than a shared view, whose whole workspace IS the share).
+    if (isSharedWithMePath(input.siteRoot)) {
+      throw new Error(
+        "This site arrived through a share. Previews run with workspace access, so copy the site into your own files to run it.",
+      );
+    }
     const site = await getSitePackage(workspace.rootPath, input.siteRoot);
     if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
     return StartSitePreviewResult.parse(

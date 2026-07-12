@@ -268,6 +268,28 @@ describe("mcp tool path containment", () => {
     });
   });
 
+  it("site tools refuse mounted-share roots (no running someone else's code)", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "shared-with-me", "alex", "site"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "shared-with-me", "alex", "site", "index.html"),
+        "<!doctype html><title>shared</title>",
+      );
+      for (const run of [
+        () => testSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
+        () => buildSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
+        () => previewSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
+        () => publishSite(ctx, { siteRoot: "shared-with-me/alex/site" }),
+        () => addSiteSdk(ctx, { siteRoot: "shared-with-me/alex/site" }),
+      ]) {
+        await expect(run()).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("mounted share"),
+        });
+      }
+    });
+  });
+
   it("workspace mutations refuse a symlinked .dohc before changing visible files", async () => {
     await withWorkspace(async (ctx) => {
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-metadata-outside-"));

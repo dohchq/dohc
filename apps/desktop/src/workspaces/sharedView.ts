@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import {
   ShareUnavailableError,
@@ -39,6 +39,22 @@ export async function materializeSharedViewPaths(
 ): Promise<void> {
   if (changedPaths.length === 0) return;
   const store = createVersionedTextStore(rootDir);
+  const realRoot = await realpath(rootDir);
+  // REAL containment for the write, not just the lexical check above: a
+  // symlink planted inside the materialized tree (a linked directory or a
+  // link at the target path) must never redirect relay-controlled bytes
+  // outside the root. The parent is realpath-verified after mkdir, and the
+  // target itself is removed then recreated exclusively so a final-component
+  // link is deleted, never followed (gpt-5.6-sol P1).
+  async function preparedTarget(target: string): Promise<string> {
+    await mkdir(dirname(target), { recursive: true });
+    const realParent = await realpath(dirname(target));
+    if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
+      throw new Error(`Shared view parent escapes the workspace: ${target}`);
+    }
+    await rm(target, { force: true });
+    return target;
+  }
   try {
     const main = await store.ensureMainVersion({ workspaceId });
     for (const change of changedPaths) {
@@ -47,14 +63,14 @@ export async function materializeSharedViewPaths(
         await rm(target, { force: true });
         continue;
       }
-      await mkdir(dirname(target), { recursive: true });
+      await preparedTarget(target);
       if (change.contentKind === "binary") {
         const bytes = await store.readBinaryFile({
           workspaceId,
           versionId: main.id,
           path: change.path,
         });
-        if (bytes) await writeFile(target, bytes);
+        if (bytes) await writeFile(target, bytes, { flag: "wx" });
         continue;
       }
       const snapshot = await store.readTextFile({
@@ -62,7 +78,7 @@ export async function materializeSharedViewPaths(
         versionId: main.id,
         path: change.path,
       });
-      if (snapshot) await writeFile(target, snapshot.text, "utf8");
+      if (snapshot) await writeFile(target, snapshot.text, { encoding: "utf8", flag: "wx" });
     }
   } finally {
     await store.close();

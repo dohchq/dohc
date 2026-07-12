@@ -1,5 +1,6 @@
 import {
   classifyPath,
+  validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "@dohc/workspace-engine";
@@ -666,7 +667,9 @@ export async function collectZipEntries(
   let prefixRel = "";
   let baseName = basename(realRoot);
   if (relativePath !== undefined) {
-    const validated = validateUserWritePath(relativePath);
+    // Read-side validation: export is a read, so mounted shares
+    // (shared-with-me/…) export like the ordinary files they appear to be.
+    const validated = validateUserReadPath(relativePath);
     if (!validated.ok) {
       throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
     }

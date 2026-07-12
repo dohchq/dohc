@@ -54,6 +54,11 @@ export interface ShareMountRecord {
   // Same origin-relay pin as ShareViewIdentity.relayUrl: refreshes only ever
   // run against the relay the share was mounted from.
   relayUrl: string;
+  // Account pin: shares are addressed to an account, and recipient routes
+  // 404 identically for "not yours" and "revoked". Signed into a DIFFERENT
+  // account, a refresh must SKIP (not flip the mount to ended). Null on
+  // records from before this field existed — those refresh as before.
+  recipientEmail?: string | null;
   ended?: boolean;
 }
 

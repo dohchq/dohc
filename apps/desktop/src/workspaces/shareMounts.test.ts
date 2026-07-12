@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -194,6 +194,78 @@ describe("refreshShareMountOnce", () => {
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8"),
     ).toBe("keep me");
+  });
+
+  it("refuses a symlinked shared-with-me or label directory (real-path guard)", async () => {
+    const elsewhere = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "the brief");
+
+    // Symlinked container: shared-with-me itself points outside.
+    const hostA = await tempHostRoot();
+    await symlink(elsewhere, join(hostA, SHARED_WITH_ME_FOLDER), "dir");
+    await expect(
+      refreshShareMountOnce({
+        hostRoot: hostA,
+        mount: { shareId: SHARE_ID, label: "alex" },
+        relay: relay.connection(),
+      }),
+    ).rejects.toThrow(/not a real directory/);
+    expect(existsSync(join(elsewhere, "alex"))).toBe(false);
+
+    // Symlinked label directory inside a real shared-with-me.
+    const hostB = await tempHostRoot();
+    await mkdir(join(hostB, SHARED_WITH_ME_FOLDER), { recursive: true });
+    await symlink(elsewhere, join(hostB, SHARED_WITH_ME_FOLDER, "alex"), "dir");
+    await expect(
+      refreshShareMountOnce({
+        hostRoot: hostB,
+        mount: { shareId: SHARE_ID, label: "alex" },
+        relay: relay.connection(),
+      }),
+    ).rejects.toThrow(/not a real directory/);
+    expect(existsSync(join(elsewhere, "docs"))).toBe(false);
+  });
+
+  it("never follows a symlink planted INSIDE the mount (directory or file)", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "v1");
+    await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
+
+    // A planted FILE symlink at a materialized path is deleted, not
+    // followed: the update lands as a fresh regular file.
+    await writeFile(join(elsewhere, "victim.md"), "untouched");
+    await rm(join(mountRoot, "docs/brief.md"));
+    await symlink(join(elsewhere, "victim.md"), join(mountRoot, "docs/brief.md"), "file");
+    relay.addWrite("docs/brief.md", "v2");
+    await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
+    expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v2");
+
+    // A planted DIRECTORY symlink on the write path refuses the pass — the
+    // realpath parent check sees the escape before any byte lands.
+    await rm(join(mountRoot, "docs"), { recursive: true, force: true });
+    await symlink(elsewhere, join(mountRoot, "docs"), "dir");
+    relay.addWrite("docs/brief.md", "v3");
+    await expect(
+      refreshShareMountOnce({
+        hostRoot: host,
+        mount: { shareId: SHARE_ID, label: "alex" },
+        relay: relay.connection(),
+      }),
+    ).rejects.toThrow(/escapes the workspace/);
+    expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
   });
 
   it("refuses to refresh a mount whose registry label was tampered into traversal", async () => {

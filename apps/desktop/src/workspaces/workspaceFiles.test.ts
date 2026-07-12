@@ -508,6 +508,20 @@ describe("collectZipEntries", () => {
     await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
   });
 
+  it("exports mounted-share paths (read surface, not a write)", async () => {
+    await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex", "docs"), { recursive: true });
+    await writeFile(
+      join(root, SHARED_WITH_ME_FOLDER, "alex", "docs", "brief.md"),
+      "shared",
+    );
+    const { entries, baseName } = await collectZipEntries(
+      root,
+      `${SHARED_WITH_ME_FOLDER}/alex`,
+    );
+    expect(baseName).toBe("alex");
+    expect(entries.map((entry) => entry.path)).toEqual(["alex/docs/brief.md"]);
+  });
+
   it("keeps secret-classified files out of archives (codex P2)", async () => {
     await writeFile(join(root, "notes.md"), "fine");
     await writeFile(join(root, ".env"), "API_KEY=hunter2");

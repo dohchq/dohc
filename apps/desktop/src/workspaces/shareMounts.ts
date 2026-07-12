@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { SyncRelayConnection } from "@dohc/workspace-engine";
@@ -75,6 +75,27 @@ export function mountRootFor(hostRoot: string, label: string): string {
   return target;
 }
 
+// The REAL-path guard the lexical check above cannot give: refuses a
+// symlinked shared-with-me or label directory (at either component) before
+// any materialization. A refresh writes relay-controlled bytes, so a link
+// planted at either level must never redirect those writes outside the
+// workspace (gpt-5.6-sol P1). The workspace root itself is realpath'd first,
+// so ancestor system symlinks above the workspace stay legal.
+async function assertRealMountRoot(hostRoot: string, label: string): Promise<void> {
+  const realHost = await realpath(hostRoot);
+  for (const relative of [
+    SHARED_WITH_ME_FOLDER,
+    `${SHARED_WITH_ME_FOLDER}/${label}`,
+  ]) {
+    const absolute = join(realHost, ...relative.split("/"));
+    const stat = await lstat(absolute).catch(() => null);
+    if (stat === null) continue; // not created yet — mkdir will make a real dir
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Share mount path is not a real directory: ${relative}`);
+    }
+  }
+}
+
 // The store-scoping workspace id inside the mount's own nested engine.db.
 // Purely local and deterministic; it never leaves the machine.
 export function mountStoreWorkspaceIdFor(shareId: string): string {
@@ -92,6 +113,7 @@ export async function refreshShareMountOnce(input: {
   relay: SyncRelayConnection;
 }): Promise<RefreshSharedViewOutcome> {
   const rootDir = mountRootFor(input.hostRoot, input.mount.label);
+  await assertRealMountRoot(input.hostRoot, input.mount.label);
   return refreshSharedViewOnce({
     rootDir,
     workspaceId: mountStoreWorkspaceIdFor(input.mount.shareId),
@@ -109,5 +131,6 @@ export async function removeMountFolder(
   label: string,
 ): Promise<void> {
   const rootDir = mountRootFor(hostRoot, label);
+  await assertRealMountRoot(hostRoot, label);
   await rm(rootDir, { recursive: true, force: true });
 }

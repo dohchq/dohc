@@ -1854,6 +1854,16 @@ function escapeHtml(value: string): string {
 async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   const root = await safeResolve(ctx, siteRoot, "read");
   if (!root.ok) return root;
+  // Mounted shares (shared-with-me/) are readable, but site tools execute
+  // or mutate the site (test/build/preview/publish/add-sdk) — running
+  // someone else's shared code with workspace access is refused. Copying
+  // the site into the user's own files makes it runnable.
+  if (root.normalized === "shared-with-me" || root.normalized.startsWith("shared-with-me/")) {
+    return {
+      ok: false as const,
+      reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
+    };
+  }
   const allowed = sitePathAllowed(root.normalized);
   if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);

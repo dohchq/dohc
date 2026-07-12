@@ -79,6 +79,7 @@ export function SettingsDialog(props: {
   onClose: () => void;
   onAgentActiveChange?: (active: boolean) => void;
   onOpenCloud?: () => void;
+  onWorkspaceFilesChanged?: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -593,7 +594,12 @@ export function SettingsDialog(props: {
               <span aria-hidden />
             </SettingRow>
             <div className="px-1 pb-2">
-              <SharedWithMeList workspaceId={props.workspaceId} />
+              <SharedWithMeList
+                workspaceId={props.workspaceId}
+                {...(props.onWorkspaceFilesChanged
+                  ? { onWorkspaceFilesChanged: props.onWorkspaceFilesChanged }
+                  : {})}
+              />
             </div>
           </div>
         );
