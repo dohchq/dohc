@@ -12,6 +12,7 @@ import {
   HISTORY_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  RETIRED_VIEW_IDS,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -1386,9 +1387,9 @@ export const TryInWorkspaceVersionPayload = z.object({
     .refine((value) => value.trim().length > 0, {
       message: "task must not be blank",
     }),
-  // When present, main hands the task to this installed agent driver (the
-  // agent panel's session path); absent = a bare dohc-tracked run the user's
-  // own agent tool works inside.
+  // When present, main hands the task to this installed agent driver (a
+  // dohc-managed driver session); absent = a bare dohc-tracked run the
+  // user's own agent tool works inside.
   driverId: z.string().min(1).max(100).optional(),
 });
 export type TryInWorkspaceVersionPayload = z.infer<
@@ -1922,14 +1923,6 @@ export const AgentPanelSnapshotResult = z.object({
 });
 export type AgentPanelSnapshotResult = z.infer<typeof AgentPanelSnapshotResult>;
 
-export const StartAgentSessionPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  driverId: AgentDriverIdSchema,
-  prompt: z.string().min(1).max(20_000),
-  model: z.string().min(1).max(200).optional(),
-});
-export type StartAgentSessionPayload = z.infer<typeof StartAgentSessionPayload>;
-
 export const AgentPermissionResponsePayload = z.object({
   workspaceId: WORKSPACE_ID,
   requestId: z.string().min(1).max(200),
@@ -2061,7 +2054,11 @@ export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 // the pure workbench model's, so contract and model can never disagree.
 export const WorkspaceUiState = z.object({
   version: z.literal(1),
-  activeView: z.enum(VIEW_IDS),
+  // Retired views stay accepted: getWorkspaceUiState safeParses the WHOLE
+  // file, so one stale activeView (e.g. the removed Agent panel's "agent")
+  // must degrade to the default view — never null every tab/pin/fold the
+  // user had. parseUiState maps unknown views to the default.
+  activeView: z.enum([...VIEW_IDS, ...RETIRED_VIEW_IDS]),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
@@ -2410,8 +2407,6 @@ export interface DohcDesktopBridge {
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
   probeAgentDrivers(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
   getAgentSessionState(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
-  startAgentSession(payload: StartAgentSessionPayload): Promise<AgentPanelSnapshotResult>;
-  stopAgentSession(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
   answerAgentPermission(
     payload: AgentPermissionResponsePayload,
   ): Promise<AgentPanelSnapshotResult>;

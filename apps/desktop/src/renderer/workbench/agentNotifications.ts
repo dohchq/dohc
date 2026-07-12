@@ -266,18 +266,3 @@ export function dismissAgentNotification(
 ): AgentNotification[] {
   return list.filter((notice) => notice.id !== id);
 }
-
-// Auto-clear seam: remove every notice for a workspace (used when the user
-// opens the Agent panel — they are now looking at the run). This is the ONLY
-// auto-clear: a run's notices point at the workspace's agent session, not at a
-// specific chat thread. The agent session model does not (yet) carry the chat
-// thread a mention-driven ask belongs to, so there is no reliable per-thread
-// clear to offer — opening the notice lands on the run and clears the whole
-// workspace. When the session snapshot starts carrying the originating chat
-// thread, a thread-scoped clear can be reintroduced honestly.
-export function clearAgentNotificationsForWorkspace(
-  list: readonly AgentNotification[],
-  workspaceId: string,
-): AgentNotification[] {
-  return list.filter((notice) => notice.workspaceId !== workspaceId);
-}

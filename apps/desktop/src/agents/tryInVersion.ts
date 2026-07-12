@@ -10,8 +10,8 @@
 //      so 0N-1 attribution applies to everything the agent writes.
 //
 // When the run ends — every terminal path funnels through
-// AgentIntegration.endAgentRun (driver turn-completed, panel Stop, the
-// endAgentRun IPC) — the session becomes a REVIEW state carrying the
+// AgentIntegration.endAgentRun (driver turn-completed, a Settings stop,
+// the endAgentRun IPC) — the session becomes a REVIEW state carrying the
 // changed-file count vs Main (0M-4 compare, also on the capture chain).
 // Sessions are in-memory: runs cannot outlive the app (quit ends them), and
 // the versions themselves are durable engine state either way — nothing a
@@ -185,7 +185,7 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
     const existing = sessions.get(workspaceId);
     if (existing && existing.state.status === "running") {
       throw new Error(
-        "An agent is already trying something in this workspace. Wait for it to finish, or stop it from the agent panel.",
+        "An agent is already trying something in this workspace. Wait for it to finish, or stop it from Settings → Agents & MCP.",
       );
     }
     const ops = await options.operationsFor(workspaceId);

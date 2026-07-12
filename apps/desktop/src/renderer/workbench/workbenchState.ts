@@ -14,10 +14,14 @@ export const VIEW_IDS = [
   "chats",
   "graph",
   "sites",
-  "agent",
   "history",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
+// Views that existed in earlier releases ("agent": the retired Agent panel).
+// Persisted ui-state may still carry one; the IPC contract accepts these so a
+// stale activeView never nulls the whole saved state, and the tolerant
+// parseUiState below maps them to the default view.
+export const RETIRED_VIEW_IDS = ["agent"] as const;
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
