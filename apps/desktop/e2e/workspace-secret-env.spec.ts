@@ -6,6 +6,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   seedWorkspaceSettings,
   waitForWorkspaceFile,
@@ -144,6 +145,8 @@ test("a .env is versioned protected: locked history, versions carry it, search f
     const protectedRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path=".env"]',
     );
+    // History lives in the left History view (the right panel is Chats now).
+    await openHistoryView(page);
     await expect(protectedRow.first()).toBeVisible({ timeout: 20_000 });
     await expect(protectedRow.first()).toContainText("Updated .env");
     await expect(

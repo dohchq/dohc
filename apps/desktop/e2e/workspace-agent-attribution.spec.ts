@@ -4,6 +4,8 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openFileChatsPanel,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
@@ -72,6 +74,8 @@ test("a dohc-tracked run's edits show as \"You's agent\" in History; later edits
     ]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
 
+    // History lives in the left History view (the right panel is Chats now).
+    await openHistoryView(page);
     const agentRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );
@@ -145,7 +149,7 @@ test("an MCP chat reply appears in the file rail as \"You's agent\"", async () =
     // Create the chat and ask a question as the human user.
     await revealExplorerPath(page, "notes/topic.md");
     await explorerRow(page, "notes/topic.md").click();
-    await page.getByTestId("rail-tab-chats").click();
+    await openFileChatsPanel(page);
     await page.getByTestId("linked-chat-new").click();
     const titleInput = page.getByTestId("linked-chat-new-title");
     await titleInput.fill("Agent question");

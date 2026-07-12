@@ -200,13 +200,15 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.waitForTimeout(1_200);
     await shot(page, "07-search-light");
 
-    // 08 — chats view
+    // 08 — chats panel (right-hand secondary sidebar)
     await page.getByTestId("activity-chats").click();
     await page.waitForTimeout(800);
     await shot(page, "08-chats-light");
     await setTheme(page, "dark");
     await shot(page, "08-chats-dark");
     await setTheme(page, "light");
+    // Close the panel so later shots keep their pre-panel composition.
+    await page.getByTestId("chats-panel-collapse").click();
 
     // 09 — graph view
     await page.getByTestId("activity-graph").click();

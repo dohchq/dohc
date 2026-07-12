@@ -2931,8 +2931,8 @@ export function ChatsView(props: {
                     data-thread-id={thread.id}
                     title={
                       thread.path
-                        ? `Open in the file rail (${thread.path})`
-                        : "Open in the file rail"
+                        ? `Open in the Chats panel (${thread.path})`
+                        : "Open in the Chats panel"
                     }
                     onClick={() => props.onOpenFileChat(thread)}
                     className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"

@@ -194,7 +194,7 @@ const Tab = memo(function Tab(props: {
 // Ctrl+W and the menu use, reorder through the pure moveTab. `dirty` is
 // runtime-only and known for the ACTIVE tab (the one mounted inspector
 // reports its save state). h-9: ONE header band height with the side panel
-// and history rail, so the three hairlines meet at the vertical seams.
+// and Chats panel, so the three hairlines meet at the vertical seams.
 export function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
