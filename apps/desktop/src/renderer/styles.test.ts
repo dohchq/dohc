@@ -44,6 +44,13 @@ describe("markdown editor layout css", () => {
   });
 });
 
+describe("editor tab strip css", () => {
+  it("hides the strip's scrollbar so a painted bar never pushes the fixed-height tabs into vertical overflow", () => {
+    expect(cssRule(".dohc-tab-strip")).toContain("scrollbar-width: none;");
+    expect(cssRule(".dohc-tab-strip::-webkit-scrollbar")).toContain("display: none;");
+  });
+});
+
 describe("workbench cursor css", () => {
   it("uses a pointer cursor for clickable app chrome", () => {
     const clickableChrome = cssRule(
