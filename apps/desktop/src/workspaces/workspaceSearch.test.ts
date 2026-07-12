@@ -449,6 +449,12 @@ describe("mountScopedIncludeGlob", () => {
     expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe(
       "shared-with-me/alex/**",
     );
+    // Recursive "**/"-prefixed globs are NOT root-anchored and do match
+    // mounted files — they scope under the projection.
+    expect(mountScopedIncludeGlob("**/*.md")).toBe("shared-with-me/**/*.md");
+    expect(mountScopedIncludeGlob("**/docs/**/*.md")).toBe(
+      "shared-with-me/**/docs/**/*.md",
+    );
     // Anchored path globs outside the projection cannot match under it.
     expect(mountScopedIncludeGlob("notes/**")).toBeNull();
     expect(mountScopedIncludeGlob("docs/plan.md")).toBeNull();

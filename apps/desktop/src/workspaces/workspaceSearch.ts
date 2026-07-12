@@ -60,6 +60,10 @@ export function mountScopedIncludeGlob(
     return segments.join("/");
   }
   if (!glob.includes("/")) return `shared-with-me/**/${glob}`;
+  // A leading "**/" floats like a basename glob (gitignore semantics: not
+  // root-anchored), so "**/*.md" DOES match mounted files — scope it under
+  // the projection instead of skipping the pass.
+  if (glob.startsWith("**/")) return `shared-with-me/${glob}`;
   return null;
 }
 
