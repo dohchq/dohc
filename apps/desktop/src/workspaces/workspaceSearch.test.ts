@@ -444,6 +444,11 @@ describe("mountScopedIncludeGlob", () => {
     // they intersect mounts and get scoped.
     expect(mountScopedIncludeGlob("*.md")).toBe("shared-with-me/**/*.md");
     expect(mountScopedIncludeGlob("brief.*")).toBe("shared-with-me/**/brief.*");
+    // Case-variant projection globs normalize their prefix to the on-disk
+    // casing (rg glob matching is byte-wise).
+    expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe(
+      "shared-with-me/alex/**",
+    );
     // Anchored path globs outside the projection cannot match under it.
     expect(mountScopedIncludeGlob("notes/**")).toBeNull();
     expect(mountScopedIncludeGlob("docs/plan.md")).toBeNull();

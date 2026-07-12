@@ -385,6 +385,30 @@ describe("refreshShareMountOnce", () => {
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
   });
 
+  it("heals a FILE squatting on an ancestor directory path", async () => {
+    const host = await tempHostRoot();
+    const relay = new FakeShareRelay();
+    relay.addWrite("docs/brief.md", "v1");
+    await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
+
+    // Replace the docs DIRECTORY with a plain file; the next refresh must
+    // rebuild the real chain instead of wedging on ENOTDIR.
+    await rm(join(mountRoot, "docs"), { recursive: true, force: true });
+    await writeFile(join(mountRoot, "docs"), "squatter");
+    const healed = await refreshShareMountOnce({
+      hostRoot: host,
+      mount: { shareId: SHARE_ID, label: "alex" },
+      relay: relay.connection(),
+    });
+    expect(healed.status).toBe("updated");
+    expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v1");
+  });
+
   it("routes DELETE ops through the same real-parent containment", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();

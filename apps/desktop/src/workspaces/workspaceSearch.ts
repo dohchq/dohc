@@ -1,4 +1,8 @@
-import { hasIgnoredSegment, validateUserReadPath } from "@dohc/workspace-core";
+import {
+  hasIgnoredSegment,
+  isSharedWithMePath,
+  validateUserReadPath,
+} from "@dohc/workspace-core";
 import { classifyEngineFilePathForRead } from "@dohc/workspace-engine";
 import { spawn } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
@@ -47,7 +51,14 @@ export function mountScopedIncludeGlob(
 ): string | null {
   if (!userGlob || userGlob.trim().length === 0) return "shared-with-me/**";
   const glob = userGlob.trim();
-  if (glob === "shared-with-me" || glob.startsWith("shared-with-me/")) return glob;
+  // Projection-targeting globs pass through with the PREFIX normalized to
+  // the on-disk casing: rg glob matching is byte-wise, so a case-variant
+  // "Shared-With-Me/**" would otherwise match nothing.
+  if (isSharedWithMePath(glob)) {
+    const segments = glob.split("/");
+    segments[0] = "shared-with-me";
+    return segments.join("/");
+  }
   if (!glob.includes("/")) return `shared-with-me/**/${glob}`;
   return null;
 }

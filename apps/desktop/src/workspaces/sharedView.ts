@@ -132,12 +132,22 @@ export async function repairSharedViewProjection(
   // of wedging on the containment guard.
   async function healTamperedAncestors(relativePath: string): Promise<void> {
     let current: string = realRoot;
-    for (const segment of relativePath.split("/")) {
-      current = resolve(current, segment);
+    const segments = relativePath.split("/");
+    for (let index = 0; index < segments.length; index += 1) {
+      current = resolve(current, segments[index]!);
       const stat = await lstat(current).catch(() => null);
       if (stat === null) return; // chain ends — nothing deeper exists
       if (stat.isSymbolicLink()) {
         await rm(current, { force: true });
+        return;
+      }
+      // An ANCESTOR that is not a directory (a file squatting on the path)
+      // blocks mkdir the same way a symlink misroutes it — remove it so the
+      // real chain can rebuild. The final component is the target itself;
+      // preparedTarget removes and recreates that one.
+      const isAncestor = index < segments.length - 1;
+      if (isAncestor && !stat.isDirectory()) {
+        await rm(current, { recursive: true, force: true });
         return;
       }
     }
