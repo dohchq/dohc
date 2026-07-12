@@ -822,7 +822,7 @@ async function readGraphText(
   rootPath: string,
   relativePath: string,
 ): Promise<{ text: string; truncated: boolean; bytesRead: number }> {
-  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
+  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath, "read");
   const handle = await open(realTarget, "r");
   try {
     const buf = Buffer.alloc(MAX_GRAPH_FILE_TEXT_BYTES + 1);

@@ -103,6 +103,20 @@ export const WorkspaceSummary = z.object({
       ended: z.boolean().optional(),
     })
     .optional(),
+  // Share mounts: received shares materialized into this workspace's
+  // shared-with-me/<label>/ as ordinary read-only files. `ended` marks a
+  // revoked share (the mounted copy stays readable, stops refreshing).
+  shareMounts: z
+    .array(
+      z.object({
+        shareId: z.string().min(1).max(200),
+        label: z.string().min(1).max(64),
+        granterEmail: z.string().min(3).max(320).nullable(),
+        ended: z.boolean().optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
 });
 export type WorkspaceSummary = z.infer<typeof WorkspaceSummary>;
 
@@ -1668,8 +1682,23 @@ export const RelayShareGrantedRow = z.object({
 });
 export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 
+// A path/version share granted TO this account (the receive side). The
+// relay deliberately omits the granter's workspace id; the selector and
+// granter identity are all a recipient ever sees.
+export const RelayShareReceivedRow = z.object({
+  shareId: SHARE_ID,
+  granterEmail: EMAIL_STRING.nullable(),
+  selector: RelayShareSelector,
+  createdAtMs: z.number().int().nonnegative(),
+  shareCode: z.string().min(1).max(4096),
+});
+export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
+
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
+  // Path/version shares addressed to this account (chat-channel grants are
+  // listed through listChatChannelShares).
+  received: z.array(RelayShareReceivedRow).max(1000).default([]),
 });
 export type ListRelaySharesResult = z.infer<typeof ListRelaySharesResult>;
 
@@ -1796,6 +1825,54 @@ export const RefreshSharedViewResult = z.object({
   changedPaths: z.number().int().nonnegative(),
 });
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
+
+// ---- Share mounts ----
+// The receive side of a relay share materialized INSIDE a host workspace as
+// shared-with-me/<label>/ — ordinary read-only files (agent-readable through
+// normal tools) that live-follow the share. Mounting/refreshing/unmounting
+// are host-workspace operations; every path and label is re-validated in
+// main before any disk effect.
+
+export const MountSharePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareCode: z.string().min(1).max(4096),
+});
+export type MountSharePayload = z.infer<typeof MountSharePayload>;
+
+export const ShareMountStatusRow = z.object({
+  shareId: SHARE_ID,
+  label: z.string().min(1).max(64),
+  status: z.enum(["updated", "unchanged", "ended"]),
+  changedPaths: z.number().int().nonnegative(),
+});
+export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
+
+export const MountShareResult = z.object({
+  workspace: WorkspaceSummary,
+  mount: ShareMountStatusRow,
+});
+export type MountShareResult = z.infer<typeof MountShareResult>;
+
+export const RefreshShareMountsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type RefreshShareMountsPayload = z.infer<typeof RefreshShareMountsPayload>;
+
+export const RefreshShareMountsResult = z.object({
+  results: z.array(ShareMountStatusRow).max(200),
+});
+export type RefreshShareMountsResult = z.infer<typeof RefreshShareMountsResult>;
+
+export const UnmountSharePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: SHARE_ID,
+});
+export type UnmountSharePayload = z.infer<typeof UnmountSharePayload>;
+
+export const UnmountShareResult = z.object({
+  workspace: WorkspaceSummary,
+});
+export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
 // Local agent integration (Phase 11). An agent run is a LOCAL concept: a small
 // record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
@@ -2324,6 +2401,13 @@ export interface DohcDesktopBridge {
   // Relay shares (PR 18): receive side — read-only shared views.
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
+  // Share mounts: a received share materialized into a host workspace's
+  // shared-with-me/<label>/ as ordinary read-only files.
+  mountShare(payload: MountSharePayload): Promise<MountShareResult>;
+  refreshShareMounts(
+    payload: RefreshShareMountsPayload,
+  ): Promise<RefreshShareMountsResult>;
+  unmountShare(payload: UnmountSharePayload): Promise<UnmountShareResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
   // flag: for unflagged workspaces every call rejects.

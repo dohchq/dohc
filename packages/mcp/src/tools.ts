@@ -14,6 +14,7 @@ import {
   hasWebDependency,
   mediaTypeForPath,
   packageManagerFromFiles,
+  validateUserReadPath,
   validateUserWritePath,
   type ChangeAuthor,
   type ChangeProvenance,
@@ -124,8 +125,15 @@ async function isWithinRealRoot(root: string, absolute: string): Promise<boolean
 async function safeResolve(
   ctx: ToolContext,
   relativePath: string,
+  access: "read" | "write" = "write",
 ): Promise<{ ok: true; absolute: string; normalized: string } | { ok: false; reason: string }> {
-  const validated = validateUserWritePath(relativePath);
+  // "write" (the default — fail closed) refuses the reserved shared-with-me
+  // projection; "read" allows it (share mounts exist to be read by agents)
+  // while keeping traversal/encoding/ignored-segment guards identical.
+  const validated =
+    access === "read"
+      ? validateUserReadPath(relativePath)
+      : validateUserWritePath(relativePath);
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
@@ -438,7 +446,7 @@ export async function listWorkspaceFiles(
 > {
   const root =
     args.path && args.path.trim().length > 0
-      ? await safeResolve(ctx, args.path)
+      ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!root.ok) return { ok: false as const, reason: root.reason };
 
@@ -511,7 +519,7 @@ export async function readWorkspaceFile(
     offsetBytes?: number;
   },
 ) {
-  const resolved = await safeResolve(ctx, args.path);
+  const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   if (isSecretWorkspacePath(resolved.normalized)) {
     return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
@@ -660,7 +668,7 @@ export async function searchWorkspaceFiles(
   }
   const root =
     args.path && args.path.trim().length > 0
-      ? await safeResolve(ctx, args.path)
+      ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!root.ok) return { ok: false as const, reason: root.reason };
 
@@ -1598,7 +1606,7 @@ export async function detectSites(
 ): Promise<{ ok: true; sites: WorkspaceSite[]; count: number; detector: "mcp-local" } | { ok: false; reason: string }> {
   const start =
     args.path && args.path.trim().length > 0
-      ? await safeResolve(ctx, args.path)
+      ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
   const allowed = sitePathAllowed(start.normalized);
@@ -1844,7 +1852,7 @@ function escapeHtml(value: string): string {
 }
 
 async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
-  const root = await safeResolve(ctx, siteRoot);
+  const root = await safeResolve(ctx, siteRoot, "read");
   if (!root.ok) return root;
   const allowed = sitePathAllowed(root.normalized);
   if (!allowed.ok) return allowed;
@@ -1877,7 +1885,7 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
   }
 
   if (site.entry) {
-    const entry = await safeResolve(ctx, site.entry);
+    const entry = await safeResolve(ctx, site.entry, "read");
     const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
     checks.push({
       name: "entry-file",
@@ -2122,7 +2130,7 @@ export async function importData(
   ctx: ToolContext,
   args: { sourcePath: string; databasePath: string; tableName: string },
 ) {
-  const sourceRel = await safeResolve(ctx, args.sourcePath);
+  const sourceRel = await safeResolve(ctx, args.sourcePath, "read");
   if (!sourceRel.ok) return { ok: false as const, reason: sourceRel.reason };
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };

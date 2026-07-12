@@ -59,6 +59,14 @@ describe("share selector validation", () => {
     }
   });
 
+  it("refuses shared-with-me selector paths (no transitive sharing of mounted shares)", () => {
+    for (const path of ["shared-with-me/alex/brief.md", "Shared-With-Me/alex", "shared-with-me"]) {
+      const result = validateShareSelector({ paths: [path] });
+      expect(result.ok, path).toBe(false);
+      if (!result.ok) expect(result.code).toBe("invalid_path");
+    }
+  });
+
   it("requires at least one path or a version and caps the path count", () => {
     expect(validateShareSelector({})).toMatchObject({ ok: false, code: "empty_selector" });
     expect(validateShareSelector({ paths: [] })).toMatchObject({ ok: false, code: "empty_selector" });

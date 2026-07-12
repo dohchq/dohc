@@ -87,6 +87,10 @@ export interface ExplorerProps {
   // Import into targetDir ("" = root): the folder that was dropped on, or the
   // folder whose context menu ran "Import Files…". Main re-validates it.
   onImportFiles: (droppedPaths?: string[], targetDir?: string) => void;
+  // Share mounts: refresh every mount in this workspace / remove the mount
+  // that owns the given path (shared-with-me/<label>/…).
+  onRefreshShareMounts: () => void;
+  onUnmountShare: (path: string) => void;
   // "Share…" (PR 18): offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
@@ -737,6 +741,12 @@ export function Explorer(props: ExplorerProps) {
         case "share":
           if (path) props.onShare(path);
           break;
+        case "refresh-share-mount":
+          props.onRefreshShareMounts();
+          break;
+        case "unmount-share":
+          if (path) props.onUnmountShare(path);
+          break;
         case "open-externally":
           // Main performed the containment-checked reveal already.
           break;
@@ -751,6 +761,8 @@ export function Explorer(props: ExplorerProps) {
       exportZip,
       props.onImportFiles,
       props.onShare,
+      props.onRefreshShareMounts,
+      props.onUnmountShare,
     ],
   );
 

@@ -1,4 +1,4 @@
-import { validateUserWritePath } from "@dohc/workspace-core";
+import { validateUserReadPath, validateUserWritePath } from "@dohc/workspace-core";
 import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
@@ -40,11 +40,18 @@ function isInside(parent: string, child: string): boolean {
 // Resolves a workspace-relative path to a real absolute path inside the
 // workspace, enforcing path-safety and real-path containment — a renderer
 // can never resolve a path that escapes the root or follows a symlink out.
+// `access` picks the lexical validator: "write" (the default — fail closed)
+// refuses the reserved shared-with-me projection; "read" allows it (share
+// mounts exist to be read) while keeping every other guard identical.
 export async function resolveWorkspaceFile(
   rootPath: string,
   relativePath: string,
+  access: "read" | "write" = "write",
 ): Promise<{ realTarget: string; normalized: string }> {
-  const validated = validateUserWritePath(relativePath);
+  const validated =
+    access === "read"
+      ? validateUserReadPath(relativePath)
+      : validateUserWritePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
   }
@@ -69,6 +76,7 @@ export async function readWorkspaceAsset(
   const { realTarget, normalized } = await resolveWorkspaceFile(
     rootPath,
     relativePath,
+    "read",
   );
   const { size } = await stat(realTarget);
   if (size > MAX_ASSET_BYTES) {
@@ -179,7 +187,7 @@ export async function readWorkspaceText(
   rootPath: string,
   relativePath: string,
 ): Promise<{ text: string; truncated: boolean }> {
-  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
+  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath, "read");
   const info = await stat(realTarget);
   if (!info.isFile()) {
     throw new Error(`Text path is not a file: ${relativePath}`);

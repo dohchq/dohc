@@ -1,4 +1,4 @@
-import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
+import { hasIgnoredSegment, validateUserReadPath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "@dohc/workspace-engine";
 import { spawn } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
@@ -34,7 +34,7 @@ export interface WorkspaceSearchRequest {
 }
 
 export interface SearchResultEntry {
-  // Workspace-relative, forward-slashed, validateUserWritePath-clean.
+  // Workspace-relative, forward-slashed, validateUserReadPath-clean.
   path: string;
   // 1-based line and column (column in CHARACTERS into the full line).
   line: number;
@@ -143,7 +143,7 @@ function byteToCharOffset(line: string, bytes: Buffer, byteOffset: number): numb
 }
 
 // Converts one rg match event into bounded result entries (one per submatch).
-// Every path must pass validateUserWritePath — rg runs rooted at the real
+// Every path must pass validateUserReadPath — rg runs rooted at the real
 // workspace root and emits relative paths, but the validator is the same
 // containment rule every other IPC surface enforces, applied BEFORE the path
 // crosses toward the renderer. Pure; unit tests cover the windowing math.
@@ -155,7 +155,10 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   if (typeof lineNumber !== "number" || !Number.isInteger(lineNumber) || lineNumber < 1) {
     return [];
   }
-  const validated = validateUserWritePath(rawPath.replaceAll("\\", "/"));
+  // Read-side validation: search is a read surface, so mounted shares
+  // (shared-with-me/) are searchable; every other guard is identical to the
+  // write validator.
+  const validated = validateUserReadPath(rawPath.replaceAll("\\", "/"));
   if (!validated.ok) return [];
   // Defense-in-depth reserved/ignored segment backstop. The shared validator
   // rejects these today, and this stays near rg parsing because include globs

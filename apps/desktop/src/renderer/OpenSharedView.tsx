@@ -5,10 +5,12 @@ import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { IconButton, PrimaryButton } from "./ui/controls";
 
-// "Open a share" (PR 18): the receive side of an external share grant.
-// Paste the code someone sent you, pick an empty folder, and a READ-ONLY
-// shared view arrives: browsable, searchable, refreshable — never editable.
-// Mirrors JoinSyncedWorkspace's session gate and unmount guard.
+// "Open a share" (PR 18 + share mounts): the receive side of an external
+// share grant. Paste the code someone sent you and either ADD it to the
+// current workspace (a read-only shared-with-me/<label>/ folder that
+// live-follows the share — the default when opened from inside a workspace)
+// or open it as a separate read-only view in an empty folder. Mirrors
+// JoinSyncedWorkspace's session gate and unmount guard.
 
 function shareErrorMessage(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -24,10 +26,20 @@ type Gate =
 export function OpenSharedView(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
   onBack: () => void;
+  // Present when opened from inside a workspace: enables the default
+  // "Add to this workspace" mode (a shared-with-me/ mount). Absent on
+  // first-run, where there is no workspace to mount into yet.
+  mountInto?: {
+    workspaceId: string;
+    onMounted: (label: string) => void;
+  };
 }) {
   const [gate, setGate] = useState<Gate>({ kind: "checking" });
   const [code, setCode] = useState("");
   const [folder, setFolder] = useState<string | null>(null);
+  const [mode, setMode] = useState<"mount" | "separate">(
+    props.mountInto ? "mount" : "separate",
+  );
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRef(0);
@@ -67,17 +79,29 @@ export function OpenSharedView(props: {
     if (picked) setFolder(picked);
   }
 
+  const mounting = mode === "mount" && !!props.mountInto;
+
   async function open() {
-    if (!folder || opening || code.trim().length === 0) return;
+    if (opening || code.trim().length === 0) return;
+    if (!mounting && !folder) return;
     setOpening(true);
     setError(null);
     try {
-      const result = await bridge().openSharedView({
-        shareCode: code.trim(),
-        rootPath: folder,
-      });
-      if (cancelledRef.current) return;
-      props.onWorkspaceReady(result.workspace);
+      if (mounting && props.mountInto) {
+        const result = await bridge().mountShare({
+          workspaceId: props.mountInto.workspaceId,
+          shareCode: code.trim(),
+        });
+        if (cancelledRef.current) return;
+        props.mountInto.onMounted(result.mount.label);
+      } else {
+        const result = await bridge().openSharedView({
+          shareCode: code.trim(),
+          rootPath: folder!,
+        });
+        if (cancelledRef.current) return;
+        props.onWorkspaceReady(result.workspace);
+      }
     } catch (cause) {
       if (cancelledRef.current) return;
       setError(shareErrorMessage(cause));
@@ -87,7 +111,10 @@ export function OpenSharedView(props: {
   }
 
   const canOpen =
-    gate.kind === "signed-in" && !opening && code.trim().length > 0 && folder !== null;
+    gate.kind === "signed-in" &&
+    !opening &&
+    code.trim().length > 0 &&
+    (mounting || folder !== null);
 
   return (
     <div
@@ -123,9 +150,9 @@ export function OpenSharedView(props: {
       {gate.kind === "signed-in" ? (
         <>
           <p className="m-0 text-xs leading-relaxed text-muted">
-            Paste the share code you received. You'll get a read-only view of what
-            was shared — it updates when you refresh, and only the person who shared
-            it can change the files.
+            {mounting
+              ? "Paste the share code you received. The shared files appear in this workspace under shared-with-me/ — read-only, kept up to date, and readable by your agent."
+              : "Paste the share code you received. You'll get a read-only view of what was shared — it updates when you refresh, and only the person who shared it can change the files."}
           </p>
           <label className="block text-[11px] font-medium text-subtle">
             Share code
@@ -138,6 +165,48 @@ export function OpenSharedView(props: {
               className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
             />
           </label>
+          {props.mountInto ? (
+            <div className="flex flex-col gap-1">
+              <span className="text-[11px] font-medium text-subtle">How to open it</span>
+              <div className="flex gap-1.5" role="radiogroup" aria-label="How to open it">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === "mount"}
+                  data-testid="open-share-mode-mount"
+                  onClick={() => setMode("mount")}
+                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                    mode === "mount"
+                      ? "border-ink bg-panel-2 text-ink"
+                      : "border-line bg-panel text-muted hover:text-ink"
+                  }`}
+                >
+                  Add to this workspace
+                  <span className="block text-[10px] text-subtle">
+                    Appears under shared-with-me/
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === "separate"}
+                  data-testid="open-share-mode-separate"
+                  onClick={() => setMode("separate")}
+                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                    mode === "separate"
+                      ? "border-ink bg-panel-2 text-ink"
+                      : "border-line bg-panel text-muted hover:text-ink"
+                  }`}
+                >
+                  Open separately
+                  <span className="block text-[10px] text-subtle">
+                    A read-only view in its own folder
+                  </span>
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {!mounting ? (
           <div className="flex flex-col gap-1">
             <span className="text-[11px] font-medium text-subtle">
               Where it should live on this machine
@@ -157,13 +226,20 @@ export function OpenSharedView(props: {
               </button>
             </div>
           </div>
+          ) : null}
           <PrimaryButton
             type="button"
             data-testid="open-share-start"
             disabled={!canOpen}
             onClick={() => void open()}
           >
-            {opening ? "Opening the share…" : "Open share"}
+            {opening
+              ? mounting
+                ? "Adding the share…"
+                : "Opening the share…"
+              : mounting
+                ? "Add share"
+                : "Open share"}
           </PrimaryButton>
           {error ? (
             <p data-testid="open-share-error" role="alert" className="m-0 text-xs text-danger">

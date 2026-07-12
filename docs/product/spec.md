@@ -67,9 +67,10 @@ separate collaboration server.
 - **Sharing** — relay shares: read-only live-follow shares of paths or
   versions plus bidirectional shared chat channels, exchanged as
   `dohc-share:` codes and filtered fail-closed server-side. A received
-  share opens as a read-only shared view today; mounting shares as live
-  `shared-with-me/` folders is the designed next step. (The former
-  workspace-to-workspace field-exchange panel concept is retired.)
+  share mounts into a workspace as a read-only live `shared-with-me/<label>/`
+  folder — ordinary files, agent-readable, never writable — or opens as a
+  separate read-only shared view. (The former workspace-to-workspace
+  field-exchange panel concept is retired.)
 
 ## Stack
 

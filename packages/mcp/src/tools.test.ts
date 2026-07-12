@@ -230,6 +230,44 @@ describe("mcp tool path containment", () => {
     });
   });
 
+  it("shared-with-me is agent-READABLE but never agent-writable (share mounts)", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "shared-with-me", "alex"), { recursive: true });
+      await writeFile(join(ctx.root, "shared-with-me", "alex", "brief.md"), "the brief");
+
+      // Reads: list, read, search all see the mounted projection.
+      const listed = await listWorkspaceFiles(ctx, { path: "shared-with-me/alex" });
+      expect(listed).toMatchObject({ ok: true });
+      const read = await readWorkspaceFile(ctx, { path: "shared-with-me/alex/brief.md" });
+      expect(read).toMatchObject({ ok: true, content: "the brief" });
+      const found = await searchWorkspaceFiles(ctx, {
+        path: "shared-with-me/alex",
+        query: "brief",
+      });
+      expect(found).toMatchObject({ ok: true });
+
+      // Writes: every mutation refuses the reserved projection.
+      await expect(
+        writeWorkspaceFile(ctx, { path: "shared-with-me/alex/brief.md", content: "hijack" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("reserved") });
+      await expect(
+        createWorkspaceDirectory(ctx, { path: "shared-with-me/mine" }),
+      ).resolves.toMatchObject({ ok: false });
+      await expect(
+        deleteWorkspacePath(ctx, { path: "shared-with-me/alex/brief.md" }),
+      ).resolves.toMatchObject({ ok: false });
+      await expect(
+        moveWorkspacePath(ctx, {
+          fromPath: "shared-with-me/alex/brief.md",
+          toPath: "stolen.md",
+        }),
+      ).resolves.toMatchObject({ ok: false });
+      expect(await readFile(join(ctx.root, "shared-with-me", "alex", "brief.md"), "utf8")).toBe(
+        "the brief",
+      );
+    });
+  });
+
   it("workspace mutations refuse a symlinked .dohc before changing visible files", async () => {
     await withWorkspace(async (ctx) => {
       const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-metadata-outside-"));
