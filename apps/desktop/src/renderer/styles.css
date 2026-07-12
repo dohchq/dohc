@@ -226,6 +226,18 @@ body {
   background-clip: padding-box;
 }
 
+/* The editor tab strip scrolls horizontally with no visible scrollbar
+ * (VS Code treatment): wheel, active-tab reveal, and the overflow menu are
+ * the affordances. A painted bar would eat a third of the 36px strip and
+ * push the fixed-height tabs into vertical overflow. */
+.dohc-tab-strip {
+  scrollbar-width: none;
+}
+
+.dohc-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
 /* Native feel: chrome icons and images never produce browser drag ghosts. */
 .app-chrome img,
 .app-chrome svg {

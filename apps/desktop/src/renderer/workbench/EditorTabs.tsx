@@ -1,5 +1,6 @@
 import { ChevronDown, X } from "lucide-react";
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
+import { prefersReducedMotion } from "../reducedMotion";
 import {
   isGraphTabPath,
   isHistoryDiffTabPath,
@@ -55,8 +56,21 @@ const Tab = memo(function Tab(props: {
   const drag = useRef<{ pointerId: number; startX: number; active: boolean } | null>(
     null,
   );
+  // Reveal on activation, however it happened (sidebar click, open-file,
+  // Ctrl+Tab, close-neighbor). `nearest` makes it a no-op when already
+  // visible, so plain clicks on visible tabs never nudge the strip.
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!props.active) return;
+    ref.current?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [props.active]);
   return (
     <div
+      ref={ref}
       role="tab"
       tabIndex={0}
       aria-selected={props.active}
@@ -192,13 +206,35 @@ export function EditorTabs(props: {
     path: string;
     toIndex: number;
   } | null>(null);
-  if (props.tabs.length === 0) return null;
+  // VS Code wheel behavior: a vertical wheel over the strip scrolls it
+  // horizontally. Native listener because React registers `wheel` passive,
+  // so preventDefault (needed once we consume the gesture) is a no-op there.
+  // Keyed on `empty` — the strip renders null until a tab opens, so the
+  // ref is only populated after that flip.
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const empty = props.tabs.length === 0;
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (empty || !strip) return;
+    const onWheel = (event: WheelEvent) => {
+      // Trackpads already pan horizontally via deltaX — only translate
+      // pure vertical wheels, and only when there is overflow to scroll.
+      if (event.deltaX !== 0 || event.deltaY === 0) return;
+      if (strip.scrollWidth <= strip.clientWidth) return;
+      event.preventDefault();
+      strip.scrollLeft += event.deltaY;
+    };
+    strip.addEventListener("wheel", onWheel, { passive: false });
+    return () => strip.removeEventListener("wheel", onWheel);
+  }, [empty]);
+  if (empty) return null;
   return (
     <div data-testid="editor-tabs" className="relative flex h-9 shrink-0 bg-panel-2">
       <div
+        ref={stripRef}
         role="tablist"
         aria-label="Open files"
-        className="flex min-w-0 flex-1 overflow-x-auto"
+        className="dohc-tab-strip flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
       >
         {props.tabs.map((tab) => (
           <Tab
