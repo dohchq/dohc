@@ -525,6 +525,15 @@ let applicationMenuCanInstallUpdate: boolean | null = null;
 // kill-and-replace would cancel the newer child. Stale handlers check this
 // before touching the registry.
 const latestSearchIdBySender = new Map<number, string>();
+const rendererGenerationBySender = new Map<number, number>();
+
+function rendererGeneration(senderId: number): number {
+  return rendererGenerationBySender.get(senderId) ?? 0;
+}
+
+function advanceRendererGeneration(senderId: number): void {
+  rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
+}
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
@@ -646,23 +655,35 @@ function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
   return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
 }
 
-async function startPreviewForSite(input: {
+type SitePreviewStartInput = {
   workspaceId: string;
   workspaceRoot: string;
   site: SitePackageInfo;
   mode: "static" | "dev" | "build";
-}): Promise<StartSitePreviewResult> {
+  isCurrent: () => boolean;
+};
+
+async function rememberCurrentSitePreviewHandle(
+  key: string,
+  handle: SitePreviewHandle,
+  isCurrent: () => boolean,
+): Promise<void> {
+  if (!isCurrent()) {
+    await handle.stop().catch(() => undefined);
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
+  rememberSitePreviewHandle(key, handle);
+}
+
+async function startPreviewForSite(
+  input: SitePreviewStartInput,
+): Promise<StartSitePreviewResult> {
   const key = sitePreviewKey(input.workspaceId, input.site.root);
   return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input, key));
 }
 
 async function startPreviewForSiteUnlocked(
-  input: {
-    workspaceId: string;
-    workspaceRoot: string;
-    site: SitePackageInfo;
-    mode: "static" | "dev" | "build";
-  },
+  input: SitePreviewStartInput,
   key: string,
 ): Promise<StartSitePreviewResult> {
   try {
@@ -670,12 +691,15 @@ async function startPreviewForSiteUnlocked(
   } catch (error) {
     console.warn("[desktop] failed to stop previous site preview", error);
   }
+  if (!input.isCurrent()) {
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
 
   if (input.mode === "static") {
     const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
       entry: entryRelativeToSite(input.site) ?? undefined,
     });
-    rememberSitePreviewHandle(key, handle);
+    await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
     return {
       siteRoot: input.site.root,
       mode: input.mode,
@@ -696,7 +720,7 @@ async function startPreviewForSiteUnlocked(
       command: command.command,
       args: command.args,
     });
-    rememberSitePreviewHandle(key, handle);
+    await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
     return {
       siteRoot: input.site.root,
       mode: input.mode,
@@ -746,12 +770,15 @@ async function startPreviewForSiteUnlocked(
       relativeWorkspacePath(input.workspaceRoot, result.outputPath),
     );
   }
+  if (!input.isCurrent()) {
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
   if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
   const handle = await startStaticSitePreview(
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
   );
-  rememberSitePreviewHandle(key, handle);
+  await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
   return {
     siteRoot: input.site.root,
     mode: input.mode,
@@ -1935,8 +1962,29 @@ interface EngineYDocSessionEntry {
   workspaceId: string;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
+const pendingEngineYDocOpensBySender = new Map<number, Set<Promise<void>>>();
 // Senders whose engine-ydoc 'destroyed' cleanup hook is already attached.
 const engineYDocCleanupHooked = new WeakSet<Electron.WebContents>();
+
+function beginPendingEngineYDocOpen(senderId: number): () => void {
+  let finish: () => void = () => undefined;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const pendingForSender =
+    pendingEngineYDocOpensBySender.get(senderId) ?? new Set<Promise<void>>();
+  pendingForSender.add(pending);
+  pendingEngineYDocOpensBySender.set(senderId, pendingForSender);
+  return () => {
+    pendingForSender.delete(pending);
+    if (pendingForSender.size === 0) pendingEngineYDocOpensBySender.delete(senderId);
+    finish();
+  };
+}
+
+async function waitForPendingEngineYDocOpens(senderId: number): Promise<void> {
+  await Promise.all([...(pendingEngineYDocOpensBySender.get(senderId) ?? [])]);
+}
 
 // Close and drop every engine Y.Doc session owned by one renderer (window gone
 // / crashed). Settles the converged state and releases each reservation.
@@ -1958,10 +2006,12 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   const activeWorkspaceId =
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  advanceRendererGeneration(senderId);
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
     closeEngineYDocSessionsForSender(senderId),
+    waitForPendingEngineYDocOpens(senderId),
     activeWorkspaceId
       ? stopSitePreviewsForWorkspace(activeWorkspaceId)
       : Promise.resolve(),
@@ -3897,6 +3947,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
     assertTrustedSender(event);
     const input = StartSitePreviewPayload.parse(payload);
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
     const workspace = requireWorkspace(input.workspaceId);
     assertSitePreviewMode(workspace.workspaceId, input.mode);
     // Mounted shares are someone else's code AND previews carry host-scoped
@@ -3915,6 +3967,8 @@ function registerIpcHandlers(): void {
         workspaceRoot: workspace.rootPath,
         site,
         mode: input.mode,
+        isCurrent: () =>
+          !sender.isDestroyed() && rendererGeneration(sender.id) === generation,
       }),
     );
   });
@@ -3943,6 +3997,7 @@ function registerIpcHandlers(): void {
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
         activeWorkspaceIdBySender.delete(event.sender.id);
+        rendererGenerationBySender.delete(event.sender.id);
       });
     }
     refreshNativeWorkspaceSurfaces();
@@ -5387,7 +5442,12 @@ function registerIpcHandlers(): void {
     const input = WorkspaceSearchPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
     latestSearchIdBySender.set(sender.id, input.searchId);
+    const isCurrentSearch = () =>
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation &&
+      latestSearchIdBySender.get(sender.id) === input.searchId;
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -5408,7 +5468,7 @@ function registerIpcHandlers(): void {
           console.error(
             `[desktop] workspace search blocked by policy validation for ${workspace.rootPath}: ${decision.message}`,
           );
-          if (!sender.isDestroyed()) {
+          if (isCurrentSearch()) {
             sender.send(
               CHANNELS.searchResults,
               SearchResultsEventSchema.parse({
@@ -5438,7 +5498,7 @@ function registerIpcHandlers(): void {
         // searchId. Skipped when the workspace has no mounts.
         const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
         const searchMounts = mounts.length > 0;
-        if (!sender.isDestroyed()) {
+        if (isCurrentSearch()) {
           sender.send(
             CHANNELS.searchResults,
             SearchResultsEventSchema.parse({
@@ -5465,14 +5525,14 @@ function registerIpcHandlers(): void {
           // mount pass while this handler awaited the engine phase — the
           // registry's kill-and-replace must never let the OLDER search
           // cancel it. (The renderer already drops stale batches by id.)
-          if (latestSearchIdBySender.get(sender.id) !== input.searchId) return;
+          if (!isCurrentSearch()) return;
           // rg include globs are gitignore-style: basename globs float to
           // any depth (so "*.md" intersects mounts and must be scoped),
           // while anchored path globs outside the projection cannot match
           // under it — the pass is skipped entirely.
           const mountGlob = mountScopedIncludeGlob(input.includeGlob);
           if (mountGlob === null) {
-            if (!sender.isDestroyed()) {
+            if (isCurrentSearch()) {
               sender.send(
                 CHANNELS.searchResults,
                 SearchResultsEventSchema.parse({
@@ -5502,7 +5562,7 @@ function registerIpcHandlers(): void {
               excludeGlob: input.excludeGlob,
             },
             (batch) => {
-              if (sender.isDestroyed()) return;
+              if (!isCurrentSearch()) return;
               try {
                 sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
               } catch (error) {
@@ -5532,7 +5592,7 @@ function registerIpcHandlers(): void {
         excludeGlob: input.excludeGlob,
       },
       (batch) => {
-        if (sender.isDestroyed()) return;
+        if (!isCurrentSearch()) return;
         try {
           sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
         } catch {
@@ -5571,6 +5631,7 @@ function registerIpcHandlers(): void {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     // Only engine-flagged workspaces have a capture; only rich (markdown) files
     // bind to a Y.Doc. Everything else stays on the plain editor.
@@ -5584,51 +5645,64 @@ function registerIpcHandlers(): void {
       engineYDocSessions.delete(input.sessionId);
       await existing.session.close().catch(() => undefined);
     }
-    let session: EngineYDocProviderSession;
+    const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
     try {
-      session = await capture.openYDocSession({
-        path: input.path,
-        onRemoteUpdate: (update) => {
-          // Forward a co-editor's delta to the renderer that owns this session.
-          if (sender.isDestroyed()) return;
-          try {
-            sender.send(
-              CHANNELS.engineYDocRemoteUpdate,
-              EngineYDocRemoteUpdateEventSchema.parse({ sessionId: input.sessionId, update }),
-            );
-          } catch {
-            // A malformed delta is DROPPED, never thrown through the session's
-            // update observer (an uncaught throw there would wedge main).
-          }
-        },
+      let session: EngineYDocProviderSession;
+      try {
+        session = await capture.openYDocSession({
+          path: input.path,
+          onRemoteUpdate: (update) => {
+            // Forward a co-editor's delta only to the renderer generation that
+            // opened this session. A crash reload reuses the WebContents id.
+            if (
+              sender.isDestroyed() ||
+              rendererGeneration(sender.id) !== generation
+            ) {
+              return;
+            }
+            try {
+              sender.send(
+                CHANNELS.engineYDocRemoteUpdate,
+                EngineYDocRemoteUpdateEventSchema.parse({ sessionId: input.sessionId, update }),
+              );
+            } catch {
+              // A malformed delta is DROPPED, never thrown through the session's
+              // update observer (an uncaught throw there would wedge main).
+            }
+          },
+        });
+      } catch {
+        // Secret path, missing file, or already-live: fall back gracefully.
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+      // The renderer can die or reload DURING the await above. Close the stale
+      // session before crash cleanup completes so its reservation cannot block
+      // the replacement renderer's open.
+      if (
+        sender.isDestroyed() ||
+        rendererGeneration(sender.id) !== generation
+      ) {
+        await session.close().catch(() => undefined);
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+      if (!engineYDocCleanupHooked.has(sender)) {
+        engineYDocCleanupHooked.add(sender);
+        sender.once("destroyed", () => {
+          void closeEngineYDocSessionsForSender(sender.id);
+        });
+      }
+      engineYDocSessions.set(input.sessionId, {
+        session,
+        senderId: sender.id,
+        workspaceId: workspace.workspaceId,
       });
-    } catch {
-      // Secret path, missing file, or already-live: fall back gracefully.
-      return OpenEngineYDocSessionResult.parse({ available: false });
-    }
-    // The renderer can die DURING the await above: the destroyed-cleanup hook is
-    // attached below, so a window that closed mid-open would otherwise leave the
-    // session stored forever — stranding the single-canonical reservation and
-    // blocking every reopen of this file. Close it now and report unavailable.
-    if (sender.isDestroyed()) {
-      await session.close().catch(() => undefined);
-      return OpenEngineYDocSessionResult.parse({ available: false });
-    }
-    if (!engineYDocCleanupHooked.has(sender)) {
-      engineYDocCleanupHooked.add(sender);
-      sender.once("destroyed", () => {
-        void closeEngineYDocSessionsForSender(sender.id);
+      return OpenEngineYDocSessionResult.parse({
+        available: true,
+        initialUpdate: session.initialUpdate,
       });
+    } finally {
+      finishPendingOpen();
     }
-    engineYDocSessions.set(input.sessionId, {
-      session,
-      senderId: sender.id,
-      workspaceId: workspace.workspaceId,
-    });
-    return OpenEngineYDocSessionResult.parse({
-      available: true,
-      initialUpdate: session.initialUpdate,
-    });
   });
 
   ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
