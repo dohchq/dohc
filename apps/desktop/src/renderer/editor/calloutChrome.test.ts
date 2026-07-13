@@ -81,6 +81,11 @@ function liveFold(editor: Editor): string {
   return String(node?.attrs.fold ?? "");
 }
 
+function liveType(editor: Editor): string {
+  const node = editor.state.doc.nodeAt(calloutPos(editor));
+  return String(node?.attrs.calloutType ?? "");
+}
+
 function click(el: Element): void {
   el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
   el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -186,5 +191,56 @@ describe("callout header fold control", () => {
     click(chevron);
 
     expect(liveFold(editor)).toBe("-");
+  });
+});
+
+describe("callout type menu", () => {
+  it("opens a consistent menu with every supported callout type", () => {
+    const editor = makeEditor("> [!note] Original\n> body");
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-callout-type-trigger",
+    );
+    const menu = editor.view.dom.querySelector<HTMLElement>(
+      ".dohc-callout-type-menu",
+    );
+    if (!trigger || !menu) throw new Error("callout type menu not rendered");
+
+    expect(menu.hidden).toBe(true);
+    click(trigger);
+
+    expect(menu.hidden).toBe(false);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      Array.from(
+        menu.querySelectorAll("[role='option']"),
+        (option) => option.textContent,
+      ),
+    ).toEqual(["Note", "Tip", "Info", "Warning", "Danger", "Quote"]);
+  });
+
+  it("changes the live callout type and renders the new selection", () => {
+    const editor = makeEditor("> [!note] Original\n> body");
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-callout-type-trigger",
+    );
+    if (!trigger) throw new Error("callout type trigger not rendered");
+    click(trigger);
+
+    const tip = editor.view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-callout-type-option[data-callout-type='tip']",
+    );
+    if (!tip) throw new Error("tip option not rendered");
+    click(tip);
+
+    expect(liveType(editor)).toBe("tip");
+    const nextTrigger = editor.view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-callout-type-trigger",
+    );
+    expect(nextTrigger?.textContent).toBe("Tip");
+    expect(
+      editor.view.dom
+        .querySelector(".dohc-callout-type-option[aria-selected='true']")
+        ?.textContent,
+    ).toBe("Tip");
   });
 });

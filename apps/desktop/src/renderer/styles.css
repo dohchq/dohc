@@ -2461,7 +2461,17 @@ body {
   height: 16px;
 }
 
-.dohc-callout-type-select {
+.dohc-callout-type-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.dohc-callout-type-trigger {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
   flex: 0 0 auto;
   border: 0;
   border-radius: 5px;
@@ -2481,8 +2491,66 @@ body {
   text-transform: capitalize;
   cursor: pointer;
 }
-.dohc-callout-type-select:hover {
+.dohc-callout-type-trigger:hover,
+.dohc-callout-type-picker.is-open .dohc-callout-type-trigger {
   background: color-mix(in srgb, var(--dohc-callout-accent) 12%, transparent);
+}
+.dohc-callout-type-trigger:focus-visible {
+  outline: 2px solid
+    color-mix(in srgb, var(--dohc-callout-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+.dohc-callout-type-chevron {
+  width: 12px;
+  height: 12px;
+  transition: transform 120ms ease-out;
+}
+.dohc-callout-type-picker.is-open .dohc-callout-type-chevron {
+  transform: rotate(180deg);
+}
+
+.dohc-callout-type-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 8px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+}
+[data-theme='dark'] .dohc-callout-type-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.dohc-callout-type-menu[hidden] {
+  display: none;
+}
+.dohc-callout-type-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.dohc-callout-type-option:hover,
+.dohc-callout-type-option:focus-visible,
+.dohc-callout-type-option[aria-selected='true'] {
+  background: var(--dohc-line);
+  outline: none;
 }
 
 .dohc-callout-title-input {

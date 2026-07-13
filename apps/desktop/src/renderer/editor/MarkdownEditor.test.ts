@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createElement } from "react";
+import { createElement, type SetStateAction } from "react";
 import {
   cleanup,
   fireEvent,
@@ -12,7 +12,7 @@ import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Editor } from "@tiptap/core";
+import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
@@ -26,7 +26,9 @@ import {
   CLOSED_SLASH_COMMAND_STATE,
   filterSlashCommands,
   findSlashCommandMatch,
+  makeSlashCommandPlugin,
   runSlashCommand,
+  slashCommandStatesEqual,
   type SlashCommandState,
 } from "./slashCommands";
 
@@ -98,6 +100,66 @@ describe("MarkdownEditor slash commands", () => {
     expect(filterSlashCommands("image").map((item) => item.id)).toContain("image");
     expect(filterSlashCommands("photo").map((item) => item.id)).toEqual(["image"]);
     expect(filterSlashCommands("upload").map((item) => item.id)).toEqual(["image"]);
+  });
+
+  it("does not republish identical menu state on unrelated editor updates", () => {
+    let current: SlashCommandState = CLOSED_SLASH_COMMAND_STATE;
+    const stateRef = { current };
+    const setState = vi.fn((update: SetStateAction<SlashCommandState>) => {
+      current = typeof update === "function" ? update(current) : update;
+      stateRef.current = current;
+    });
+    const runCommandRef = { current: vi.fn() };
+    const slashExtension = Extension.create({
+      name: "testSlashCommands",
+      addProseMirrorPlugins() {
+        return [makeSlashCommandPlugin({ stateRef, setState, runCommandRef })];
+      },
+    });
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit.configure({ trailingNode: false }), slashExtension],
+      content: "",
+    });
+
+    editor.commands.insertContent("/");
+    expect(setState).toHaveBeenCalledTimes(1);
+    expect(current.open && current.query).toBe("");
+
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(current.open && current.selected).toBe(2);
+    expect(setState).toHaveBeenCalledTimes(3);
+
+    editor.view.dispatch(editor.state.tr.setMeta("unrelated", true));
+    expect(setState).toHaveBeenCalledTimes(3);
+
+    editor.commands.insertContent("h");
+    expect(setState).toHaveBeenCalledTimes(4);
+    expect(current.open && current.query).toBe("h");
+    editor.destroy();
+  });
+
+  it("compares every field that can visibly move or select the menu", () => {
+    const state: SlashCommandState = {
+      open: true,
+      from: 1,
+      to: 2,
+      query: "h",
+      selected: 0,
+      x: 10,
+      y: 20,
+      maxHeight: 300,
+      placement: "below",
+    };
+    expect(slashCommandStatesEqual(state, { ...state })).toBe(true);
+    expect(slashCommandStatesEqual(state, { ...state, selected: 1 })).toBe(false);
+    expect(slashCommandStatesEqual(state, { ...state, y: 21 })).toBe(false);
+    expect(slashCommandStatesEqual(state, CLOSED_SLASH_COMMAND_STATE)).toBe(false);
   });
 });
 

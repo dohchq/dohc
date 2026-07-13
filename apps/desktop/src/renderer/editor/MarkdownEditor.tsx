@@ -6,7 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import { Extension } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -75,6 +77,7 @@ import {
   CLOSED_SLASH_COMMAND_STATE,
   makeSlashCommandPlugin,
   runSlashCommand as runSlashCommandCore,
+  slashCommandStatesEqual,
   SlashCommandMenu,
   type SlashCommandId,
   type SlashCommandState,
@@ -305,6 +308,20 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onOpenWikilink ?? null,
     );
 
+    // ProseMirror invokes menu handlers outside React's render cycle. Keep the
+    // imperative ref current in the same tick as the visual state so rapid
+    // typing/arrow keys never read the previous menu query or selection.
+    const publishSlashState = useCallback<
+      Dispatch<SetStateAction<SlashCommandState>>
+    >((update) => {
+      const current = slashStateRef.current;
+      const next = typeof update === "function" ? update(current) : update;
+      slashStateRef.current = next;
+      setSlashState((rendered) =>
+        slashCommandStatesEqual(rendered, next) ? rendered : next,
+      );
+    }, []);
+
     // Refs (not props) so the editorProps closures below — created once with
     // the editor — always resolve/write against the CURRENT document, even if
     // the same editor instance is reused across a path change.
@@ -408,7 +425,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             return [
               makeSlashCommandPlugin({
                 stateRef: slashStateRef,
-                setState: setSlashState,
+                setState: publishSlashState,
                 runCommandRef: slashCommandRunnerRef,
               }),
               makeBlockControlsPlugin({
@@ -434,7 +451,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             ];
           },
         }),
-      [],
+      [publishSlashState],
     );
 
     // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
@@ -587,7 +604,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           // Offscreen/jsdom editors cannot always resolve coordinates.
         }
 
-        setSlashState({
+        publishSlashState({
           open: true,
           from: pos,
           to: pos,
@@ -599,7 +616,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           placement,
         });
       },
-      [editor],
+      [editor, publishSlashState],
     );
 
     const insertBlockAfter = useCallback(
@@ -657,11 +674,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           editor,
           id,
           slashStateRef.current,
-          setSlashState,
+          publishSlashState,
           insertImageAtSlash,
         );
       },
-      [editor, insertImageAtSlash],
+      [editor, insertImageAtSlash, publishSlashState],
     );
 
     useEffect(() => {
@@ -830,7 +847,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               state={slashState}
               onSelect={runSlashCommand}
               onHover={(index) =>
-                setSlashState((current) =>
+                publishSlashState((current) =>
                   current.open ? { ...current, selected: index } : current,
                 )
               }

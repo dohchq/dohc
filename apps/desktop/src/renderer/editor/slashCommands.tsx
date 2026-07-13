@@ -56,6 +56,23 @@ export type SlashCommandState =
 
 export const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false };
 
+export function slashCommandStatesEqual(
+  left: SlashCommandState,
+  right: SlashCommandState,
+): boolean {
+  if (!left.open || !right.open) return left.open === right.open;
+  return (
+    left.from === right.from &&
+    left.to === right.to &&
+    left.query === right.query &&
+    left.selected === right.selected &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.maxHeight === right.maxHeight &&
+    left.placement === right.placement
+  );
+}
+
 const SLASH_COMMANDS: SlashCommandItem[] = [
   {
     id: "wikilink",
@@ -288,11 +305,17 @@ export function makeSlashCommandPlugin({
   setState: Dispatch<SetStateAction<SlashCommandState>>;
   runCommandRef: RefObject<(id: SlashCommandId) => void>;
 }) {
-  const close = () => setState(CLOSED_SLASH_COMMAND_STATE);
+  const publish = (next: SlashCommandState) => {
+    if (slashCommandStatesEqual(stateRef.current, next)) return;
+    stateRef.current = next;
+    setState(next);
+  };
+
+  const close = () => publish(CLOSED_SLASH_COMMAND_STATE);
 
   const refresh = (view: EditorView) => {
     const next = readSlashCommandState(view, stateRef.current);
-    setState(next);
+    publish(next);
   };
 
   return new Plugin({
@@ -316,29 +339,21 @@ export function makeSlashCommandPlugin({
         const items = filterSlashCommands(slashState.query);
         if (event.key === "ArrowDown") {
           event.preventDefault();
-          setState((current) =>
-            current.open
-              ? {
-                  ...current,
-                  selected: items.length ? (current.selected + 1) % items.length : 0,
-                }
-              : current,
-          );
+          publish({
+            ...slashState,
+            selected: items.length ? (slashState.selected + 1) % items.length : 0,
+          });
           return true;
         }
 
         if (event.key === "ArrowUp") {
           event.preventDefault();
-          setState((current) =>
-            current.open
-              ? {
-                  ...current,
-                  selected: items.length
-                    ? (current.selected - 1 + items.length) % items.length
-                    : 0,
-                }
-              : current,
-          );
+          publish({
+            ...slashState,
+            selected: items.length
+              ? (slashState.selected - 1 + items.length) % items.length
+              : 0,
+          });
           return true;
         }
 
