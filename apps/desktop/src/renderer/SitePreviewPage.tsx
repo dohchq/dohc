@@ -119,9 +119,15 @@ function isSafeWorkspaceRelativePath(path: string): boolean {
 }
 
 function siteFrameUrl(url: string): string {
-  const framed = new URL(url);
-  framed.searchParams.set("dohcHostOrigin", window.location.origin);
-  return framed.href;
+  // Called during render: a malformed preview URL must degrade to a frame
+  // that fails to load, never a `new URL` throw that takes the render down.
+  try {
+    const framed = new URL(url);
+    framed.searchParams.set("dohcHostOrigin", window.location.origin);
+    return framed.href;
+  } catch {
+    return url;
+  }
 }
 
 export function SitePreviewPage(props: {
@@ -298,19 +304,21 @@ export function SitePreviewPage(props: {
           ))}
           {preview ? (
             <>
-              <IconButton
-                data-testid="site-preview-reload"
-                aria-label="Reload preview"
-                title="Reload preview"
-                onClick={() => {
-                  const url = new URL(preview.url);
-                  url.searchParams.set("t", String(Date.now()));
-                  setPreview({ ...preview, url: url.href });
-                }}
-                className="size-7"
-              >
-                <RefreshCcw size={13} aria-hidden />
-              </IconButton>
+              {previewUrlAllowed ? (
+                <IconButton
+                  data-testid="site-preview-reload"
+                  aria-label="Reload preview"
+                  title="Reload preview"
+                  onClick={() => {
+                    const url = new URL(preview.url);
+                    url.searchParams.set("t", String(Date.now()));
+                    setPreview({ ...preview, url: url.href });
+                  }}
+                  className="size-7"
+                >
+                  <RefreshCcw size={13} aria-hidden />
+                </IconButton>
+              ) : null}
               <IconButton
                 data-testid="site-preview-stop"
                 aria-label="Stop preview"

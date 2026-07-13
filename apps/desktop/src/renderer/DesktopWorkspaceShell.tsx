@@ -44,6 +44,7 @@ import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
   classifyForView,
@@ -2348,6 +2349,11 @@ export function DesktopWorkspaceShell(props: {
               ) : undefined
             }
           >
+            {/* One island: a crash inside any panel view (or a failed lazy
+                chunk under its Suspense) shows an inline error card here —
+                the editor, tabs, and rail keep working. Switching views
+                clears it. */}
+            <ErrorBoundary scope="side-panel" resetKeys={[wb.activeView]}>
             {wb.activeView === "explorer" ? (
               explorerView
             ) : wb.activeView === "search" ? (
@@ -2376,6 +2382,7 @@ export function DesktopWorkspaceShell(props: {
             ) : wb.activeView === "history" ? (
               historyTimeline
             ) : null}
+            </ErrorBoundary>
           </SidePanel>
         ) : null}
 
@@ -2460,6 +2467,14 @@ export function DesktopWorkspaceShell(props: {
               void showWorkbenchMenu("editor");
             }}
           >
+            {/* The editor island: a document/tab view that throws (hostile
+                markdown tripping the WYSIWYG parse, a failed editor chunk, a
+                view bug) contains to this pane — tabs, explorer, and rail
+                stay alive, and switching or closing the tab recovers. */}
+            <ErrorBoundary
+              scope="editor"
+              resetKeys={[wb.activeTab, workspaceId, versionEpoch]}
+            >
             {isGraphTabPath(wb.activeTab) ? (
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView
@@ -2587,6 +2602,7 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               </div>
             )}
+            </ErrorBoundary>
           </div>
         </main>
 
@@ -2617,33 +2633,40 @@ export function DesktopWorkspaceShell(props: {
               ) : undefined
             }
           >
-            {chatsPanelTab === "file" ? (
-              <Suspense fallback={<PanelLoading label="Chats" />}>
-                <LazyLinkedChatsPanel
-                  workspaceId={workspaceId}
-                  filePath={activeDocumentPath}
-                  initialThread={searchChatThread}
-                  onInitialThreadConsumed={() => setSearchChatThread(null)}
-                  onError={(message) => setShellError(message)}
-                />
-              </Suspense>
-            ) : isChatsTabPath(wb.activeTab) ? (
-              // The chats TAB is live — never mount a second chat client
-              // (duplicate presence lease, composer ids, diverging state).
-              <div
-                data-testid="chats-panel-deferred"
-                className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-              >
-                <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-xs text-muted">
-                  Chats are open as a tab.
-                </span>
-              </div>
-            ) : (
-              <Suspense fallback={<PanelLoading label="Chats" />}>
-                <LazyChatsView {...chatsViewProps} />
-              </Suspense>
-            )}
+            {/* Chats island: a crash in either panel view stays contained;
+                switching panel mode or workspace tab clears the failure. */}
+            <ErrorBoundary
+              scope="rail"
+              resetKeys={[chatsPanelTab, wb.activeTab]}
+            >
+              {chatsPanelTab === "file" ? (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyLinkedChatsPanel
+                    workspaceId={workspaceId}
+                    filePath={activeDocumentPath}
+                    initialThread={searchChatThread}
+                    onInitialThreadConsumed={() => setSearchChatThread(null)}
+                    onError={(message) => setShellError(message)}
+                  />
+                </Suspense>
+              ) : isChatsTabPath(wb.activeTab) ? (
+                // The chats TAB is live — never mount a second chat client
+                // (duplicate presence lease, composer ids, diverging state).
+                <div
+                  data-testid="chats-panel-deferred"
+                  className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+                >
+                  <MessagesSquare size={16} aria-hidden className="text-subtle" />
+                  <span className="text-xs text-muted">
+                    Chats are open as a tab.
+                  </span>
+                </div>
+              ) : (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyChatsView {...chatsViewProps} />
+                </Suspense>
+              )}
+            </ErrorBoundary>
           </ChatsPanel>
         ) : null}
       </div>

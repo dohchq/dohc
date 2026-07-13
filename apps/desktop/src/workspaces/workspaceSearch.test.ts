@@ -404,6 +404,34 @@ describe("createSearchRegistry", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("does not replace the active search when startup became stale", async () => {
+    const killed: string[] = [];
+    const started: string[] = [];
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: ((options: { searchId: string }) => {
+        started.push(options.searchId);
+        return {
+          searchId: options.searchId,
+          kill: () => killed.push(options.searchId),
+        };
+      }) as never,
+    });
+    const root = await mkdtemp(join(tmpdir(), "dohc-reg-"));
+    await registry.startSearch(1, root, "current", { query: "a" }, () => {});
+    await registry.startSearch(
+      1,
+      root,
+      "stale",
+      { query: "b" },
+      () => {},
+      () => false,
+    );
+    expect(started).toEqual(["current"]);
+    expect(killed).toEqual([]);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("cancel kills only a matching searchId; disposeOwner and killAll kill tracked children", async () => {
     const killed: string[] = [];
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) as never });
