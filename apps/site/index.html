@@ -41,6 +41,7 @@
     <span class="wordmark">dohc</span>
   </a>
   <nav class="nav-links" aria-label="Site">
+    <a href="#demo">try it</a>
     <a href="#note">the note</a>
     <a href="#onboard">on board</a>
     <a href="#convictions">convictions</a>
@@ -96,146 +97,13 @@
         </div>
       </div>
     </div>
-    <div class="dohc-slice reveal d4" data-demo aria-label="A working slice of the dohc desktop app">
-      <div class="demo-windowbar">
-        <div class="demo-brand">
-          <svg viewBox="0 0 96 104" aria-hidden="true">
-            <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z" fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
-            <circle cx="38" cy="58" r="9" fill="currentColor"/>
-          </svg>
-          <strong>dohc</strong><span>workspace</span><svg class="demo-workspace-switch" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg>
-        </div>
-        <button class="demo-command-trigger" type="button" aria-label="Quick open" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
-          <span>Search files…</span><kbd>Ctrl P</kbd>
-        </button>
-      </div>
+  </section>
 
-      <div class="demo-shell">
-        <nav class="demo-activity" aria-label="Workspace views">
-          <div>
-            <button class="is-active" type="button" data-demo-toggle-explorer aria-label="Explorer" title="Explorer">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 2h-4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8"/><path d="M16.706 2.706A2.4 2.4 0 0 0 15 2v5a1 1 0 0 0 1 1h5a2.4 2.4 0 0 0-.706-1.706z"/><path d="M5 7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 1.732-1"/></svg>
-            </button>
-            <button type="button" aria-label="Search" title="Search" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
-            </button>
-            <button type="button" aria-label="Agent" title="Agent" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 10a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 14.286V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><path d="M20 9a2 2 0 0 1 2 2v10.286a.71.71 0 0 1-1.212.502l-2.202-2.202A2 2 0 0 0 17.172 19H10a2 2 0 0 1-2-2v-1"/></svg>
-            </button>
-            <button type="button" aria-label="Graph" title="Graph" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></svg>
-            </button>
-            <button type="button" aria-label="Sites" title="Sites" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.54 15H17a2 2 0 0 0-2 2v4.54"/><path d="M7 3.34V5a3 3 0 0 0 3 3 2 2 0 0 1 2 2c0 1.1.9 2 2 2s2-.9 2-2 .9-2 2-2h3.17"/><path d="M11 21.95V18a2 2 0 0 0-2-2 2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05"/><circle cx="12" cy="12" r="10"/></svg>
-            </button>
-            <button type="button" aria-label="History" title="History" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
-            </button>
-          </div>
-          <div class="demo-activity-bottom">
-            <button type="button" aria-label="dohc Cloud" title="dohc Cloud" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
-            </button>
-            <button type="button" aria-label="Settings" title="Settings" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
-          </div>
-        </nav>
-
-        <aside class="demo-explorer">
-          <div class="demo-pane-title">
-            <span>Explorer</span>
-          </div>
-          <section class="demo-file-section">
-            <div class="demo-group-label">
-              <button class="demo-group-toggle" type="button" data-demo-toggle-editors aria-expanded="true"><svg class="demo-disclosure-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg> Open editors</button>
-              <span><b data-demo-open-count>1</b><button type="button" data-demo-new-untitled aria-label="New untitled text file" title="New untitled text file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.35 22H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v5.35"/><path d="M14 2v5a1 1 0 0 0 1 1h5M14 19h6M17 16v6"/></svg></button><button type="button" data-demo-close-all aria-label="Close all editors">×</button></span>
-            </div>
-            <div data-demo-open-file></div>
-          </section>
-          <section class="demo-file-section">
-            <div class="demo-group-label">
-              <button class="demo-group-toggle" type="button" data-demo-toggle-files aria-expanded="true"><svg class="demo-disclosure-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg> Files</button>
-              <span><button type="button" data-demo-inline-new-file aria-label="New file" title="New file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.35 22H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v5.35"/><path d="M14 2v5a1 1 0 0 0 1 1h5M14 19h6M17 16v6"/></svg></button><button type="button" data-demo-new-folder aria-label="New folder"><svg viewBox="0 0 24 24"><path d="M12 10v6M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></button><button type="button" data-demo-refresh aria-label="Refresh explorer"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5"/></svg></button><button type="button" data-demo-collapse-folders aria-label="Collapse folders"><svg viewBox="0 0 24 24"><path d="m17 11-5-5-5 5M17 18l-5-5-5 5"/></svg></button></span>
-            </div>
-            <div class="demo-tree" data-demo-file-tree></div>
-          </section>
-        </aside>
-
-        <main class="demo-editor">
-          <div class="demo-tabs">
-            <div class="demo-tab-list" data-demo-tab-list></div>
-            <div class="demo-tab-context"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg><svg viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></svg><strong>Main</strong><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></div>
-          </div>
-          <div class="demo-editor-toolbar">
-            <span class="demo-path" data-demo-path><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h7l4 4V20h-11z"/><path d="M13.5 3.5v4h4"/></svg><span data-demo-path-folder>notes/</span><strong data-demo-path-name>product-plan.md</strong></span>
-            <button class="demo-mobile-new" type="button" data-demo-new-file>+ New file</button>
-            <div class="demo-mode" aria-label="Editor mode">
-              <button class="is-active" type="button" data-demo-mode="document" aria-pressed="true">Document</button>
-              <button class="demo-share" type="button" disabled aria-label="Share"><svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="18" cy="19" r="2"/><path d="m8 11 8-5M8 13l8 5"/></svg></button>
-              <span class="demo-toolbar-save" data-demo-toolbar-save>Saved</span>
-              <button type="button" data-demo-mode="source" aria-pressed="false">Source</button>
-              <button type="button" disabled aria-label="More">···</button>
-            </div>
-          </div>
-
-          <div class="demo-editor-scroll" data-demo-editor-scroll>
-            <div class="demo-empty-editor" data-demo-empty-editor hidden><p>Select a file, or create one</p><button type="button" data-demo-new-file>Ctrl N · new file</button></div>
-            <div class="demo-page" data-demo-document>
-              <div class="demo-block-gutter" data-demo-block-gutter hidden><span>+</span><span>⋮</span></div>
-              <div class="demo-page-icon-row"><button type="button" disabled>+ Add icon</button></div>
-              <input class="demo-page-title" data-demo-title aria-label="Document title" value="product-plan" spellcheck="true" />
-              <div class="demo-wysiwyg" data-demo-wysiwyg contenteditable="true" role="textbox" aria-multiline="true" aria-label="Document editor" data-placeholder="Start writing, or type / for commands…" spellcheck="true">
-                <h1>Q3 product plan</h1>
-                <p>dohc turns messy work into an inspectable workspace. This quarter we focus on<br>polish, collaboration, and making the editor feel effortless.</p>
-                <h2>Goals</h2>
-                <ul><li>Ship the hybrid chats feed to beta users</li><li>Reduce time-to-first-document under 30 seconds</li><li>Make agent activity legible at a glance</li></ul>
-                <h2>Workstreams</h2>
-                <table><thead><tr><th>Workstream</th><th>Owner</th><th>Status</th></tr></thead><tbody><tr><td>Editor polish</td><td>Ice</td><td>In progress</td></tr><tr><td>Sync relay</td><td>Agent</td><td>Shipping</td></tr><tr><td>Sites preview</td><td>Ice</td><td>Planned</td></tr></tbody></table>
-              </div>
-              <div class="demo-bubble-menu" data-demo-bubble-menu hidden role="toolbar" aria-label="Text formatting">
-                <button class="demo-heading-select" type="button" disabled>Heading 1 <span>⌄</span></button>
-                <button type="button" data-demo-command="bold" aria-label="Bold"><strong>B</strong></button>
-                <button type="button" data-demo-command="italic" aria-label="Italic"><em>I</em></button>
-                <button type="button" data-demo-command="underline" aria-label="Underline"><u>U</u></button>
-                <button type="button" data-demo-command="strikeThrough" aria-label="Strike"><s>S</s></button>
-                <button type="button" data-demo-command="code" aria-label="Inline code"><span>&lt;&gt;</span></button>
-                <button type="button" data-demo-command="hiliteColor" data-demo-command-value="#dcd7c9" aria-label="Highlight">◢</button>
-                <button type="button" disabled aria-label="Link">⛓</button>
-              </div>
-              <div class="demo-slash-menu" data-demo-slash-menu hidden role="listbox" aria-label="slash commands"></div>
-            </div>
-            <textarea class="demo-source-editor" data-demo-source-editor aria-label="Markdown source" spellcheck="false" hidden></textarea>
-          </div>
-        </main>
-
-        <aside class="demo-history">
-          <div class="demo-inspector-tabs"><button class="is-active" type="button" disabled>History</button><button type="button" disabled>Chats</button><span><svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></svg></span></div>
-          <div class="demo-history-list" data-demo-history aria-live="polite">
-            <label class="demo-history-search"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4.5 4.5"/></svg><input aria-label="Search history" placeholder="Search history" disabled></label>
-            <p class="demo-inspector-date">Mon, Jul 13, 2026</p>
-            <div class="demo-event"><i></i><div><strong>Edited AGENTS.md</strong><small>Local file edit · Jul 13, 5:24 PM · AGEN…</small></div></div>
-            <div class="demo-event is-muted"><span>›</span><div><strong>Reconciled offline edits</strong><small>Jul 13, 5:24 PM · 6 files</small></div></div>
-          </div>
-        </aside>
-      </div>
-
-      <div class="demo-statusbar">
-        <div><span class="demo-workspace-name">workspace</span><span data-demo-save-state><i></i>Local · saved</span></div>
-        <div class="demo-status-actions"><span><svg viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span><span><svg viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Connect dohc Cloud</span><span><svg viewBox="0 0 24 24"><path d="M12 2v2"/><path d="M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715"/><path d="M16 12a4 4 0 0 0-4-4"/><path d="m19 5-1.256 1.256M20 12h2"/></svg></span><span><svg viewBox="0 0 24 24"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>Settings</span></div>
-      </div>
-
-      <div class="demo-dialog-backdrop" data-demo-dialog hidden>
-        <form class="demo-dialog" data-demo-new-file-form>
-          <h3>New file</h3>
-          <p>Name it like a path — any folders you name are created for you. No extension means markdown (.md).</p>
-          <input data-demo-new-file-input aria-label="New file path" placeholder="notes/today.md" autocomplete="off" spellcheck="false" />
-          <span class="demo-dialog-error" data-demo-new-file-error aria-live="polite"></span>
-        </form>
-      </div>
+  <!-- ============ interactive desktop demo ============ -->
+  <section class="section demo-section" id="demo" aria-label="Interactive dohc workspace demo">
+    <div class="demo-stage reveal">
+      <div id="desktop-demo" aria-label="Interactive demo of the dohc desktop app"></div>
     </div>
-    <p class="demo-disclosure reveal d4">This browser slice is temporary; the desktop app saves these files to your workspace.</p>
   </section>
 
   <!-- ============ 01 · the note ============ -->
@@ -363,6 +231,7 @@
   <p class="footer-fine">The 1976 Apple-1 note appears as historical inspiration. Apple is a trademark of Apple Inc.; dohc is not affiliated with Apple.</p>
 </footer>
 
-<script src="site.js" defer></script>
+<script type="module" src="/src/main.tsx"></script>
+<script type="module" src="site.js"></script>
 </body>
 </html>
