@@ -21,6 +21,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -104,7 +105,9 @@ describe("ErrorBoundary (scoped)", () => {
 });
 
 describe("AppErrorBoundary", () => {
-  it("renders the branded crash screen with a reload affordance", () => {
+  it("reloads through main so renderer-owned resources are cleaned up", () => {
+    const reloadRenderer = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", { reloadRenderer });
     render(
       <AppErrorBoundary>
         <Bomb />
@@ -113,7 +116,8 @@ describe("AppErrorBoundary", () => {
     expect(screen.getByTestId("app-crash-screen")).toBeTruthy();
     expect(screen.getByText("something went wrong")).toBeTruthy();
     expect(screen.getByText("kaboom in a view")).toBeTruthy();
-    expect(screen.getByTestId("app-crash-reload")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("app-crash-reload"));
+    expect(reloadRenderer).toHaveBeenCalledOnce();
   });
 });
 

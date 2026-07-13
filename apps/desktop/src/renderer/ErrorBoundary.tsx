@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
+import { bridge } from "./bridge";
 
 // Crash containment for the renderer. React unmounts the ENTIRE tree when a
 // render/lifecycle error reaches the root with no boundary — the user sees a
@@ -142,7 +143,7 @@ export class AppErrorBoundary extends Component<
         <button
           type="button"
           data-testid="app-crash-reload"
-          onClick={() => window.location.reload()}
+          onClick={() => void bridge().reloadRenderer()}
           className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs font-semibold text-muted hover:bg-line/50 hover:text-ink"
         >
           Reload dohc

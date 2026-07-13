@@ -30,6 +30,7 @@ import {
 // mistyped method fails the desktop typecheck).
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
+  reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>

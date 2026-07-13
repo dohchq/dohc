@@ -686,6 +686,9 @@ async function startPreviewForSiteUnlocked(
   input: SitePreviewStartInput,
   key: string,
 ): Promise<StartSitePreviewResult> {
+  if (!input.isCurrent()) {
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
   try {
     await stopSitePreviewHandle(input.workspaceId, input.site.root);
   } catch (error) {
@@ -2363,6 +2366,13 @@ function requireAuthorizedWorkspace(
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.handle(CHANNELS.reloadRenderer, async (event) => {
+    assertTrustedSender(event);
+    const sender = event.sender;
+    await prepareForRendererReload(sender.id);
+    if (!sender.isDestroyed()) sender.reload();
+  });
+
   ipcMain.handle(CHANNELS.pickWorkspaceRoot, async (event) => {
     assertTrustedSender(event);
     // Test seam: native dialogs cannot be driven by Playwright.
