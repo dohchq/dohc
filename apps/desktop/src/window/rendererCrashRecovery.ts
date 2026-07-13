@@ -28,10 +28,7 @@ export function crashLoopPolicy(
     (at) => nowMs - at < CRASH_LOOP_WINDOW_MS,
   );
   pruned.push(nowMs);
-  return {
-    reload: pruned.length <= CRASH_LOOP_MAX_RELOADS,
-    recentCrashesMs: pruned,
-  };
+  return { reload: pruned.length <= CRASH_LOOP_MAX_RELOADS, recentCrashesMs: pruned };
 }
 
 export function isCleanRendererExit(reason: string): boolean {
@@ -42,10 +39,7 @@ export function isCleanRendererExit(reason: string): boolean {
 type RecoverableWebContents = {
   on(
     event: "render-process-gone",
-    listener: (
-      event: unknown,
-      details: { reason: string; exitCode: number },
-    ) => void,
+    listener: (event: unknown, details: { reason: string; exitCode: number }) => void,
   ): unknown;
   reload(): void;
   isDestroyed(): boolean;
@@ -54,7 +48,6 @@ type RecoverableWebContents = {
 export function installRendererCrashRecovery(
   webContents: RecoverableWebContents,
   now: () => number = Date.now,
-  beforeReload?: () => void | Promise<void>,
 ): void {
   let recentCrashesMs: number[] = [];
   webContents.on("render-process-gone", (_event, details) => {
@@ -69,21 +62,6 @@ export function installRendererCrashRecovery(
       }`,
     );
     if (!decision.reload || webContents.isDestroyed()) return;
-    if (!beforeReload) {
-      webContents.reload();
-      return;
-    }
-    // Main-owned resources outlive a renderer process. Close them before the
-    // replacement renderer mounts so it cannot collide with stale Y.Doc
-    // reservations or orphaned preview processes. Cleanup failure must still
-    // recover the visible window; it is logged and reload proceeds.
-    void Promise.resolve()
-      .then(beforeReload)
-      .catch((error) => {
-        console.error("[desktop] renderer crash cleanup failed:", error);
-      })
-      .then(() => {
-        if (!webContents.isDestroyed()) webContents.reload();
-      });
+    webContents.reload();
   });
 }

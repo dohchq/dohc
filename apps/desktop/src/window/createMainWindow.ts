@@ -153,9 +153,7 @@ function trackWindowState(window: BrowserWindow): void {
   });
 }
 
-export function createMainWindow(options?: {
-  beforeRendererReload?: (senderId: number) => void | Promise<void>;
-}): BrowserWindow {
+export function createMainWindow(): BrowserWindow {
   const preloadPath = join(import.meta.dirname, "../preload/preload.cjs");
   const placement = loadPlacement();
   // Native chrome paints the LAUNCH theme (persisted user choice, else the OS
@@ -190,13 +188,7 @@ export function createMainWindow(options?: {
 
   // A crashed renderer reloads instead of leaving a permanently blank window
   // (crash-loop guarded) — see rendererCrashRecovery.ts.
-  installRendererCrashRecovery(
-    window.webContents,
-    Date.now,
-    options?.beforeRendererReload
-      ? () => options.beforeRendererReload?.(window.webContents.id)
-      : undefined,
-  );
+  installRendererCrashRecovery(window.webContents);
 
   // window.open is a pure deny with NO side effects: renderer content (file
   // views today, app iframes in 7b) must never reach the OS browser except

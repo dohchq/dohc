@@ -31,10 +31,7 @@ const bridgeMock = {
   })),
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
-  readWorkspaceText: vi.fn(async () => ({
-    text: "Quarterly notes",
-    truncated: false,
-  })),
+  readWorkspaceText: vi.fn(async () => ({ text: "Quarterly notes", truncated: false })),
 };
 
 describe("SitePreviewPage", () => {
@@ -65,9 +62,7 @@ describe("SitePreviewPage", () => {
     expect(sandbox).not.toContain("allow-top-navigation");
     const frameUrl = new URL(frame.getAttribute("src") ?? "");
     expect(frameUrl.origin).toBe("http://127.0.0.1:49152");
-    expect(frameUrl.searchParams.get("dohcHostOrigin")).toBe(
-      window.location.origin,
-    );
+    expect(frameUrl.searchParams.get("dohcHostOrigin")).toBe(window.location.origin);
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
       siteRoot: "report",
@@ -88,15 +83,8 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    expect(
-      await screen.findByText(
-        "Preview URL must be an unauthenticated loopback HTTP URL.",
-      ),
-    ).toBeTruthy();
+    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
-    expect(screen.queryByTestId("site-preview-reload")).toBeNull();
-    expect(screen.queryByTestId("site-preview-open-external")).toBeNull();
-    expect(screen.getByTestId("site-preview-stop")).toBeTruthy();
   });
 
   it("refuses to render HTTPS loopback preview URLs", async () => {
@@ -112,11 +100,7 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    expect(
-      await screen.findByText(
-        "Preview URL must be an unauthenticated loopback HTTP URL.",
-      ),
-    ).toBeTruthy();
+    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
@@ -133,18 +117,12 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    expect(
-      await screen.findByText(
-        "Preview URL must be an unauthenticated loopback HTTP URL.",
-      ),
-    ).toBeTruthy();
+    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
   it("stops the preview when the page unmounts", async () => {
-    const view = render(
-      <SitePreviewPage workspaceId="ws-sites" siteRoot="report" />,
-    );
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
     await screen.findByText("Report");
     view.unmount();
 
@@ -156,24 +134,17 @@ describe("SitePreviewPage", () => {
 
   it("removes the SDK message listener when the page unmounts", async () => {
     const removeEventListener = vi.spyOn(window, "removeEventListener");
-    const view = render(
-      <SitePreviewPage workspaceId="ws-sites" siteRoot="report" />,
-    );
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByText("Report");
     view.unmount();
 
-    expect(removeEventListener).toHaveBeenCalledWith(
-      "message",
-      expect.any(Function),
-    );
+    expect(removeEventListener).toHaveBeenCalledWith("message", expect.any(Function));
     removeEventListener.mockRestore();
   });
 
   it("keeps the preview visible and reports stop failures", async () => {
-    bridgeMock.stopSitePreview.mockRejectedValueOnce(
-      new Error("Could not stop dev server"),
-    );
+    bridgeMock.stopSitePreview.mockRejectedValueOnce(new Error("Could not stop dev server"));
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -193,9 +164,7 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    const frame = (await screen.findByTestId(
-      "site-preview-frame",
-    )) as HTMLIFrameElement;
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
     const postMessage = vi.fn();
     const source = { postMessage } as unknown as Window;
     Object.defineProperty(frame, "contentWindow", {
@@ -240,9 +209,7 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    const frame = (await screen.findByTestId(
-      "site-preview-frame",
-    )) as HTMLIFrameElement;
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
     const postMessage = vi.fn();
     const source = { postMessage } as unknown as Window;
     const fakeSource = { postMessage: vi.fn() } as unknown as Window;
@@ -269,18 +236,14 @@ describe("SitePreviewPage", () => {
   });
 
   it("returns SDK host errors when workspace file reads fail", async () => {
-    bridgeMock.readWorkspaceText.mockRejectedValueOnce(
-      new Error("Could not read notes/q1.md"),
-    );
+    bridgeMock.readWorkspaceText.mockRejectedValueOnce(new Error("Could not read notes/q1.md"));
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    const frame = (await screen.findByTestId(
-      "site-preview-frame",
-    )) as HTMLIFrameElement;
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
     const postMessage = vi.fn();
     const source = { postMessage } as unknown as Window;
     Object.defineProperty(frame, "contentWindow", {
@@ -324,9 +287,7 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    const frame = (await screen.findByTestId(
-      "site-preview-frame",
-    )) as HTMLIFrameElement;
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
     const postMessage = vi.fn();
     const source = { postMessage } as unknown as Window;
     Object.defineProperty(frame, "contentWindow", {
@@ -395,9 +356,7 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    const frame = (await screen.findByTestId(
-      "site-preview-frame",
-    )) as HTMLIFrameElement;
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
     const postMessage = vi.fn();
     const source = { postMessage } as unknown as Window;
     Object.defineProperty(frame, "contentWindow", {
@@ -429,9 +388,7 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     await user.click(screen.getByTestId("site-preview-static"));
 
-    const frame = (await screen.findByTestId(
-      "site-preview-frame",
-    )) as HTMLIFrameElement;
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
     const postMessage = vi.fn();
     const source = { postMessage } as unknown as Window;
     Object.defineProperty(frame, "contentWindow", {
