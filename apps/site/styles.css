@@ -227,6 +227,7 @@ body {
 }
 
 [data-theme='dark'] .demo-stage {
+  border-color: transparent;
   box-shadow: none;
 }
 
