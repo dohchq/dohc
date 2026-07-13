@@ -114,7 +114,11 @@ function isSafeWorkspaceRelativePath(path: string): boolean {
     !value.includes("\\") &&
     !value.startsWith("/") &&
     !/^[A-Za-z]:/.test(value) &&
-    value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+    value
+      .split("/")
+      .every(
+        (segment) => segment !== "" && segment !== "." && segment !== "..",
+      );
   return safe(path) && safe(decoded);
 }
 
@@ -154,7 +158,8 @@ export function SitePreviewPage(props: {
     } catch (error) {
       setLoad({
         status: "error",
-        message: error instanceof Error ? error.message : "Could not load this site.",
+        message:
+          error instanceof Error ? error.message : "Could not load this site.",
       });
     }
   }, [props.workspaceId, props.siteRoot]);
@@ -166,7 +171,10 @@ export function SitePreviewPage(props: {
   useEffect(() => {
     return () => {
       void bridge()
-        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot })
+        .stopSitePreview({
+          workspaceId: props.workspaceId,
+          siteRoot: props.siteRoot,
+        })
         .catch(() => undefined);
     };
   }, [props.workspaceId, props.siteRoot]);
@@ -196,7 +204,10 @@ export function SitePreviewPage(props: {
           };
         } else if (request.method === "files.read") {
           const params = request.params as { path?: unknown } | undefined;
-          if (typeof params?.path !== "string" || !isSafeWorkspaceRelativePath(params.path)) {
+          if (
+            typeof params?.path !== "string" ||
+            !isSafeWorkspaceRelativePath(params.path)
+          ) {
             response = sdkErrorResponse(
               request.id,
               "DOHC_BAD_REQUEST",
@@ -253,7 +264,11 @@ export function SitePreviewPage(props: {
       });
       setPreview(result);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : `Could not start ${modeLabel(mode)} preview.`);
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : `Could not start ${modeLabel(mode)} preview.`,
+      );
     } finally {
       setRunningMode(null);
     }
@@ -268,20 +283,27 @@ export function SitePreviewPage(props: {
       });
       setPreview(null);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Could not stop preview.");
+      setActionError(
+        error instanceof Error ? error.message : "Could not stop preview.",
+      );
     }
   }
 
   const site = load.status === "ready" ? load.site : null;
 
   return (
-    <div data-testid="site-preview-page" className="flex min-h-0 flex-1 flex-col bg-bg">
+    <div
+      data-testid="site-preview-page"
+      className="flex min-h-0 flex-1 flex-col bg-bg"
+    >
       <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-4 py-1.5">
         <Globe2 size={14} aria-hidden className="text-subtle" />
         <span className="truncate text-[13px] font-medium text-ink">
           {site?.title ?? props.siteRoot}
         </span>
-        <span className="truncate font-mono text-[11px] text-subtle">{props.siteRoot}</span>
+        <span className="truncate font-mono text-[11px] text-subtle">
+          {props.siteRoot}
+        </span>
         <div className="ml-auto flex items-center gap-1.5">
           {modes.map((mode) => (
             <button
@@ -304,19 +326,21 @@ export function SitePreviewPage(props: {
           ))}
           {preview ? (
             <>
-              <IconButton
-                data-testid="site-preview-reload"
-                aria-label="Reload preview"
-                title="Reload preview"
-                onClick={() => {
-                  const url = new URL(preview.url);
-                  url.searchParams.set("t", String(Date.now()));
-                  setPreview({ ...preview, url: url.href });
-                }}
-                className="size-7"
-              >
-                <RefreshCcw size={13} aria-hidden />
-              </IconButton>
+              {previewUrlAllowed ? (
+                <IconButton
+                  data-testid="site-preview-reload"
+                  aria-label="Reload preview"
+                  title="Reload preview"
+                  onClick={() => {
+                    const url = new URL(preview.url);
+                    url.searchParams.set("t", String(Date.now()));
+                    setPreview({ ...preview, url: url.href });
+                  }}
+                  className="size-7"
+                >
+                  <RefreshCcw size={13} aria-hidden />
+                </IconButton>
+              ) : null}
               <IconButton
                 data-testid="site-preview-stop"
                 aria-label="Stop preview"
@@ -336,7 +360,10 @@ export function SitePreviewPage(props: {
           Loading site...
         </div>
       ) : load.status === "missing" ? (
-        <EmptyState title="Site not detected" body="The folder no longer looks like a website." />
+        <EmptyState
+          title="Site not detected"
+          body="The folder no longer looks like a website."
+        />
       ) : load.status === "error" ? (
         <EmptyState title="Could not load site" body={load.message} />
       ) : site ? (
@@ -354,7 +381,10 @@ export function SitePreviewPage(props: {
                 </div>
               ))}
               {actionError ? (
-                <div data-testid="site-preview-error" className="flex items-center gap-1.5 text-[12px] text-danger">
+                <div
+                  data-testid="site-preview-error"
+                  className="flex items-center gap-1.5 text-[12px] text-danger"
+                >
                   <AlertTriangle size={12} aria-hidden />
                   <span>{actionError}</span>
                 </div>
@@ -364,7 +394,10 @@ export function SitePreviewPage(props: {
 
           {preview ? (
             !previewUrlAllowed ? (
-              <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
+              <div
+                data-testid="site-preview-error"
+                className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger"
+              >
                 Preview URL must be an unauthenticated loopback HTTP URL.
               </div>
             ) : (
@@ -374,15 +407,22 @@ export function SitePreviewPage(props: {
                     aria-hidden
                     className="size-1.5 shrink-0 rounded-full bg-success"
                   />
-                  <span data-testid="site-preview-mode" className="text-[11px] text-success">
+                  <span
+                    data-testid="site-preview-mode"
+                    className="text-[11px] text-success"
+                  >
                     {modeLabel(preview.mode)} preview
                   </span>
-                  <span className="truncate font-mono text-[11px] text-subtle">{preview.url}</span>
+                  <span className="truncate font-mono text-[11px] text-subtle">
+                    {preview.url}
+                  </span>
                   <IconButton
                     data-testid="site-preview-open-external"
                     aria-label="Open preview externally"
                     title="Open preview externally"
-                    onClick={() => void bridge().openExternalUrl({ url: preview.url })}
+                    onClick={() =>
+                      void bridge().openExternalUrl({ url: preview.url })
+                    }
                     className="ml-auto"
                   >
                     <ExternalLink size={12} aria-hidden />
@@ -407,9 +447,13 @@ export function SitePreviewPage(props: {
                 />
                 {preview.logs.length > 0 ? (
                   <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
-                    <summary className="cursor-pointer text-muted">Logs</summary>
+                    <summary className="cursor-pointer text-muted">
+                      Logs
+                    </summary>
                     <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-                      {preview.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+                      {preview.logs
+                        .map((log) => `[${log.stream}] ${log.text}`)
+                        .join("\n")}
                     </pre>
                   </details>
                 ) : null}

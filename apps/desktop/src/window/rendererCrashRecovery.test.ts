@@ -85,6 +85,39 @@ describe("installRendererCrashRecovery", () => {
     expect(fake.reloads).toHaveLength(1);
   });
 
+  it("awaits main-owned resource cleanup before reloading", async () => {
+    const fake = fakeWebContents();
+    let finishCleanup: (() => void) | undefined;
+    const cleanup = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
+    );
+    installRendererCrashRecovery(fake.contents, () => 1_000, cleanup);
+
+    fake.crash("crashed");
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    expect(fake.reloads).toHaveLength(0);
+
+    finishCleanup?.();
+    await vi.waitFor(() => expect(fake.reloads).toHaveLength(1));
+  });
+
+  it("still reloads when main-owned resource cleanup fails", async () => {
+    const fake = fakeWebContents();
+    installRendererCrashRecovery(
+      fake.contents,
+      () => 1_000,
+      async () => {
+        throw new Error("cleanup failed");
+      },
+    );
+
+    fake.crash("crashed");
+    await vi.waitFor(() => expect(fake.reloads).toHaveLength(1));
+  });
+
   it("ignores intentional clean exits", () => {
     const fake = fakeWebContents();
     installRendererCrashRecovery(fake.contents, () => 1_000);

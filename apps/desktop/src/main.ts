@@ -20,7 +20,15 @@ import {
 } from "electron";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -225,7 +233,10 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
-import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
+import {
+  decideNavigation,
+  isSafeExternalUrl,
+} from "./security/electronSecurity";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
@@ -399,10 +410,11 @@ import {
   movePath,
 } from "./workspaces/workspaceFiles";
 import { buildStoreZip } from "./workspaces/zipWriter";
-import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
 import {
-  DEFAULT_USER_SETTINGS,
-} from "./settings/userSettings";
+  readUiStateFile,
+  writeUiStateFile,
+} from "./workspaces/workspaceUiState";
+import { DEFAULT_USER_SETTINGS } from "./settings/userSettings";
 import {
   readCachedUserSettingsFile,
   writeUserSettingsFile,
@@ -435,7 +447,12 @@ const DOHC_FILE_SCHEME = "dohc-file";
 protocol.registerSchemesAsPrivileged([
   {
     scheme: DOHC_FILE_SCHEME,
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
   },
 ]);
 
@@ -476,7 +493,9 @@ function isRichEnginePath(path: string): boolean {
 // routes through it so a shared view can never be changed, only read. The
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
-function sharedViewOf(workspaceId: string): { granterEmail: string | null } | null {
+function sharedViewOf(
+  workspaceId: string,
+): { granterEmail: string | null } | null {
   return findWorkspace(workspaceId)?.shareView ?? null;
 }
 
@@ -553,7 +572,10 @@ async function withSitePreviewStartLock<T>(
   }
 }
 
-async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
+async function stopSitePreviewHandle(
+  workspaceId: string,
+  siteRoot: string,
+): Promise<void> {
   const key = sitePreviewKey(workspaceId, siteRoot);
   const handle = sitePreviewHandles.get(key);
   sitePreviewHandles.delete(key);
@@ -576,7 +598,9 @@ function stopSitePreviewsForQuit(): void {
   }
 }
 
-async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
+async function stopSitePreviewsForWorkspace(
+  workspaceId: string,
+): Promise<void> {
   const prefix = `${workspaceId}\0`;
   const siteRoots = new Set<string>();
   for (const key of sitePreviewHandles.keys()) {
@@ -588,17 +612,22 @@ async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> 
 
   await Promise.all(
     [...siteRoots].map((siteRoot) =>
-      withSitePreviewStartLock(
-        sitePreviewKey(workspaceId, siteRoot),
-        () => stopSitePreviewHandle(workspaceId, siteRoot),
+      withSitePreviewStartLock(sitePreviewKey(workspaceId, siteRoot), () =>
+        stopSitePreviewHandle(workspaceId, siteRoot),
       ).catch((error) => {
-        console.warn("[desktop] failed to stop site preview during workspace switch", error);
+        console.warn(
+          "[desktop] failed to stop site preview during workspace switch",
+          error,
+        );
       }),
     ),
   );
 }
 
-function rememberSitePreviewHandle(key: string, handle: SitePreviewHandle): void {
+function rememberSitePreviewHandle(
+  key: string,
+  handle: SitePreviewHandle,
+): void {
   sitePreviewOriginReleases.get(key)?.();
   sitePreviewHandles.set(key, handle);
   sitePreviewOriginReleases.set(key, allowSitePreviewOrigin(handle.url));
@@ -611,14 +640,18 @@ function commandForSiteScript(
   const configuredCommand = site.configuredScripts?.[script];
   if (configuredCommand) return splitCommandLine(configuredCommand);
   const configured = site.scripts[script];
-  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
+  if (!configured)
+    throw new Error(`Site has no ${script} script: ${site.root}`);
   if (site.packagePath) {
     return packageManagerCommand(site.packageManager ?? "npm", script);
   }
   return splitCommandLine(configured);
 }
 
-function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
+function relativeWorkspacePath(
+  workspaceRoot: string,
+  absolutePath: string,
+): string {
   const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
   if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
     throw new Error(`Build output escaped the workspace: ${absolutePath}`);
@@ -626,7 +659,10 @@ function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): str
   return rel;
 }
 
-function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: string): string {
+function buildOutputRelativeToSite(
+  siteRoot: string,
+  workspaceRelativeOutput: string,
+): string {
   if (siteRoot === ".") return workspaceRelativeOutput;
   if (workspaceRelativeOutput === siteRoot) return ".";
   if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
@@ -653,7 +689,9 @@ async function startPreviewForSite(input: {
   mode: "static" | "dev" | "build";
 }): Promise<StartSitePreviewResult> {
   const key = sitePreviewKey(input.workspaceId, input.site.root);
-  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input, key));
+  return withSitePreviewStartLock(key, async () =>
+    startPreviewForSiteUnlocked(input, key),
+  );
 }
 
 async function startPreviewForSiteUnlocked(
@@ -672,9 +710,13 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "static") {
-    const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
-      entry: entryRelativeToSite(input.site) ?? undefined,
-    });
+    const handle = await startStaticSitePreview(
+      input.workspaceRoot,
+      input.site.root,
+      {
+        entry: entryRelativeToSite(input.site) ?? undefined,
+      },
+    );
     rememberSitePreviewHandle(key, handle);
     return {
       siteRoot: input.site.root,
@@ -746,7 +788,8 @@ async function startPreviewForSiteUnlocked(
       relativeWorkspacePath(input.workspaceRoot, result.outputPath),
     );
   }
-  if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
+  if (!outputRoot)
+    throw new Error(`Site has no build output to preview: ${input.site.root}`);
   const handle = await startStaticSitePreview(
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
@@ -765,7 +808,10 @@ async function startPreviewForSiteUnlocked(
 // gets ONE seam of the same shape: a DOHC_TEST_* env var holding a JSON array
 // of absolute paths, honored only in an unpackaged test build. Shared so the
 // import and image-picker seams cannot drift apart in their validation.
-function testAbsolutePaths(envName: string, maxEntries: number): string[] | null {
+function testAbsolutePaths(
+  envName: string,
+  maxEntries: number,
+): string[] | null {
   if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
   const raw = process.env[envName];
   if (!raw) return null;
@@ -810,7 +856,8 @@ function cloudLogin(): CloudLogin {
         dir: stateDir(),
         cipher: {
           isAvailable: () => safeStorage.isEncryptionAvailable(),
-          encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+          encrypt: (plain) =>
+            safeStorage.encryptString(plain).toString("base64"),
           decrypt: (cipherText) =>
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
         },
@@ -845,6 +892,8 @@ function nativeWorkspaceSummaries(): WorkspaceSummary[] {
 }
 
 let preferredWorkspaceId: string | null = null;
+const activeWorkspaceIdBySender = new Map<number, string>();
+const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
 
 function prioritizePreferredWorkspace(
   workspaces: WorkspaceSummary[],
@@ -861,7 +910,9 @@ function prioritizePreferredWorkspace(
   ];
 }
 
-function targetWindow(window: BrowserWindow | undefined): BrowserWindow | undefined {
+function targetWindow(
+  window: BrowserWindow | undefined,
+): BrowserWindow | undefined {
   return window ?? BrowserWindow.getAllWindows()[0];
 }
 
@@ -870,7 +921,10 @@ function sendWorkspaceActivated(
   workspace: WorkspaceSummary,
 ): void {
   preferredWorkspaceId = workspace.workspaceId;
-  targetWindow(window)?.webContents.send(CHANNELS.workspaceActivated, workspace);
+  targetWindow(window)?.webContents.send(
+    CHANNELS.workspaceActivated,
+    workspace,
+  );
 }
 
 function quoteWindowsArg(value: string): string {
@@ -964,7 +1018,9 @@ function warmCredentialCache(): Promise<void> {
   credentialCacheReady ??= refreshCredentialCache().catch(() => undefined);
   return credentialCacheReady;
 }
-function setCachedCredentials(credentials: Awaited<ReturnType<CloudLogin["credentials"]>>): void {
+function setCachedCredentials(
+  credentials: Awaited<ReturnType<CloudLogin["credentials"]>>,
+): void {
   credentialCacheGeneration += 1;
   cachedCredentials = credentials;
   credentialCacheReady = Promise.resolve();
@@ -985,7 +1041,8 @@ function normalizeServerUrl(url: string): string {
 function credentialMatchesRemote(remoteServerUrl: string): boolean {
   return (
     cachedCredentials !== null &&
-    normalizeServerUrl(cachedCredentials.serverUrl) === normalizeServerUrl(remoteServerUrl)
+    normalizeServerUrl(cachedCredentials.serverUrl) ===
+      normalizeServerUrl(remoteServerUrl)
   );
 }
 
@@ -1028,7 +1085,9 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   await warmCredentialCache();
   if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
   if (!cachedCredentials.relayUrl) {
-    throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+    throw new Error(
+      "Reconnect dohc Cloud with a sync relay URL, then try again.",
+    );
   }
   const headers = new Headers(init?.headers);
   if (init?.body) headers.set("content-type", "application/json");
@@ -1038,11 +1097,15 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
     { ...init, headers },
   );
   if (response.status === 401) {
-    throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+    throw new Error(
+      "Your dohc Cloud session expired. Sign in again, then retry.",
+    );
   }
-  const data = (await response.json().catch(() => null)) as
-    | { ok?: boolean; error?: string; code?: string }
-    | null;
+  const data = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    error?: string;
+    code?: string;
+  } | null;
   if (!response.ok || data?.ok === false) {
     throw new Error(relayShareErrorCopy(response.status, data));
   }
@@ -1078,7 +1141,10 @@ const presencePollRegistry = createPresencePollRegistry();
 const presencePollCleanupHooked = new WeakSet<Electron.WebContents>();
 // A stable ownership key so one window holds at most ONE poll per (scope, topic):
 // a new poll for the same key supersedes (aborts) the prior long-poll.
-function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string {
+function presenceScopeTopicKey(
+  scope: PresenceScopeInput,
+  topic: string,
+): string {
   return JSON.stringify(
     scope.kind === "workspace"
       ? ["w", scope.workspaceId, topic]
@@ -1137,7 +1203,9 @@ function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
 async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
   try {
     const entry = findWorkspace(workspaceId);
-    const channels = (entry?.sharedChannels ?? []).filter((channel) => !channel.ended);
+    const channels = (entry?.sharedChannels ?? []).filter(
+      (channel) => !channel.ended,
+    );
     if (!entry || channels.length === 0) return;
     await warmCredentialCache();
     if (!cachedCredentials?.relayUrl) return;
@@ -1145,7 +1213,9 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
     // Origin-relay pin (mirrors the shared-view refresh rule): a share is
     // only ever refreshed against the relay it was joined from — signed into
     // a DIFFERENT relay, skip rather than misread a 404 as "ended".
-    const matching = channels.filter((channel) => relayUrlsMatch(channel.relayUrl, relayUrl));
+    const matching = channels.filter((channel) =>
+      relayUrlsMatch(channel.relayUrl, relayUrl),
+    );
     if (matching.length === 0) return;
     const result = await syncJoinedSharedChannels({
       rootDir: entry.rootPath,
@@ -1168,16 +1238,24 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
         workspaceId,
         (findWorkspace(workspaceId)?.sharedChannels ?? []).map((channel) => {
           if (ended.has(channel.shareId)) return { ...channel, ended: true };
-          if (readOnly.has(channel.shareId)) return { ...channel, access: "read-only" as const };
+          if (readOnly.has(channel.shareId))
+            return { ...channel, access: "read-only" as const };
           return channel;
         }),
       );
     }
-    if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
+    if (
+      result.changed ||
+      result.endedShareIds.length > 0 ||
+      result.readOnlyShareIds.length > 0
+    ) {
       notifyRenderer();
     }
   } catch (error) {
-    console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
+    console.error(
+      `[desktop] shared channel sync failed for ${workspaceId}:`,
+      error,
+    );
   }
 }
 
@@ -1205,7 +1283,8 @@ function mcpConfigFor(
   // view but cannot write into it.
   if (options.readOnly) args.push("--read-only");
   if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
-  if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
+  if (sdkDependencyRange)
+    args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
     command,
     args,
@@ -1219,7 +1298,9 @@ function mcpRuntimeConfigFor(rootPath: string): {
   args: string[];
   env?: Record<string, string>;
 } {
-  const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
+  const workspace = listWorkspaces().find(
+    (entry) => entry.rootPath === rootPath,
+  );
   // Defense in depth: managed agent runs are already refused on shared views,
   // but if a runtime MCP is ever spawned for one it must be the read-only
   // profile — never the write-capable server.
@@ -1258,8 +1339,12 @@ function testSyncTimingOverrides(): {
   const debounce = Number(process.env.DOHC_TEST_SYNC_DEBOUNCE_MS);
   const backoff = Number(process.env.DOHC_TEST_SYNC_BACKOFF_MS);
   return {
-    ...(Number.isFinite(debounce) && debounce > 0 ? { debounceMs: debounce } : {}),
-    ...(Number.isFinite(backoff) && backoff > 0 ? { initialBackoffMs: backoff } : {}),
+    ...(Number.isFinite(debounce) && debounce > 0
+      ? { debounceMs: debounce }
+      : {}),
+    ...(Number.isFinite(backoff) && backoff > 0
+      ? { initialBackoffMs: backoff }
+      : {}),
   };
 }
 
@@ -1284,13 +1369,16 @@ function engineForWorkspace(
     capture,
     onChange: () => {
       notifyRenderer();
-      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-        console.error("[desktop] relay dispatch scan:", error);
-      });
+      void chatDispatchService
+        .scanWorkspace(workspace.workspaceId)
+        .catch((error) => {
+          console.error("[desktop] relay dispatch scan:", error);
+        });
     },
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
-    syncSharedChannels: () => syncWorkspaceSharedChannels(workspace.workspaceId),
+    syncSharedChannels: () =>
+      syncWorkspaceSharedChannels(workspace.workspaceId),
     // Post-pass open-conflict truth: pulled peer resolutions and local
     // resolutions both clear the status-bar/notice conflict state, and the
     // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
@@ -1305,7 +1393,8 @@ function engineForWorkspace(
 
 configureWorkspaceKernelRuntime({
   isPackaged: app.isPackaged,
-  resourcesPath: (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  resourcesPath: (process as NodeJS.Process & { resourcesPath?: string })
+    .resourcesPath,
 });
 
 const activity = createWorkspaceActivity(notifyRenderer, {
@@ -1341,7 +1430,9 @@ const agentIntegration = createAgentIntegration({
       const previous = panelAgentRunSlots.get(workspaceId);
       if (previous) activity.clearAgentRun(workspaceId, previous);
       if (!activity.claimAgentRun(workspaceId, run)) {
-        throw new Error("Another agent run is already active in this workspace.");
+        throw new Error(
+          "Another agent run is already active in this workspace.",
+        );
       }
       panelAgentRunSlots.set(workspaceId, run.agentRunId);
       return;
@@ -1412,14 +1503,19 @@ const tryInVersionSessions = createTryInVersionSessions({
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
-    const [{ createAgentDriverRegistry }, { createDesktopAgentDrivers }, { createAgentSessionManager }] =
-      await Promise.all([
-        import("./agents/AgentDriver"),
-        import("./agents/AgentProcessDrivers"),
-        import("./agents/AgentSessionManager"),
-      ]);
+    const [
+      { createAgentDriverRegistry },
+      { createDesktopAgentDrivers },
+      { createAgentSessionManager },
+    ] = await Promise.all([
+      import("./agents/AgentDriver"),
+      import("./agents/AgentProcessDrivers"),
+      import("./agents/AgentSessionManager"),
+    ]);
     cachedAgentSessions = createAgentSessionManager({
-      registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
+      registry: createAgentDriverRegistry(
+        createDesktopAgentDrivers(process.env),
+      ),
       integration: agentIntegration,
       rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
       mcpFor: mcpRuntimeConfigFor,
@@ -1433,7 +1529,10 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
 // first chat IPC and only ever for flagged workspaces (the handlers gate on
 // the engine capture being attached).
 const linkedChatStores = new Map<string, LinkedChatStore>();
-function linkedChatStoreFor(workspace: { workspaceId: string; rootPath: string }): LinkedChatStore {
+function linkedChatStoreFor(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): LinkedChatStore {
   const existing = linkedChatStores.get(workspace.workspaceId);
   if (existing) return existing;
   const store = createLinkedChatStore(workspace.rootPath);
@@ -1516,7 +1615,9 @@ function relayAuthorUserId(): string | undefined {
   return cachedCredentials?.userId;
 }
 
-function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null {
+function workspaceForDispatch(
+  workspaceId: string,
+): ChatDispatchWorkspace | null {
   const workspace = findWorkspace(workspaceId);
   if (!workspace || sharedViewOf(workspaceId)) {
     return null;
@@ -1623,7 +1724,9 @@ async function ensureWorkspaceActivityOpen(
     try {
       return await opening;
     } finally {
-      if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
+      if (
+        workspaceActivityOpenPromises.get(workspace.workspaceId) === opening
+      ) {
         workspaceActivityOpenPromises.delete(workspace.workspaceId);
       }
     }
@@ -1650,9 +1753,8 @@ async function acquireDispatchRunActivity(
   const alreadyOpen = activity
     .listOpenWorkspaceIds()
     .includes(workspace.workspaceId);
-  await workspaceChatLifecycle.open(
-    workspace,
-    () => ensureWorkspaceActivityOpen(workspace),
+  await workspaceChatLifecycle.open(workspace, () =>
+    ensureWorkspaceActivityOpen(workspace),
   );
   let released = false;
   return async () => {
@@ -1670,7 +1772,9 @@ function openDispatchWorkspaces(): ChatDispatchWorkspace[] {
     .listOpenWorkspaceIds()
     .filter((workspaceId) => activity.engineCaptureFor(workspaceId) !== null)
     .map(workspaceForDispatch)
-    .filter((workspace): workspace is ChatDispatchWorkspace => workspace !== null);
+    .filter(
+      (workspace): workspace is ChatDispatchWorkspace => workspace !== null,
+    );
 }
 
 async function publishAgentPresence(
@@ -1681,13 +1785,12 @@ async function publishAgentPresence(
     workspaceId: input.workspaceId,
   });
   if (!transport) return;
-  const topics = [
-    `chat:thread:${input.threadId}`,
-    CHAT_AGENT_PRESENCE_TOPIC,
-  ];
+  const topics = [`chat:thread:${input.threadId}`, CHAT_AGENT_PRESENCE_TOPIC];
   if (input.leave) {
     await Promise.all(
-      topics.map((topic) => transport.leave({ topic, clientId: input.clientId })),
+      topics.map((topic) =>
+        transport.leave({ topic, clientId: input.clientId }),
+      ),
     );
     return;
   }
@@ -1707,8 +1810,7 @@ const chatDispatchService = createChatDispatchService({
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
   chatStoreFor: linkedChatStoreFor,
-  dispatchStoreFor: (workspace) =>
-    agentDispatchStoreHandleFor(workspace).store,
+  dispatchStoreFor: (workspace) => agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.runner,
   identityFor: async (workspaceId) => {
@@ -1767,7 +1869,9 @@ const chatDispatchService = createChatDispatchService({
   setRunAttribution: (workspaceId, run) => {
     if (run) {
       if (!activity.claimAgentRun(workspaceId, run)) {
-        throw new Error("Another agent run is already active in this workspace.");
+        throw new Error(
+          "Another agent run is already active in this workspace.",
+        );
       }
       dispatchAgentRunSlots.set(workspaceId, run.agentRunId);
       return;
@@ -1825,9 +1929,11 @@ async function openWorkspaceActivity(
     () => ensureWorkspaceActivityOpen(workspace),
     afterActivityOpen,
   );
-  void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-    console.error("[desktop] chat dispatch workspace-open scan:", error);
-  });
+  void chatDispatchService
+    .scanWorkspace(workspace.workspaceId)
+    .catch((error) => {
+      console.error("[desktop] chat dispatch workspace-open scan:", error);
+    });
   return result;
 }
 
@@ -1842,7 +1948,10 @@ async function openCliWorkspace(
   requested: CliRegistryWorkspace,
 ): Promise<CliWorkspaceContext> {
   const workspace = findWorkspace(requested.workspaceId);
-  if (!workspace || resolve(workspace.rootPath) !== resolve(requested.rootPath)) {
+  if (
+    !workspace ||
+    resolve(workspace.rootPath) !== resolve(requested.rootPath)
+  ) {
     throw new Error("dohc: not inside a dohc workspace");
   }
   if (sharedViewOf(workspace.workspaceId)) {
@@ -1872,18 +1981,19 @@ async function openCliWorkspace(
 }
 
 async function startDesktopCliServer(): Promise<CliServerHandle> {
-  await workspaceChatLifecycle.boot(listWorkspaces()).catch((error: unknown) => {
-    console.error("[desktop] AGENTS.md boot maintenance:", error);
-  });
+  await workspaceChatLifecycle
+    .boot(listWorkspaces())
+    .catch((error: unknown) => {
+      console.error("[desktop] AGENTS.md boot maintenance:", error);
+    });
   const server = await startCliServer({
     stateDir: stateDir(),
     listWorkspaces: () =>
-      listWorkspaces()
-        .map(({ workspaceId, rootPath }) => ({
-          workspaceId,
-          rootPath,
-          readOnly: Boolean(sharedViewOf(workspaceId)),
-        })),
+      listWorkspaces().map(({ workspaceId, rootPath }) => ({
+        workspaceId,
+        rootPath,
+        readOnly: Boolean(sharedViewOf(workspaceId)),
+      })),
     openWorkspace: openCliWorkspace,
     identity: async () => {
       await warmCredentialCache();
@@ -1898,9 +2008,11 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       notifyRenderer();
       activity.queueCloudSync(workspace.workspaceId);
       void syncWorkspaceSharedChannels(workspace.workspaceId);
-      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-        console.error("[desktop] CLI dispatch scan:", error);
-      });
+      void chatDispatchService
+        .scanWorkspace(workspace.workspaceId)
+        .catch((error) => {
+          console.error("[desktop] CLI dispatch scan:", error);
+        });
     },
     onError: (error) => {
       console.error("[desktop] CLI server:", error);
@@ -1938,12 +2050,32 @@ const engineYDocCleanupHooked = new WeakSet<Electron.WebContents>();
 
 // Close and drop every engine Y.Doc session owned by one renderer (window gone
 // / crashed). Settles the converged state and releases each reservation.
-function closeEngineYDocSessionsForSender(senderId: number): void {
+async function closeEngineYDocSessionsForSender(
+  senderId: number,
+): Promise<void> {
+  const closing: Promise<void>[] = [];
   for (const [sessionId, entry] of [...engineYDocSessions]) {
     if (entry.senderId !== senderId) continue;
     engineYDocSessions.delete(sessionId);
-    void entry.session.close().catch(() => undefined);
+    closing.push(entry.session.close().catch(() => undefined));
   }
+  await Promise.all(closing);
+}
+
+async function prepareForRendererReload(senderId: number): Promise<void> {
+  // `openWorkspace` records the active workspace before awaiting watcher
+  // startup. Re-prioritize that sender's workspace so its replacement renderer
+  // boots back into the same place, while closing every main-owned resource
+  // the crashed renderer cannot clean up itself.
+  const activeWorkspaceId =
+    activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
+  if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  await Promise.all([
+    closeEngineYDocSessionsForSender(senderId),
+    activeWorkspaceId
+      ? stopSitePreviewsForWorkspace(activeWorkspaceId)
+      : Promise.resolve(),
+  ]);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
@@ -1951,7 +2083,9 @@ function closeEngineYDocSessionsForSender(senderId: number): void {
 async function closeAllEngineYDocSessions(): Promise<void> {
   const entries = [...engineYDocSessions.values()];
   engineYDocSessions.clear();
-  await Promise.all(entries.map((entry) => entry.session.close().catch(() => undefined)));
+  await Promise.all(
+    entries.map((entry) => entry.session.close().catch(() => undefined)),
+  );
 }
 
 function fallbackUpdateState(): PublicUpdateState {
@@ -1963,14 +2097,19 @@ function fallbackUpdateState(): PublicUpdateState {
   return { ...state, canCheck: false, canInstall: false };
 }
 
-function parseUpdateStateForIpc(state: PublicUpdateState): UpdateStateEvent | null {
+function parseUpdateStateForIpc(
+  state: PublicUpdateState,
+): UpdateStateEvent | null {
   const parsed = UpdateStateEvent.safeParse(state);
   return parsed.success ? parsed.data : null;
 }
 
 function currentUpdateState(): UpdateStateEvent {
   const fallback = fallbackUpdateState();
-  return parseUpdateStateForIpc(autoUpdateController?.publicState() ?? fallback) ?? fallback;
+  return (
+    parseUpdateStateForIpc(autoUpdateController?.publicState() ?? fallback) ??
+    fallback
+  );
 }
 
 function broadcastUpdateState(state: PublicUpdateState): void {
@@ -1986,14 +2125,15 @@ function broadcastUpdateState(state: PublicUpdateState): void {
 
 let dispatchTray: Tray | null = null;
 
-function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
+function configuredRunnerEnabled(
+  settings: DesktopUserSettingsResult["settings"],
+): boolean {
   return settings.runner.enabled && settings.runner.command.trim().length > 0;
 }
 
 function dispatchTrayIcon() {
-  const resourcesPath = (
-    process as NodeJS.Process & { resourcesPath?: string }
-  ).resourcesPath;
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
+    .resourcesPath;
   const packagedPath = resourcesPath
     ? join(resourcesPath, "tray-icon.png")
     : "";
@@ -2016,7 +2156,9 @@ async function showOrCreateMainWindow(): Promise<void> {
     return;
   }
   const { createMainWindow } = await import("./window/createMainWindow");
-  const window = createMainWindow();
+  const window = createMainWindow({
+    beforeRendererReload: prepareForRendererReload,
+  });
   window.show();
   window.focus();
 }
@@ -2085,16 +2227,19 @@ app.on("will-quit", (event) => {
   const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
   const cliServerStop = chatDispatchStop.then(() =>
     (cliServerStartup ?? Promise.resolve(cliServer))
-    .then((server) => server?.close())
-    .catch(() => undefined),
+      .then((server) => server?.close())
+      .catch(() => undefined),
   );
   agentIntegration.stopAll();
   // Linked chat stores are lazy singletons with SQLite handles on the shared
   // engine.db; close them at quit so WAL locks never outlive the app.
   const chatStoreStop = chatDispatchStop.then(() =>
     Promise.all(
-      [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
-    ));
+      [...linkedChatStores.values()].map((store) =>
+        store.close().catch(() => undefined),
+      ),
+    ),
+  );
   const dispatchStoreStop = chatDispatchStop.then(() => {
     for (const handle of agentDispatchStoreHandles.values()) {
       try {
@@ -2106,7 +2251,9 @@ app.on("will-quit", (event) => {
   // Engine search stores hold the same kind of lazy SQLite handle; close them
   // with the chat stores so WAL locks never outlive the app.
   const searchStoreStop = Promise.all(
-    [...engineSearchStores.values()].map((store) => store.close().catch(() => undefined)),
+    [...engineSearchStores.values()].map((store) =>
+      store.close().catch(() => undefined),
+    ),
   );
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
@@ -2116,7 +2263,9 @@ app.on("will-quit", (event) => {
       agentSessionStop,
       cliServerStop,
       chatDispatchStop,
-      engineYDocStop.then(() => chatDispatchStop).then(() => activity.stopAll()),
+      engineYDocStop
+        .then(() => chatDispatchStop)
+        .then(() => activity.stopAll()),
       chatStoreStop,
       dispatchStoreStop,
       searchStoreStop,
@@ -2204,13 +2353,16 @@ function workspaceRootForOpenPath(path: string): string | null {
   } catch {
     return null;
   }
-  if (stats.isDirectory()) return nearestWorkspaceRoot(normalized) ?? normalized;
+  if (stats.isDirectory())
+    return nearestWorkspaceRoot(normalized) ?? normalized;
   if (!stats.isFile()) return null;
   const parent = dirname(normalized);
   return nearestWorkspaceRoot(parent) ?? parent;
 }
 
-async function ensureWorkspaceRegistered(rootPath: string): Promise<WorkspaceSummary> {
+async function ensureWorkspaceRegistered(
+  rootPath: string,
+): Promise<WorkspaceSummary> {
   const normalized = normalizeAbsolutePath(rootPath);
   const existing = workspaceSummaries().find(
     (workspace) => normalizeAbsolutePath(workspace.rootPath) === normalized,
@@ -2410,7 +2562,11 @@ function registerIpcHandlers(): void {
       ? await capture.beginFileRename(input.fromPath, input.toPath)
       : null;
     try {
-      const path = await movePath(workspace.rootPath, input.fromPath, input.toPath);
+      const path = await movePath(
+        workspace.rootPath,
+        input.fromPath,
+        input.toPath,
+      );
       await finishRename?.(true);
       return CreateWorkspaceFileResult.parse({ path });
     } catch (error) {
@@ -2434,8 +2590,10 @@ function registerIpcHandlers(): void {
     // shell.trashItem first (recoverable on every platform); deletePath
     // falls back to the workspace's .dohc/trash where the OS rejects
     // (cross-filesystem mounts) — never a hard delete either way.
-    const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
-      shell.trashItem(p),
+    const result = await deletePath(
+      workspace.rootPath,
+      input.relativePath,
+      (p) => shell.trashItem(p),
     );
     return DeleteWorkspacePathResult.parse(result);
   });
@@ -2583,7 +2741,10 @@ function registerIpcHandlers(): void {
           )
         : undefined;
       const canShare =
-        !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root";
+        !isSharedView &&
+        !isMountPath &&
+        !!registryEntry?.remote &&
+        input.kind !== "root";
       const template: Electron.MenuItemConstructorOptions[] = isSharedView
         ? input.kind === "root"
           ? [item("Export Workspace as Zip…", "export-zip")]
@@ -2607,34 +2768,34 @@ function registerIpcHandlers(): void {
               item("Export as Zip…", "export-zip"),
               item("Reveal in File Manager", "open-externally"),
             ]
-        : input.kind === "root"
-          ? [
-              item("New File", "new-file"),
-              item("New Folder", "new-folder"),
-              separator,
-              item("Import Files…", "import-files"),
-              item("Export Workspace as Zip…", "export-zip"),
-            ]
-          : [
-              ...(canShare ? [item("Share…", "share"), separator] : []),
-              ...(input.kind === "folder"
-                ? [
-                    item("New File", "new-file"),
-                    item("New Folder", "new-folder"),
-                    // Folder-targeted import: files land IN this folder (the
-                    // renderer passes the folder as importWorkspaceFiles'
-                    // targetDir, re-validated main-side before any copy).
-                    item("Import Files…", "import-files"),
-                    separator,
-                  ]
-                : []),
-              item("Rename", "rename"),
-              item("Delete", "delete"),
-              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
-              separator,
-              item("Export as Zip…", "export-zip"),
-              item("Reveal in File Manager", "open-externally"),
-            ];
+          : input.kind === "root"
+            ? [
+                item("New File", "new-file"),
+                item("New Folder", "new-folder"),
+                separator,
+                item("Import Files…", "import-files"),
+                item("Export Workspace as Zip…", "export-zip"),
+              ]
+            : [
+                ...(canShare ? [item("Share…", "share"), separator] : []),
+                ...(input.kind === "folder"
+                  ? [
+                      item("New File", "new-file"),
+                      item("New Folder", "new-folder"),
+                      // Folder-targeted import: files land IN this folder (the
+                      // renderer passes the folder as importWorkspaceFiles'
+                      // targetDir, re-validated main-side before any copy).
+                      item("Import Files…", "import-files"),
+                      separator,
+                    ]
+                  : []),
+                item("Rename", "rename"),
+                item("Delete", "delete"),
+                input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
+                separator,
+                item("Export as Zip…", "export-zip"),
+                item("Reveal in File Manager", "open-externally"),
+              ];
       const menu = Menu.buildFromTemplate(template);
       const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       menu.popup({
@@ -2758,7 +2919,11 @@ function registerIpcHandlers(): void {
         : { canceled: false, filePaths: picked };
     const outcome = result.canceled
       ? { imported: [], skipped: 0 }
-      : await copyIntoWorkspace(workspace.rootPath, result.filePaths, input.targetDir);
+      : await copyIntoWorkspace(
+          workspace.rootPath,
+          result.filePaths,
+          input.targetDir,
+        );
     return ImportWorkspaceFilesResult.parse(outcome);
   });
 
@@ -2778,7 +2943,11 @@ function registerIpcHandlers(): void {
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    await writeWorkspaceText(workspace.rootPath, input.relativePath, input.text);
+    await writeWorkspaceText(
+      workspace.rootPath,
+      input.relativePath,
+      input.text,
+    );
   });
 
   ipcMain.handle(CHANNELS.writeWorkspaceAsset, async (event, payload) => {
@@ -2806,7 +2975,10 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
 
-    const seam = testAbsolutePaths("DOHC_TEST_PICK_IMAGE_PATHS", MAX_PICKED_IMAGES);
+    const seam = testAbsolutePaths(
+      "DOHC_TEST_PICK_IMAGE_PATHS",
+      MAX_PICKED_IMAGES,
+    );
     let picked: string[];
     if (seam) {
       picked = seam;
@@ -2820,7 +2992,16 @@ function registerIpcHandlers(): void {
         filters: [
           {
             name: "Images",
-            extensions: ["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"],
+            extensions: [
+              "png",
+              "jpg",
+              "jpeg",
+              "webp",
+              "gif",
+              "svg",
+              "avif",
+              "bmp",
+            ],
           },
         ],
       });
@@ -2834,7 +3015,11 @@ function registerIpcHandlers(): void {
         const info = await stat(path);
         // Oversize picks are refused the same QUIET way paste refuses them:
         // skipped with a warning, never a thrown dialog in the user's face.
-        if (!info.isFile() || info.size === 0 || info.size > WRITE_ASSET_MAX_BYTES) {
+        if (
+          !info.isFile() ||
+          info.size === 0 ||
+          info.size > WRITE_ASSET_MAX_BYTES
+        ) {
           console.warn(
             `[desktop] skipping picked image "${path}" (${info.size} bytes; max ${WRITE_ASSET_MAX_BYTES}).`,
           );
@@ -2872,7 +3057,9 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = ReadWorkspaceGraphPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return WorkspaceGraphResult.parse(await readWorkspaceGraph(workspace.rootPath));
+    return WorkspaceGraphResult.parse(
+      await readWorkspaceGraph(workspace.rootPath),
+    );
   });
 
   ipcMain.handle(CHANNELS.getBacklinks, async (event, payload) => {
@@ -2898,7 +3085,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.cloudLoginStart, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudLoginStartPayload.parse(payload ?? {});
-    return CloudLoginStartResult.parse(await cloudLogin().start(input.serverUrl, input.relayUrl));
+    return CloudLoginStartResult.parse(
+      await cloudLogin().start(input.serverUrl, input.relayUrl),
+    );
   });
 
   ipcMain.handle(CHANNELS.cloudLoginPoll, async (event) => {
@@ -2917,7 +3106,9 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = CloudStatusPayload.parse(payload ?? {});
     const status = await cloudLogin().status();
-    const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
+    const workspace = input.workspaceId
+      ? findWorkspace(input.workspaceId)
+      : undefined;
     return CloudStatusResult.parse({
       ...status,
       ...(input.workspaceId
@@ -2961,7 +3152,8 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     const credentials = await cloudLogin().credentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first");
-    if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
+    if (!credentials.relayUrl)
+      throw new Error("Cloud sync requires a relay URL");
     setCachedCredentials(credentials);
 
     {
@@ -2975,7 +3167,9 @@ function registerIpcHandlers(): void {
         });
       } catch (error) {
         if (error instanceof RelayWorkspaceUnavailableError) {
-          throw new Error("This workspace id is already claimed by another account");
+          throw new Error(
+            "This workspace id is already claimed by another account",
+          );
         }
         throw error;
       }
@@ -3069,7 +3263,10 @@ function registerIpcHandlers(): void {
     }
     const credentials = await cloudLogin().credentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first.");
-    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
+    if (
+      !credentials.relayUrl ||
+      !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)
+    ) {
       // Security gate, not cosmetics: the session token is only ever sent to
       // the relay this machine signed in with — never to a URL that arrived
       // inside a pasted code.
@@ -3096,7 +3293,10 @@ function registerIpcHandlers(): void {
     // Pre-flight against the relay BEFORE creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     try {
-      const probe = await probeRelayWorkspace({ workspaceId: parsed.workspaceId, relay });
+      const probe = await probeRelayWorkspace({
+        workspaceId: parsed.workspaceId,
+        relay,
+      });
       if (!probe.hasContent) {
         throw new Error(
           "That workspace hasn't synced anything yet. Make sure sync is on for it on the other machine, then try again.",
@@ -3109,7 +3309,9 @@ function registerIpcHandlers(): void {
         );
       }
       if (error instanceof RelayUnauthorizedError) {
-        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+        throw new Error(
+          "Your dohc Cloud session expired. Sign in again, then retry.",
+        );
       }
       throw error;
     }
@@ -3187,7 +3389,9 @@ function registerIpcHandlers(): void {
     }
     const entry = requireWorkspace(input.workspaceId);
     if (entry.shareView) {
-      throw new Error("This is a shared view — only the original workspace can be shared.");
+      throw new Error(
+        "This is a shared view — only the original workspace can be shared.",
+      );
     }
     const { remote } = await remoteForWorkspace(input.workspaceId);
     const created = await relayShareJson<{ shareId: string }>(
@@ -3225,20 +3429,28 @@ function registerIpcHandlers(): void {
       (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel";
     const withCode = (row: Record<string, unknown>) => ({
       ...row,
-      shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
+      shareCode: buildShareCode({
+        shareId: String(row.shareId),
+        relayUrl: relayUrl!,
+      }),
     });
     const granted = (result.granted ?? []).filter(notChatChannel).map(withCode);
-    const received = (result.received ?? []).filter(notChatChannel).map(withCode);
+    const received = (result.received ?? [])
+      .filter(notChatChannel)
+      .map(withCode);
     return ListRelaySharesResult.parse({ granted, received });
   });
 
   ipcMain.handle(CHANNELS.revokeRelayShare, async (event, payload) => {
     assertTrustedSender(event);
     const input = RevokeRelaySharePayload.parse(payload);
-    await relayShareJson(`/sync/shares/${encodeURIComponent(input.shareId)}/revoke`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
+    await relayShareJson(
+      `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    );
     return undefined;
   });
 
@@ -3269,7 +3481,9 @@ function registerIpcHandlers(): void {
       );
     }
     const entry = findWorkspace(input.workspaceId);
-    if (entry?.sharedChannels?.some((channel) => channel.channelWireId === wireId)) {
+    if (
+      entry?.sharedChannels?.some((channel) => channel.channelWireId === wireId)
+    ) {
       throw new Error(
         "This channel was shared with you — ask the person who shared it to add more people.",
       );
@@ -3317,7 +3531,8 @@ function registerIpcHandlers(): void {
           typeof selector.channelWireId === "string"
           ? {
               channelWireId: selector.channelWireId,
-              access: selector.access === "read-only" ? "read-only" : "read-write",
+              access:
+                selector.access === "read-only" ? "read-only" : "read-write",
             }
           : null;
       };
@@ -3326,7 +3541,8 @@ function registerIpcHandlers(): void {
         const selector = chatSelector(row);
         // Grants are scoped to THIS workspace's remote identity: a channel
         // shared from another workspace is managed there.
-        if (!selector || remoteId === null || row.workspaceId !== remoteId) continue;
+        if (!selector || remoteId === null || row.workspaceId !== remoteId)
+          continue;
         granted.push({
           shareId: row.shareId,
           ...selector,
@@ -3359,12 +3575,16 @@ function registerIpcHandlers(): void {
     );
     const entry = requireWorkspace(input.workspaceId);
     if (entry.shareView) {
-      throw new Error("Shared views are read-only — join channels from a workspace you own.");
+      throw new Error(
+        "Shared views are read-only — join channels from a workspace you own.",
+      );
     }
     await warmCredentialCache();
     if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
     if (!cachedCredentials.relayUrl) {
-      throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+      throw new Error(
+        "Reconnect dohc Cloud with a sync relay URL, then try again.",
+      );
     }
     // Capture the credentials BEFORE the awaits below (CodeRabbit Data
     // Integrity): cachedCredentials can change during fetch/pull (logout,
@@ -3410,7 +3630,9 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       mergeJoinedChannel(entry.sharedChannels ?? [], joined),
     );
-    return JoinSharedChannelResult.parse({ joined: { ...joined, ended: false } });
+    return JoinSharedChannelResult.parse({
+      joined: { ...joined, ended: false },
+    });
   });
 
   // Member-initiated leave: purely local — the channel stops syncing and its
@@ -3421,7 +3643,9 @@ function registerIpcHandlers(): void {
     const entry = requireWorkspace(input.workspaceId);
     setWorkspaceSharedChannels(
       input.workspaceId,
-      (entry.sharedChannels ?? []).filter((channel) => channel.shareId !== input.shareId),
+      (entry.sharedChannels ?? []).filter(
+        (channel) => channel.shareId !== input.shareId,
+      ),
     );
     return undefined;
   });
@@ -3435,11 +3659,16 @@ function registerIpcHandlers(): void {
     const input = OpenSharedViewPayload.parse(payload);
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
-      throw new Error("That doesn't look like a share code. Copy it again and retry.");
+      throw new Error(
+        "That doesn't look like a share code. Copy it again and retry.",
+      );
     }
     const credentials = await cloudLogin().credentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first.");
-    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
+    if (
+      !credentials.relayUrl ||
+      !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)
+    ) {
       // Security gate, not cosmetics: the session token is only ever sent to
       // the relay this machine signed in with — never to a URL that arrived
       // inside a pasted code.
@@ -3462,7 +3691,9 @@ function registerIpcHandlers(): void {
         );
       }
       if (error instanceof RelayUnauthorizedError) {
-        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+        throw new Error(
+          "Your dohc Cloud session expired. Sign in again, then retry.",
+        );
       }
       throw error;
     }
@@ -3472,7 +3703,9 @@ function registerIpcHandlers(): void {
       throw error;
     });
     if (existingEntries.length > 0) {
-      throw new Error("Choose an empty folder — the shared files will be placed inside it.");
+      throw new Error(
+        "Choose an empty folder — the shared files will be placed inside it.",
+      );
     }
     // Identity/metadata only (the join bootstrap): the shared content
     // arrives with the first pull below, and a shared view must never seed
@@ -3530,10 +3763,14 @@ function registerIpcHandlers(): void {
     const shareView = workspace.shareView;
     if (!shareView) throw new Error("This workspace is not a shared view.");
     if (shareView.ended) {
-      return RefreshSharedViewResult.parse({ status: "ended", changedPaths: 0 });
+      return RefreshSharedViewResult.parse({
+        status: "ended",
+        changedPaths: 0,
+      });
     }
     await warmCredentialCache();
-    if (!cachedCredentials?.relayUrl) throw new Error("Sign in to dohc Cloud first.");
+    if (!cachedCredentials?.relayUrl)
+      throw new Error("Sign in to dohc Cloud first.");
     // Only refresh against the share's ORIGIN relay. Signed into a different
     // relay, a 404 there means "wrong server", not "share ended" — so skip
     // the refresh (leaving the view active) rather than flip it to ended.
@@ -3541,18 +3778,27 @@ function registerIpcHandlers(): void {
       shareView.relayUrl &&
       !relayUrlsMatch(cachedCredentials.relayUrl, shareView.relayUrl)
     ) {
-      return RefreshSharedViewResult.parse({ status: "unchanged", changedPaths: 0 });
+      return RefreshSharedViewResult.parse({
+        status: "unchanged",
+        changedPaths: 0,
+      });
     }
     const outcome = await refreshSharedViewOnce({
       rootDir: workspace.rootPath,
       workspaceId: workspace.workspaceId,
-      relay: { baseUrl: cachedCredentials.relayUrl, token: cachedCredentials.token },
+      relay: {
+        baseUrl: cachedCredentials.relayUrl,
+        token: cachedCredentials.token,
+      },
       shareId: shareView.shareId,
     });
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
       // refreshing; the notice survives restarts.
-      setWorkspaceShareView(workspace.workspaceId, { ...shareView, ended: true });
+      setWorkspaceShareView(workspace.workspaceId, {
+        ...shareView,
+        ended: true,
+      });
       refreshNativeWorkspaceSurfaces();
     }
     notifyRenderer();
@@ -3594,109 +3840,124 @@ function registerIpcHandlers(): void {
     // A mount changes the host tree — shared views cannot host mounts.
     assertWritableWorkspace(workspace);
     return withShareMountLock(workspace.workspaceId, async () => {
-    const parsed = parseShareCode(input.shareCode);
-    if (!parsed) {
-      throw new Error("That doesn't look like a share code. Copy it again and retry.");
-    }
-    const credentials = await cloudLogin().credentials();
-    if (!credentials) throw new Error("Sign in to dohc Cloud first.");
-    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
-      // Same security gate as openSharedView: the session token is only ever
-      // sent to the relay this machine signed in with.
-      throw new Error(
-        "This share lives on a different server than the one you're signed in to. " +
-          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
-      );
-    }
-    setCachedCredentials(credentials);
-    const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
-    const existing = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    if (existing.some((mount) => mount.shareId === parsed.shareId)) {
-      throw new Error("This share is already added to this workspace.");
-    }
-    let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
-    try {
-      info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
-    } catch (error) {
-      if (error instanceof ShareUnavailableError) {
+      const parsed = parseShareCode(input.shareCode);
+      if (!parsed) {
         throw new Error(
-          "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
+          "That doesn't look like a share code. Copy it again and retry.",
         );
       }
-      if (error instanceof RelayUnauthorizedError) {
-        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
+      const credentials = await cloudLogin().credentials();
+      if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+      if (
+        !credentials.relayUrl ||
+        !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)
+      ) {
+        // Same security gate as openSharedView: the session token is only ever
+        // sent to the relay this machine signed in with.
+        throw new Error(
+          "This share lives on a different server than the one you're signed in to. " +
+            `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
+        );
       }
-      throw error;
-    }
-    // A chat-channel code has no file content to mount — send the user to
-    // the right surface instead of creating an empty folder.
-    assertMountableSelector(info.selector);
-    // Label dedupe considers BOTH registry mounts and whatever is already on
-    // disk under shared-with-me — a leftover or hand-made folder must never
-    // be adopted (its contents would be overwritten by the pull and deleted
-    // by rollback/unmount). createMountDirectory guards the container
-    // against symlinks BEFORE any mkdir and creates the label EXCLUSIVELY.
-    const sharedWithMeDir = join(workspace.rootPath, SHARED_WITH_ME_FOLDER);
-    const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
-    const mount = {
-      shareId: parsed.shareId,
-      label: mountLabelFor(info.granterEmail, [
-        ...existing.map((m) => m.label),
-        ...onDisk,
-      ]),
-      granterEmail: info.granterEmail,
-      relayUrl: credentials.relayUrl,
-      recipientEmail: credentials.email ?? null,
-    };
-    await createMountDirectory(workspace.rootPath, mount.label);
-    try {
-      // Inside the rollback scope: a failed registry write (ENOSPC, perms)
-      // must also remove the just-created folder — the app deliberately
-      // refuses to adopt or delete unrecorded shared-with-me folders, so an
-      // orphan here would be permanent (codex P2).
-      setWorkspaceShareMounts(workspace.workspaceId, [
-        ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
-        mount,
-      ]);
-      const outcome = await refreshShareMountOnce({
-        hostRoot: workspace.rootPath,
-        mount,
-        relay,
-      });
-      if (outcome.status === "ended") throw new ShareUnavailableError();
-      refreshNativeWorkspaceSurfaces();
-      notifyRenderer();
-      return MountShareResult.parse({
-        workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
-        mount: {
-          shareId: mount.shareId,
-          label: mount.label,
-          status: outcome.status,
-          changedPaths: outcome.changedPaths,
-        },
-      });
-    } catch (error) {
-      // Rollback both sides — a failed mount leaves no record and no folder.
-      // The record removal filters the CURRENT set (never a stale snapshot).
-      console.error(`[desktop] mount-share rollback for ${mount.label}:`, error);
+      setCachedCredentials(credentials);
+      const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+      const existing = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+      if (existing.some((mount) => mount.shareId === parsed.shareId)) {
+        throw new Error("This share is already added to this workspace.");
+      }
+      let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
       try {
-        const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-        setWorkspaceShareMounts(
-          workspace.workspaceId,
-          current.filter((m) => m.shareId !== mount.shareId),
+        info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
+      } catch (error) {
+        if (error instanceof ShareUnavailableError) {
+          throw new Error(
+            "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
+          );
+        }
+        if (error instanceof RelayUnauthorizedError) {
+          throw new Error(
+            "Your dohc Cloud session expired. Sign in again, then retry.",
+          );
+        }
+        throw error;
+      }
+      // A chat-channel code has no file content to mount — send the user to
+      // the right surface instead of creating an empty folder.
+      assertMountableSelector(info.selector);
+      // Label dedupe considers BOTH registry mounts and whatever is already on
+      // disk under shared-with-me — a leftover or hand-made folder must never
+      // be adopted (its contents would be overwritten by the pull and deleted
+      // by rollback/unmount). createMountDirectory guards the container
+      // against symlinks BEFORE any mkdir and creates the label EXCLUSIVELY.
+      const sharedWithMeDir = join(workspace.rootPath, SHARED_WITH_ME_FOLDER);
+      const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
+      const mount = {
+        shareId: parsed.shareId,
+        label: mountLabelFor(info.granterEmail, [
+          ...existing.map((m) => m.label),
+          ...onDisk,
+        ]),
+        granterEmail: info.granterEmail,
+        relayUrl: credentials.relayUrl,
+        recipientEmail: credentials.email ?? null,
+      };
+      await createMountDirectory(workspace.rootPath, mount.label);
+      try {
+        // Inside the rollback scope: a failed registry write (ENOSPC, perms)
+        // must also remove the just-created folder — the app deliberately
+        // refuses to adopt or delete unrecorded shared-with-me folders, so an
+        // orphan here would be permanent (codex P2).
+        setWorkspaceShareMounts(workspace.workspaceId, [
+          ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
+          mount,
+        ]);
+        const outcome = await refreshShareMountOnce({
+          hostRoot: workspace.rootPath,
+          mount,
+          relay,
+        });
+        if (outcome.status === "ended") throw new ShareUnavailableError();
+        refreshNativeWorkspaceSurfaces();
+        notifyRenderer();
+        return MountShareResult.parse({
+          workspace: WorkspaceSummary.parse(
+            findWorkspace(workspace.workspaceId),
+          ),
+          mount: {
+            shareId: mount.shareId,
+            label: mount.label,
+            status: outcome.status,
+            changedPaths: outcome.changedPaths,
+          },
+        });
+      } catch (error) {
+        // Rollback both sides — a failed mount leaves no record and no folder.
+        // The record removal filters the CURRENT set (never a stale snapshot).
+        console.error(
+          `[desktop] mount-share rollback for ${mount.label}:`,
+          error,
         );
-      } catch {}
-      await removeMountFolder(workspace.rootPath, mount.label).catch(() => undefined);
-      notifyRenderer();
-      if (error instanceof ShareUnavailableError) {
+        try {
+          const current =
+            findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+          setWorkspaceShareMounts(
+            workspace.workspaceId,
+            current.filter((m) => m.shareId !== mount.shareId),
+          );
+        } catch {}
+        await removeMountFolder(workspace.rootPath, mount.label).catch(
+          () => undefined,
+        );
+        notifyRenderer();
+        if (error instanceof ShareUnavailableError) {
+          throw new Error(
+            "This share was ended before it could be added. Nothing was added to this workspace.",
+          );
+        }
         throw new Error(
-          "This share was ended before it could be added. Nothing was added to this workspace.",
+          "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
         );
       }
-      throw new Error(
-        "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
-      );
-    }
     });
   });
 
@@ -3705,76 +3966,97 @@ function registerIpcHandlers(): void {
     const input = RefreshShareMountsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return withShareMountLock(workspace.workspaceId, async () => {
-    const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    const results: Array<{
-      shareId: string;
-      label: string;
-      status: "updated" | "unchanged" | "ended";
-      changedPaths: number;
-    }> = [];
-    if (mounts.length === 0) {
+      const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+      const results: Array<{
+        shareId: string;
+        label: string;
+        status: "updated" | "unchanged" | "ended";
+        changedPaths: number;
+      }> = [];
+      if (mounts.length === 0) {
+        return RefreshShareMountsResult.parse({ results });
+      }
+      await warmCredentialCache().catch(() => undefined);
+      // ONE credentials snapshot for the whole loop: a sign-out/sign-in while
+      // an awaited refresh runs must never pair the old relay URL with a new
+      // account's token (gpt-5.6-sol P1).
+      const credentials = cachedCredentials;
+      for (const mount of mounts) {
+        if (mount.ended) {
+          results.push({
+            shareId: mount.shareId,
+            label: mount.label,
+            status: "ended",
+            changedPaths: 0,
+          });
+          continue;
+        }
+        // Offline, signed out, signed into a DIFFERENT relay, or signed into a
+        // different ACCOUNT: skip — recipient routes 404 identically for "not
+        // yours" and "revoked", so refreshing under the wrong identity would
+        // permanently (and wrongly) stamp the mount ended.
+        if (
+          !credentials?.relayUrl ||
+          !relayUrlsMatch(credentials.relayUrl, mount.relayUrl) ||
+          (mount.recipientEmail != null &&
+            credentials.email != null &&
+            credentials.email !== mount.recipientEmail)
+        ) {
+          results.push({
+            shareId: mount.shareId,
+            label: mount.label,
+            status: "unchanged",
+            changedPaths: 0,
+          });
+          continue;
+        }
+        try {
+          const outcome = await refreshShareMountOnce({
+            hostRoot: workspace.rootPath,
+            mount,
+            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+          });
+          if (outcome.status === "ended") {
+            const current =
+              findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+            setWorkspaceShareMounts(
+              workspace.workspaceId,
+              current.map((m) =>
+                m.shareId === mount.shareId ? { ...m, ended: true } : m,
+              ),
+            );
+          }
+          results.push({
+            shareId: mount.shareId,
+            label: mount.label,
+            status: outcome.status,
+            changedPaths: outcome.changedPaths,
+          });
+        } catch (error) {
+          // An expired session must SURFACE, not read as "refreshed, nothing
+          // new" — a manual Refresh Share would otherwise report success
+          // forever while every pull 401s (codex P2).
+          if (error instanceof RelayUnauthorizedError) {
+            throw new Error(
+              "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+            );
+          }
+          // One mount's network failure must not stop the others; report it
+          // as unchanged and move on.
+          console.error(
+            `[desktop] share-mount refresh failed for ${mount.label}:`,
+            error,
+          );
+          results.push({
+            shareId: mount.shareId,
+            label: mount.label,
+            status: "unchanged",
+            changedPaths: 0,
+          });
+        }
+      }
+      notifyRenderer();
       return RefreshShareMountsResult.parse({ results });
-    }
-    await warmCredentialCache().catch(() => undefined);
-    // ONE credentials snapshot for the whole loop: a sign-out/sign-in while
-    // an awaited refresh runs must never pair the old relay URL with a new
-    // account's token (gpt-5.6-sol P1).
-    const credentials = cachedCredentials;
-    for (const mount of mounts) {
-      if (mount.ended) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
-        continue;
-      }
-      // Offline, signed out, signed into a DIFFERENT relay, or signed into a
-      // different ACCOUNT: skip — recipient routes 404 identically for "not
-      // yours" and "revoked", so refreshing under the wrong identity would
-      // permanently (and wrongly) stamp the mount ended.
-      if (
-        !credentials?.relayUrl ||
-        !relayUrlsMatch(credentials.relayUrl, mount.relayUrl) ||
-        (mount.recipientEmail != null &&
-          credentials.email != null &&
-          credentials.email !== mount.recipientEmail)
-      ) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
-        continue;
-      }
-      try {
-        const outcome = await refreshShareMountOnce({
-          hostRoot: workspace.rootPath,
-          mount,
-          relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-        });
-        if (outcome.status === "ended") {
-          const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-          setWorkspaceShareMounts(
-            workspace.workspaceId,
-            current.map((m) => (m.shareId === mount.shareId ? { ...m, ended: true } : m)),
-          );
-        }
-        results.push({
-          shareId: mount.shareId,
-          label: mount.label,
-          status: outcome.status,
-          changedPaths: outcome.changedPaths,
-        });
-      } catch (error) {
-        // An expired session must SURFACE, not read as "refreshed, nothing
-        // new" — a manual Refresh Share would otherwise report success
-        // forever while every pull 401s (codex P2).
-        if (error instanceof RelayUnauthorizedError) {
-          throw new Error(
-            "Your dohc Cloud session expired. Sign in again, then refresh shares.",
-          );
-        }
-        // One mount's network failure must not stop the others; report it
-        // as unchanged and move on.
-        console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
-      }
-    }
-    notifyRenderer();
-    return RefreshShareMountsResult.parse({ results });
     });
   });
 
@@ -3784,25 +4066,25 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
     return withShareMountLock(workspace.workspaceId, async () => {
-    const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    const mount = mounts.find((m) => m.shareId === input.shareId);
-    if (!mount) throw new Error("This share is not added to this workspace.");
-    // Disk first, record second: a crash between the two leaves a record
-    // whose folder is gone — refresh simply re-materializes or reports
-    // ended — never an orphaned folder that looks like local files. The
-    // record removal filters the CURRENT set (the lock serializes mount
-    // operations, so no writer can interleave here anyway).
-    await removeMountFolder(workspace.rootPath, mount.label);
-    const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    setWorkspaceShareMounts(
-      workspace.workspaceId,
-      current.filter((m) => m.shareId !== mount.shareId),
-    );
-    refreshNativeWorkspaceSurfaces();
-    notifyRenderer();
-    return UnmountShareResult.parse({
-      workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
-    });
+      const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+      const mount = mounts.find((m) => m.shareId === input.shareId);
+      if (!mount) throw new Error("This share is not added to this workspace.");
+      // Disk first, record second: a crash between the two leaves a record
+      // whose folder is gone — refresh simply re-materializes or reports
+      // ended — never an orphaned folder that looks like local files. The
+      // record removal filters the CURRENT set (the lock serializes mount
+      // operations, so no writer can interleave here anyway).
+      await removeMountFolder(workspace.rootPath, mount.label);
+      const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+      setWorkspaceShareMounts(
+        workspace.workspaceId,
+        current.filter((m) => m.shareId !== mount.shareId),
+      );
+      refreshNativeWorkspaceSurfaces();
+      notifyRenderer();
+      return UnmountShareResult.parse({
+        workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+      });
     });
   });
 
@@ -3860,7 +4142,9 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = ListSitesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return ListSitesResult.parse({ sites: await listSitePackages(workspace.rootPath) });
+    return ListSitesResult.parse({
+      sites: await listSitePackages(workspace.rootPath),
+    });
   });
 
   ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
@@ -3916,6 +4200,13 @@ function registerIpcHandlers(): void {
       await stopSitePreviewsForWorkspace(previousWorkspaceId);
     }
     preferredWorkspaceId = workspace.workspaceId;
+    activeWorkspaceIdBySender.set(event.sender.id, workspace.workspaceId);
+    if (!activeWorkspaceCleanupHooked.has(event.sender)) {
+      activeWorkspaceCleanupHooked.add(event.sender);
+      event.sender.once("destroyed", () => {
+        activeWorkspaceIdBySender.delete(event.sender.id);
+      });
+    }
     refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await openWorkspaceActivity(workspace));
   });
@@ -3924,7 +4215,10 @@ function registerIpcHandlers(): void {
   // requireWorkspace (renderer identity is never trusted) and is gated on the
   // workspace-engine alpha capture being attached — for unflagged workspaces
   // the calls reject.
-  async function requireEngineCapture(workspaceId: string, unavailable: string) {
+  async function requireEngineCapture(
+    workspaceId: string,
+    unavailable: string,
+  ) {
     const workspace = requireWorkspace(workspaceId);
     // Idempotent: guarantees the watcher + capture are live before any
     // engine operation touches the chain.
@@ -4015,15 +4309,18 @@ function registerIpcHandlers(): void {
     });
   });
 
-  ipcMain.handle(CHANNELS.listWorkspaceVersionConflicts, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const conflicts = await capture.listOpenConflicts();
-    return ListWorkspaceVersionConflictsResult.parse({
-      conflicts: conflicts.map(versionConflictForIpc),
-    });
-  });
+  ipcMain.handle(
+    CHANNELS.listWorkspaceVersionConflicts,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ListWorkspaceFilesPayload.parse(payload);
+      const capture = await requireVersionOperations(input.workspaceId);
+      const conflicts = await capture.listOpenConflicts();
+      return ListWorkspaceVersionConflictsResult.parse({
+        conflicts: conflicts.map(versionConflictForIpc),
+      });
+    },
+  );
 
   ipcMain.handle(
     CHANNELS.resolveWorkspaceVersionConflict,
@@ -4037,7 +4334,10 @@ function registerIpcHandlers(): void {
           : input.resolution.kind === "keep-incoming"
             ? ({ kind: "apply-incoming" } as const)
             : ({ kind: "apply-merged", text: input.resolution.text } as const);
-      const outcome = await capture.resolveConflict(input.conflictId, resolution);
+      const outcome = await capture.resolveConflict(
+        input.conflictId,
+        resolution,
+      );
       // Push the resolution promptly: "keep mine" changes nothing on disk, so
       // without this nudge the other machine's mirrored conflict would stay
       // open until an unrelated edit happened to trigger a sync.
@@ -4093,8 +4393,12 @@ function registerIpcHandlers(): void {
   // stamps onBehalfOf "local" for the desktop's own user, which displays as
   // the cloud email (or "You" when signed out); any other onBehalfOf is
   // already a user-facing label and displays as-is.
-  function agentAuthorDisplayName(author: NonNullable<VersionedTextMomentSummary["author"]>): string {
-    return author.onBehalfOf === "local" ? localUserDisplayName() : author.onBehalfOf;
+  function agentAuthorDisplayName(
+    author: NonNullable<VersionedTextMomentSummary["author"]>,
+  ): string {
+    return author.onBehalfOf === "local"
+      ? localUserDisplayName()
+      : author.onBehalfOf;
   }
 
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
@@ -4162,7 +4466,9 @@ function registerIpcHandlers(): void {
     );
     const moment = await capture.readMoment(input.momentId);
     return ReadEngineMomentResult.parse({
-      moment: moment ? engineMomentDetailForIpc(moment, agentAuthorDisplayName) : null,
+      moment: moment
+        ? engineMomentDetailForIpc(moment, agentAuthorDisplayName)
+        : null,
     });
   });
 
@@ -4278,9 +4584,11 @@ function registerIpcHandlers(): void {
     // promptly (fire-and-forget; the sync cadence is the backstop).
     void syncWorkspaceSharedChannels(workspace.workspaceId);
     activity.queueCloudSync(workspace.workspaceId);
-    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-      console.error("[desktop] local chat dispatch scan:", error);
-    });
+    void chatDispatchService
+      .scanWorkspace(workspace.workspaceId)
+      .catch((error) => {
+        console.error("[desktop] local chat dispatch scan:", error);
+      });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
   });
 
@@ -4350,10 +4658,9 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    const attachments = await linkedChatStoreFor(workspace).listThreadAttachments(
-      workspace.workspaceId,
-      input.threadId,
-    );
+    const attachments = await linkedChatStoreFor(
+      workspace,
+    ).listThreadAttachments(workspace.workspaceId, input.threadId);
     return ListChatThreadAttachmentsResult.parse({ attachments });
   });
 
@@ -4382,9 +4689,7 @@ function registerIpcHandlers(): void {
           triggerMessageId: run.triggerMessageId,
           command: run.command,
           startedAtMs: run.startedAtMs,
-          ...(run.endedAtMs !== undefined
-            ? { endedAtMs: run.endedAtMs }
-            : {}),
+          ...(run.endedAtMs !== undefined ? { endedAtMs: run.endedAtMs } : {}),
           ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
           ...(run.logPath ? { logPath: run.logPath } : {}),
         },
@@ -4446,21 +4751,31 @@ function registerIpcHandlers(): void {
     const store = linkedChatStoreFor(workspace);
     // First chat use auto-creates the workspace's default channel.
     await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
-    const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
+    const channels = await store.listChannels({
+      workspaceId: workspace.workspaceId,
+    });
     // Wire identities let the renderer match channels against share grants.
     const wireIdEntries = await Promise.all(
-      channels.map(async (channel) => [
-        channel.id,
-        await store
-          .getChannelWireId({ workspaceId: workspace.workspaceId, channelId: channel.id })
-          .catch(() => null),
-      ] as const),
+      channels.map(
+        async (channel) =>
+          [
+            channel.id,
+            await store
+              .getChannelWireId({
+                workspaceId: workspace.workspaceId,
+                channelId: channel.id,
+              })
+              .catch(() => null),
+          ] as const,
+      ),
     );
     const wireIds = new Map(wireIdEntries);
     // The "Files" grouping: file-linked Chats with their CURRENT path (the
     // stable object id resolved through the active version), falling back to
     // the captured hint when the engine no longer owns the file.
-    const threads = await store.listThreads({ workspaceId: workspace.workspaceId });
+    const threads = await store.listThreads({
+      workspaceId: workspace.workspaceId,
+    });
     const fileThreads = threads.filter((thread) => thread.linkedFile);
     let pathByObjectId = new Map<string, string>();
     if (fileThreads.length > 0) {
@@ -4474,7 +4789,9 @@ function registerIpcHandlers(): void {
             workspaceId: workspace.workspaceId,
             versionId: active.id,
           });
-          pathByObjectId = new Map(files.map((file) => [file.objectId, file.path]));
+          pathByObjectId = new Map(
+            files.map((file) => [file.objectId, file.path]),
+          );
         }
       } catch {
         // Path resolution is display-only; the hint fallback keeps the
@@ -4490,8 +4807,8 @@ function registerIpcHandlers(): void {
         ...chatThreadForIpc(thread),
         path:
           (thread.linkedFile
-            ? pathByObjectId.get(thread.linkedFile.objectId) ??
-              thread.linkedFile.pathHint
+            ? (pathByObjectId.get(thread.linkedFile.objectId) ??
+              thread.linkedFile.pathHint)
             : undefined) ?? null,
       })),
     });
@@ -4511,7 +4828,10 @@ function registerIpcHandlers(): void {
     });
     return CreateChatChannelResult.parse({
       // A locally created channel's wire identity is its own id.
-      channel: { ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }), wireId: channel.id },
+      channel: {
+        ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }),
+        wireId: channel.id,
+      },
     });
   });
 
@@ -4563,9 +4883,11 @@ function registerIpcHandlers(): void {
     });
     void syncWorkspaceSharedChannels(workspace.workspaceId);
     activity.queueCloudSync(workspace.workspaceId);
-    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-      console.error("[desktop] local chat dispatch scan:", error);
-    });
+    void chatDispatchService
+      .scanWorkspace(workspace.workspaceId)
+      .catch((error) => {
+        console.error("[desktop] local chat dispatch scan:", error);
+      });
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
         thread: started.thread,
@@ -4753,14 +5075,19 @@ function registerIpcHandlers(): void {
       const shareId = typeof row.shareId === "string" ? row.shareId : null;
       const selector = row.selector;
       if (!shareId || selector?.kind !== "chat-channel") continue;
-      if (typeof selector.channelWireId !== "string" || selector.channelWireId.length === 0) {
+      if (
+        typeof selector.channelWireId !== "string" ||
+        selector.channelWireId.length === 0
+      ) {
         continue;
       }
-      const existing = findWorkspace(workspace.workspaceId)?.sharedChannels ?? [];
+      const existing =
+        findWorkspace(workspace.workspaceId)?.sharedChannels ?? [];
       if (
         existing.some(
           (channel) =>
-            channel.shareId === shareId || channel.channelWireId === selector.channelWireId,
+            channel.shareId === shareId ||
+            channel.channelWireId === selector.channelWireId,
         )
       ) {
         continue;
@@ -4783,7 +5110,8 @@ function registerIpcHandlers(): void {
         // Transient failure: leave un-cached and retry on the next pass.
         if (kind !== "dm") continue;
         // The DM peek confirmed it — claim it here (or confirm this is home).
-        if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
+        if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId))
+          continue;
         const info = await fetchSharedChannelInfo({ relay, shareId });
         await pullSharedChannel({
           rootDir: workspace.rootPath,
@@ -4844,15 +5172,22 @@ function registerIpcHandlers(): void {
       } catch (error) {
         // Offline degradation: never a crash, never a blocked Chats view — the
         // local DM list still serves and the next pass retries.
-        console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
+        console.error(
+          `[desktop] DM sync failed for ${workspace.rootPath}:`,
+          error,
+        );
       }
     }
     const dms = await listDmRecords({
       workspaceId: workspace.workspaceId,
       store,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
+      sharedChannels:
+        findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
     });
-    return SyncDmsResult.parse({ available: relay !== null, dms: dms.map(dmRecordForIpc) });
+    return SyncDmsResult.parse({
+      available: relay !== null,
+      dms: dms.map(dmRecordForIpc),
+    });
   });
 
   // Start (or continue) a DM: dedupe by recipient set, ensure one live grant
@@ -4864,7 +5199,10 @@ function registerIpcHandlers(): void {
     // a synced workspace — the DM's canonical log is this workspace's relay
     // bucket, so an unsynced workspace could never deliver it.
     const { workspace, remote } = await remoteForWorkspace(input.workspaceId);
-    await requireEngineCapture(input.workspaceId, "Chats are not enabled for this workspace.");
+    await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const authorUserId = relayAuthorUserId();
@@ -4874,7 +5212,9 @@ function registerIpcHandlers(): void {
     const recipients = parseDmRecipients(input.recipients);
     const selfEmail = cachedCredentials?.email?.toLowerCase();
     if (selfEmail && recipients.includes(selfEmail)) {
-      throw new Error("A direct message needs a recipient other than yourself.");
+      throw new Error(
+        "A direct message needs a recipient other than yourself.",
+      );
     }
     const store = linkedChatStoreFor(workspace);
     // A DM's identity is its LIVE grant recipient set — NOT its (truncatable,
@@ -4968,9 +5308,12 @@ function registerIpcHandlers(): void {
         return typeof created.shareId === "string" ? created.shareId : null;
       },
       revokeGrant: async (shareId) => {
-        await relayShareJson(`/sync/shares/${encodeURIComponent(shareId)}/revoke`, {
-          method: "POST",
-        });
+        await relayShareJson(
+          `/sync/shares/${encodeURIComponent(shareId)}/revoke`,
+          {
+            method: "POST",
+          },
+        );
       },
     });
     // The single running conversation (anti-forum): reuse the oldest thread or
@@ -4981,7 +5324,10 @@ function registerIpcHandlers(): void {
       channelId,
     });
     const running = runningThread(threads);
-    const author = { kind: "human" as const, displayName: localUserDisplayName() };
+    const author = {
+      kind: "human" as const,
+      displayName: localUserDisplayName(),
+    };
     const message = running
       ? await store.sendMessage({
           workspaceId: workspace.workspaceId,
@@ -5002,14 +5348,17 @@ function registerIpcHandlers(): void {
     // Replicate promptly: the channel/thread/message ops are journaled but chat
     // writes never pass through the file watcher.
     activity.queueCloudSync(workspace.workspaceId);
-    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-      console.error("[desktop] local chat dispatch scan:", error);
-    });
+    void chatDispatchService
+      .scanWorkspace(workspace.workspaceId)
+      .catch((error) => {
+        console.error("[desktop] local chat dispatch scan:", error);
+      });
     const dm = (
       await listDmRecords({
         workspaceId: workspace.workspaceId,
         store,
-        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
+        sharedChannels:
+          findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
       })
     ).find((candidate) => candidate.channelId === channelId);
     if (!dm) throw new Error("Could not start that direct message.");
@@ -5036,12 +5385,16 @@ function registerIpcHandlers(): void {
       // throw degrades to the dormant "unavailable" result, never a rejected
       // IPC promise — presence is best-effort.
       const transport = await presenceRelayTransportForScope(input.scope);
-      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      if (!transport)
+        return PresenceResult.parse({ ok: false, reason: "unavailable" });
       if (input.leave === true) {
         await transport.leave({ topic: input.topic, clientId: input.clientId });
         // A leave has no snapshot to echo; report an empty one so the renderer
         // clears without treating it as a failure.
-        return PresenceResult.parse({ ok: true, snapshot: { version: 0, peers: [] } });
+        return PresenceResult.parse({
+          ok: true,
+          snapshot: { version: 0, peers: [] },
+        });
       }
       const snapshot = await transport.publish({
         topic: input.topic,
@@ -5075,9 +5428,11 @@ function registerIpcHandlers(): void {
     const safety = setTimeout(() => handle.abort(), PRESENCE_POLL_SAFETY_MS);
     try {
       const transport = await presenceRelayTransportForScope(input.scope);
-      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      if (!transport)
+        return PresenceResult.parse({ ok: false, reason: "unavailable" });
       // A cancel could have landed while scope was resolving.
-      if (handle.signal.aborted) return PresenceResult.parse({ ok: false, reason: "aborted" });
+      if (handle.signal.aborted)
+        return PresenceResult.parse({ ok: false, reason: "aborted" });
       const snapshot = await transport.poll({
         topic: input.topic,
         since: input.since,
@@ -5124,7 +5479,9 @@ function registerIpcHandlers(): void {
     assertAgentRunnableWorkspace(workspace.workspaceId);
     assertChatRunnerIdle(workspace.workspaceId);
     await openWorkspaceActivity(workspace);
-    return StartAgentRunResult.parse(await agentIntegration.startAgentRun(input.workspaceId));
+    return StartAgentRunResult.parse(
+      await agentIntegration.startAgentRun(input.workspaceId),
+    );
   });
 
   ipcMain.handle(CHANNELS.endAgentRun, async (event, payload) => {
@@ -5138,24 +5495,34 @@ function registerIpcHandlers(): void {
     // stopSession finalizes the run through agentIntegration.endAgentRun
     // exactly once, so onRunEnded fires as before. No cached manager means
     // no session ever started — plain run-record end.
-    const session = cachedAgentSessions?.panelSnapshot(input.workspaceId).session;
+    const session = cachedAgentSessions?.panelSnapshot(
+      input.workspaceId,
+    ).session;
     if (
       cachedAgentSessions &&
       session?.runId === input.runId &&
-      ["starting", "ready", "running", "waiting-permission"].includes(session.status)
+      ["starting", "ready", "running", "waiting-permission"].includes(
+        session.status,
+      )
     ) {
       // Keep the caller's explicit outcome (e.g. "failed") on the record.
       await cachedAgentSessions.stopSession(input.workspaceId, input.status);
       return;
     }
-    await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
+    await agentIntegration.endAgentRun(
+      input.workspaceId,
+      input.runId,
+      input.status ?? "complete",
+    );
   });
 
   ipcMain.handle(CHANNELS.getAgentRunStatus, async (event, payload) => {
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
-    return AgentRunStatusResult.parse(await agentIntegration.getAgentRunStatus(input.workspaceId));
+    return AgentRunStatusResult.parse(
+      await agentIntegration.getAgentRunStatus(input.workspaceId),
+    );
   });
 
   // The copyable MCP config snippet for the user's AI tool. Main owns the real
@@ -5167,7 +5534,9 @@ function registerIpcHandlers(): void {
     // A shared view hands out the read-only MCP profile so the user's AI tool
     // can browse the shared files without any write tool existing.
     const readOnly = !!sharedViewOf(workspace.workspaceId);
-    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, { readOnly }));
+    return McpConfigResult.parse(
+      mcpConfigFor(workspace.rootPath, { readOnly }),
+    );
   });
 
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
@@ -5176,7 +5545,9 @@ function registerIpcHandlers(): void {
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
     await sessions.probeDrivers();
-    return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
+    return AgentPanelSnapshotResult.parse(
+      sessions.panelSnapshot(input.workspaceId),
+    );
   });
 
   ipcMain.handle(CHANNELS.getAgentSessionState, async (event, payload) => {
@@ -5184,7 +5555,9 @@ function registerIpcHandlers(): void {
     const input = AgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
-    return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
+    return AgentPanelSnapshotResult.parse(
+      sessions.panelSnapshot(input.workspaceId),
+    );
   });
 
   ipcMain.handle(CHANNELS.answerAgentPermission, async (event, payload) => {
@@ -5192,7 +5565,9 @@ function registerIpcHandlers(): void {
     const input = AgentPermissionResponsePayload.parse(payload);
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
-    return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
+    return AgentPanelSnapshotResult.parse(
+      await sessions.answerPermission(input),
+    );
   });
 
   ipcMain.handle(CHANNELS.stopAgentRun, async (event, payload) => {
@@ -5202,17 +5577,20 @@ function registerIpcHandlers(): void {
     await chatDispatchService.stopAgentRun(input.workspaceId);
   });
 
-  ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ChatDispatchStateForThreadPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    return ChatDispatchStateForThreadResult.parse(
-      chatDispatchService.dispatchStateForThread(
-        input.workspaceId,
-        input.threadId,
-      ),
-    );
-  });
+  ipcMain.handle(
+    CHANNELS.chatDispatchStateForThread,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ChatDispatchStateForThreadPayload.parse(payload);
+      requireWorkspace(input.workspaceId);
+      return ChatDispatchStateForThreadResult.parse(
+        chatDispatchService.dispatchStateForThread(
+          input.workspaceId,
+          input.threadId,
+        ),
+      );
+    },
+  );
 
   ipcMain.handle(CHANNELS.resumeThreadDispatch, async (event, payload) => {
     assertTrustedSender(event);
@@ -5249,9 +5627,11 @@ function registerIpcHandlers(): void {
     await refreshDispatchTray();
     if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
       for (const workspace of openDispatchWorkspaces()) {
-        void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-          console.error("[desktop] runner-settings dispatch scan:", error);
-        });
+        void chatDispatchService
+          .scanWorkspace(workspace.workspaceId)
+          .catch((error) => {
+            console.error("[desktop] runner-settings dispatch scan:", error);
+          });
       }
     }
     return DesktopUserSettingsResult.parse({
@@ -5294,7 +5674,10 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = WorkspaceSettingsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    await writeWorkspaceSettingsFile(workspace.rootPath, DEFAULT_WORKSPACE_SETTINGS);
+    await writeWorkspaceSettingsFile(
+      workspace.rootPath,
+      DEFAULT_WORKSPACE_SETTINGS,
+    );
     return WorkspaceSettingsResult.parse({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored",
@@ -5458,7 +5841,9 @@ function registerIpcHandlers(): void {
           }
           if (!searchCleanupHooked.has(sender)) {
             searchCleanupHooked.add(sender);
-            sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
+            sender.once("destroyed", () =>
+              searchRegistry.disposeOwner(sender.id),
+            );
           }
           await searchRegistry.startSearch(
             sender.id,
@@ -5475,7 +5860,10 @@ function registerIpcHandlers(): void {
             (batch) => {
               if (sender.isDestroyed()) return;
               try {
-                sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
+                sender.send(
+                  CHANNELS.searchResults,
+                  SearchResultsEventSchema.parse(batch),
+                );
               } catch (error) {
                 console.error("[desktop] mount search batch dropped:", error);
               }
@@ -5505,7 +5893,10 @@ function registerIpcHandlers(): void {
       (batch) => {
         if (sender.isDestroyed()) return;
         try {
-          sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
+          sender.send(
+            CHANNELS.searchResults,
+            SearchResultsEventSchema.parse(batch),
+          );
         } catch {
           // Defense in depth: a batch that fails the contract is DROPPED,
           // never thrown through the engine's stream handler (an uncaught
@@ -5565,7 +5956,10 @@ function registerIpcHandlers(): void {
           try {
             sender.send(
               CHANNELS.engineYDocRemoteUpdate,
-              EngineYDocRemoteUpdateEventSchema.parse({ sessionId: input.sessionId, update }),
+              EngineYDocRemoteUpdateEventSchema.parse({
+                sessionId: input.sessionId,
+                update,
+              }),
             );
           } catch {
             // A malformed delta is DROPPED, never thrown through the session's
@@ -5587,7 +5981,9 @@ function registerIpcHandlers(): void {
     }
     if (!engineYDocCleanupHooked.has(sender)) {
       engineYDocCleanupHooked.add(sender);
-      sender.once("destroyed", () => closeEngineYDocSessionsForSender(sender.id));
+      sender.once("destroyed", () => {
+        void closeEngineYDocSessionsForSender(sender.id);
+      });
     }
     engineYDocSessions.set(input.sessionId, {
       session,
@@ -5637,7 +6033,9 @@ function registerIpcHandlers(): void {
         state: currentUpdateState(),
       });
     }
-    return UpdateCheckResult.parse(await autoUpdateController.checkForUpdates());
+    return UpdateCheckResult.parse(
+      await autoUpdateController.checkForUpdates(),
+    );
   });
 
   ipcMain.handle(CHANNELS.installUpdate, async (event) => {
@@ -5744,7 +6142,8 @@ if (!app.requestSingleInstanceLock()) {
       try {
         const url = new URL(request.url);
         const workspace = findWorkspace(url.hostname);
-        if (!workspace) return new Response("Unknown workspace", { status: 404 });
+        if (!workspace)
+          return new Response("Unknown workspace", { status: 404 });
         const relPath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
         const { bytes, mediaType } = await readWorkspaceAsset(
           workspace.rootPath,
@@ -5785,7 +6184,9 @@ if (!app.requestSingleInstanceLock()) {
     refreshNativeWorkspaceSurfaces();
 
     const { createMainWindow } = await import("./window/createMainWindow");
-    const window = createMainWindow();
+    const window = createMainWindow({
+      beforeRendererReload: prepareForRendererReload,
+    });
     if (initialActivatedWorkspace) {
       window.webContents.once("did-finish-load", () => {
         sendWorkspaceActivated(window, initialActivatedWorkspace);
@@ -5796,7 +6197,9 @@ if (!app.requestSingleInstanceLock()) {
 
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
-    void warmCredentialCache().then(() => activity.reconcileCloud(engineForWorkspace));
+    void warmCredentialCache().then(() =>
+      activity.reconcileCloud(engineForWorkspace),
+    );
 
     // Auto-updates: packaged builds use electron-builder's baked app-update.yml
     // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
@@ -5811,7 +6214,9 @@ if (!app.requestSingleInstanceLock()) {
     })
       .then((controller) => {
         autoUpdateController = controller;
-        broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+        broadcastUpdateState(
+          autoUpdateController?.publicState() ?? fallbackUpdateState(),
+        );
       })
       .catch(() => undefined);
   });
