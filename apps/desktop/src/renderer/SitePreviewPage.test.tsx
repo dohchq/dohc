@@ -85,6 +85,9 @@ describe("SitePreviewPage", () => {
 
     expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.queryByTestId("site-preview-reload")).toBeNull();
+    expect(screen.queryByTestId("site-preview-open-external")).toBeNull();
+    expect(screen.getByTestId("site-preview-stop")).toBeTruthy();
   });
 
   it("refuses to render HTTPS loopback preview URLs", async () => {

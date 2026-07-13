@@ -304,19 +304,21 @@ export function SitePreviewPage(props: {
           ))}
           {preview ? (
             <>
-              <IconButton
-                data-testid="site-preview-reload"
-                aria-label="Reload preview"
-                title="Reload preview"
-                onClick={() => {
-                  const url = new URL(preview.url);
-                  url.searchParams.set("t", String(Date.now()));
-                  setPreview({ ...preview, url: url.href });
-                }}
-                className="size-7"
-              >
-                <RefreshCcw size={13} aria-hidden />
-              </IconButton>
+              {previewUrlAllowed ? (
+                <IconButton
+                  data-testid="site-preview-reload"
+                  aria-label="Reload preview"
+                  title="Reload preview"
+                  onClick={() => {
+                    const url = new URL(preview.url);
+                    url.searchParams.set("t", String(Date.now()));
+                    setPreview({ ...preview, url: url.href });
+                  }}
+                  className="size-7"
+                >
+                  <RefreshCcw size={13} aria-hidden />
+                </IconButton>
+              ) : null}
               <IconButton
                 data-testid="site-preview-stop"
                 aria-label="Stop preview"

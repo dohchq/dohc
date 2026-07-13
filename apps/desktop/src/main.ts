@@ -845,6 +845,8 @@ function nativeWorkspaceSummaries(): WorkspaceSummary[] {
 }
 
 let preferredWorkspaceId: string | null = null;
+const activeWorkspaceIdBySender = new Map<number, string>();
+const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
 
 function prioritizePreferredWorkspace(
   workspaces: WorkspaceSummary[],
@@ -1938,12 +1940,30 @@ const engineYDocCleanupHooked = new WeakSet<Electron.WebContents>();
 
 // Close and drop every engine Y.Doc session owned by one renderer (window gone
 // / crashed). Settles the converged state and releases each reservation.
-function closeEngineYDocSessionsForSender(senderId: number): void {
+async function closeEngineYDocSessionsForSender(senderId: number): Promise<void> {
+  const closing: Promise<void>[] = [];
   for (const [sessionId, entry] of [...engineYDocSessions]) {
     if (entry.senderId !== senderId) continue;
     engineYDocSessions.delete(sessionId);
-    void entry.session.close().catch(() => undefined);
+    closing.push(entry.session.close().catch(() => undefined));
   }
+  await Promise.all(closing);
+}
+
+async function prepareForRendererReload(senderId: number): Promise<void> {
+  // `openWorkspace` records the active workspace before awaiting watcher
+  // startup. Re-prioritize that sender's workspace so its replacement renderer
+  // boots back into the same place, while closing every main-owned resource
+  // the crashed renderer cannot clean up itself.
+  const activeWorkspaceId =
+    activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
+  if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  await Promise.all([
+    closeEngineYDocSessionsForSender(senderId),
+    activeWorkspaceId
+      ? stopSitePreviewsForWorkspace(activeWorkspaceId)
+      : Promise.resolve(),
+  ]);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
@@ -2016,7 +2036,7 @@ async function showOrCreateMainWindow(): Promise<void> {
     return;
   }
   const { createMainWindow } = await import("./window/createMainWindow");
-  const window = createMainWindow();
+  const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
   window.show();
   window.focus();
 }
@@ -3916,6 +3936,13 @@ function registerIpcHandlers(): void {
       await stopSitePreviewsForWorkspace(previousWorkspaceId);
     }
     preferredWorkspaceId = workspace.workspaceId;
+    activeWorkspaceIdBySender.set(event.sender.id, workspace.workspaceId);
+    if (!activeWorkspaceCleanupHooked.has(event.sender)) {
+      activeWorkspaceCleanupHooked.add(event.sender);
+      event.sender.once("destroyed", () => {
+        activeWorkspaceIdBySender.delete(event.sender.id);
+      });
+    }
     refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await openWorkspaceActivity(workspace));
   });
@@ -5587,7 +5614,9 @@ function registerIpcHandlers(): void {
     }
     if (!engineYDocCleanupHooked.has(sender)) {
       engineYDocCleanupHooked.add(sender);
-      sender.once("destroyed", () => closeEngineYDocSessionsForSender(sender.id));
+      sender.once("destroyed", () => {
+        void closeEngineYDocSessionsForSender(sender.id);
+      });
     }
     engineYDocSessions.set(input.sessionId, {
       session,
@@ -5785,7 +5814,7 @@ if (!app.requestSingleInstanceLock()) {
     refreshNativeWorkspaceSurfaces();
 
     const { createMainWindow } = await import("./window/createMainWindow");
-    const window = createMainWindow();
+    const window = createMainWindow({ beforeRendererReload: prepareForRendererReload });
     if (initialActivatedWorkspace) {
       window.webContents.once("did-finish-load", () => {
         sendWorkspaceActivated(window, initialActivatedWorkspace);
