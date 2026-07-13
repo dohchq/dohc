@@ -2,8 +2,15 @@
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { makeTableControlsPlugin } from "./tableControls";
+
+// jsdom has no elementFromPoint; prosemirror-tables' columnresizing plugin
+// calls it (via posAtCoords) on every mousemove the hover-tracking tests
+// dispatch. A null stub keeps it on its "no resize boundary" path.
+beforeAll(() => {
+  document.elementFromPoint = () => null;
+});
 
 const testTableControls = Extension.create({
   name: "testTableControls",
@@ -12,15 +19,19 @@ const testTableControls = Extension.create({
   },
 });
 
-function createTableEditor(rows = 2, cols = 2): Editor {
-  const editor = new Editor({
+function createEditor(content: string): Editor {
+  return new Editor({
     extensions: [
       StarterKit,
       TableKit.configure({ table: { resizable: true } }),
       testTableControls,
     ],
-    content: "<p></p>",
+    content,
   });
+}
+
+function createTableEditor(rows = 2, cols = 2): Editor {
+  const editor = createEditor("<p></p>");
   editor.commands.insertTable({ rows, cols, withHeaderRow: true });
   return editor;
 }
@@ -45,8 +56,9 @@ function click(el: Element): void {
 // in a test; a small structural type is simpler than fighting that union.
 type JsonNode = {
   type: string;
-  attrs?: { align?: string | null };
+  attrs?: { align?: string | null; colspan?: number; rowspan?: number };
   content?: JsonNode[];
+  text?: string;
 };
 
 function tableNode(editor: Editor): JsonNode {
@@ -78,6 +90,70 @@ describe("table controls grips", () => {
     expect(dom.querySelectorAll(".dohc-table-grip--col")).toHaveLength(3);
     expect(dom.querySelectorAll(".dohc-table-grip--row")).toHaveLength(2);
     expect(dom.querySelectorAll(".dohc-table-menu-btn")).toHaveLength(1);
+  });
+
+  it("mousemove over a cell activates exactly that column's and row's handles", () => {
+    editor = createTableEditor(2, 3);
+    const dom = editor.view.dom;
+    // Body-row cells are `td`; index 1 is row 1 / column 1.
+    const cell = dom.querySelectorAll("td")[1] as HTMLElement;
+    cell.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    const activeCols = dom.querySelectorAll<HTMLElement>(".dohc-table-grip--col.is-active");
+    const activeRows = dom.querySelectorAll<HTMLElement>(".dohc-table-grip--row.is-active");
+    expect(activeCols).toHaveLength(1);
+    expect(activeRows).toHaveLength(1);
+    expect(activeCols[0]?.dataset.col).toBe("1");
+    expect(activeRows[0]?.dataset.row).toBe("1");
+  });
+
+  it("hovered column handle uses TableMap coordinates when a rowspan precedes the cell", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><td rowspan="2">R</td><td>A</td></tr><tr><td>B</td></tr></table>',
+    );
+    const dom = editor.view.dom;
+    const cells = dom.querySelectorAll("td");
+    const cell = cells[cells.length - 1] as HTMLElement;
+    cell.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    const activeCols = dom.querySelectorAll<HTMLElement>(".dohc-table-grip--col.is-active");
+    expect(activeCols).toHaveLength(1);
+    expect(activeCols[0]?.dataset.col).toBe("1");
+    // Row 1's col-0 slot is covered by the rowspan, so the decoration
+    // builder dedups away row 1's grip — there is nothing to activate.
+    expect(dom.querySelectorAll(".dohc-table-grip--row.is-active")).toHaveLength(0);
+  });
+
+  it("mousemove outside the table clears the active handles", () => {
+    editor = createTableEditor(2, 2);
+    const dom = editor.view.dom;
+    const cell = dom.querySelector("td") as HTMLElement;
+    cell.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(dom.querySelectorAll(".dohc-table-grip.is-active").length).toBeGreaterThan(0);
+
+    const outside = Array.from(dom.querySelectorAll("p")).find(
+      (p) => !p.closest("table"),
+    ) as HTMLElement;
+    // jsdom tables have zero rects, so 400,400 is outside the margin band.
+    outside.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }),
+    );
+    expect(dom.querySelectorAll(".dohc-table-grip.is-active")).toHaveLength(0);
+  });
+
+  it("mousemove in the margin band next to the table keeps the active handles", () => {
+    editor = createTableEditor(2, 2);
+    const dom = editor.view.dom;
+    const cell = dom.querySelector("td") as HTMLElement;
+    cell.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    const outside = Array.from(dom.querySelectorAll("p")).find(
+      (p) => !p.closest("table"),
+    ) as HTMLElement;
+    outside.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    expect(dom.querySelectorAll(".dohc-table-grip.is-active")).toHaveLength(2);
   });
 
   it("clicking a column grip selects the column and its menu inserts a column left", () => {
@@ -122,6 +198,109 @@ describe("table controls grips", () => {
     click(menuItemByLabel("Delete row"));
 
     expect(tableNode(editor).content).toHaveLength(2);
+  });
+
+  it("row grip menu duplicates the row below it (header duplicates as a body row)", () => {
+    editor = createTableEditor(2, 2);
+    // insertTable leaves the caret in the first header cell.
+    editor.commands.insertContent("Head");
+
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--row") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Duplicate row"));
+
+    const rows = tableNode(editor).content ?? [];
+    expect(rows).toHaveLength(3);
+    // The original header row is untouched; the copy right below it is made
+    // of BODY cells (GFM has exactly one header row) with the same content.
+    expect(rows[0]?.content?.every((cell) => cell.type === "tableHeader")).toBe(true);
+    expect(rows[1]?.content?.every((cell) => cell.type === "tableCell")).toBe(true);
+    expect(rows[1]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("Head");
+  });
+
+  it("row grip menu widens a rowspan crossing the duplicated row", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><td rowspan="2">R</td><td>b1</td></tr><tr><td>b2</td></tr></table>',
+    );
+
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--row") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Duplicate row"));
+
+    const rows = tableNode(editor).content ?? [];
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.content?.[0]?.attrs?.rowspan).toBe(3);
+    expect(rows[1]?.content).toHaveLength(1);
+    expect(rows[1]?.content?.[0]?.attrs?.rowspan).toBe(1);
+    expect(rows[1]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("b1");
+    expect(rows[2]?.content).toHaveLength(1);
+    expect(rows[2]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe("b2");
+  });
+
+  it("row grip menu copies a rowspan that ends at the duplicated row", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><td>a</td><td rowspan="2">R</td></tr><tr><td>b</td></tr></table>',
+    );
+
+    const grips = editor.view.dom.querySelectorAll<HTMLElement>(
+      ".dohc-table-grip--row",
+    );
+    expect(grips).toHaveLength(2);
+    click(grips[1] as HTMLElement);
+    click(menuItemByLabel("Duplicate row"));
+
+    const rows = tableNode(editor).content ?? [];
+    const copy = rows[2]?.content ?? [];
+    expect(rows).toHaveLength(3);
+    expect(copy).toHaveLength(2);
+    expect(copy.every((cell) => cell.attrs?.rowspan === 1)).toBe(true);
+    expect(copy.map((cell) => cell.content?.[0]?.content?.[0]?.text)).toEqual([
+      "b",
+      "R",
+    ]);
+  });
+
+  it("column grip menu duplicates the column, alignment included", () => {
+    editor = createTableEditor(2, 2);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Align center"));
+    click(grip);
+    click(menuItemByLabel("Duplicate column"));
+
+    expect(tableNode(editor).content?.[0]?.content).toHaveLength(3);
+    expect(columnAligns(editor, 0)).toEqual(["center", "center"]);
+    expect(columnAligns(editor, 1)).toEqual(["center", "center"]);
+    expect(columnAligns(editor, 2)).toEqual([null, null]);
+  });
+
+  it("column grip menu duplicates exactly one column from a spanning cell", () => {
+    editor = createTableEditor();
+    editor.commands.setContent(
+      '<table><tr><th colspan="2">Span</th><th>C</th></tr><tr><td>a</td><td>b</td><td>c</td></tr></table>',
+    );
+
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    click(menuItemByLabel("Duplicate column"));
+
+    const rows = tableNode(editor).content ?? [];
+    const headerCells = rows[0]?.content ?? [];
+    const bodyCells = rows[1]?.content ?? [];
+    expect(bodyCells).toHaveLength(4);
+    expect(headerCells).toHaveLength(2);
+    expect(headerCells[0]?.attrs?.colspan).toBe(3);
+    expect(
+      headerCells.reduce((width, cell) => width + (cell.attrs?.colspan ?? 1), 0),
+    ).toBe(4);
+    expect(bodyCells.map((cell) => cell.content?.[0]?.content?.[0]?.text)).toEqual([
+      "a",
+      "a",
+      "b",
+      "c",
+    ]);
   });
 
   it("table menu toggles the header row", () => {
@@ -225,6 +404,22 @@ describe("table controls grips", () => {
     click(appendCol);
 
     expect(tableNode(editor).content?.[0]?.content).toHaveLength(3);
+  });
+
+  it("append strips are sized on editor mouseenter before any cell hover", () => {
+    editor = createEditor(
+      "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr><tr><td>E</td><td>F</td></tr></table>",
+    );
+    const dom = editor.view.dom;
+    const colStrip = dom.querySelector(".dohc-table-append--col") as HTMLElement;
+    const rowStrip = dom.querySelector(".dohc-table-append--row") as HTMLElement;
+    expect(colStrip.style.height).toBe("");
+
+    // mouseenter does not bubble; ProseMirror binds it on the editor root.
+    dom.dispatchEvent(new MouseEvent("mouseenter"));
+
+    expect(colStrip.style.height).toBe("0px");
+    expect(rowStrip.style.width).toBe("0px");
   });
 
   it("append-row button adds a row at the bottom edge", () => {

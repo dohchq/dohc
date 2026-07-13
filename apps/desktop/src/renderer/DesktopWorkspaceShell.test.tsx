@@ -22,6 +22,10 @@ import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import {
+  OPEN_EDITORS_DEFAULT_HEIGHT,
+  OPEN_EDITORS_MIN_HEIGHT,
+} from "./workbench/workbenchState";
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -62,8 +66,8 @@ const STORED_STATE: WorkspaceUiState = {
   sidebarWidth: 320,
   tabs: ["b.md"],
   activeTab: "b.md",
-  historyVisible: true,
-  historyWidth: 360,
+  chatsVisible: true,
+  chatsWidth: 360,
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -237,6 +241,50 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   };
 }
 
+// Engine-flagged variant: the same bridge with the workspace-engine alpha on
+// plus the minimal engine/chats IPC surface the flagged shell touches on
+// mount (empty history, no try-session, Main only, no chats yet).
+function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
+  const bridge = makeBridge(uiStatePromise);
+  bridge.getWorkspaceSettings = vi.fn(async () => ({
+    settings: {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      experimental: {
+        ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+        workspaceEngineAlpha: true,
+      },
+    },
+    source: "stored" as const,
+  }));
+  return Object.assign(bridge, {
+    listEngineMoments: vi.fn(async () => ({
+      moments: [],
+      nextBeforeMomentOrder: null,
+      latestMomentOrder: 0,
+    })),
+    getTryInVersionState: vi.fn(async () => ({ state: null })),
+    listWorkspaceVersions: vi.fn(async () => ({
+      versions: [
+        {
+          id: "main",
+          name: "Main",
+          kind: "main" as const,
+          createdAtMs: 0,
+          canMergeIntoMain: false,
+        },
+      ],
+      activeVersionId: "main",
+    })),
+    listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
+    listChatChannelShares: vi.fn(async () => {
+      // Sharing is optional; ChatsView downgrades a rejection to "none".
+      throw new Error("sharing unavailable in shell tests");
+    }),
+    syncDms: vi.fn(async () => ({ available: false, dms: [] })),
+    listFileChats: vi.fn(async () => ({ fileObjectId: null, threads: [] })),
+  });
+}
+
 function renderShell(bridge: ReturnType<typeof makeBridge>) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
@@ -308,7 +356,11 @@ describe("ui-state merge-on-load", () => {
 
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
-    expect((await screen.findByTestId("history-timeline")).style.width).toBe("360px");
+    expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
+    // chatsVisible is stored true, but this workspace is engine-off: the
+    // Chats panel (and its activity-bar toggle) must not exist at all.
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
   });
 });
 
@@ -741,57 +793,192 @@ describe("open editors", () => {
     // active behavior needs real layout and is covered by the desktop e2e
     // spec (workspace-open-editors.spec.ts).
     const list = screen.getByTestId("open-editors-list");
-    expect(list.className).toContain("max-h-[238px]");
+    expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
     expect(list.className).toContain("overflow-y-auto");
   });
-});
 
-describe("history rail", () => {
-  it("can be collapsed and restored from the right edge", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findByTestId("history-timeline");
-    await user.click(screen.getByTestId("history-collapse"));
-
-    expect(screen.queryByTestId("history-timeline")).toBeNull();
-    await user.click(screen.getByTestId("history-restore"));
-
-    expect(await screen.findByTestId("history-timeline")).toBeTruthy();
-  });
-
-  it("can be resized well beyond the old narrow rail width", async () => {
+  it("resizes the open editors section by dragging its bottom edge", async () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
       configurable: true,
       value: vi.fn(),
     });
     const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
     renderShell(bridge);
 
-    const rail = await screen.findByTestId("history-timeline");
-    Object.defineProperty(rail, "getBoundingClientRect", {
+    const treeRows = await screen.findAllByTestId("tree-row");
+    const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+    await user.click(rowA);
+    await screen.findByTestId("tab-a.md");
+
+    const list = screen.getByTestId("open-editors-list");
+    const handle = screen.getByTestId("open-editors-resize");
+    // A non-left press must not start a resize.
+    fireEvent.pointerDown(handle, {
+      button: 2,
+      buttons: 2,
+      clientY: 200,
+      pointerId: 1,
+    });
+    fireEvent.pointerMove(handle, { buttons: 2, clientY: 500 });
+    expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
+
+    fireEvent.pointerDown(handle, {
+      button: 0,
+      buttons: 1,
+      clientY: 200,
+      pointerId: 1,
+    });
+    // The one-item list is shorter than its cap; a zero-delta move must
+    // preserve the saved cap.
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+    expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
+
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 374 });
+    await waitFor(() => {
+      expect(list.style.maxHeight).toBe("300px");
+    });
+
+    // Dragging far above the list clamps at the minimum height.
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 0 });
+    await waitFor(() => {
+      expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_MIN_HEIGHT}px`);
+    });
+  });
+
+  it("clamps the rendered open editors height to the viewport", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const original = window.innerHeight;
+    try {
+      const user = userEvent.setup();
+      renderShell(makeBridge(Promise.resolve(null)));
+
+      const treeRows = await screen.findAllByTestId("tree-row");
+      const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+      await user.click(rowA);
+      await screen.findByTestId("tab-a.md");
+
+      const list = screen.getByTestId("open-editors-list");
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: 150,
+      });
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => expect(list.style.maxHeight).toBe("90px"));
+
+      const handle = screen.getByTestId("open-editors-resize");
+      fireEvent.pointerDown(handle, {
+        button: 0,
+        buttons: 1,
+        clientY: 100,
+        pointerId: 1,
+      });
+      fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+      expect(list.style.maxHeight).toBe("90px");
+
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: 768,
+      });
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => expect(list.style.maxHeight).toBe("190px"));
+    } finally {
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+      window.dispatchEvent(new Event("resize"));
+    }
+  });
+});
+
+describe("chats panel (right side)", () => {
+  it("never renders a right panel (or a collapsed stub) for an engine-off workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await screen.findByText("a.md");
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    // The old history rail is gone for good — no timeline, no restore stub.
+    expect(screen.queryByTestId("history-timeline")).toBeNull();
+    expect(screen.queryByTestId("history-restore")).toBeNull();
+  });
+
+  it("toggles from the activity bar and hides entirely when collapsed", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    // Hidden by default (VS Code secondary-sidebar grammar).
+    await screen.findByText("a.md");
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+
+    await user.click(await screen.findByTestId("activity-chats"));
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+
+    await user.click(screen.getByTestId("chats-panel-collapse"));
+    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    // Collapsed means GONE — no 36px stub squatting on the right edge.
+    expect(screen.queryByTestId("history-restore")).toBeNull();
+
+    await user.click(screen.getByTestId("activity-chats"));
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+  });
+
+  it("restores the stored width and can be resized from its left edge", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    const panel = await screen.findByTestId("chats-panel");
+    expect(panel.style.width).toBe("360px");
+    Object.defineProperty(panel, "getBoundingClientRect", {
       configurable: true,
       value: () => ({
-        x: 720,
+        x: 640,
         y: 0,
-        left: 720,
+        left: 640,
         top: 0,
         right: 1000,
         bottom: 800,
-        width: 280,
+        width: 360,
         height: 800,
         toJSON: () => {},
       }),
     });
 
-    const handle = screen.getByTestId("history-resize");
+    const handle = screen.getByTestId("chats-panel-resize");
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
     fireEvent.pointerMove(handle, { buttons: 1, clientX: 100 });
 
     await waitFor(() => {
-      expect(rail.style.width).toBe("900px");
+      expect(panel.style.width).toBe("900px");
     });
+  });
+
+  it("the 'This file' tab shows the active file's chats surface", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-chats"));
+    await screen.findByTestId("chats-panel");
+    await user.click(screen.getByTestId("chats-panel-tab-file"));
+
+    // No file open yet: the linked-chats surface says so honestly.
+    expect(
+      (await screen.findByTestId("linked-chats-empty")).textContent,
+    ).toContain("No file open");
   });
 });
 

@@ -188,13 +188,31 @@ const Tab = memo(function Tab(props: {
   );
 });
 
+// The overlay thumb never shrinks below a grabbable pill (VS Code's minimum
+// slider size treatment).
+const MIN_THUMB_WIDTH = 32;
+
+// Proportional thumb width for the overlay scrollbar; the native-bar ratio
+// clamped to stay grabbable, but never wider than the track itself (a strip
+// squeezed under 32px by the side panes must not push the thumb's travel
+// range negative).
+function thumbWidth(strip: HTMLElement): number {
+  return Math.min(
+    Math.max(
+      (strip.clientWidth * strip.clientWidth) / strip.scrollWidth,
+      MIN_THUMB_WIDTH,
+    ),
+    strip.clientWidth,
+  );
+}
+
 // The tab strip above the editor area. Pure view over workbenchState's tabs:
 // activation routes through the shell's single openFile() (which fires the
 // file-open-start perf mark), closing through the same closeTab transition
 // Ctrl+W and the menu use, reorder through the pure moveTab. `dirty` is
 // runtime-only and known for the ACTIVE tab (the one mounted inspector
 // reports its save state). h-9: ONE header band height with the side panel
-// and history rail, so the three hairlines meet at the vertical seams.
+// and Chats panel, so the three hairlines meet at the vertical seams.
 export function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
@@ -215,6 +233,18 @@ export function EditorTabs(props: {
   // Keyed on `empty` — the strip renders null until a tab opens, so the
   // ref is only populated after that flip.
   const stripRef = useRef<HTMLDivElement | null>(null);
+  // Overlay scrollbar (VS Code treatment): the native bar stays hidden
+  // because a painted bar eats the 36px strip, so the visible affordance is
+  // a thin thumb drawn OVER the strip's bottom edge — zero layout height,
+  // shown on hover, draggable. Positioned imperatively (scroll fires every
+  // frame; no reason to re-render the whole strip per tick).
+  const thumbRef = useRef<HTMLDivElement | null>(null);
+  const thumbDrag = useRef<{
+    pointerId: number;
+    startX: number;
+    startScrollLeft: number;
+  } | null>(null);
+  const [thumbDragging, setThumbDragging] = useState(false);
   const empty = props.tabs.length === 0;
   useEffect(() => {
     const strip = stripRef.current;
@@ -228,11 +258,52 @@ export function EditorTabs(props: {
       strip.scrollLeft += event.deltaY;
     };
     strip.addEventListener("wheel", onWheel, { passive: false });
-    return () => strip.removeEventListener("wheel", onWheel);
+    // The thumb is a SIBLING of the scroller (it must not scroll away with
+    // the content), so wheels over it never bubble through the strip —
+    // listen there too or the gesture dies exactly over the affordance.
+    const thumb = thumbRef.current;
+    thumb?.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      strip.removeEventListener("wheel", onWheel);
+      thumb?.removeEventListener("wheel", onWheel);
+    };
   }, [empty]);
+  useEffect(() => {
+    const strip = stripRef.current;
+    const thumb = thumbRef.current;
+    if (empty || !strip || !thumb) return;
+    const measure = () => {
+      const maxScroll = strip.scrollWidth - strip.clientWidth;
+      if (maxScroll <= 0) {
+        thumb.style.display = "none";
+        return;
+      }
+      const width = thumbWidth(strip);
+      thumb.style.display = "";
+      thumb.style.width = `${width}px`;
+      thumb.style.transform = `translateX(${
+        (strip.scrollLeft / maxScroll) * (strip.clientWidth - width)
+      }px)`;
+    };
+    measure();
+    strip.addEventListener("scroll", measure, { passive: true });
+    // Tab opens/closes re-run this effect (deps), as does a dirty dot changing
+    // tab width — the observer covers the container resizing under the same
+    // tabs (panel toggle, window resize).
+    const resize =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resize?.observe(strip);
+    return () => {
+      strip.removeEventListener("scroll", measure);
+      resize?.disconnect();
+    };
+  }, [empty, props.tabs, props.activeTabDirty]);
   if (empty) return null;
   return (
-    <div data-testid="editor-tabs" className="relative flex h-9 shrink-0 bg-panel-2">
+    <div
+      data-testid="editor-tabs"
+      className="group/strip relative flex h-9 shrink-0 bg-panel-2"
+    >
       <div
         ref={stripRef}
         role="tablist"
@@ -261,6 +332,64 @@ export function EditorTabs(props: {
         {/* Continues the hairline across the empty strip — only the active
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
+      </div>
+      {/* The overlay scrollbar thumb. Sibling of the scroller (a child would
+          scroll away with the content); width/position are set by the
+          measure effect, so it only ever paints when the strip overflows.
+          The taller transparent zone is the grab target for the 4px pill. */}
+      <div
+        ref={thumbRef}
+        data-testid="tab-strip-scrollbar"
+        aria-hidden
+        style={{ display: "none" }}
+        onPointerDown={(event) => {
+          const strip = stripRef.current;
+          if (event.button !== 0 || !strip) return;
+          // Keep the browser from starting a text selection / focus change.
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          thumbDrag.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startScrollLeft: strip.scrollLeft,
+          };
+          setThumbDragging(true);
+        }}
+        onPointerMove={(event) => {
+          const state = thumbDrag.current;
+          const strip = stripRef.current;
+          if (!state || !strip || state.pointerId !== event.pointerId) return;
+          // Missed release (capture lost): a buttons-up move ends the drag,
+          // or plain hovering would keep scrolling (Tab drag convention).
+          if ((event.buttons & 1) === 0) {
+            thumbDrag.current = null;
+            setThumbDragging(false);
+            return;
+          }
+          const range = strip.clientWidth - thumbWidth(strip);
+          const maxScroll = strip.scrollWidth - strip.clientWidth;
+          if (range <= 0 || maxScroll <= 0) return;
+          strip.scrollLeft =
+            state.startScrollLeft +
+            ((event.clientX - state.startX) * maxScroll) / range;
+        }}
+        onPointerUp={() => {
+          thumbDrag.current = null;
+          setThumbDragging(false);
+        }}
+        onPointerCancel={() => {
+          thumbDrag.current = null;
+          setThumbDragging(false);
+        }}
+        className={`absolute bottom-0 left-0 z-10 flex h-2 touch-none items-end transition-opacity ${
+          thumbDragging ? "opacity-100" : "opacity-0 group-hover/strip:opacity-100"
+        }`}
+      >
+        <div
+          className={`h-1 w-full rounded-full ${
+            thumbDragging ? "bg-ink/40" : "bg-ink/20 hover:bg-ink/35"
+          }`}
+        />
       </div>
       {/* Overflow affordance: every open tab, reachable even when the strip
           scrolls. Lives OUTSIDE the scroller so the menu is never clipped. */}

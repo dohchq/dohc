@@ -6,6 +6,8 @@ import {
   createSiblingWorkspaceDir,
   createTempWorkspace,
   explorerRow,
+  openFileChatsPanel,
+  openHistoryView,
   revealExplorerPath,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
@@ -123,7 +125,10 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     await waitForWorkspaceReady(page);
 
     // --- Perf evidence: history first useful content with 1,000 moments ---
+    // History lives in the left History view now (the right panel is Chats);
+    // the measurement includes opening the view.
     const historyStart = Date.now();
+    await openHistoryView(page);
     await expect(
       page.getByTestId("engine-moment").first(),
     ).toBeVisible();
@@ -153,27 +158,29 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     // Budget: first useful content under 500ms.
     expect(ipcTiming.ms).toBeLessThan(500);
 
-    // --- Perf evidence: chat rail with 200 messages ---
+    // --- Perf evidence: chats panel with 200 messages ---
+    await page.getByTestId("activity-explorer").click();
     await revealExplorerPath(page, "files/doc-000.md");
     await explorerRow(page, "files/doc-000.md").click();
     const chatStart = Date.now();
-    await page.getByTestId("rail-tab-chats").click();
+    await openFileChatsPanel(page);
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-message")).toHaveCount(CHAT_MESSAGES);
     const chatOpenMs = Date.now() - chatStart;
     console.log(
-      `[perf] chat rail open with ${CHAT_MESSAGES} messages: ${chatOpenMs}ms to all messages rendered`,
+      `[perf] chats panel open with ${CHAT_MESSAGES} messages: ${chatOpenMs}ms to all messages rendered`,
     );
 
     // --- The race: switch to B while A's heavy surfaces are (re)loading ---
-    // Kick fresh loads of A's big history page and chat, then switch
-    // immediately without awaiting them.
-    await page.getByTestId("rail-tab-history").click();
+    // Kick a fresh paint of A's big history view (the chats panel is already
+    // live), then switch immediately without awaiting it.
+    await openHistoryView(page);
     await page.getByTestId("workspace-switcher").click();
     await switcherOption(page, WORKSPACE_B_ID).click();
     await waitForWorkspaceReady(page);
 
     // B's shell renders B's history...
+    await openHistoryView(page);
     await expect(
       page.locator(
         '[data-testid="engine-moment-open"][data-moment-path="b-note.md"]',
@@ -190,9 +197,10 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);
+    await page.getByTestId("activity-explorer").click();
     await revealExplorerPath(page, "b-note.md");
     await explorerRow(page, "b-note.md").click();
-    await page.getByTestId("rail-tab-chats").click();
+    await openFileChatsPanel(page);
     await expect(page.getByTestId("linked-chats-empty")).toContainText(
       "No chats about this file yet.",
     );
@@ -202,6 +210,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     await page.getByTestId("workspace-switcher").click();
     await switcherOption(page, WORKSPACE_A_ID).click();
     await waitForWorkspaceReady(page);
+    await openHistoryView(page);
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]').first(),
     ).toBeVisible();

@@ -16,7 +16,7 @@ import {
 // WS-D — INDEXED ENGINE SEARCH MOUNTED IN THE DESKTOP (plan PR 11/17 scope):
 // a flagged workspace's search panel routes through the engine's FTS index
 // and returns FILES and CHAT MESSAGES in one result list; a chat hit renders
-// a distinguishable row and opens the Chats rail on its thread. The `.env`
+// a distinguishable row and opens the Chats panel on its thread. The `.env`
 // family (including `.env.local`) is never findable AND never present in the
 // raw FTS tables. Unflagged workspaces keep the streamed ripgrep path.
 
@@ -119,7 +119,7 @@ test("flagged: search finds file content and a chat message; .env.local content 
     await expect(chatGroup).toBeVisible({ timeout: 20_000 });
     await expect(chatGroup.getByText("Chat", { exact: true })).toBeVisible();
 
-    // 3. Clicking the chat result opens the Chats rail on that thread.
+    // 3. Clicking the chat result opens the Chats panel on that thread.
     await chatGroup.getByTestId("search-result-row").first().click();
     await expect(page.getByTestId("linked-chat-thread")).toBeVisible({
       timeout: 20_000,
@@ -130,7 +130,7 @@ test("flagged: search finds file content and a chat message; .env.local content 
     );
 
     // 4. The `.env.local` content is never findable... (the search panel is
-    // still open — opening the rail does not close it)
+    // still open — opening the Chats panel does not close it)
     await page.getByTestId("search-input").fill(SECRET_VALUE);
     await expect(page.getByTestId("search-empty-state")).toBeVisible({
       timeout: 20_000,

@@ -5,6 +5,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openFileChatsPanel,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
@@ -60,7 +61,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
 
     await revealExplorerPath(page, "notes/topic.md");
     await explorerRow(page, "notes/topic.md").click();
-    await page.getByTestId("rail-tab-chats").click();
+    await openFileChatsPanel(page);
 
     // Calm empty state, then create.
     await expect(page.getByTestId("linked-chats-empty")).toContainText(
@@ -92,7 +93,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/topic.md");
     await revealExplorerPath(page, "notes/topic.md");
     await explorerRow(page, "notes/topic.md").click();
-    await page.getByTestId("rail-tab-chats").click();
+    await openFileChatsPanel(page);
     await expect(page.getByTestId("linked-chat-open")).toContainText(
       "Naming discussion",
     );
@@ -202,7 +203,7 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
     await waitForWorkspaceFile(page, workspaceId, "notes/agenda.md");
     await revealExplorerPath(page, "notes/agenda.md");
     await explorerRow(page, "notes/agenda.md").click();
-    await page.getByTestId("rail-tab-chats").click();
+    await openFileChatsPanel(page);
     await page.getByTestId("linked-chat-open").click();
 
     const authors = page.getByTestId("linked-chat-message-author");

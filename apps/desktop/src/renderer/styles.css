@@ -226,10 +226,11 @@ body {
   background-clip: padding-box;
 }
 
-/* The editor tab strip scrolls horizontally with no visible scrollbar
- * (VS Code treatment): wheel, active-tab reveal, and the overflow menu are
- * the affordances. A painted bar would eat a third of the 36px strip and
- * push the fixed-height tabs into vertical overflow. */
+/* The editor tab strip scrolls horizontally with the NATIVE scrollbar
+ * hidden (a painted bar would eat a third of the 36px strip and push the
+ * fixed-height tabs into vertical overflow). The visible affordance is the
+ * overlay thumb EditorTabs draws over the strip's bottom edge (VS Code
+ * treatment), plus wheel, active-tab reveal, and the overflow menu. */
 .dohc-tab-strip {
   scrollbar-width: none;
 }
@@ -263,6 +264,11 @@ body {
  * disagree about width. */
 .dohc-tiptap-editor {
   --dohc-editor-measure: 720px;
+  /* How far framed blocks (code, tables, callouts, mermaid previews) extend
+   * past the text column on each side. Their inner horizontal padding equals
+   * this inset (minus their border), which lands the text inside them back on
+   * the column's left content edge — see the alignment comment below. */
+  --dohc-editor-block-inset: 16px;
   position: relative;
   height: 100%;
   min-height: 100%;
@@ -302,6 +308,21 @@ body {
 }
 .dohc-notion-editor > :last-child {
   margin-bottom: 0;
+}
+
+/* One shared left content edge: the TEXT of every top-level block sits on the
+ * column's left edge, so a straight vertical line down the page touches all
+ * of it. Decorations — list markers, task checkboxes, the quote bar — hang
+ * LEFT of that line into the gutter, and framed blocks below extend one
+ * --dohc-editor-block-inset past the column on BOTH sides so their inner
+ * padding lands their text back on the edge (degrades to a flush frame when
+ * the pane is too narrow for the overhang). */
+.dohc-notion-editor > pre,
+.dohc-notion-editor > table,
+.dohc-notion-editor > .tableWrapper,
+.dohc-notion-editor > .dohc-callout,
+.dohc-notion-editor > .dohc-mermaid-preview {
+  max-width: calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset));
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -377,6 +398,20 @@ body {
   list-style-position: outside;
 }
 
+/* Top-level lists put their text on the content edge; the outside markers
+ * hang into the gutter. Nested lists keep the 24px relative indent. */
+.dohc-notion-editor > ul,
+.dohc-notion-editor > ol {
+  padding-left: 0;
+}
+
+/* Hanging markers live in the gutter, so nudge the hover +/⋮ cluster further
+ * left to stay clear of them. -56px still fits inside the editor's 56px
+ * horizontal padding at every pane width. */
+.dohc-notion-editor > :is(ul, ol) .dohc-block-affordance {
+  left: -56px;
+}
+
 /* Task lists exist in two DOM shapes: TipTap's TaskList/TaskItem attrs
  * (data-type) and the markdown-parsed form where the li carries only
  * data-checked. --dohc-task-ul/-li match BOTH so the styling can never go
@@ -404,8 +439,17 @@ body {
 
 .dohc-notion-editor ul[data-type="taskList"],
 .dohc-notion-editor ul:has(> li[data-checked]) {
-  padding-left: 2px;
+  padding-left: 24px;
   list-style: none;
+}
+
+/* Top-level task lists: text on the content edge, checkbox hanging in the
+ * gutter (task lists carry no block affordance, so nothing collides there).
+ * Repeated with the attribute selectors because the plain `> ul` rule above
+ * loses specificity to the base task-list rule. */
+.dohc-notion-editor > ul[data-type="taskList"],
+.dohc-notion-editor > ul:has(> li[data-checked]) {
+  padding-left: 0;
 }
 
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) {
@@ -417,6 +461,9 @@ body {
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) > label {
   flex: 0 0 auto;
   margin-top: 4px;
+  /* 15px checkbox + 8px flex gap: hangs the whole checkbox left of the item's
+   * content box, so task text starts exactly on the item's left edge. */
+  margin-left: -23px;
 }
 
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) > div {
@@ -472,6 +519,27 @@ body {
   font-style: italic;
 }
 
+/* Top-level quotes: text on the content edge, the accent bar hanging in the
+ * gutter as a ::before (a negative margin would defeat the `> *` auto-margin
+ * centering). Its -12px offset keeps it clear of the hover ⋮ handle, whose
+ * right edge sits at -10px. Nested quotes keep the classic inside bar. */
+.dohc-notion-editor > blockquote {
+  position: relative;
+  border-left: 0;
+  padding-left: 0;
+}
+
+.dohc-notion-editor > blockquote::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: -12px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--dohc-accent);
+}
+
 .dohc-notion-editor code {
   border: 1px solid var(--dohc-line);
   border-radius: 4px;
@@ -487,7 +555,9 @@ body {
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-panel);
-  padding: 44px 16px 14px;
+  /* 1px border + 15px = one block inset: code text lands on the content edge
+   * when the frame extends past the column (see the alignment comment). */
+  padding: 44px calc(var(--dohc-editor-block-inset) - 1px) 14px;
 }
 
 .dohc-notion-editor pre code {
@@ -498,45 +568,24 @@ body {
   line-height: 1.6;
 }
 
-/* Tables: quiet grid, tinted header band, rounded frame — data that reads
- * like part of the document, not an embedded spreadsheet. */
-/* No `overflow: hidden` here: the row/column grips float into the table's
- * outer margin (negative offsets, see the table-controls block below) and
- * would be clipped by it. The rounded frame is instead preserved by rounding
- * the four corner cells to match the table's own rounded border. */
+/* Tables — Notion's simple-table look: a quiet square hairline grid with a
+ * subtly tinted header band; data that reads like part of the document, not
+ * an embedded spreadsheet. No `overflow: hidden` on the table: the hover
+ * chrome (handles, "+" strips) floats into the table's outer margin via
+ * negative offsets (see the table-controls block below) and would be
+ * clipped by it. */
 .dohc-notion-editor table {
   border-collapse: separate;
   border-spacing: 0;
   width: 100%;
   border: 1px solid var(--dohc-line);
-  border-radius: 8px;
-}
-
-.dohc-notion-editor tr:first-child > th:first-child,
-.dohc-notion-editor tr:first-child > td:first-child {
-  border-top-left-radius: 7px;
-}
-
-.dohc-notion-editor tr:first-child > th:last-child,
-.dohc-notion-editor tr:first-child > td:last-child {
-  border-top-right-radius: 7px;
-}
-
-.dohc-notion-editor tr:last-child > th:first-child,
-.dohc-notion-editor tr:last-child > td:first-child {
-  border-bottom-left-radius: 7px;
-}
-
-.dohc-notion-editor tr:last-child > th:last-child,
-.dohc-notion-editor tr:last-child > td:last-child {
-  border-bottom-right-radius: 7px;
 }
 
 .dohc-notion-editor th,
 .dohc-notion-editor td {
   border: 0;
   border-top: 1px solid var(--dohc-line);
-  padding: 7px 10px;
+  padding: 8px 10px;
   vertical-align: top;
   text-align: left;
   font-size: 14px;
@@ -547,6 +596,19 @@ body {
   border-left: 1px solid var(--dohc-line);
 }
 
+/* The table frame extends one block inset past the column, so the outer
+ * columns pad back to it: 1px table border + 15px = the 16px inset, landing
+ * first-column text on the shared content edge (last column mirrors it). */
+.dohc-notion-editor th:first-child,
+.dohc-notion-editor td:first-child {
+  padding-left: calc(var(--dohc-editor-block-inset) - 1px);
+}
+
+.dohc-notion-editor th:last-child,
+.dohc-notion-editor td:last-child {
+  padding-right: calc(var(--dohc-editor-block-inset) - 1px);
+}
+
 .dohc-notion-editor tr:first-child > th,
 .dohc-notion-editor tr:first-child > td {
   border-top: 0;
@@ -554,8 +616,6 @@ body {
 
 .dohc-notion-editor th {
   background: var(--dohc-panel);
-  color: var(--dohc-muted);
-  font-size: 13px;
   font-weight: 600;
 }
 
@@ -787,7 +847,11 @@ body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  width: min(var(--dohc-editor-measure), calc(100% - 112px));
+  /* Matches the widened code-block frame (measure + 2 block insets). */
+  width: min(
+    calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset)),
+    calc(100% - 112px)
+  );
   box-sizing: border-box;
   align-items: center;
   justify-content: space-between;
@@ -812,8 +876,7 @@ body {
 }
 
 .dohc-code-language-select,
-.dohc-code-copy-btn,
-.dohc-code-block-continue-btn {
+.dohc-code-copy-btn {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -826,8 +889,7 @@ body {
 }
 
 .dohc-code-language-select:hover,
-.dohc-code-copy-btn:hover,
-.dohc-code-block-continue-btn:hover {
+.dohc-code-copy-btn:hover {
   border-color: var(--dohc-line);
   background: var(--dohc-line);
   color: var(--dohc-ink);
@@ -837,20 +899,64 @@ body {
   padding: 2px 7px;
 }
 
+/* Rendered only after a terminal code block (nothing below it): a quiet
+ * strip for getting a cursor under the block. The whole strip is the click
+ * target; hovering it reveals a gutter-style "+" that matches the
+ * block-controls affordances (18px box, 120ms fade, --dohc-line fill). */
 .dohc-code-block-continuation {
+  display: flex;
+  align-items: center;
   max-width: var(--dohc-editor-measure);
+  height: 26px;
+  margin-top: -4px;
+  cursor: text;
+}
+
+.dohc-code-block-continuation:has(> .dohc-code-block-continue-btn:disabled) {
+  display: none;
 }
 
 .dohc-code-block-continue-btn {
-  margin: 2px 0 10px;
-  width: 22px;
-  height: 20px;
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background-color 100ms ease-out,
+    border-color 100ms ease-out,
+    color 100ms ease-out;
 }
 
+.dohc-code-block-continuation:hover .dohc-code-block-continue-btn,
+.dohc-code-block-continue-btn:focus-visible {
+  opacity: 1;
+}
+
+.dohc-code-block-continue-btn:hover,
+.dohc-code-block-continue-btn:focus-visible {
+  border-color: var(--dohc-line);
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
+}
+
+/* Shared popover box treatment. `overflow` is deliberately NOT shared: the
+ * scrolling menus (slash menu, wikilink picker) own it individually, because
+ * the bubble menu must stay overflow-visible — it hosts the anchored
+ * turn-into dropdown (.dohc-turn-into-menu), which an overflow rule here
+ * would clip to the toolbar's own height. */
 .dohc-slash-menu,
 .dohc-wikilink-picker,
 .dohc-bubble-menu {
-  overflow: auto;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-panel);
@@ -873,6 +979,7 @@ body {
   z-index: 70;
   width: 320px;
   padding: 5px;
+  overflow: auto;
 }
 
 .dohc-slash-menu__item,
@@ -948,6 +1055,7 @@ body {
 .dohc-wikilink-picker {
   width: 360px;
   padding: 4px;
+  overflow: auto;
 }
 
 .dohc-wikilink-picker__item {
@@ -1005,7 +1113,17 @@ body {
   -webkit-box-decoration-break: clone;
 }
 
+/* The selection toolbar. TipTap appends this element inside
+ * .dohc-editor-surface next to the ProseMirror DOM — the SAME stacking
+ * context as all in-document chrome — so it needs an explicit spot on the
+ * editor's layering scale: content chrome stays ≤ 20 (outline z3, block
+ * gutter, table grips z4 / table-menu chip z5, column-resize handle +
+ * collab caret labels z20), popovers sit at 69 (backdrop) / 70 (menus) /
+ * 71 (dropdowns nested inside a z70 menu). Without a z-index here the
+ * positive-z table controls paint OVER the selection menu. Table chrome
+ * must stay below 69 so selection UI always wins. */
 .dohc-bubble-menu {
+  z-index: 70;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -1428,25 +1546,28 @@ body {
 }
 
 /* ── table controls ──
- * Row/column grips, the table menu, and the append "+" buttons
- * (tableControls.tsx). Each is a decoration widget nested one position inside
- * its target cell — same "widget-inside-node, hover-revealed via an ancestor
- * class" technique as the block gutter (.dohc-block-node /
- * .dohc-block-affordance above), so `td`/`th` needs `position: relative`
- * exactly like `.dohc-block-node` does. The chrome is then pushed into the
- * table's OUTER margin with negative offsets so it never overlaps cell text,
- * while staying a DOM descendant of the cell — which is what keeps every grip
- * glued to its column/row while a resize drag is live (see the comment at the
- * top of tableControls.tsx). */
+ * Notion-style row/column handles, the table menu, and the append "+"
+ * strips (tableControls.tsx). Each is a decoration widget nested one
+ * position inside its target cell — same "widget-inside-node" technique as
+ * the block gutter (.dohc-block-node / .dohc-block-affordance above), so
+ * `td`/`th` needs `position: relative` exactly like `.dohc-block-node`
+ * does. The chrome is then pushed into the table's OUTER margin with
+ * negative offsets so it never overlaps cell text, while staying a DOM
+ * descendant of the cell — which is what keeps every handle glued to its
+ * column/row while a resize drag is live (see the comment at the top of
+ * tableControls.tsx). Reveal is split: handles show per hovered row/column
+ * (`is-active`, toggled by the plugin's mousemove tracking); the ⋯ menu and
+ * "+" strips show on table hover (`.dohc-table-node:hover`). */
 .dohc-notion-editor td,
 .dohc-notion-editor th {
   position: relative;
 }
 
-/* Grips, the table menu, and the append "+" buttons all float in the table's
- * OUTER margin (negative offsets), so none of them overlap or reflow cell
- * text. They share the hover-reveal treatment: shown when the table is
- * hovered or the control itself is keyboard-focused. */
+/* Handles, the table menu, and the append "+" strips all float in the
+ * table's OUTER margin (negative offsets), so none of them overlap or
+ * reflow cell text. z-index stays modest ON PURPOSE: editor-surface content
+ * chrome must stay ≤ 20 so selection UI (bubble menu and friends, 69–71)
+ * always paints on top — see the stacking-scale note on .dohc-bubble-menu. */
 .dohc-table-grip,
 .dohc-table-menu-btn,
 .dohc-table-append {
@@ -1455,50 +1576,67 @@ body {
   border: 0;
   padding: 0;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition:
+    opacity 100ms ease,
+    background-color 100ms ease;
 }
 
-.dohc-table-node:hover .dohc-table-grip,
-.dohc-table-node:hover .dohc-table-menu-btn,
-.dohc-table-node:hover .dohc-table-append,
-.dohc-table-grip:focus-visible,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
-  opacity: 1;
-}
-
+/* Notion-style handles: a small pill centered above the hovered COLUMN /
+ * beside the hovered ROW. `is-active` is toggled by tableControls.tsx's
+ * mousemove tracking, so exactly one column handle and one row handle show
+ * at a time — not a bar on every row and column at once. */
 .dohc-table-grip {
+  /* Invisible handles must not eat clicks meant for the table margins. */
+  pointer-events: none;
   background: var(--dohc-line);
   border-radius: 999px;
   cursor: pointer;
 }
 
+.dohc-table-grip.is-active,
+.dohc-table-grip:focus-visible {
+  pointer-events: auto;
+  opacity: 1;
+}
+
 .dohc-table-grip:hover,
 .dohc-table-grip:focus-visible {
-  background: var(--dohc-accent);
+  background: var(--dohc-subtle);
 }
 
-/* Column grip: a pill floating just ABOVE its column, spanning the column
- * width. Negative `top` lifts it into the margin over the table's top edge;
- * `left`/`right` keep it glued to the (live-resized) column box. */
+/* Column handle: floats just above the table's top edge, centered on the
+ * (live-resized) column box. */
 .dohc-table-grip--col {
-  top: -11px;
-  left: 1px;
-  right: 1px;
-  height: 7px;
+  top: -13px;
+  left: 50%;
+  width: 24px;
+  height: 8px;
+  transform: translateX(-50%);
 }
 
-/* Row grip: a pill floating just LEFT of its row, spanning the row height. */
+/* Row handle: floats just left of the table, centered on the row box. */
 .dohc-table-grip--row {
-  top: 1px;
-  bottom: 1px;
-  left: -11px;
-  width: 7px;
+  top: 50%;
+  left: -13px;
+  width: 8px;
+  height: 24px;
+  transform: translateY(-50%);
 }
 
-/* Corner chips — the table menu (⋯) and the append "+" buttons. */
-.dohc-table-menu-btn,
-.dohc-table-append {
+/* The table menu (⋯) and the append strips reveal on table hover. */
+.dohc-table-node:hover .dohc-table-menu-btn,
+.dohc-table-node:hover .dohc-table-append,
+.dohc-table-menu-btn:focus-visible,
+.dohc-table-append:focus-visible {
+  opacity: 1;
+}
+
+/* Table menu chip: the top-left outer corner (the spreadsheet "select-all"
+ * corner where the handle strips meet). */
+.dohc-table-menu-btn {
+  top: -12px;
+  left: -12px;
+  z-index: 5;
   display: inline-grid;
   place-items: center;
   width: 16px;
@@ -1513,9 +1651,7 @@ body {
 }
 
 .dohc-table-menu-btn:hover,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:hover,
-.dohc-table-append:focus-visible {
+.dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
   /* --dohc-line, not --dohc-panel-2: matches the menu-family unification (see
    * the note above .dohc-slash-menu__item) — panel-2 is darker than the panel
@@ -1524,38 +1660,48 @@ body {
   color: var(--dohc-ink);
 }
 
-/* Table menu: the top-left outer corner (the spreadsheet "select-all"
- * corner where the row and column strips meet). */
-.dohc-table-menu-btn {
-  top: -12px;
-  left: -12px;
-  z-index: 5;
-}
-
 .dohc-table-menu-btn::before {
   content: "⋯";
+}
+
+/* Append strips — Notion's slim "+" bars hugging the table's full right
+ * edge (add column) and bottom edge (add row). The CSS geometry here only
+ * spans the anchor corner cell (the strip's absolute containing block);
+ * sizeAppendStrips in tableControls.tsx stretches it to the full table edge
+ * with inline offsets on hover. */
+.dohc-table-append {
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dohc-subtle);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dohc-table-append:hover,
+.dohc-table-append:focus-visible {
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
 }
 
 .dohc-table-append::before {
   content: "+";
 }
 
-/* Append column: hugs the table's right edge, spanning the anchor cell. */
 .dohc-table-append--col {
-  top: 1px;
-  bottom: 1px;
-  right: -12px;
-  width: 16px;
-  height: auto;
+  top: 0;
+  right: -15px;
+  width: 11px;
+  height: 100%;
 }
 
-/* Append row: hugs the table's bottom edge under the first column. */
 .dohc-table-append--row {
-  bottom: -12px;
-  left: 1px;
-  right: 1px;
-  width: auto;
-  height: 16px;
+  bottom: -15px;
+  left: 0;
+  width: 100%;
+  height: 11px;
 }
 
 /* Grip menu (insert/delete row or column, toggle header, delete table) —
@@ -1691,6 +1837,18 @@ body {
     0 1px 2px rgba(28, 27, 24, 0.05),
     0 8px 24px rgba(28, 27, 24, 0.12);
   animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+/* Flipped above the trigger when the viewport has more room there — the
+ * placement/maxHeight come from resolveTurnIntoDropdown (blockControls.tsx),
+ * which reuses the shared floating-menu math. The dropdown stays ANCHORED
+ * (position: absolute), never position: fixed: the bubble menu lives inside
+ * .dohc-editor-surface, whose container-type would re-base fixed coordinates
+ * onto the pane instead of the viewport (see the .dohc-editor-surface
+ * comment below). */
+.dohc-turn-into-menu[data-placement='above'] {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .dohc-turn-into-menu:focus {
@@ -2372,7 +2530,10 @@ body {
   /* Default + unknown types render with note styling. */
   --dohc-callout-accent: var(--dohc-match);
   position: relative;
-  margin: 14px 0;
+  /* `auto` inline margins: this rule outranks the editor's `> *` centering
+   * (source order), so a plain `14px 0` would pin callouts to the left rail
+   * while everything else centers. */
+  margin: 14px auto;
   border: 1px solid color-mix(in srgb, var(--dohc-callout-accent) 26%, var(--dohc-line));
   border-left: 3px solid var(--dohc-callout-accent);
   border-radius: 8px;
@@ -2396,7 +2557,10 @@ body {
 }
 
 .dohc-callout-body {
-  padding: 6px 12px 8px;
+  /* Horizontal padding + the callout borders (3px bar left, 1px right) add up
+   * to one block inset per side, landing body text on the content edge. */
+  padding: 6px calc(var(--dohc-editor-block-inset) - 1px) 8px
+    calc(var(--dohc-editor-block-inset) - 3px);
 }
 
 .dohc-callout-body > *:first-child {
@@ -2545,11 +2709,14 @@ mark.dohc-highlight,
   flex-direction: column;
   align-items: center;
   overflow: auto;
-  margin: 0 0 12px;
+  /* `auto` inline margins: keeps the preview centered in the column (this
+   * rule outranks the editor's `> *` centering by source order). */
+  margin: 0 auto 12px;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-bg);
-  padding: 18px;
+  /* 1px border + 15px = one block inset, like the other framed blocks. */
+  padding: 18px calc(var(--dohc-editor-block-inset) - 1px);
   cursor: text;
 }
 
@@ -2896,7 +3063,9 @@ mark.dohc-highlight,
 
 .dohc-math-block {
   display: block;
-  margin: 0.6em 0;
+  /* `auto` inline margins: keeps display math centered in the column (this
+   * rule outranks the editor's `> *` centering by source order). */
+  margin: 0.6em auto;
   padding: 0.5em 0.75em;
   text-align: center;
   cursor: pointer;

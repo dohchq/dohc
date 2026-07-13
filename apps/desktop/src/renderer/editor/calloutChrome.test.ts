@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
+import { NodeSelection } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
@@ -186,5 +187,42 @@ describe("callout header fold control", () => {
     click(chevron);
 
     expect(liveFold(editor)).toBe("-");
+  });
+});
+
+describe("callout header selection", () => {
+  function headerEl(editor: Editor): HTMLElement {
+    const header = editor.view.dom.querySelector<HTMLElement>(".dohc-callout-header");
+    if (!header) throw new Error("callout header not rendered");
+    return header;
+  }
+
+  function selectedNodeName(editor: Editor): string | null {
+    const selection = editor.state.selection;
+    return selection instanceof NodeSelection ? selection.node.type.name : null;
+  }
+
+  it("clicking the header background selects the whole callout", () => {
+    // This is the only mouse path to select a FOLDED callout (its body is
+    // hidden), which in turn is what makes it deletable via Backspace.
+    const editor = makeEditor("> [!note]- Folded\n> hidden body");
+
+    headerEl(editor).dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    );
+
+    expect(selectedNodeName(editor)).toBe("callout");
+  });
+
+  it("leaves clicks on the header's interactive controls alone", () => {
+    const editor = makeEditor("> [!note] Titled\n> body");
+    const input = editor.view.dom.querySelector(".dohc-callout-title-input");
+    if (!input) throw new Error("title input not rendered");
+
+    input.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    );
+
+    expect(selectedNodeName(editor)).toBeNull();
   });
 });
