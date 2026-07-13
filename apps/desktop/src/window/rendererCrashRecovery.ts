@@ -62,9 +62,12 @@ export function installRendererCrashRecovery(
           : "crash loop detected, leaving the window for manual reload"
       }`,
     );
-    if (!decision.reload || webContents.isDestroyed()) return;
+    if (webContents.isDestroyed()) return;
+    const reloadIfAllowed = () => {
+      if (decision.reload && !webContents.isDestroyed()) webContents.reload();
+    };
     if (!beforeReload) {
-      webContents.reload();
+      reloadIfAllowed();
       return;
     }
     // Main-owned resources outlive a renderer process. Close them before the
@@ -76,8 +79,6 @@ export function installRendererCrashRecovery(
       .catch((error) => {
         console.error("[desktop] renderer crash cleanup failed:", error);
       })
-      .then(() => {
-        if (!webContents.isDestroyed()) webContents.reload();
-      });
+      .then(reloadIfAllowed);
   });
 }

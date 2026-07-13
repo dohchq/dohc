@@ -138,6 +138,26 @@ describe("installRendererCrashRecovery", () => {
     expect(fake.reloads).toHaveLength(CRASH_LOOP_MAX_RELOADS);
   });
 
+  it("still cleans up resources after the crash-loop reload cap", async () => {
+    let now = 0;
+    const fake = fakeWebContents();
+    const cleanup = vi.fn(async () => undefined);
+    installRendererCrashRecovery(
+      fake.contents,
+      () => {
+        now += 1_000;
+        return now;
+      },
+      cleanup,
+    );
+
+    const crashCount = CRASH_LOOP_MAX_RELOADS + 2;
+    for (let i = 0; i < crashCount; i += 1) fake.crash("oom");
+
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(crashCount));
+    expect(fake.reloads).toHaveLength(CRASH_LOOP_MAX_RELOADS);
+  });
+
   it("never reloads a destroyed webContents", () => {
     const fake = fakeWebContents();
     installRendererCrashRecovery(fake.contents, () => 1_000);

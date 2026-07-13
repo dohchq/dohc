@@ -1958,6 +1958,8 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   const activeWorkspaceId =
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  searchRegistry.disposeOwner(senderId);
+  latestSearchIdBySender.delete(senderId);
   await Promise.all([
     closeEngineYDocSessionsForSender(senderId),
     activeWorkspaceId
