@@ -1461,6 +1461,9 @@ body {
 .dohc-table-node:hover .dohc-table-grip,
 .dohc-table-node:hover .dohc-table-menu-btn,
 .dohc-table-node:hover .dohc-table-append,
+.dohc-table-node:focus-within .dohc-table-grip,
+.dohc-table-node:focus-within .dohc-table-menu-btn,
+.dohc-table-node:focus-within .dohc-table-append,
 .dohc-table-grip:focus-visible,
 .dohc-table-menu-btn:focus-visible,
 .dohc-table-append:focus-visible {

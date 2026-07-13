@@ -3,10 +3,8 @@ import {
   Bell,
   ChevronDown,
   Cloud,
-  FileClock,
   FileText,
   GitBranch,
-  MessagesSquare,
   MoreHorizontal,
   Search,
   Settings,
@@ -23,12 +21,13 @@ import {
   applyFrontmatter,
   parseFrontmatter,
 } from "../../desktop/src/renderer/markdown/frontmatter";
+import { ActivityBar } from "../../desktop/src/renderer/workbench/ActivityBar";
 import {
-  DEMO_ACTIVITY_ITEMS,
   DemoSidebar,
   type DemoPanelId,
   type DemoWorkspaceDocument,
 } from "./DemoSidebar";
+import { configureDemoDesktopBridge } from "./demoDesktopBridge";
 
 type DemoDocument = {
   path: string;
@@ -110,47 +109,6 @@ intent -> inspectable work -> review -> durable context
   },
 ];
 
-const HISTORY_ITEMS = [
-  {
-    title: "Edited welcome.md",
-    meta: "Local file edit · just now",
-    path: "welcome.md",
-  },
-  {
-    title: "Saved latest edits",
-    meta: "Workspace moment · 2 minutes ago",
-    path: "projects/launch-plan.md",
-  },
-  {
-    title: "Created launch-plan.md",
-    meta: "Local file edit · today",
-    path: "projects/launch-plan.md",
-  },
-  {
-    title: "Updated agent workflows",
-    meta: "Agent edit · today",
-    path: "research/agent-workflows.md",
-  },
-  {
-    title: "Reconciled offline edits",
-    meta: "Workspace history · yesterday",
-    path: "welcome.md",
-  },
-] as const;
-
-const LINKED_CHAT_ITEMS = [
-  {
-    title: "Launch planning",
-    meta: "2 messages · launch-plan.md",
-    path: "projects/launch-plan.md",
-  },
-  {
-    title: "Agent workflow review",
-    meta: "1 message · agent-workflows.md",
-    path: "research/agent-workflows.md",
-  },
-] as const;
-
 function filename(path: string): string {
   return path.split("/").pop() ?? path;
 }
@@ -197,17 +155,10 @@ export function ProductDemo() {
     useState<DemoPanelId>("explorer");
   const [sidebarVisible, setSidebarVisible] = useState(initialSidebarVisible);
   const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts);
+  const [emptyFolders, setEmptyFolders] = useState<string[]>([]);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [showSource, setShowSource] = useState(false);
   const [sourceText, setSourceText] = useState("");
-  const [density, setDensity] = useState<"comfortable" | "compact">(
-    "comfortable",
-  );
-  const [cloudConnected, setCloudConnected] = useState(false);
-  const [rightRailView, setRightRailView] = useState<"history" | "chats">(
-    "history",
-  );
-  const [rightRailQuery, setRightRailQuery] = useState("");
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const saveTimer = useRef<number | null>(null);
 
@@ -222,6 +173,9 @@ export function ProductDemo() {
             path,
             title: String(parsed.meta.title ?? filenameStem(path)),
             body: parsed.body,
+            ...(typeof parsed.meta.icon === "string"
+              ? { icon: parsed.meta.icon }
+              : {}),
           };
         })
         .sort((left, right) => left.path.localeCompare(right.path)),
@@ -314,6 +268,68 @@ export function ProductDemo() {
     setSaveState("saved");
   }, [activePath, composeCurrentDocument, drafts, storeDraft]);
 
+  const createDocumentAtPath = useCallback(
+    (path: string) => {
+      const title = filenameStem(path)
+        .replace(/[-_]+/g, " ")
+        .replace(/\b\w/g, (letter) => letter.toUpperCase());
+      storeDraft(
+        path,
+        `---\ntitle: ${title}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`,
+      );
+    },
+    [storeDraft],
+  );
+
+  const moveDraftPath = useCallback((fromPath: string, toPath: string) => {
+    setDrafts((current) => {
+      const next = { ...current };
+      for (const [path, markdown] of Object.entries(current)) {
+        if (path !== fromPath && !path.startsWith(`${fromPath}/`)) continue;
+        const suffix = path.slice(fromPath.length);
+        delete next[path];
+        next[`${toPath}${suffix}`] = markdown;
+      }
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // The in-memory demo remains usable when storage is unavailable.
+      }
+      return next;
+    });
+    setActivePath((current) =>
+      current === fromPath || current.startsWith(`${fromPath}/`)
+        ? `${toPath}${current.slice(fromPath.length)}`
+        : current,
+    );
+    setEmptyFolders((current) =>
+      current.map((path) =>
+        path === fromPath || path.startsWith(`${fromPath}/`)
+          ? `${toPath}${path.slice(fromPath.length)}`
+          : path,
+      ),
+    );
+  }, []);
+
+  const deleteDraftPath = useCallback((path: string) => {
+    setDrafts((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(
+          ([entry]) => entry !== path && !entry.startsWith(`${path}/`),
+        ),
+      );
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // The in-memory demo remains usable when storage is unavailable.
+      }
+      return next;
+    });
+    setEmptyFolders((current) =>
+      current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
+    );
+  }, []);
+
   const updateIdentity = useCallback(
     (nextFullText: string) => {
       const next = applyFrontmatter(
@@ -340,15 +356,6 @@ export function ProductDemo() {
     setShowSource((current) => !current);
   }, [activePath, composeCurrentDocument, showSource, storeDraft]);
 
-  const rightRailItems = useMemo(() => {
-    const source = rightRailView === "history" ? HISTORY_ITEMS : LINKED_CHAT_ITEMS;
-    const query = rightRailQuery.trim().toLowerCase();
-    if (!query) return source;
-    return source.filter((item) =>
-      `${item.title} ${item.meta}`.toLowerCase().includes(query),
-    );
-  }, [rightRailQuery, rightRailView]);
-
   const selectActivity = useCallback(
     (next: DemoPanelId) => {
       if (next === activeActivity) {
@@ -361,11 +368,21 @@ export function ProductDemo() {
     [activeActivity],
   );
 
+  configureDemoDesktopBridge({
+    documents,
+    createFile: createDocumentAtPath,
+    createFolder: (path) =>
+      setEmptyFolders((current) =>
+        current.includes(path) ? current : [...current, path],
+      ),
+    movePath: moveDraftPath,
+    deletePath: deleteDraftPath,
+  });
+
   return (
     <div
       className="demo-window"
       data-theme={theme}
-      data-density={density}
       data-sidebar-visible={sidebarVisible}
     >
       <header className="demo-titlebar">
@@ -393,71 +410,22 @@ export function ProductDemo() {
       </header>
 
       <div className="demo-workbench">
-        <nav className="demo-activity" aria-label="Demo activity bar">
-          {DEMO_ACTIVITY_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              className={`demo-rail-button${
-                sidebarVisible && activeActivity === item.id ? " is-active" : ""
-              }`}
-              type="button"
-              title={item.label}
-              aria-label={item.label}
-              aria-current={
-                sidebarVisible && activeActivity === item.id ? "page" : undefined
-              }
-              onClick={() => selectActivity(item.id)}
-            >
-              <item.icon size={18} strokeWidth={1.9} aria-hidden />
-            </button>
-          ))}
-          <div className="demo-activity-bottom">
-            <button
-              className={`demo-rail-button${
-                sidebarVisible && activeActivity === "cloud" ? " is-active" : ""
-              }`}
-              type="button"
-              title="dohc Cloud"
-              aria-label="dohc Cloud"
-              aria-current={
-                sidebarVisible && activeActivity === "cloud" ? "page" : undefined
-              }
-              onClick={() => selectActivity("cloud")}
-            >
-              <Cloud size={18} strokeWidth={1.9} aria-hidden />
-            </button>
-            <button
-              className={`demo-rail-button${
-                sidebarVisible && activeActivity === "settings"
-                  ? " is-active"
-                  : ""
-              }`}
-              type="button"
-              title="Open settings"
-              aria-label="Open settings"
-              aria-current={
-                sidebarVisible && activeActivity === "settings" ? "page" : undefined
-              }
-              onClick={() => selectActivity("settings")}
-            >
-              <Settings size={18} strokeWidth={1.9} aria-hidden />
-            </button>
-          </div>
-        </nav>
+        <ActivityBar
+          activeView={activeActivity}
+          sidebarVisible={sidebarVisible}
+          hasConflict={false}
+          chatsEnabled
+          onSelectView={selectActivity}
+        />
 
         <DemoSidebar
           activePanel={activeActivity}
           visible={sidebarVisible}
           documents={documents}
+          folders={emptyFolders}
           activePath={activePath}
-          theme={theme}
-          density={density}
-          cloudConnected={cloudConnected}
           onOpenDocument={openDocument}
           onCreateDocument={createDocument}
-          onSetTheme={setTheme}
-          onSetDensity={setDensity}
-          onToggleCloud={() => setCloudConnected((current) => !current)}
         />
 
         <section className="demo-editor-column" aria-label="Editable dohc document demo">
@@ -477,11 +445,21 @@ export function ProductDemo() {
           <div className="demo-editor-header">
             <FileText size={13} aria-hidden />
             <span className="demo-doc-name">{filename(activePath)}</span>
-            <span className="demo-doc-kind">{showSource ? "markdown source" : "document"}</span>
+            <span className="demo-doc-kind">document</span>
             <Share2 size={13} aria-hidden />
-            <span className="demo-save-state">{saveState === "saved" ? "Saved" : "Saving..."}</span>
-            <button className="demo-header-button" type="button" onClick={toggleSource}>
-              {showSource ? "Editor" : "Source"}
+            <button
+              className={`demo-header-button${showSource ? "" : " is-active"}`}
+              type="button"
+              onClick={() => showSource && toggleSource()}
+            >
+              Styled
+            </button>
+            <button
+              className={`demo-header-button${showSource ? " is-active" : ""}`}
+              type="button"
+              onClick={() => !showSource && toggleSource()}
+            >
+              Source
             </button>
             <button className="demo-icon-button" type="button" aria-label="Document menu" title="Document menu">
               <MoreHorizontal size={14} aria-hidden />
@@ -516,57 +494,6 @@ export function ProductDemo() {
             />
           </div>
         </section>
-
-        <aside className="demo-history">
-          <div className="demo-history-tabs">
-            <button
-              className={`demo-history-tab${rightRailView === "history" ? " is-active" : ""}`}
-              type="button"
-              onClick={() => setRightRailView("history")}
-            >
-              History
-            </button>
-            <button
-              className={`demo-history-tab${rightRailView === "chats" ? " is-active" : ""}`}
-              type="button"
-              onClick={() => setRightRailView("chats")}
-            >
-              Chats
-            </button>
-          </div>
-          <label className="demo-history-search">
-            <Search size={12} aria-hidden />
-            <input
-              value={rightRailQuery}
-              onChange={(event) => setRightRailQuery(event.target.value)}
-              placeholder={rightRailView === "history" ? "Search history" : "Search chats"}
-              aria-label={rightRailView === "history" ? "Search history" : "Search chats"}
-            />
-          </label>
-          <div className="demo-history-list">
-            <div className="demo-history-date">
-              {rightRailView === "history" ? "Today" : "Linked to workspace"}
-            </div>
-            {rightRailItems.map((item) => (
-              <button
-                className="demo-history-item"
-                key={item.title}
-                type="button"
-                onClick={() => openDocument(item.path)}
-              >
-                {rightRailView === "history" ? (
-                  <FileClock size={13} aria-hidden />
-                ) : (
-                  <MessagesSquare size={13} aria-hidden />
-                )}
-                <div>
-                  <div className="demo-history-title">{item.title}</div>
-                  <div className="demo-history-meta">{item.meta}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </aside>
       </div>
 
       <footer className="demo-statusbar">
@@ -575,7 +502,7 @@ export function ProductDemo() {
         <span className="demo-status-right">
           <Bell size={12} aria-hidden />
           <Cloud size={12} aria-hidden />
-          {cloudConnected ? "Cloud connected" : "Connect dohc Cloud"}
+          Connect dohc Cloud
           <GitBranch size={12} aria-hidden /> Main
           <Settings size={12} aria-hidden /> Settings
         </span>

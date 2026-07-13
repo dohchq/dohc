@@ -175,6 +175,34 @@ describe("table controls grips", () => {
     expect(headerRow?.content).toHaveLength(2);
   });
 
+  it("keeps the grip menu inside an embedded editor's shadow root", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const chrome = document.createElement("div");
+    chrome.className = "dohc-tiptap-editor";
+    const mount = document.createElement("div");
+    chrome.appendChild(mount);
+    shadow.appendChild(chrome);
+    editor = new Editor({
+      element: mount,
+      extensions: [
+        StarterKit,
+        TableKit.configure({ table: { resizable: true } }),
+        testTableControls,
+      ],
+      content: "<p></p>",
+    });
+    editor.commands.insertTable({ rows: 2, cols: 2, withHeaderRow: true });
+
+    const grip = shadow.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+
+    expect(chrome.querySelector(".dohc-table-menu")).not.toBeNull();
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    host.remove();
+  });
+
   it("column grip menu aligns every cell in the column (center) via the `align` attr", () => {
     editor = createTableEditor(3, 2);
     expect(columnAligns(editor, 0)).toEqual([null, null, null]);

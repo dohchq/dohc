@@ -184,7 +184,14 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
     menuMaxHeight: 200,
   });
 
-  const menu = document.createElement("div");
+  const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView ?? window;
+  const editorRoot = view.dom.getRootNode();
+  const editorChrome = view.dom.closest<HTMLElement>(".dohc-tiptap-editor");
+  const menuHost =
+    editorChrome ??
+    (editorRoot instanceof ShadowRoot ? editorRoot : ownerDocument.body);
+  const menu = ownerDocument.createElement("div");
   menu.className = "dohc-table-menu";
   menu.setAttribute("role", "listbox");
   menu.setAttribute("aria-label", "table controls");
@@ -207,7 +214,7 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
   };
 
   items.forEach((item, index) => {
-    const button = document.createElement("button");
+    const button = ownerDocument.createElement("button");
     button.type = "button";
     button.setAttribute("role", "option");
     button.className = `dohc-table-menu__item${item.destructive ? " dohc-table-menu__item--danger" : ""}`;
@@ -246,20 +253,20 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
   }
 
   function onPointerDown(event: MouseEvent): void {
-    if (event.target instanceof Node && menu.contains(event.target)) return;
+    if (event.target instanceof ownerWindow.Node && menu.contains(event.target)) return;
     close();
   }
 
   function close(): void {
-    window.removeEventListener("keydown", onKeyDown, true);
-    window.removeEventListener("mousedown", onPointerDown, true);
+    ownerWindow.removeEventListener("keydown", onKeyDown, true);
+    ownerWindow.removeEventListener("mousedown", onPointerDown, true);
     menu.remove();
     if (closeOpenMenu === close) closeOpenMenu = null;
   }
 
-  window.addEventListener("keydown", onKeyDown, true);
-  window.addEventListener("mousedown", onPointerDown, true);
-  document.body.appendChild(menu);
+  ownerWindow.addEventListener("keydown", onKeyDown, true);
+  ownerWindow.addEventListener("mousedown", onPointerDown, true);
+  menuHost.appendChild(menu);
   closeOpenMenu = close;
 }
 

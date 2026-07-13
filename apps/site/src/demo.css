@@ -176,13 +176,12 @@ button {
 }
 
 .demo-workbench {
-  display: grid;
-  grid-template-columns: 48px 270px minmax(0, 1fr) 270px;
+  display: flex;
   min-height: 0;
 }
 
-.demo-window[data-sidebar-visible="false"] .demo-workbench {
-  grid-template-columns: 48px minmax(0, 1fr) 270px;
+.demo-workbench > [data-testid="side-panel"] {
+  width: 305px;
 }
 
 .demo-activity {
@@ -377,6 +376,7 @@ button {
 
 .demo-editor-column {
   display: flex;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -1165,11 +1165,16 @@ button {
 
 .demo-header-button {
   height: 24px;
-  border: 1px solid var(--dohc-line);
+  border: 0;
   border-radius: 6px;
   padding: 0 8px;
   color: var(--dohc-muted);
   font-size: 11px;
+}
+
+.demo-header-button.is-active {
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
 }
 
 .demo-editor-pane {
@@ -1317,16 +1322,8 @@ button {
 }
 
 @media (max-width: 1050px) {
-  .demo-workbench {
-    grid-template-columns: 48px 230px minmax(0, 1fr);
-  }
-
-  .demo-history {
-    display: none;
-  }
-
-  .demo-window[data-sidebar-visible="false"] .demo-workbench {
-    grid-template-columns: 48px minmax(0, 1fr);
+  .demo-workbench > [data-testid="side-panel"] {
+    width: 270px !important;
   }
 }
 
@@ -1338,36 +1335,18 @@ button {
 
   .demo-workbench {
     position: relative;
-    grid-template-columns: 42px minmax(0, 1fr);
   }
 
-  .demo-sidebar {
+  .demo-workbench > [data-testid="side-panel"] {
     position: absolute;
     z-index: 20;
     top: 0;
     bottom: 0;
-    left: 42px;
+    left: 48px;
     display: flex;
-    width: min(270px, calc(100% - 42px));
+    width: min(305px, calc(100% - 48px)) !important;
     border-right: 1px solid var(--dohc-line);
     box-shadow: 12px 0 24px color-mix(in srgb, var(--dohc-ink) 10%, transparent);
-  }
-
-  .demo-sidebar.is-collapsed {
-    display: none;
-  }
-
-  .demo-window[data-sidebar-visible="false"] .demo-workbench {
-    grid-template-columns: 42px minmax(0, 1fr);
-  }
-
-  .demo-activity {
-    width: 42px;
-  }
-
-  .demo-rail-button {
-    width: 32px;
-    height: 34px;
   }
 
   .demo-editor-header {
