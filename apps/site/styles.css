@@ -226,6 +226,10 @@ body {
   box-shadow: 0 32px 80px -38px color-mix(in srgb, var(--ink) 42%, transparent);
 }
 
+[data-theme='dark'] .demo-stage {
+  box-shadow: none;
+}
+
 #desktop-demo {
   display: block;
   width: 100%;
