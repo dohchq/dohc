@@ -244,7 +244,7 @@ body {
 .hero-annotation {
   position: absolute;
   right: clamp(16px, 6vw, 96px);
-  top: clamp(120px, 22vh, 220px);
+  bottom: clamp(70px, 8vh, 100px);
   width: 230px;
   color: var(--muted);
   transform: rotate(3deg);
