@@ -348,11 +348,16 @@ export function createSearchRegistry(deps: {
       searchId: string,
       request: WorkspaceSearchRequest,
       onBatch: (batch: SearchBatch) => void,
+      isCurrent: () => boolean = () => true,
     ): Promise<void> {
       const realRoot = await realpath(rootPath);
       if (!(await stat(realRoot)).isDirectory()) {
         throw new Error("Workspace root is not a directory");
       }
+      // Root validation is async. A renderer reload/newer generation can win
+      // while it is in flight; the stale call must not kill or replace that
+      // generation's active search when validation eventually finishes.
+      if (!isCurrent()) return;
       active.get(ownerId)?.kill();
       const handle = start({
         rgPath: deps.rgPath,

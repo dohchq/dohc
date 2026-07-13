@@ -516,6 +516,10 @@ type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 const sitePreviewHandles = new Map<string, SitePreviewHandle>();
 const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
+const sitePreviewStartControllersBySender = new Map<
+  number,
+  Set<AbortController>
+>();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
@@ -533,6 +537,33 @@ function rendererGeneration(senderId: number): number {
 
 function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
+}
+
+function beginSitePreviewStart(senderId: number): {
+  controller: AbortController;
+  finish: () => void;
+} {
+  const controller = new AbortController();
+  const controllers =
+    sitePreviewStartControllersBySender.get(senderId) ??
+    new Set<AbortController>();
+  controllers.add(controller);
+  sitePreviewStartControllersBySender.set(senderId, controllers);
+  return {
+    controller,
+    finish: () => {
+      controllers.delete(controller);
+      if (controllers.size === 0) {
+        sitePreviewStartControllersBySender.delete(senderId);
+      }
+    },
+  };
+}
+
+function abortSitePreviewStartsForSender(senderId: number): void {
+  const controllers = sitePreviewStartControllersBySender.get(senderId);
+  sitePreviewStartControllersBySender.delete(senderId);
+  for (const controller of controllers ?? []) controller.abort();
 }
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
@@ -661,6 +692,7 @@ type SitePreviewStartInput = {
   site: SitePackageInfo;
   mode: "static" | "dev" | "build";
   isCurrent: () => boolean;
+  signal: AbortSignal;
 };
 
 async function rememberCurrentSitePreviewHandle(
@@ -722,6 +754,7 @@ async function startPreviewForSiteUnlocked(
       siteRoot: input.site.root,
       command: command.command,
       args: command.args,
+      signal: input.signal,
     });
     await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
     return {
@@ -751,6 +784,7 @@ async function startPreviewForSiteUnlocked(
       command: command.command,
       args: command.args,
       output: outputRoot ?? undefined,
+      signal: input.signal,
     });
     logs = result.logs;
     build = {
@@ -2010,6 +2044,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
+  abortSitePreviewStartsForSender(senderId);
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
@@ -3959,28 +3994,37 @@ function registerIpcHandlers(): void {
     const input = StartSitePreviewPayload.parse(payload);
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertSitePreviewMode(workspace.workspaceId, input.mode);
-    // Mounted shares are someone else's code AND previews carry host-scoped
-    // SDK reads, so EVERY preview mode is refused for shared-with-me roots
-    // (stricter than a shared view, whose whole workspace IS the share).
-    if (isSharedWithMePath(input.siteRoot)) {
-      throw new Error(
-        "This site arrived through a share. Previews run with workspace access, so copy the site into your own files to run it.",
+    const pendingStart = beginSitePreviewStart(sender.id);
+    const isCurrent = () =>
+      !pendingStart.controller.signal.aborted &&
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation;
+    try {
+      const workspace = requireWorkspace(input.workspaceId);
+      assertSitePreviewMode(workspace.workspaceId, input.mode);
+      // Mounted shares are someone else's code AND previews carry host-scoped
+      // SDK reads, so EVERY preview mode is refused for shared-with-me roots
+      // (stricter than a shared view, whose whole workspace IS the share).
+      if (isSharedWithMePath(input.siteRoot)) {
+        throw new Error(
+          "This site arrived through a share. Previews run with workspace access, so copy the site into your own files to run it.",
+        );
+      }
+      const site = await getSitePackage(workspace.rootPath, input.siteRoot);
+      if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
+      return StartSitePreviewResult.parse(
+        await startPreviewForSite({
+          workspaceId: input.workspaceId,
+          workspaceRoot: workspace.rootPath,
+          site,
+          mode: input.mode,
+          isCurrent,
+          signal: pendingStart.controller.signal,
+        }),
       );
+    } finally {
+      pendingStart.finish();
     }
-    const site = await getSitePackage(workspace.rootPath, input.siteRoot);
-    if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
-    return StartSitePreviewResult.parse(
-      await startPreviewForSite({
-        workspaceId: input.workspaceId,
-        workspaceRoot: workspace.rootPath,
-        site,
-        mode: input.mode,
-        isCurrent: () =>
-          !sender.isDestroyed() && rendererGeneration(sender.id) === generation,
-      }),
-    );
   });
 
   ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
@@ -5579,6 +5623,7 @@ function registerIpcHandlers(): void {
                 console.error("[desktop] mount search batch dropped:", error);
               }
             },
+            isCurrentSearch,
           );
         }
       }
@@ -5612,6 +5657,7 @@ function registerIpcHandlers(): void {
           // batch still arrives and settles the renderer.
         }
       },
+      isCurrentSearch,
     );
   });
 
