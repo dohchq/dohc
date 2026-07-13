@@ -264,6 +264,11 @@ body {
  * disagree about width. */
 .dohc-tiptap-editor {
   --dohc-editor-measure: 720px;
+  /* How far framed blocks (code, tables, callouts, mermaid previews) extend
+   * past the text column on each side. Their inner horizontal padding equals
+   * this inset (minus their border), which lands the text inside them back on
+   * the column's left content edge — see the alignment comment below. */
+  --dohc-editor-block-inset: 16px;
   position: relative;
   height: 100%;
   min-height: 100%;
@@ -303,6 +308,21 @@ body {
 }
 .dohc-notion-editor > :last-child {
   margin-bottom: 0;
+}
+
+/* One shared left content edge: the TEXT of every top-level block sits on the
+ * column's left edge, so a straight vertical line down the page touches all
+ * of it. Decorations — list markers, task checkboxes, the quote bar — hang
+ * LEFT of that line into the gutter, and framed blocks below extend one
+ * --dohc-editor-block-inset past the column on BOTH sides so their inner
+ * padding lands their text back on the edge (degrades to a flush frame when
+ * the pane is too narrow for the overhang). */
+.dohc-notion-editor > pre,
+.dohc-notion-editor > table,
+.dohc-notion-editor > .tableWrapper,
+.dohc-notion-editor > .dohc-callout,
+.dohc-notion-editor > .dohc-mermaid-preview {
+  max-width: calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset));
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -378,6 +398,20 @@ body {
   list-style-position: outside;
 }
 
+/* Top-level lists put their text on the content edge; the outside markers
+ * hang into the gutter. Nested lists keep the 24px relative indent. */
+.dohc-notion-editor > ul,
+.dohc-notion-editor > ol {
+  padding-left: 0;
+}
+
+/* Hanging markers live in the gutter, so nudge the hover +/⋮ cluster further
+ * left to stay clear of them. -56px still fits inside the editor's 56px
+ * horizontal padding at every pane width. */
+.dohc-notion-editor > :is(ul, ol) .dohc-block-affordance {
+  left: -56px;
+}
+
 /* Task lists exist in two DOM shapes: TipTap's TaskList/TaskItem attrs
  * (data-type) and the markdown-parsed form where the li carries only
  * data-checked. --dohc-task-ul/-li match BOTH so the styling can never go
@@ -405,8 +439,17 @@ body {
 
 .dohc-notion-editor ul[data-type="taskList"],
 .dohc-notion-editor ul:has(> li[data-checked]) {
-  padding-left: 2px;
+  padding-left: 24px;
   list-style: none;
+}
+
+/* Top-level task lists: text on the content edge, checkbox hanging in the
+ * gutter (task lists carry no block affordance, so nothing collides there).
+ * Repeated with the attribute selectors because the plain `> ul` rule above
+ * loses specificity to the base task-list rule. */
+.dohc-notion-editor > ul[data-type="taskList"],
+.dohc-notion-editor > ul:has(> li[data-checked]) {
+  padding-left: 0;
 }
 
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) {
@@ -418,6 +461,9 @@ body {
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) > label {
   flex: 0 0 auto;
   margin-top: 4px;
+  /* 15px checkbox + 8px flex gap: hangs the whole checkbox left of the item's
+   * content box, so task text starts exactly on the item's left edge. */
+  margin-left: -23px;
 }
 
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) > div {
@@ -473,6 +519,27 @@ body {
   font-style: italic;
 }
 
+/* Top-level quotes: text on the content edge, the accent bar hanging in the
+ * gutter as a ::before (a negative margin would defeat the `> *` auto-margin
+ * centering). Its -12px offset keeps it clear of the hover ⋮ handle, whose
+ * right edge sits at -10px. Nested quotes keep the classic inside bar. */
+.dohc-notion-editor > blockquote {
+  position: relative;
+  border-left: 0;
+  padding-left: 0;
+}
+
+.dohc-notion-editor > blockquote::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: -12px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--dohc-accent);
+}
+
 .dohc-notion-editor code {
   border: 1px solid var(--dohc-line);
   border-radius: 4px;
@@ -488,7 +555,9 @@ body {
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-panel);
-  padding: 44px 16px 14px;
+  /* 1px border + 15px = one block inset: code text lands on the content edge
+   * when the frame extends past the column (see the alignment comment). */
+  padding: 44px calc(var(--dohc-editor-block-inset) - 1px) 14px;
 }
 
 .dohc-notion-editor pre code {
@@ -525,6 +594,19 @@ body {
 .dohc-notion-editor th + th,
 .dohc-notion-editor td + td {
   border-left: 1px solid var(--dohc-line);
+}
+
+/* The table frame extends one block inset past the column, so the outer
+ * columns pad back to it: 1px table border + 15px = the 16px inset, landing
+ * first-column text on the shared content edge (last column mirrors it). */
+.dohc-notion-editor th:first-child,
+.dohc-notion-editor td:first-child {
+  padding-left: calc(var(--dohc-editor-block-inset) - 1px);
+}
+
+.dohc-notion-editor th:last-child,
+.dohc-notion-editor td:last-child {
+  padding-right: calc(var(--dohc-editor-block-inset) - 1px);
 }
 
 .dohc-notion-editor tr:first-child > th,
@@ -765,7 +847,11 @@ body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  width: min(var(--dohc-editor-measure), calc(100% - 112px));
+  /* Matches the widened code-block frame (measure + 2 block insets). */
+  width: min(
+    calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset)),
+    calc(100% - 112px)
+  );
   box-sizing: border-box;
   align-items: center;
   justify-content: space-between;
@@ -2444,7 +2530,10 @@ body {
   /* Default + unknown types render with note styling. */
   --dohc-callout-accent: var(--dohc-match);
   position: relative;
-  margin: 14px 0;
+  /* `auto` inline margins: this rule outranks the editor's `> *` centering
+   * (source order), so a plain `14px 0` would pin callouts to the left rail
+   * while everything else centers. */
+  margin: 14px auto;
   border: 1px solid color-mix(in srgb, var(--dohc-callout-accent) 26%, var(--dohc-line));
   border-left: 3px solid var(--dohc-callout-accent);
   border-radius: 8px;
@@ -2468,7 +2557,10 @@ body {
 }
 
 .dohc-callout-body {
-  padding: 6px 12px 8px;
+  /* Horizontal padding + the callout borders (3px bar left, 1px right) add up
+   * to one block inset per side, landing body text on the content edge. */
+  padding: 6px calc(var(--dohc-editor-block-inset) - 1px) 8px
+    calc(var(--dohc-editor-block-inset) - 3px);
 }
 
 .dohc-callout-body > *:first-child {
@@ -2617,11 +2709,14 @@ mark.dohc-highlight,
   flex-direction: column;
   align-items: center;
   overflow: auto;
-  margin: 0 0 12px;
+  /* `auto` inline margins: keeps the preview centered in the column (this
+   * rule outranks the editor's `> *` centering by source order). */
+  margin: 0 auto 12px;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-bg);
-  padding: 18px;
+  /* 1px border + 15px = one block inset, like the other framed blocks. */
+  padding: 18px calc(var(--dohc-editor-block-inset) - 1px);
   cursor: text;
 }
 
@@ -2968,7 +3063,9 @@ mark.dohc-highlight,
 
 .dohc-math-block {
   display: block;
-  margin: 0.6em 0;
+  /* `auto` inline margins: keeps display math centered in the column (this
+   * rule outranks the editor's `> *` centering by source order). */
+  margin: 0.6em auto;
   padding: 0.5em 0.75em;
   text-align: center;
   cursor: pointer;
