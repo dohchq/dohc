@@ -1,5 +1,9 @@
 import type { SearchResultsEvent, SearchResultsEventEntry } from "../../desktop/src/ipc/channels";
 import type { DohcDesktopBridge } from "../../desktop/src/ipc/bridgeContract";
+import {
+  isPathAtOrBelow,
+  planDemoPathMove,
+} from "./demoWorkspacePaths";
 
 export type DemoBridgeDocument = {
   path: string;
@@ -338,39 +342,25 @@ const demoBridge = {
     return { path: payload.relativePath };
   },
   async moveWorkspacePath(payload: { fromPath: string; toPath: string }) {
-    const sourceDocuments = context.documents.filter(
-      (document) =>
-        document.path === payload.fromPath ||
-        document.path.startsWith(`${payload.fromPath}/`),
+    const moves = planDemoPathMove(
+      context.documents.map((document) => document.path),
+      payload.fromPath,
+      payload.toPath,
     );
-    const sourcePaths = new Set(sourceDocuments.map((document) => document.path));
-    for (const document of sourceDocuments) {
-      const targetPath = `${payload.toPath}${document.path.slice(payload.fromPath.length)}`;
-      if (
-        context.documents.some(
-          (candidate) => candidate.path === targetPath && !sourcePaths.has(candidate.path),
-        )
-      ) {
-        throw new Error(`A document already exists at ${targetPath}`);
-      }
-    }
+    const targetBySource = new Map(
+      moves.map(({ sourcePath, targetPath }) => [sourcePath, targetPath]),
+    );
     context.movePath(payload.fromPath, payload.toPath);
-    context.documents = context.documents.map((document) =>
-      sourcePaths.has(document.path)
-        ? {
-            ...document,
-            path: `${payload.toPath}${document.path.slice(payload.fromPath.length)}`,
-          }
-        : document,
-    );
+    context.documents = context.documents.map((document) => {
+      const targetPath = targetBySource.get(document.path);
+      return targetPath ? { ...document, path: targetPath } : document;
+    });
     return { path: payload.toPath };
   },
   async deleteWorkspacePath(payload: { relativePath: string }) {
     context.deletePath(payload.relativePath);
     context.documents = context.documents.filter(
-      (document) =>
-        document.path !== payload.relativePath &&
-        !document.path.startsWith(`${payload.relativePath}/`),
+      (document) => !isPathAtOrBelow(document.path, payload.relativePath),
     );
     return { trashed: true };
   },

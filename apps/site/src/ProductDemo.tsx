@@ -38,6 +38,11 @@ import {
   configureDemoDesktopBridge,
   resolveDemoWorkspaceAssetUrl,
 } from "./demoDesktopBridge";
+import {
+  isPathAtOrBelow,
+  planDemoPathMove,
+  rewritePathPrefix,
+} from "./demoWorkspacePaths";
 
 type DemoDocument = {
   path: string;
@@ -346,35 +351,18 @@ export function ProductDemo() {
   const moveDraftPath = useCallback((fromPath: string, toPath: string) => {
     updateDrafts((current) => {
       const next = { ...current };
-      const sourcePaths = Object.keys(current).filter(
-        (path) => path === fromPath || path.startsWith(`${fromPath}/`),
-      );
-      const sourceSet = new Set(sourcePaths);
-      for (const path of sourcePaths) {
-        const targetPath = `${toPath}${path.slice(fromPath.length)}`;
-        if (targetPath in current && !sourceSet.has(targetPath)) {
-          throw new Error(`A document already exists at ${targetPath}`);
-        }
-      }
-      for (const [path, markdown] of Object.entries(current)) {
-        if (path !== fromPath && !path.startsWith(`${fromPath}/`)) continue;
-        const suffix = path.slice(fromPath.length);
-        delete next[path];
-        next[`${toPath}${suffix}`] = markdown;
+      const moves = planDemoPathMove(Object.keys(current), fromPath, toPath);
+      for (const { sourcePath } of moves) delete next[sourcePath];
+      for (const { sourcePath, targetPath } of moves) {
+        next[targetPath] = current[sourcePath];
       }
       return next;
     });
     setActivePath((current) =>
-      current === fromPath || current.startsWith(`${fromPath}/`)
-        ? `${toPath}${current.slice(fromPath.length)}`
-        : current,
+      rewritePathPrefix(current, fromPath, toPath),
     );
     setEmptyFolders((current) =>
-      current.map((path) =>
-        path === fromPath || path.startsWith(`${fromPath}/`)
-          ? `${toPath}${path.slice(fromPath.length)}`
-          : path,
-      ),
+      current.map((path) => rewritePathPrefix(path, fromPath, toPath)),
     );
   }, [updateDrafts]);
 
@@ -382,7 +370,7 @@ export function ProductDemo() {
     const next = updateDrafts((current) => {
       const filtered = Object.fromEntries(
         Object.entries(current).filter(
-          ([entry]) => entry !== path && !entry.startsWith(`${path}/`),
+          ([entry]) => !isPathAtOrBelow(entry, path),
         ),
       );
       if (Object.keys(filtered).length === 0) {
