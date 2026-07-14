@@ -42,6 +42,30 @@ describe("markdown editor layout css", () => {
     expect(taskList).toContain("list-style: none;");
     expect(listParagraph).toContain("min-height: 1.65em;");
   });
+
+  it("keeps every slash-command block on the document writing axis", () => {
+    const topLevelBlock = cssRule(".dohc-notion-editor > *");
+    const callout = cssRule(".dohc-callout");
+    const mermaid = cssRule(".dohc-mermaid-preview");
+    const math = cssRule(".dohc-math-block");
+    const renderedMath = cssRule(
+      ".dohc-math-block .katex-display,\n.dohc-math-block .katex-display > .katex",
+    );
+    const image = cssRule(".dohc-notion-editor > .dohc-editor-image");
+
+    expect(topLevelBlock).toContain("max-width: var(--dohc-editor-measure);");
+    expect(topLevelBlock).toContain("margin-left: auto;");
+    expect(topLevelBlock).toContain("margin-right: auto;");
+    expect(callout).toContain("margin: 14px auto;");
+    expect(mermaid).toContain("margin: 0 auto 12px;");
+    expect(math).toContain("margin: 0.6em auto;");
+    expect(math).toContain("text-align: left;");
+    expect(renderedMath).toContain("text-align: left;");
+    expect(image).toContain("max-width: min(100%, var(--dohc-editor-measure));");
+    expect(image).toContain(
+      "margin-inline-start: max(0px, calc((100% - var(--dohc-editor-measure)) / 2));",
+    );
+  });
 });
 
 describe("editor tab strip css", () => {

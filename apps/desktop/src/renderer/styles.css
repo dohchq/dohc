@@ -257,10 +257,10 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* Tiptap document editor (E4): warm paper, a centered reading measure, dense
- * enough for daily work. --dohc-editor-measure is shared by the content
- * column AND the absolutely-positioned code-block toolbar so they can never
- * disagree about width. */
+/* Tiptap document editor (E4): warm paper with one shared writing axis, dense
+ * enough for daily work. --dohc-editor-measure is shared by the title, body
+ * blocks, rendered slash-command components, and absolutely-positioned code
+ * toolbar so every editable surface begins on the same left edge. */
 .dohc-tiptap-editor {
   --dohc-editor-measure: 720px;
   position: relative;
@@ -285,7 +285,9 @@ body {
   user-select: text;
 }
 
-/* Centered column, like paper on a desk — not text pinned to the left rail. */
+/* Center the reading column in the pane. Every top-level block fills this
+ * measure, so its contents share one predictable left edge. Component rules
+ * that use margin shorthands must preserve the auto inline margins below. */
 .dohc-notion-editor > * {
   max-width: var(--dohc-editor-measure);
   margin-left: auto;
@@ -577,10 +579,20 @@ body {
  * blocks. The atom gets no default selected-state paint (prosemirror-view's
  * base stylesheet isn't loaded), so its selection outline is defined here. */
 .dohc-notion-editor .dohc-editor-image {
+  display: block;
   max-width: 100%;
   height: auto;
   border-radius: 6px;
   vertical-align: middle;
+}
+
+/* Images are replaced elements, so unlike normal block boxes they keep their
+ * intrinsic width. Anchor even a narrow image to the reading column's left
+ * edge instead of centering the bitmap or falling back to the pane gutter. */
+.dohc-notion-editor > .dohc-editor-image {
+  max-width: min(100%, var(--dohc-editor-measure));
+  margin-inline-start: max(0px, calc((100% - var(--dohc-editor-measure)) / 2));
+  margin-inline-end: 0;
 }
 
 .dohc-notion-editor .dohc-editor-image.ProseMirror-selectednode {
@@ -2375,7 +2387,7 @@ body {
   /* Default + unknown types render with note styling. */
   --dohc-callout-accent: var(--dohc-match);
   position: relative;
-  margin: 14px 0;
+  margin: 14px auto;
   border: 1px solid color-mix(in srgb, var(--dohc-callout-accent) 26%, var(--dohc-line));
   border-left: 3px solid var(--dohc-callout-accent);
   border-radius: 8px;
@@ -2616,7 +2628,7 @@ mark.dohc-highlight,
   flex-direction: column;
   align-items: center;
   overflow: auto;
-  margin: 0 0 12px;
+  margin: 0 auto 12px;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
   background: var(--dohc-bg);
@@ -2967,15 +2979,24 @@ mark.dohc-highlight,
 
 .dohc-math-block {
   display: block;
-  margin: 0.6em 0;
+  margin: 0.6em auto;
   padding: 0.5em 0.75em;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
   border-radius: 6px;
   overflow-x: auto;
 }
 .dohc-math-block:hover {
   background: color-mix(in srgb, var(--dohc-match) 8%, transparent);
+}
+
+/* KaTeX's bundled display rule centers the typeset child independently of
+ * our block wrapper. Keep the equation on the same writing axis as its source
+ * field and every other slash-command result. */
+.dohc-math-block .katex-display,
+.dohc-math-block .katex-display > .katex {
+  margin: 0;
+  text-align: left;
 }
 
 /* Empty math (e.g. a freshly inserted `$$` block) shows a calm hint so it is
