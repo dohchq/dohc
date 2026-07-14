@@ -1075,7 +1075,9 @@ function MarkdownView(props: {
               <LazyPropertiesPanel ydoc={engine.doc} />
             </Suspense>
           </div>
-          <EditorErrorBoundary resetKey={`${props.workspaceId}:${props.path}:engine`}>
+          <EditorErrorBoundary
+            resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
+          >
             <Suspense
               fallback={
                 <div className="flex h-full items-center justify-center text-xs text-subtle">
@@ -1204,7 +1206,9 @@ function MarkdownView(props: {
               </Suspense>
             ) : null}
           </div>
-          <EditorErrorBoundary resetKey={`${props.workspaceId}:${props.path}:local`}>
+          <EditorErrorBoundary
+            resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
+          >
             <Suspense
               fallback={
                 <div className="flex h-full items-center justify-center text-xs text-subtle">

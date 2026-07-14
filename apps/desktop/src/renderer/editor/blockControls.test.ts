@@ -7,6 +7,7 @@ import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
+import { NodeSelection } from "@tiptap/pm/state";
 import { dohcMarkdownExtensions } from "./extensions";
 import {
   activeTurnIntoId,
@@ -215,6 +216,32 @@ describe("blockControls delete", () => {
     editor.commands.setTextSelection(2);
     expect(deleteSelectedTopLevelBlock(editor.view)).toBe(false);
     expect(editor.state.doc.child(0).type.name).toBe("codeBlock");
+  });
+
+  it("does not delete a parent block for a nested node selection", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              {
+                type: "image",
+                attrs: { src: "asset.png", alt: "asset", title: null },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 1)),
+    );
+
+    expect(deleteSelectedTopLevelBlock(editor.view)).toBe(false);
+    expect(editor.state.doc.child(0).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(0).child(0).type.name).toBe("image");
   });
 });
 

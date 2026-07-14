@@ -41,17 +41,17 @@ export class EditorErrorBoundary extends Component<
         className="flex min-h-48 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
         data-testid="editor-crash-recovery"
       >
-        <p className="text-sm font-medium text-ink">This document hit an editor error.</p>
+        <p className="text-sm font-medium text-ink">The editor could not render this document.</p>
         <p className="max-w-md text-xs text-muted">
-          Your workspace is still running. Retry the editor, or switch documents and come
-          back.
+          Your workspace is still running. Try rendering this document again, or switch
+          documents and come back.
         </p>
         <button
           type="button"
           className="rounded-md border border-line bg-panel px-3 py-1.5 text-xs text-ink hover:bg-panel-2"
           onClick={() => this.setState({ failed: false })}
         >
-          Retry editor
+          Render again
         </button>
       </div>
     );

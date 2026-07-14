@@ -20,22 +20,28 @@ themeToggle?.addEventListener('click', () => {
 syncThemeToggle();
 
 const RELEASES_URL = 'https://github.com/dohc-ai/dohc/releases';
+
+function matchesBuild(extension, architecture) {
+  const architecturePattern = new RegExp(`(?:^|[-_])${architecture}(?:[-_.]|$)`, 'i');
+  return (name) => name.toLowerCase().endsWith(extension) && architecturePattern.test(name);
+}
+
 const downloadBuilds = {
   'windows-x64': {
     platform: 'windows', label: 'Windows', detail: '.exe · x64', icon: 'windows',
-    matches: (name) => name.toLowerCase().endsWith('.exe') && /(?:^|[-_])x64(?:[-_.]|$)/i.test(name),
+    matches: matchesBuild('.exe', 'x64'),
   },
   'mac-arm64': {
     platform: 'mac', label: 'macOS', detail: 'Apple silicon · .dmg', icon: 'apple',
-    matches: (name) => name.toLowerCase().endsWith('.dmg') && /(?:^|[-_])arm64(?:[-_.]|$)/i.test(name),
+    matches: matchesBuild('.dmg', 'arm64'),
   },
   'mac-x64': {
     platform: 'mac', label: 'macOS', detail: 'Intel · .dmg', icon: 'apple',
-    matches: (name) => name.toLowerCase().endsWith('.dmg') && /(?:^|[-_])x64(?:[-_.]|$)/i.test(name),
+    matches: matchesBuild('.dmg', 'x64'),
   },
   'linux-x64': {
     platform: 'linux', label: 'Linux', detail: 'AppImage · x64', icon: 'linux',
-    matches: (name) => name.toLowerCase().endsWith('.appimage') && /(?:^|[-_])x64(?:[-_.]|$)/i.test(name),
+    matches: matchesBuild('.appimage', 'x64'),
   },
 };
 
@@ -44,6 +50,7 @@ Object.values(downloadBuilds).forEach((build) => { build.url = RELEASES_URL; });
 function detectedDesktopPlatform() {
   const fingerprint = `${navigator.userAgentData?.platform ?? ''} ${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`;
   if (/Android|iPhone|iPad|iPod|Mobile|CrOS/i.test(fingerprint)) return 'unknown';
+  if (/Macintosh|MacIntel|Mac OS/i.test(fingerprint) && navigator.maxTouchPoints > 1) return 'unknown';
   if (/Windows|Win32|Win64/i.test(fingerprint)) return 'windows';
   if (/Macintosh|MacIntel|Mac OS/i.test(fingerprint)) return 'mac';
   if (/Linux|X11/i.test(fingerprint)) return 'linux';
@@ -77,6 +84,7 @@ function configureDownloadControl(control, preferredKey) {
   const primaryIcon = control.querySelector('[data-download-primary-icon]');
   const toggle = control.querySelector('[data-platform-toggle]');
   const menu = control.querySelector('[data-platform-menu]');
+  if (!primary || !primaryLabel || !primaryIcon || !toggle || !menu) return;
   const buildLinks = Array.from(menu.querySelectorAll('[data-download-build]'));
   let selectedKey = preferredKey;
 
@@ -198,4 +206,5 @@ if (targets.length) {
   }
 }
 
-document.getElementById('year').textContent = new Date().getFullYear();
+const year = document.getElementById('year');
+if (year) year.textContent = new Date().getFullYear();

@@ -104,14 +104,12 @@ const demoBridge = {
     searchListeners.add(listener);
     return () => searchListeners.delete(listener);
   },
-  async searchWorkspace(payload: {
-    searchId: string;
-    query: string;
-    caseSensitive: boolean;
-  }) {
+  async searchWorkspace(
+    payload: Parameters<DohcDesktopBridge["searchWorkspace"]>[0],
+  ) {
     const batch: SearchResultsEvent = {
       searchId: payload.searchId,
-      entries: searchEntries(payload.query, payload.caseSensitive),
+      entries: searchEntries(payload.query, payload.caseSensitive ?? false),
       done: true,
       limitHit: false,
     };
@@ -170,19 +168,19 @@ const demoBridge = {
   },
   async moveWorkspacePath(payload: { fromPath: string; toPath: string }) {
     context.movePath(payload.fromPath, payload.toPath);
-    return { fromPath: payload.fromPath, toPath: payload.toPath };
+    return { path: payload.toPath };
   },
   async deleteWorkspacePath(payload: { relativePath: string }) {
     context.deletePath(payload.relativePath);
-    return { path: payload.relativePath };
+    return { trashed: true };
   },
   async showExplorerMenu() {
     return null;
   },
   async exportWorkspaceZip() {
-    return { filePath: "demo-workspace.zip" };
+    return { path: "demo-workspace.zip" };
   },
-  async getDroppedFilePaths() {
+  getDroppedFilePaths(_files: File[]) {
     return [];
   },
   onWorkspaceActivity(listener: () => void) {
@@ -266,8 +264,22 @@ const demoBridge = {
   async sendChatMessage(payload: { threadId: string; body: string }) {
     return { message: message(payload.threadId, `message-${Date.now()}`, payload.body) };
   },
-  async setChatReaction() {
-    return { reaction: null, viewerAuthorId: "demo-user" };
+  async setChatReaction(
+    payload: Parameters<DohcDesktopBridge["setChatReaction"]>[0],
+  ) {
+    return {
+      viewerAuthorId: "demo-user",
+      reaction: {
+        threadId: payload.threadId,
+        authorKind: "human" as const,
+        authorDisplayName: "You",
+        reactionId: `reaction-${payload.messageId}-${payload.emoji}`,
+        messageId: payload.messageId,
+        emoji: payload.emoji,
+        authorId: "demo-user",
+        state: payload.state,
+      },
+    };
   },
   async resolveChatDecision() {
     throw new Error("No open decision in the demo");
@@ -276,17 +288,30 @@ const demoBridge = {
   async resumeThreadDispatch() {},
   async writeClipboardText() {},
   async shareChatChannel() {
-    return { share: null };
+    return { shareId: "demo-share" };
   },
-  async joinSharedChannel() {},
+  async joinSharedChannel() {
+    return {
+      joined: {
+        shareId: "demo-share",
+        channelWireId: "demo-channel",
+        access: "read-only" as const,
+        granterEmail: null,
+        ended: false,
+      },
+    };
+  },
   async leaveSharedChannel() {},
   async revokeRelayShare() {},
   async startDm() {
     throw new Error("Direct messages are unavailable in the demo");
   },
-} as unknown as DohcDesktopBridge;
+} satisfies Partial<DohcDesktopBridge>;
 
 export function configureDemoDesktopBridge(next: DemoBridgeContext): void {
   context = next;
-  window.dohcDesktop = demoBridge;
+  // The embedded demo deliberately exposes only the bridge methods consumed by
+  // DemoSidebar. `satisfies Partial` type-checks every implemented method while
+  // keeping that narrower contract explicit at this integration boundary.
+  window.dohcDesktop = demoBridge as unknown as DohcDesktopBridge;
 }

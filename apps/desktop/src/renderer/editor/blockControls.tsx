@@ -197,7 +197,11 @@ function buildBlockControlDecorations(
   return DecorationSet.create(doc as never, decorations);
 }
 
-function setVisibleBlockControl(view: EditorView, target: EventTarget | null): void {
+function setVisibleBlockControl(
+  view: EditorView,
+  target: EventTarget | null,
+  previousIndex: string | null | undefined,
+): string | null {
   const element =
     target instanceof Element
       ? target
@@ -206,6 +210,7 @@ function setVisibleBlockControl(view: EditorView, target: EventTarget | null): v
         : null;
   const owner = element?.closest<HTMLElement>("[data-dohc-block-index]");
   const activeIndex = owner?.dataset.dohcBlockIndex ?? null;
+  if (activeIndex === previousIndex) return activeIndex;
 
   view.dom
     .querySelectorAll<HTMLElement>(".dohc-block-affordance")
@@ -215,6 +220,7 @@ function setVisibleBlockControl(view: EditorView, target: EventTarget | null): v
         activeIndex !== null && control.dataset.dohcBlockIndex === activeIndex,
       );
     });
+  return activeIndex;
 }
 
 /** Delete a whole top-level block after it has been selected from its gutter.
@@ -239,6 +245,7 @@ export function makeBlockControlsPlugin({
   onInsertRef: RefObject<(pos: number) => void>;
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>;
 }) {
+  let activeBlockIndex: string | null | undefined;
   return new Plugin({
     key: blockControlsKey,
     state: {
@@ -247,6 +254,7 @@ export function makeBlockControlsPlugin({
       },
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
+        activeBlockIndex = undefined;
         return buildBlockControlDecorations(tr.doc, onInsertRef, onOpenMenuRef);
       },
     },
@@ -256,11 +264,15 @@ export function makeBlockControlsPlugin({
       },
       handleDOMEvents: {
         mousemove(view, event) {
-          setVisibleBlockControl(view, event.target);
+          activeBlockIndex = setVisibleBlockControl(
+            view,
+            event.target,
+            activeBlockIndex,
+          );
           return false;
         },
         mouseleave(view) {
-          setVisibleBlockControl(view, null);
+          activeBlockIndex = setVisibleBlockControl(view, null, activeBlockIndex);
           return false;
         },
       },

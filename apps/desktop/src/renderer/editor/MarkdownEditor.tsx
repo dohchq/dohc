@@ -373,10 +373,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     }, [workspaceId, path]);
 
     useEffect(() => {
-      slashStateRef.current = slashState;
-    }, [slashState]);
-
-    useEffect(() => {
       linkMenuStateRef.current = linkMenuState;
     }, [linkMenuState]);
 

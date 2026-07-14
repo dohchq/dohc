@@ -57,6 +57,7 @@ import {
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 export const tableControlsKey = new PluginKey("dohc-table-controls");
+let nextTableControlsInstanceId = 0;
 
 type TableCommand = (
   state: EditorState,
@@ -91,8 +92,24 @@ type TableDragState = {
   dropTarget?: TableDropTarget;
 };
 
-let activeTableDrag: TableDragState | null = null;
-let cancelActiveTablePointer: (() => void) | null = null;
+type TableControlsRuntime = {
+  instanceId: number;
+  activeDrag: TableDragState | null;
+  cancelPointer: (() => void) | null;
+  closeMenu: (() => void) | null;
+  menuSerial: number;
+};
+
+function createTableControlsRuntime(): TableControlsRuntime {
+  return {
+    instanceId: nextTableControlsInstanceId++,
+    activeDrag: null,
+    cancelPointer: null,
+    closeMenu: null,
+    menuSerial: 0,
+  };
+}
+
 const suppressTableGripClickUntil = new WeakMap<HTMLButtonElement, number>();
 
 type RectLike = Pick<
@@ -304,20 +321,19 @@ function tableMenuItems(): GripMenuItem[] {
   ];
 }
 
-// A single vanilla-DOM popover, module-scoped since only one grip menu can
-// be open at a time. Visuals mirror `.dohc-slash-menu` (`.dohc-table-menu`
+// A single vanilla-DOM popover per editor instance. Visuals mirror
+// `.dohc-slash-menu` (`.dohc-table-menu`
 // in styles.css); keyboard model (arrows/Enter/Escape) mirrors
 // SlashCommandMenu's handleKeyDown in MarkdownEditor.tsx.
-let closeOpenMenu: (() => void) | null = null;
-
 function openGripMenu(
+  runtime: TableControlsRuntime,
   view: EditorView,
   anchor: HTMLElement,
   items: GripMenuItem[],
   placement: TableMenuPlacement,
 ): void {
-  closeOpenMenu?.();
-  closeOpenMenu = null;
+  runtime.closeMenu?.();
+  runtime.closeMenu = null;
   if (view.editable === false || items.length === 0) return;
 
   const ownerDocument = view.dom.ownerDocument;
@@ -329,6 +345,8 @@ function openGripMenu(
   menu.className = "dohc-table-menu";
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", "table controls");
+  const menuId = `dohc-table-menu-${runtime.instanceId}-${runtime.menuSerial++}`;
+  menu.id = menuId;
   const menuMaxHeight = Math.max(80, Math.min(280, ownerWindow.innerHeight - 16));
   menu.style.maxHeight = `${menuMaxHeight}px`;
   menu.style.visibility = "hidden";
@@ -340,6 +358,8 @@ function openGripMenu(
     buttons.forEach((button, index) => {
       button.classList.toggle("is-selected", index === selected);
     });
+    const activeButton = buttons[selected];
+    if (activeButton) menu.setAttribute("aria-activedescendant", activeButton.id);
   };
 
   const runItem = (index: number) => {
@@ -351,6 +371,7 @@ function openGripMenu(
   items.forEach((item, index) => {
     const button = ownerDocument.createElement("button");
     button.type = "button";
+    button.id = `${menuId}-item-${index}`;
     button.setAttribute("role", "menuitem");
     button.className = `dohc-table-menu__item${item.destructive ? " dohc-table-menu__item--danger" : ""}`;
     if (item.separatorBefore) button.classList.add("dohc-table-menu__item--separated");
@@ -427,7 +448,7 @@ function openGripMenu(
     anchor.classList.remove("is-open");
     anchor.setAttribute("aria-expanded", "false");
     menu.remove();
-    if (closeOpenMenu === close) closeOpenMenu = null;
+    if (runtime.closeMenu === close) runtime.closeMenu = null;
   }
 
   ownerWindow.addEventListener("keydown", onKeyDown, true);
@@ -440,7 +461,7 @@ function openGripMenu(
   reposition();
   menu.style.removeProperty("visibility");
   menu.style.removeProperty("animation");
-  closeOpenMenu = close;
+  runtime.closeMenu = close;
 }
 
 function clearTableDropTargetChrome(view: EditorView): void {
@@ -489,7 +510,11 @@ function markTableBand(
 
 function announceTableDrag(view: EditorView, message: string): void {
   const ownerDocument = view.dom.ownerDocument;
-  let status = ownerDocument.querySelector<HTMLElement>(
+  const ownerWindow = ownerDocument.defaultView ?? window;
+  const editorRoot = view.dom.getRootNode();
+  const host =
+    editorRoot instanceof ownerWindow.ShadowRoot ? editorRoot : ownerDocument.body;
+  let status = host.querySelector<HTMLElement>(
     "[data-dohc-table-drag-status]",
   );
   if (!status) {
@@ -498,7 +523,7 @@ function announceTableDrag(view: EditorView, message: string): void {
     status.dataset.dohcTableDragStatus = "";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
-    ownerDocument.body.appendChild(status);
+    host.appendChild(status);
   }
   status.textContent = message;
 }
@@ -509,10 +534,14 @@ function createTableDragPreview(
   index: number,
 ): HTMLElement {
   const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView ?? window;
+  const editorRoot = view.dom.getRootNode();
+  const host =
+    editorRoot instanceof ownerWindow.ShadowRoot ? editorRoot : ownerDocument.body;
   const preview = ownerDocument.createElement("div");
   preview.className = "dohc-table-drag-preview";
   preview.textContent = `⠿  ${band === "row" ? "Row" : "Column"} ${index + 1}`;
-  ownerDocument.body.appendChild(preview);
+  host.appendChild(preview);
   return preview;
 }
 
@@ -652,6 +681,7 @@ function updateTableDragTarget(
 }
 
 function finishTableDrop(
+  runtime: TableControlsRuntime,
   view: EditorView,
   drag: TableDragState,
   target: TableDropTarget | undefined,
@@ -686,11 +716,12 @@ function finishTableDrop(
         : `Could not move ${drag.band} ${drag.index + 1}.`,
     );
   }
-  activeTableDrag = null;
+  runtime.activeDrag = null;
   clearTableDragChrome(view);
 }
 
 function configureGripDrag(
+  runtime: TableControlsRuntime,
   view: EditorView,
   button: HTMLButtonElement,
   band: TableBand,
@@ -732,14 +763,14 @@ function configureGripDrag(
     const session = pointerSession;
     if (!session) return;
     detachReleaseFallbacks();
-    cancelActiveTablePointer = null;
+    runtime.cancelPointer = null;
     session.preview?.remove();
     button.setAttribute("aria-grabbed", "false");
     if (session.dragging) {
       suppressTableGripClickUntil.set(button, Date.now() + 250);
       if (message) announceTableDrag(view, message);
     }
-    activeTableDrag = null;
+    runtime.activeDrag = null;
     clearTableDragChrome(view);
     pointerSession = undefined;
     releasePointer(session.pointerId);
@@ -748,8 +779,8 @@ function configureGripDrag(
   const beginPointerDrag = (event: PointerEvent): TableDragState | null => {
     const tableElement = button.closest("table");
     if (!tableElement || !pointerSession) return null;
-    closeOpenMenu?.();
-    closeOpenMenu = null;
+    runtime.closeMenu?.();
+    runtime.closeMenu = null;
     const preview = createTableDragPreview(view, band, index);
     const drag: TableDragState = {
       band,
@@ -760,7 +791,7 @@ function configureGripDrag(
       scrollContainer: findVerticalScrollContainer(view),
       preview,
     };
-    activeTableDrag = drag;
+    runtime.activeDrag = drag;
     pointerSession.dragging = true;
     pointerSession.preview = preview;
     positionTableDragPreview(pointerSession.preview, event.clientX, event.clientY);
@@ -790,13 +821,13 @@ function configureGripDrag(
       return;
     }
     detachReleaseFallbacks();
-    cancelActiveTablePointer = null;
-    if (!session.dragging || !activeTableDrag) {
+    runtime.cancelPointer = null;
+    if (!session.dragging || !runtime.activeDrag) {
       pointerSession = undefined;
       releasePointer(session.pointerId);
       return;
     }
-    const drag = activeTableDrag;
+    const drag = runtime.activeDrag;
     const hitTarget = view.dom.ownerDocument.elementFromPoint(clientX, clientY);
     const previousTarget = drag.dropTarget;
     const target =
@@ -805,7 +836,7 @@ function configureGripDrag(
         : null) ?? previousTarget;
     pointerSession = undefined;
     releasePointer(session.pointerId);
-    finishTableDrop(view, drag, target);
+    finishTableDrop(runtime, view, drag, target);
   };
 
   function handleWindowPointerUp(event: PointerEvent): void {
@@ -820,7 +851,7 @@ function configureGripDrag(
       const dy = event.clientY - session.startY;
       if (dx * dx + dy * dy < 25) return;
     }
-    const drag = activeTableDrag ?? beginPointerDrag(event);
+    const drag = runtime.activeDrag ?? beginPointerDrag(event);
     if (!drag || !pointerSession?.preview) return;
     event.preventDefault();
     event.stopPropagation();
@@ -848,7 +879,7 @@ function configureGripDrag(
 
   button.addEventListener("pointerdown", (event) => {
     if (view.editable === false || event.button !== 0) return;
-    cancelActiveTablePointer?.();
+    runtime.cancelPointer?.();
     pointerSession = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -856,7 +887,7 @@ function configureGripDrag(
       dragging: false,
       preview: null,
     };
-    cancelActiveTablePointer = () => cancelPointerDrag();
+    runtime.cancelPointer = () => cancelPointerDrag();
     try {
       button.setPointerCapture?.(event.pointerId);
     } catch {
@@ -889,6 +920,7 @@ function configureGripDrag(
 }
 
 function buildColumnGrip(
+  runtime: TableControlsRuntime,
   view: EditorView,
   cellPos: number,
   colIndex: number,
@@ -904,18 +936,19 @@ function buildColumnGrip(
   button.setAttribute("contenteditable", "false");
   button.textContent = "⠿";
   button.disabled = view.editable === false;
-  configureGripDrag(view, button, "column", colIndex, cellPos);
+  configureGripDrag(runtime, view, button, "column", colIndex, cellPos);
   button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEvent(event);
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
     selectColumn(view, cellPos);
-    openGripMenu(view, button, columnMenuItems(cellPos), "column");
+    openGripMenu(runtime, view, button, columnMenuItems(cellPos), "column");
   });
   return button;
 }
 
 function buildRowGrip(
+  runtime: TableControlsRuntime,
   view: EditorView,
   cellPos: number,
   rowIndex: number,
@@ -931,18 +964,22 @@ function buildRowGrip(
   button.setAttribute("contenteditable", "false");
   button.textContent = "⠿";
   button.disabled = view.editable === false;
-  configureGripDrag(view, button, "row", rowIndex, cellPos);
+  configureGripDrag(runtime, view, button, "row", rowIndex, cellPos);
   button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEvent(event);
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
     selectRow(view, cellPos);
-    openGripMenu(view, button, rowMenuItems(), "row");
+    openGripMenu(runtime, view, button, rowMenuItems(), "row");
   });
   return button;
 }
 
-function buildTableMenuButton(view: EditorView, cellPos: number): HTMLElement {
+function buildTableMenuButton(
+  runtime: TableControlsRuntime,
+  view: EditorView,
+  cellPos: number,
+): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-menu-btn";
@@ -954,7 +991,7 @@ function buildTableMenuButton(view: EditorView, cellPos: number): HTMLElement {
   button.addEventListener("click", (event) => {
     stopEvent(event);
     focusCell(view, cellPos);
-    openGripMenu(view, button, tableMenuItems(), "table");
+    openGripMenu(runtime, view, button, tableMenuItems(), "table");
   });
   return button;
 }
@@ -1013,7 +1050,17 @@ function widgetDecoration(
   });
 }
 
-function setActiveTableControls(view: EditorView, target: EventTarget | null): void {
+type ActiveTableControls = {
+  table: HTMLElement | null;
+  rowIndex: number;
+  columnIndex: number;
+};
+
+function setActiveTableControls(
+  view: EditorView,
+  target: EventTarget | null,
+  previous: ActiveTableControls | undefined,
+): ActiveTableControls {
   const element =
     target instanceof Element
       ? target
@@ -1025,6 +1072,13 @@ function setActiveTableControls(view: EditorView, target: EventTarget | null): v
   const rowIndex =
     (cell?.parentElement as HTMLTableRowElement | null)?.rowIndex ?? -1;
   const columnIndex = cell?.cellIndex ?? -1;
+  if (
+    previous?.table === table &&
+    previous.rowIndex === rowIndex &&
+    previous.columnIndex === columnIndex
+  ) {
+    return previous;
+  }
 
   view.dom.querySelectorAll<HTMLElement>(".dohc-table-grip").forEach((grip) => {
     const ownsActiveTable = table !== null && grip.closest(".dohc-table-node") === table;
@@ -1035,9 +1089,13 @@ function setActiveTableControls(view: EditorView, target: EventTarget | null): v
       ownsActiveTable && (matchesRow || matchesColumn),
     );
   });
+  return { table, rowIndex, columnIndex };
 }
 
-function buildTableControlDecorations(doc: PMNode): DecorationSet {
+function buildTableControlDecorations(
+  doc: PMNode,
+  runtime: TableControlsRuntime,
+): DecorationSet {
   const decorations: Decoration[] = [];
 
   doc.descendants((node, pos) => {
@@ -1062,7 +1120,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildColumnGrip(view, cellPos, colIndex),
+          (view) => buildColumnGrip(runtime, view, cellPos, colIndex),
           `dohc-table-col-${cellPos}`,
         ),
       );
@@ -1074,7 +1132,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
     decorations.push(
       widgetDecoration(
         topLeftCellPos + 1,
-        (view) => buildTableMenuButton(view, topLeftCellPos),
+        (view) => buildTableMenuButton(runtime, view, topLeftCellPos),
         `dohc-table-menu-${pos}`,
       ),
     );
@@ -1100,7 +1158,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildRowGrip(view, cellPos, rowIndex),
+          (view) => buildRowGrip(runtime, view, cellPos, rowIndex),
           `dohc-table-row-${cellPos}`,
         ),
       );
@@ -1124,15 +1182,18 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
 }
 
 export function makeTableControlsPlugin(): Plugin {
+  const runtime = createTableControlsRuntime();
+  let activeControls: ActiveTableControls | undefined;
   return new Plugin({
     key: tableControlsKey,
     state: {
       init(_, instance) {
-        return buildTableControlDecorations(instance.doc);
+        return buildTableControlDecorations(instance.doc, runtime);
       },
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        return buildTableControlDecorations(tr.doc);
+        activeControls = undefined;
+        return buildTableControlDecorations(tr.doc, runtime);
       },
     },
     props: {
@@ -1141,11 +1202,15 @@ export function makeTableControlsPlugin(): Plugin {
       },
       handleDOMEvents: {
         mousemove(view, event) {
-          setActiveTableControls(view, event.target);
+          activeControls = setActiveTableControls(
+            view,
+            event.target,
+            activeControls,
+          );
           return false;
         },
         mouseleave(view) {
-          setActiveTableControls(view, null);
+          activeControls = setActiveTableControls(view, null, activeControls);
           return false;
         },
       },
@@ -1165,18 +1230,19 @@ export function makeTableControlsPlugin(): Plugin {
         // detached overlay element, not a decoration, so it isn't rebuilt with
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
-          if (closeOpenMenu && !view.state.doc.eq(prevState.doc)) {
-            closeOpenMenu();
-            closeOpenMenu = null;
+          if (runtime.closeMenu && !view.state.doc.eq(prevState.doc)) {
+            runtime.closeMenu();
+            runtime.closeMenu = null;
           }
         },
         destroy() {
-          cancelActiveTablePointer?.();
-          cancelActiveTablePointer = null;
-          closeOpenMenu?.();
-          closeOpenMenu = null;
-          activeTableDrag?.preview.remove();
-          activeTableDrag = null;
+          runtime.cancelPointer?.();
+          runtime.cancelPointer = null;
+          runtime.closeMenu?.();
+          runtime.closeMenu = null;
+          runtime.activeDrag?.preview.remove();
+          runtime.activeDrag = null;
+          activeControls = undefined;
         },
       };
     },

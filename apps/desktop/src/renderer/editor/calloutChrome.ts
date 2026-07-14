@@ -190,7 +190,11 @@ function buildCalloutHeader(
       event.stopPropagation();
       setTypeMenuOpen(false);
       commitFocusedTitle();
-      if (option.value !== attrs.type) {
+      const liveCallout = resolveCallout(view, getPos);
+      const liveType = liveCallout
+        ? String(liveCallout.attrs.calloutType ?? "note")
+        : null;
+      if (liveType !== null && option.value !== liveType) {
         updateCalloutAttr(view, getPos, { calloutType: option.value });
       } else {
         typeTrigger.focus();

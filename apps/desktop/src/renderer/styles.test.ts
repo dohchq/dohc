@@ -13,6 +13,20 @@ function cssRule(selector: string): string {
   return stylesCss.slice(open + 1, close);
 }
 
+function cssRuleForSelectorGroup(selectors: string[]): string {
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+  const expected = selectors.map(normalize);
+  const withoutComments = stylesCss.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g);
+  for (const match of rules) {
+    const actual = (match[1] ?? "").split(",").map(normalize);
+    if (expected.every((selector) => actual.includes(selector))) {
+      return match[2] ?? "";
+    }
+  }
+  throw new Error(`styles.css must contain selector group: ${selectors.join(", ")}`);
+}
+
 describe("markdown editor layout css", () => {
   it("sizes the Tiptap document to its pane instead of the viewport", () => {
     const editor = cssRule(".dohc-tiptap-editor");
@@ -48,9 +62,10 @@ describe("markdown editor layout css", () => {
     const callout = cssRule(".dohc-callout");
     const mermaid = cssRule(".dohc-mermaid-preview");
     const math = cssRule(".dohc-math-block");
-    const renderedMath = cssRule(
-      ".dohc-math-block .katex-display,\n.dohc-math-block .katex-display > .katex",
-    );
+    const renderedMath = cssRuleForSelectorGroup([
+      ".dohc-math-block .katex-display",
+      ".dohc-math-block .katex-display > .katex",
+    ]);
     const image = cssRule(".dohc-notion-editor > .dohc-editor-image");
 
     expect(topLevelBlock).toContain("max-width: var(--dohc-editor-measure);");

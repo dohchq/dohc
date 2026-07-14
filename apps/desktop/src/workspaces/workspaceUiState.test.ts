@@ -2,6 +2,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   symlink,
   unlink,
@@ -17,6 +18,13 @@ import {
   writeUiStateFile,
 } from "./workspaceUiState";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>(
+    "node:fs/promises",
+  );
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
 
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
@@ -67,6 +75,20 @@ describe("ui-state file store", () => {
     expect(
       (await readdir(join(root, ".dohc"))).filter((name) => name.includes(".tmp-")),
     ).toEqual([]);
+  });
+
+  it("retries a transient Windows rename failure and completes the write", async () => {
+    const root = await tempRoot();
+    const transient = Object.assign(new Error("file is temporarily busy"), {
+      code: "EBUSY",
+    });
+    const renameMock = vi.mocked(rename);
+    renameMock.mockRejectedValueOnce(transient);
+
+    await expect(writeUiStateFile(root, STATE)).resolves.toBeUndefined();
+
+    expect(renameMock).toHaveBeenCalledTimes(2);
+    expect(await readUiStateFile(root)).toEqual(STATE);
   });
 
   it("a missing or corrupt file reads as null, never an error", async () => {

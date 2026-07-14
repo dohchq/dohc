@@ -11,7 +11,14 @@ import {
   Share2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -140,6 +147,14 @@ function initialDrafts(): Record<string, string> {
   return defaults;
 }
 
+function persistDrafts(drafts: Record<string, string>): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts));
+  } catch {
+    // The in-memory editor still works when persistence is unavailable.
+  }
+}
+
 function currentTheme(): "light" | "dark" {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
@@ -160,6 +175,7 @@ export function ProductDemo() {
   const [showSource, setShowSource] = useState(false);
   const [sourceText, setSourceText] = useState("");
   const editorRef = useRef<MarkdownEditorHandle>(null);
+  const saveFrame = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
 
   const activeFullText = drafts[activePath] ?? "";
@@ -201,10 +217,15 @@ export function ProductDemo() {
 
   useEffect(
     () => () => {
+      if (saveFrame.current !== null) cancelAnimationFrame(saveFrame.current);
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     },
     [],
   );
+
+  useEffect(() => {
+    persistDrafts(drafts);
+  }, [drafts]);
 
   const composeCurrentDocument = useCallback(
     (path = activePath, fallback = drafts[path] ?? "") => {
@@ -217,21 +238,17 @@ export function ProductDemo() {
   );
 
   const storeDraft = useCallback((path: string, markdown: string) => {
-    setDrafts((current) => {
-      const next = { ...current, [path]: markdown };
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        // The in-memory editor still works when persistence is unavailable.
-      }
-      return next;
-    });
+    setDrafts((current) => ({ ...current, [path]: markdown }));
   }, []);
 
   const scheduleSave = useCallback(() => {
     setSaveState("saving");
-    requestAnimationFrame(() => {
-      storeDraft(activePath, composeCurrentDocument());
+    if (saveFrame.current !== null) cancelAnimationFrame(saveFrame.current);
+    const path = activePath;
+    const markdown = composeCurrentDocument(path);
+    saveFrame.current = requestAnimationFrame(() => {
+      saveFrame.current = null;
+      storeDraft(path, markdown);
     });
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
@@ -290,11 +307,6 @@ export function ProductDemo() {
         delete next[path];
         next[`${toPath}${suffix}`] = markdown;
       }
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        // The in-memory demo remains usable when storage is unavailable.
-      }
       return next;
     });
     setActivePath((current) =>
@@ -312,23 +324,25 @@ export function ProductDemo() {
   }, []);
 
   const deleteDraftPath = useCallback((path: string) => {
-    setDrafts((current) => {
-      const next = Object.fromEntries(
-        Object.entries(current).filter(
-          ([entry]) => entry !== path && !entry.startsWith(`${path}/`),
-        ),
-      );
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        // The in-memory demo remains usable when storage is unavailable.
-      }
-      return next;
-    });
+    const next = Object.fromEntries(
+      Object.entries(drafts).filter(
+        ([entry]) => entry !== path && !entry.startsWith(`${path}/`),
+      ),
+    );
+    if (Object.keys(next).length === 0) {
+      const fallback = DEMO_DOCUMENTS[0];
+      next[fallback.path] = fallback.markdown;
+    }
+    setDrafts(next);
+    setActivePath((current) =>
+      current === path || current.startsWith(`${path}/`)
+        ? (Object.keys(next)[0] ?? DEMO_DOCUMENTS[0].path)
+        : current,
+    );
     setEmptyFolders((current) =>
       current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
     );
-  }, []);
+  }, [drafts]);
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
@@ -368,16 +382,21 @@ export function ProductDemo() {
     [activeActivity],
   );
 
-  configureDemoDesktopBridge({
-    documents,
-    createFile: createDocumentAtPath,
-    createFolder: (path) =>
-      setEmptyFolders((current) =>
-        current.includes(path) ? current : [...current, path],
-      ),
-    movePath: moveDraftPath,
-    deletePath: deleteDraftPath,
-  });
+  const createFolder = useCallback((path: string) => {
+    setEmptyFolders((current) =>
+      current.includes(path) ? current : [...current, path],
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    configureDemoDesktopBridge({
+      documents,
+      createFile: createDocumentAtPath,
+      createFolder,
+      movePath: moveDraftPath,
+      deletePath: deleteDraftPath,
+    });
+  }, [createDocumentAtPath, createFolder, deleteDraftPath, documents, moveDraftPath]);
 
   return (
     <div

@@ -434,8 +434,12 @@ describe("table controls grips", () => {
     editor = createTableEditor(2, 3);
     const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
     click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    const items = menu.querySelectorAll<HTMLElement>("[role='menuitem']");
+    expect(menu.getAttribute("aria-activedescendant")).toBe(items[0]?.id);
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    expect(menu.getAttribute("aria-activedescendant")).toBe(items[1]?.id);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
 
     // Second column menu item is "Insert column right" — still an insert,
@@ -484,6 +488,18 @@ describe("table controls grips", () => {
     expect(shadow.querySelector(".dohc-table-menu")).not.toBeNull();
     expect(chrome.querySelector(".dohc-table-menu")).toBeNull();
     expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+
+    document.body.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    );
+    elementFromPointResult = grip;
+    dispatchPointer(grip, "pointerdown");
+    dispatchPointer(grip, "pointermove", { clientX: 10, clientY: 10 });
+    expect(shadow.querySelector(".dohc-table-drag-preview")).not.toBeNull();
+    expect(shadow.querySelector("[data-dohc-table-drag-status]")).not.toBeNull();
+    expect(document.body.querySelector(".dohc-table-drag-preview")).toBeNull();
+    dispatchPointer(grip, "pointercancel", { clientX: 10, clientY: 10 });
+    elementFromPointResult = null;
     host.remove();
   });
 
@@ -534,6 +550,28 @@ describe("table controls grips", () => {
         menuHeight: 220,
       }),
     ).toEqual({ x: 200, y: 422 });
+  });
+
+  it("positions row menus beside their handle and flips left near the viewport edge", () => {
+    const base = { top: 100, bottom: 120, width: 20, height: 20 };
+    expect(
+      resolveTableMenuPosition({
+        anchorRect: { ...base, left: 300, right: 320 },
+        placement: "row",
+        viewportWidth: 1000,
+        viewportHeight: 700,
+        menuHeight: 220,
+      }),
+    ).toEqual({ x: 328, y: 8 });
+    expect(
+      resolveTableMenuPosition({
+        anchorRect: { ...base, left: 900, right: 920 },
+        placement: "row",
+        viewportWidth: 1000,
+        viewportHeight: 700,
+        menuHeight: 220,
+      }),
+    ).toEqual({ x: 672, y: 8 });
   });
 
   it("keeps the dragged band highlighted while showing the full drop target", () => {
