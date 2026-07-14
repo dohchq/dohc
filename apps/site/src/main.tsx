@@ -13,9 +13,12 @@ if (host) {
       import("@fontsource/ibm-plex-mono/500.css"),
       import("./ProductDemo"),
       import("./demo.css?inline"),
+      import("./demoDesktopBridge"),
     ]);
     const { ProductDemo } = modules[3];
     const { default: demoCss } = modules[4];
+    const { hydrateDemoWorkspaceAssets } = modules[5];
+    await hydrateDemoWorkspaceAssets();
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = demoCss;

@@ -12,6 +12,10 @@ import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
 import { SitesView } from "../../desktop/src/renderer/workbench/SitesView";
 import { useWorkspaceSearch } from "../../desktop/src/renderer/workbench/useWorkspaceSearch";
 import type { ViewId } from "../../desktop/src/renderer/workbench/workbenchState";
+import {
+  projectTreePath,
+  type PendingTreeChange,
+} from "../../desktop/src/renderer/workbench/file-tree-optimistic";
 
 export type DemoPanelId = ViewId;
 
@@ -65,6 +69,7 @@ export function DemoSidebar(props: {
   activePath: string;
   onOpenDocument: (path: string) => void;
   onCreateDocument: () => void;
+  onBeforeChanges: () => Promise<void>;
 }) {
   const [width, setWidth] = useState(305);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([
@@ -101,6 +106,19 @@ export function DemoSidebar(props: {
     if (!props.documents.some((document) => document.path === path)) return;
     setOpenTabs((current) => (current.includes(path) ? current : [...current, path]));
     props.onOpenDocument(path);
+  }
+
+  function reprojectPaths(changes: PendingTreeChange[]) {
+    const project = (paths: string[]) => [
+      ...new Set(
+        paths.flatMap((path) => {
+          const next = projectTreePath(path, changes);
+          return next === null ? [] : [next];
+        }),
+      ),
+    ];
+    setOpenTabs(project);
+    setExpandedFolders(project);
   }
 
   if (!props.visible) return null;
@@ -147,7 +165,8 @@ export function DemoSidebar(props: {
             )
           }
           onTogglePin={() => undefined}
-          onPathsChanged={() => undefined}
+          onBeforeChanges={props.onBeforeChanges}
+          onPathsChanged={reprojectPaths}
           onImportFiles={() => undefined}
           onRefreshShareMounts={() => undefined}
           onUnmountShare={() => undefined}

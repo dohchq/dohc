@@ -26,7 +26,75 @@ let context: DemoBridgeContext = {
 const searchListeners = new Set<(batch: SearchResultsEvent) => void>();
 const activityListeners = new Set<() => void>();
 const assetUrls = new Map<string, string>();
+const ASSET_DB_NAME = "dohc-marketing-demo";
+const ASSET_STORE_NAME = "workspace-assets";
 const now = Date.now();
+
+type StoredDemoAsset = {
+  path: string;
+  mediaType: string;
+  bytes: ArrayBuffer;
+};
+
+function openAssetDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(ASSET_DB_NAME, 1);
+    request.addEventListener("upgradeneeded", () => {
+      if (!request.result.objectStoreNames.contains(ASSET_STORE_NAME)) {
+        request.result.createObjectStore(ASSET_STORE_NAME, { keyPath: "path" });
+      }
+    });
+    request.addEventListener("success", () => resolve(request.result));
+    request.addEventListener("error", () => reject(request.error));
+  });
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.addEventListener("complete", () => resolve());
+    transaction.addEventListener("abort", () => reject(transaction.error));
+    transaction.addEventListener("error", () => reject(transaction.error));
+  });
+}
+
+function setAssetUrl(path: string, mediaType: string, bytes: ArrayBuffer): void {
+  const previous = assetUrls.get(path);
+  if (previous) URL.revokeObjectURL(previous);
+  assetUrls.set(path, URL.createObjectURL(new Blob([bytes], { type: mediaType })));
+}
+
+async function persistAsset(asset: StoredDemoAsset): Promise<void> {
+  const database = await openAssetDatabase();
+  try {
+    const transaction = database.transaction(ASSET_STORE_NAME, "readwrite");
+    transaction.objectStore(ASSET_STORE_NAME).put(asset);
+    await transactionDone(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+export async function hydrateDemoWorkspaceAssets(): Promise<void> {
+  if (!("indexedDB" in window)) return;
+  try {
+    const database = await openAssetDatabase();
+    const transaction = database.transaction(ASSET_STORE_NAME, "readonly");
+    const request = transaction
+      .objectStore(ASSET_STORE_NAME)
+      .getAll() as IDBRequest<StoredDemoAsset[]>;
+    const assets = await new Promise<StoredDemoAsset[]>((resolve, reject) => {
+      request.addEventListener("success", () => resolve(request.result));
+      request.addEventListener("error", () => reject(request.error));
+    });
+    await transactionDone(transaction);
+    database.close();
+    for (const asset of assets) {
+      setAssetUrl(asset.path, asset.mediaType, asset.bytes);
+    }
+  } catch {
+    // Private browsing may disable IndexedDB; the current session still works.
+  }
+}
 
 function mediaTypeForPath(path: string): string {
   const extension = path.split(".").pop()?.toLocaleLowerCase();
@@ -254,7 +322,14 @@ const demoBridge = {
     };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {
+    if (context.documents.some((document) => document.path === payload.relativePath)) {
+      throw new Error(`A document already exists at ${payload.relativePath}`);
+    }
     context.createFile(payload.relativePath);
+    context.documents = [
+      ...context.documents,
+      { path: payload.relativePath, title: payload.relativePath, body: "" },
+    ];
     activityListeners.forEach((listener) => listener());
     return { path: payload.relativePath };
   },
@@ -263,11 +338,40 @@ const demoBridge = {
     return { path: payload.relativePath };
   },
   async moveWorkspacePath(payload: { fromPath: string; toPath: string }) {
+    const sourceDocuments = context.documents.filter(
+      (document) =>
+        document.path === payload.fromPath ||
+        document.path.startsWith(`${payload.fromPath}/`),
+    );
+    const sourcePaths = new Set(sourceDocuments.map((document) => document.path));
+    for (const document of sourceDocuments) {
+      const targetPath = `${payload.toPath}${document.path.slice(payload.fromPath.length)}`;
+      if (
+        context.documents.some(
+          (candidate) => candidate.path === targetPath && !sourcePaths.has(candidate.path),
+        )
+      ) {
+        throw new Error(`A document already exists at ${targetPath}`);
+      }
+    }
     context.movePath(payload.fromPath, payload.toPath);
+    context.documents = context.documents.map((document) =>
+      sourcePaths.has(document.path)
+        ? {
+            ...document,
+            path: `${payload.toPath}${document.path.slice(payload.fromPath.length)}`,
+          }
+        : document,
+    );
     return { path: payload.toPath };
   },
   async deleteWorkspacePath(payload: { relativePath: string }) {
     context.deletePath(payload.relativePath);
+    context.documents = context.documents.filter(
+      (document) =>
+        document.path !== payload.relativePath &&
+        !document.path.startsWith(`${payload.relativePath}/`),
+    );
     return { trashed: true };
   },
   async showExplorerMenu() {
@@ -283,13 +387,14 @@ const demoBridge = {
     return { files: await pickBrowserImages() };
   },
   async writeWorkspaceAsset(payload: { relativePath: string; bytes: Uint8Array }) {
-    const previous = assetUrls.get(payload.relativePath);
-    if (previous) URL.revokeObjectURL(previous);
     const bytes = new Uint8Array(payload.bytes).buffer;
-    assetUrls.set(
-      payload.relativePath,
-      URL.createObjectURL(new Blob([bytes], { type: mediaTypeForPath(payload.relativePath) })),
-    );
+    const mediaType = mediaTypeForPath(payload.relativePath);
+    setAssetUrl(payload.relativePath, mediaType, bytes);
+    if ("indexedDB" in window) {
+      await persistAsset({ path: payload.relativePath, mediaType, bytes }).catch(
+        () => undefined,
+      );
+    }
   },
   async getWorkspaceSettings() {
     return {

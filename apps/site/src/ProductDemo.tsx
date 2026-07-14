@@ -180,6 +180,17 @@ export function ProductDemo() {
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const saveFrame = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
+  const draftsRef = useRef(drafts);
+
+  const updateDrafts = useCallback(
+    (update: (current: Record<string, string>) => Record<string, string>) => {
+      const next = update(draftsRef.current);
+      draftsRef.current = next;
+      setDrafts(next);
+      return next;
+    },
+    [],
+  );
 
   const activeFullText = drafts[activePath] ?? "";
   const activeBody = parseFrontmatter(activeFullText).body;
@@ -241,8 +252,8 @@ export function ProductDemo() {
   );
 
   const storeDraft = useCallback((path: string, markdown: string) => {
-    setDrafts((current) => ({ ...current, [path]: markdown }));
-  }, []);
+    updateDrafts((current) => ({ ...current, [path]: markdown }));
+  }, [updateDrafts]);
 
   const scheduleSave = useCallback(() => {
     setSaveState("saving");
@@ -263,6 +274,10 @@ export function ProductDemo() {
   const openDocument = useCallback(
     (path: string) => {
       if (path === activePath) return;
+      if (saveFrame.current !== null) {
+        cancelAnimationFrame(saveFrame.current);
+        saveFrame.current = null;
+      }
       storeDraft(activePath, composeCurrentDocument());
       setShowSource(false);
       setActivePath(path);
@@ -270,6 +285,27 @@ export function ProductDemo() {
     },
     [activePath, composeCurrentDocument, storeDraft],
   );
+
+  const openWikilink = useCallback(
+    (target: string) => {
+      const normalized = target.replace(/\.md$/i, "");
+      const match =
+        knownFiles.find(
+          (file) => file.path.replace(/\.md$/i, "") === normalized,
+        ) ?? knownFiles.find((file) => file.path === target);
+      openDocument(match?.path ?? `${normalized}.md`);
+    },
+    [knownFiles, openDocument],
+  );
+
+  const flushActiveDraft = useCallback(async () => {
+    if (saveFrame.current !== null) {
+      cancelAnimationFrame(saveFrame.current);
+      saveFrame.current = null;
+    }
+    storeDraft(activePath, composeCurrentDocument());
+    setSaveState("saved");
+  }, [activePath, composeCurrentDocument, storeDraft]);
 
   const createDocument = useCallback(() => {
     storeDraft(activePath, composeCurrentDocument());
@@ -308,8 +344,18 @@ export function ProductDemo() {
   );
 
   const moveDraftPath = useCallback((fromPath: string, toPath: string) => {
-    setDrafts((current) => {
+    updateDrafts((current) => {
       const next = { ...current };
+      const sourcePaths = Object.keys(current).filter(
+        (path) => path === fromPath || path.startsWith(`${fromPath}/`),
+      );
+      const sourceSet = new Set(sourcePaths);
+      for (const path of sourcePaths) {
+        const targetPath = `${toPath}${path.slice(fromPath.length)}`;
+        if (targetPath in current && !sourceSet.has(targetPath)) {
+          throw new Error(`A document already exists at ${targetPath}`);
+        }
+      }
       for (const [path, markdown] of Object.entries(current)) {
         if (path !== fromPath && !path.startsWith(`${fromPath}/`)) continue;
         const suffix = path.slice(fromPath.length);
@@ -330,19 +376,21 @@ export function ProductDemo() {
           : path,
       ),
     );
-  }, []);
+  }, [updateDrafts]);
 
   const deleteDraftPath = useCallback((path: string) => {
-    const next = Object.fromEntries(
-      Object.entries(drafts).filter(
-        ([entry]) => entry !== path && !entry.startsWith(`${path}/`),
-      ),
-    );
-    if (Object.keys(next).length === 0) {
-      const fallback = DEMO_DOCUMENTS[0];
-      next[fallback.path] = fallback.markdown;
-    }
-    setDrafts(next);
+    const next = updateDrafts((current) => {
+      const filtered = Object.fromEntries(
+        Object.entries(current).filter(
+          ([entry]) => entry !== path && !entry.startsWith(`${path}/`),
+        ),
+      );
+      if (Object.keys(filtered).length === 0) {
+        const fallback = DEMO_DOCUMENTS[0];
+        filtered[fallback.path] = fallback.markdown;
+      }
+      return filtered;
+    });
     setActivePath((current) =>
       current === path || current.startsWith(`${path}/`)
         ? (Object.keys(next)[0] ?? DEMO_DOCUMENTS[0].path)
@@ -351,7 +399,7 @@ export function ProductDemo() {
     setEmptyFolders((current) =>
       current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
     );
-  }, [drafts]);
+  }, [updateDrafts]);
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
@@ -454,6 +502,7 @@ export function ProductDemo() {
           activePath={activePath}
           onOpenDocument={openDocument}
           onCreateDocument={createDocument}
+          onBeforeChanges={flushActiveDraft}
         />
 
         <section className="demo-editor-column" aria-label="Editable dohc document demo">
@@ -517,7 +566,7 @@ export function ProductDemo() {
               workspaceId="marketing-demo"
               path={activePath}
               knownFiles={knownFiles}
-              onOpenWikilink={openDocument}
+              onOpenWikilink={openWikilink}
               resolveWorkspaceAssetUrl={resolveDemoWorkspaceAssetUrl}
               collab={null}
             />
