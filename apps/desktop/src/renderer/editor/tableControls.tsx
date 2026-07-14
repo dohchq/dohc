@@ -72,15 +72,26 @@ type GripMenuItem = {
 
 type TableBand = "column" | "row";
 type TableMenuPlacement = TableBand | "table";
+type TableDropSide = "before" | "after";
+
+type TableDropTarget = {
+  index: number;
+  side: TableDropSide;
+  destination: number;
+};
 
 type TableDragState = {
   band: TableBand;
   index: number;
-  tablePos: number;
   cellPos: number;
+  tableElement: HTMLTableElement;
+  sourceButton: HTMLButtonElement;
+  scrollContainer: HTMLElement | null;
+  dropTarget?: TableDropTarget;
 };
 
 let activeTableDrag: TableDragState | null = null;
+const suppressTableGripClickUntil = new WeakMap<HTMLButtonElement, number>();
 
 type RectLike = Pick<
   DOMRect,
@@ -137,6 +148,24 @@ export function resolveTableMenuPosition({
       viewportHeight - menuHeight - margin,
     ),
   };
+}
+
+export function resolveTableDropDestination({
+  sourceIndex,
+  targetIndex,
+  side,
+  bandCount,
+}: {
+  sourceIndex: number;
+  targetIndex: number;
+  side: TableDropSide;
+  bandCount: number;
+}): number {
+  // Convert the visual boundary (before/after the hovered band) into the
+  // final zero-based index after the source band has been removed.
+  const boundary = targetIndex + (side === "after" ? 1 : 0);
+  const destination = boundary - (sourceIndex < boundary ? 1 : 0);
+  return Math.max(0, Math.min(destination, bandCount - 1));
 }
 
 function stopEvent(event: Event): void {
@@ -414,10 +443,14 @@ function openGripMenu(
 function clearTableDropTargetChrome(view: EditorView): void {
   view.dom
     .querySelectorAll<HTMLElement>(
-      ".dohc-table-grip.is-drop-target, .dohc-table-drag-target",
+      ".dohc-table-grip.is-drop-target, .dohc-table-drop-before, .dohc-table-drop-after",
     )
     .forEach((element) =>
-      element.classList.remove("is-drop-target", "dohc-table-drag-target"),
+      element.classList.remove(
+        "is-drop-target",
+        "dohc-table-drop-before",
+        "dohc-table-drop-after",
+      ),
     );
 }
 
@@ -437,18 +470,34 @@ function clearTableDragChrome(view: EditorView): void {
 }
 
 function markTableBand(
-  button: HTMLButtonElement,
+  table: HTMLTableElement,
   band: TableBand,
   index: number,
   className: string,
 ): void {
-  const table = button.closest("table");
-  if (!table) return;
   if (band === "row") {
-    button.closest("tr")?.classList.add(className);
+    table.rows[index]?.classList.add(className);
     return;
   }
-  Array.from(table.rows).forEach((row) => row.cells[index]?.classList.add(className));
+  Array.from(table.rows).forEach((row) =>
+    row.cells[index]?.classList.add(className),
+  );
+}
+
+function announceTableDrag(view: EditorView, message: string): void {
+  const ownerDocument = view.dom.ownerDocument;
+  let status = ownerDocument.querySelector<HTMLElement>(
+    "[data-dohc-table-drag-status]",
+  );
+  if (!status) {
+    status = ownerDocument.createElement("div");
+    status.className = "dohc-table-drag-status";
+    status.dataset.dohcTableDragStatus = "";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    ownerDocument.body.appendChild(status);
+  }
+  status.textContent = message;
 }
 
 function setTableDragPreview(
@@ -461,10 +510,171 @@ function setTableDragPreview(
   const ownerDocument = view.dom.ownerDocument;
   const preview = ownerDocument.createElement("div");
   preview.className = "dohc-table-drag-preview";
-  preview.textContent = `Move ${band} ${index + 1}`;
+  preview.textContent = `⠿  ${band === "row" ? "Row" : "Column"} ${index + 1}`;
   ownerDocument.body.appendChild(preview);
-  event.dataTransfer.setDragImage(preview, 14, 14);
+  event.dataTransfer.setDragImage(preview, 12, 16);
   (ownerDocument.defaultView ?? window).setTimeout(() => preview.remove(), 0);
+}
+
+function tableBandCount(table: HTMLTableElement, band: TableBand): number {
+  if (band === "row") return table.rows.length;
+  return table.rows[0]?.cells.length ?? 0;
+}
+
+function tableDropTargetFromEvent(
+  drag: TableDragState,
+  event: DragEvent,
+): TableDropTarget | null {
+  const target = event.target;
+  if (!(target instanceof Element)) return null;
+  const cell = target.closest<HTMLTableCellElement>("td, th");
+  if (!cell || cell.closest("table") !== drag.tableElement) return null;
+
+  const row = cell.closest<HTMLTableRowElement>("tr");
+  const bandElement = drag.band === "row" ? row : cell;
+  if (!bandElement) return null;
+  const rect = bandElement.getBoundingClientRect();
+  const pointer = drag.band === "row" ? event.clientY : event.clientX;
+  const midpoint =
+    drag.band === "row"
+      ? rect.top + rect.height / 2
+      : rect.left + rect.width / 2;
+  const side: TableDropSide = pointer < midpoint ? "before" : "after";
+  const index = drag.band === "row" ? row?.rowIndex ?? -1 : cell.cellIndex;
+  if (index < 0) return null;
+  return {
+    index,
+    side,
+    destination: resolveTableDropDestination({
+      sourceIndex: drag.index,
+      targetIndex: index,
+      side,
+      bandCount: tableBandCount(drag.tableElement, drag.band),
+    }),
+  };
+}
+
+function markTableDropTarget(
+  view: EditorView,
+  drag: TableDragState,
+  target: TableDropTarget,
+): void {
+  clearTableDropTargetChrome(view);
+  const gripSelector =
+    drag.band === "row"
+      ? `[data-table-row="${target.index}"]`
+      : `[data-table-column="${target.index}"]`;
+  drag.tableElement
+    .querySelector(gripSelector)
+    ?.classList.add("is-drop-target");
+  markTableBand(
+    drag.tableElement,
+    drag.band,
+    target.index,
+    target.side === "before" ? "dohc-table-drop-before" : "dohc-table-drop-after",
+  );
+}
+
+function findVerticalScrollContainer(view: EditorView): HTMLElement | null {
+  const ownerWindow = view.dom.ownerDocument.defaultView ?? window;
+  let element = view.dom.parentElement;
+  while (element) {
+    const overflowY = ownerWindow.getComputedStyle(element).overflowY;
+    if (
+      /(auto|scroll)/.test(overflowY) &&
+      element.scrollHeight > element.clientHeight
+    ) {
+      return element;
+    }
+    element = element.parentElement;
+  }
+  return null;
+}
+
+function autoScrollTableDrag(drag: TableDragState, event: DragEvent): void {
+  const scroller = drag.scrollContainer;
+  if (!scroller) return;
+  const rect = scroller.getBoundingClientRect();
+  const edge = Math.min(64, Math.max(36, rect.height * 0.1));
+  let delta = 0;
+  if (event.clientY < rect.top + edge) {
+    delta = -Math.ceil((rect.top + edge - event.clientY) / 4);
+  } else if (event.clientY > rect.bottom - edge) {
+    delta = Math.ceil((event.clientY - (rect.bottom - edge)) / 4);
+  }
+  if (delta !== 0) scroller.scrollTop += Math.max(-18, Math.min(delta, 18));
+}
+
+function handleTableDragOver(view: EditorView, event: DragEvent): boolean {
+  const drag = activeTableDrag;
+  if (!drag) return false;
+  const target = tableDropTargetFromEvent(drag, event);
+  if (!target) {
+    clearTableDropTargetChrome(view);
+    drag.dropTarget = undefined;
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  autoScrollTableDrag(drag, event);
+
+  const changed =
+    drag.dropTarget?.index !== target.index ||
+    drag.dropTarget?.side !== target.side;
+  drag.dropTarget = target;
+  if (target.destination === drag.index) {
+    clearTableDropTargetChrome(view);
+  } else {
+    markTableDropTarget(view, drag, target);
+  }
+  if (changed) {
+    const label = drag.band === "row" ? "row" : "column";
+    announceTableDrag(
+      view,
+      target.destination === drag.index
+        ? `${label} ${drag.index + 1}, original position.`
+        : `Move ${label} ${drag.index + 1} ${target.side} ${label} ${target.index + 1}.`,
+    );
+  }
+  return true;
+}
+
+function handleTableDrop(view: EditorView, event: DragEvent): boolean {
+  const drag = activeTableDrag;
+  if (!drag) return false;
+  const target = tableDropTargetFromEvent(drag, event) ?? drag.dropTarget;
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+
+  drag.sourceButton.setAttribute("aria-grabbed", "false");
+  suppressTableGripClickUntil.set(drag.sourceButton, Date.now() + 250);
+
+  if (target && target.destination !== drag.index) {
+    const command =
+      drag.band === "column"
+        ? moveTableColumn({
+            from: drag.index,
+            to: target.destination,
+            pos: drag.cellPos,
+          })
+        : moveTableRow({
+            from: drag.index,
+            to: target.destination,
+            pos: drag.cellPos,
+          });
+    runTableCommand(view, command);
+    announceTableDrag(
+      view,
+      `${drag.band === "row" ? "Row" : "Column"} ${drag.index + 1} moved to position ${target.destination + 1}.`,
+    );
+  }
+  activeTableDrag = null;
+  clearTableDragChrome(view);
+  return true;
 }
 
 function configureGripDrag(
@@ -472,7 +682,6 @@ function configureGripDrag(
   button: HTMLButtonElement,
   band: TableBand,
   index: number,
-  tablePos: number,
   cellPos: number,
 ): void {
   button.draggable = view.editable !== false;
@@ -485,65 +694,46 @@ function configureGripDrag(
 
     closeOpenMenu?.();
     closeOpenMenu = null;
-    activeTableDrag = { band, index, tablePos, cellPos };
+    const tableElement = button.closest("table");
+    if (!tableElement) {
+      event.preventDefault();
+      return;
+    }
+    activeTableDrag = {
+      band,
+      index,
+      cellPos,
+      tableElement,
+      sourceButton: button,
+      scrollContainer: findVerticalScrollContainer(view),
+    };
     if (band === "column") selectColumn(view, cellPos);
     else selectRow(view, cellPos);
 
-    button.closest("table")?.classList.add("is-reordering");
+    tableElement.classList.add("is-reordering");
     button.classList.add("is-dragging");
-    markTableBand(button, band, index, "dohc-table-drag-source");
+    button.setAttribute("aria-grabbed", "true");
+    markTableBand(tableElement, band, index, "dohc-table-drag-source");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", `dohc-table-${band}-${index}`);
     setTableDragPreview(view, event, band, index);
-  });
-
-  button.addEventListener("dragover", (event) => {
-    if (
-      !activeTableDrag ||
-      activeTableDrag.band !== band ||
-      activeTableDrag.tablePos !== tablePos ||
-      activeTableDrag.index === index
-    ) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    clearTableDropTargetChrome(view);
-    button.classList.add("is-drop-target");
-    markTableBand(button, band, index, "dohc-table-drag-target");
-  });
-
-  button.addEventListener("dragleave", () => {
-    button.classList.remove("is-drop-target");
-    view.dom
-      .querySelectorAll<HTMLElement>(".dohc-table-drag-target")
-      .forEach((element) => element.classList.remove("dohc-table-drag-target"));
-  });
-
-  button.addEventListener("drop", (event) => {
-    const drag = activeTableDrag;
-    if (
-      !drag ||
-      drag.band !== band ||
-      drag.tablePos !== tablePos ||
-      drag.index === index
-    ) {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-    const command =
-      band === "column"
-        ? moveTableColumn({ from: drag.index, to: index, pos: drag.cellPos })
-        : moveTableRow({ from: drag.index, to: index, pos: drag.cellPos });
-    runTableCommand(view, command);
-    activeTableDrag = null;
-    clearTableDragChrome(view);
+    announceTableDrag(
+      view,
+      `Moving ${band} ${index + 1}. Drag over any cell to choose a new position.`,
+    );
   });
 
   button.addEventListener("dragend", () => {
+    button.setAttribute("aria-grabbed", "false");
+    suppressTableGripClickUntil.set(button, Date.now() + 250);
+    if (activeTableDrag) {
+      announceTableDrag(
+        view,
+        activeTableDrag.dropTarget
+          ? `Table reorder cancelled at position ${activeTableDrag.dropTarget.destination + 1}.`
+          : "Table reorder cancelled before a drop position was chosen.",
+      );
+    }
     activeTableDrag = null;
     clearTableDragChrome(view);
   });
@@ -553,7 +743,6 @@ function buildColumnGrip(
   view: EditorView,
   cellPos: number,
   colIndex: number,
-  tablePos: number,
 ): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -566,10 +755,11 @@ function buildColumnGrip(
   button.setAttribute("contenteditable", "false");
   button.textContent = "⠿";
   button.disabled = view.editable === false;
-  configureGripDrag(view, button, "column", colIndex, tablePos, cellPos);
+  configureGripDrag(view, button, "column", colIndex, cellPos);
   button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEvent(event);
+    if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
     selectColumn(view, cellPos);
     openGripMenu(view, button, columnMenuItems(cellPos), "column");
   });
@@ -580,7 +770,6 @@ function buildRowGrip(
   view: EditorView,
   cellPos: number,
   rowIndex: number,
-  tablePos: number,
 ): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -593,10 +782,11 @@ function buildRowGrip(
   button.setAttribute("contenteditable", "false");
   button.textContent = "⠿";
   button.disabled = view.editable === false;
-  configureGripDrag(view, button, "row", rowIndex, tablePos, cellPos);
+  configureGripDrag(view, button, "row", rowIndex, cellPos);
   button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEvent(event);
+    if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
     selectRow(view, cellPos);
     openGripMenu(view, button, rowMenuItems(), "row");
   });
@@ -723,7 +913,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildColumnGrip(view, cellPos, colIndex, pos),
+          (view) => buildColumnGrip(view, cellPos, colIndex),
           `dohc-table-col-${cellPos}`,
         ),
       );
@@ -761,7 +951,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildRowGrip(view, cellPos, rowIndex, pos),
+          (view) => buildRowGrip(view, cellPos, rowIndex),
           `dohc-table-row-${cellPos}`,
         ),
       );
@@ -817,7 +1007,31 @@ export function makeTableControlsPlugin(): Plugin {
         return true;
       },
     },
-    view() {
+    view(view) {
+      const onDragOver = (event: DragEvent) => {
+        handleTableDragOver(view, event);
+      };
+      const onDragLeave = (event: DragEvent) => {
+        if (!activeTableDrag) return;
+        const next = event.relatedTarget;
+        if (
+          next instanceof Node &&
+          activeTableDrag.tableElement.contains(next)
+        ) {
+          return;
+        }
+        activeTableDrag.dropTarget = undefined;
+        clearTableDropTargetChrome(view);
+      };
+      const onDrop = (event: DragEvent) => {
+        handleTableDrop(view, event);
+      };
+      // Capture before ProseMirror's generic drop cursor. Table reordering has
+      // its own boundary indicator and should never produce a competing text
+      // insertion cursor.
+      view.dom.addEventListener("dragover", onDragOver, true);
+      view.dom.addEventListener("dragleave", onDragLeave, true);
+      view.dom.addEventListener("drop", onDrop, true);
       return {
         // An open grip menu closes over a raw cell position (see
         // columnMenuItems). If the doc shifts while it's open — e.g. a remote
@@ -832,8 +1046,13 @@ export function makeTableControlsPlugin(): Plugin {
           }
         },
         destroy() {
+          view.dom.removeEventListener("dragover", onDragOver, true);
+          view.dom.removeEventListener("dragleave", onDragLeave, true);
+          view.dom.removeEventListener("drop", onDrop, true);
           closeOpenMenu?.();
           closeOpenMenu = null;
+          activeTableDrag = null;
+          clearTableDragChrome(view);
         },
       };
     },

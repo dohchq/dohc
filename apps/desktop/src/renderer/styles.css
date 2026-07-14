@@ -1491,6 +1491,11 @@ body {
   line-height: 1;
   cursor: grab;
   user-select: none;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
 }
 
 .dohc-table-grip:hover,
@@ -1532,22 +1537,26 @@ body {
   background: color-mix(in srgb, var(--dohc-accent) 7%, transparent);
 }
 
-.dohc-table-node tr.dohc-table-drag-target > :is(td, th) {
-  box-shadow:
-    inset 0 2px 0 var(--dohc-accent),
-    inset 0 -2px 0 var(--dohc-accent);
+.dohc-table-node tr.dohc-table-drop-before > :is(td, th) {
+  box-shadow: inset 0 3px 0 var(--dohc-accent);
 }
 
-.dohc-table-node :is(td, th).dohc-table-drag-target {
-  box-shadow:
-    inset 2px 0 0 var(--dohc-accent),
-    inset -2px 0 0 var(--dohc-accent);
+.dohc-table-node tr.dohc-table-drop-after > :is(td, th) {
+  box-shadow: inset 0 -3px 0 var(--dohc-accent);
+}
+
+.dohc-table-node :is(td, th).dohc-table-drop-before {
+  box-shadow: inset 3px 0 0 var(--dohc-accent);
+}
+
+.dohc-table-node :is(td, th).dohc-table-drop-after {
+  box-shadow: inset -3px 0 0 var(--dohc-accent);
 }
 
 .dohc-table-drag-preview {
   position: fixed;
-  top: -1000px;
-  left: -1000px;
+  top: 0;
+  left: 0;
   z-index: 9999;
   border: 1px solid var(--dohc-line);
   border-radius: 7px;
@@ -1559,6 +1568,16 @@ body {
   font-weight: 600;
   white-space: nowrap;
   pointer-events: none;
+}
+
+.dohc-table-drag-status {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Notion-style six-dot handles follow the active cell: the column handle is

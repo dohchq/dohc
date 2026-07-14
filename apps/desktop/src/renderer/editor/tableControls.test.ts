@@ -5,6 +5,7 @@ import { TableKit } from "@tiptap/extension-table";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   makeTableControlsPlugin,
+  resolveTableDropDestination,
   resolveTableMenuPosition,
 } from "./tableControls";
 
@@ -88,7 +89,7 @@ function drag(source: Element, target: Element): void {
     setData: () => undefined,
   };
   const dispatch = (element: Element, type: string) => {
-    const event = new Event(type, { bubbles: true, cancelable: true });
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true });
     Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
     element.dispatchEvent(event);
   };
@@ -270,6 +271,96 @@ describe("table controls grips", () => {
     ]);
   });
 
+  it("accepts a drop anywhere inside the target row, not only on its handle", () => {
+    editor = createLabeledTableEditor();
+    const source = editor.view.dom.querySelector(
+      ".dohc-table-grip--row",
+    ) as HTMLElement;
+    const targetCell = editor.view.dom.querySelectorAll("tr")[1]?.cells[2];
+    if (!targetCell) throw new Error("target cell missing");
+
+    drag(source, targetCell);
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["B1", "B2", "B3"],
+      ["A1", "A2", "A3"],
+      ["C1", "C2", "C3"],
+    ]);
+  });
+
+  it("uses the pointer half to insert before the target row", () => {
+    editor = createLabeledTableEditor();
+    const rows = editor.view.dom.querySelectorAll("tr");
+    const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+    const source = rowGrips[2] as HTMLElement;
+    const targetCell = rows[0]?.cells[1];
+    if (!targetCell) throw new Error("target cell missing");
+    Object.defineProperty(rows[0], "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 100,
+        bottom: 140,
+        left: 0,
+        right: 300,
+        width: 300,
+        height: 40,
+      }),
+    });
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      setData: () => undefined,
+    };
+    const dispatch = (element: Element, type: string, clientY = 105) => {
+      const event = new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientY,
+      });
+      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+      element.dispatchEvent(event);
+    };
+
+    dispatch(source, "dragstart");
+    dispatch(targetCell, "dragover");
+    expect(rows[0]?.classList.contains("dohc-table-drop-before")).toBe(true);
+    dispatch(targetCell, "drop");
+    dispatch(source, "dragend");
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["C1", "C2", "C3"],
+      ["A1", "A2", "A3"],
+      ["B1", "B2", "B3"],
+    ]);
+  });
+
+  it("maps before/after boundaries to stable final indexes", () => {
+    expect(
+      resolveTableDropDestination({
+        sourceIndex: 0,
+        targetIndex: 2,
+        side: "before",
+        bandCount: 4,
+      }),
+    ).toBe(1);
+    expect(
+      resolveTableDropDestination({
+        sourceIndex: 0,
+        targetIndex: 2,
+        side: "after",
+        bandCount: 4,
+      }),
+    ).toBe(2);
+    expect(
+      resolveTableDropDestination({
+        sourceIndex: 3,
+        targetIndex: 0,
+        side: "after",
+        bandCount: 4,
+      }),
+    ).toBe(1);
+  });
+
   it("table menu toggles the header row", () => {
     editor = createTableEditor(2, 2);
     const before = tableNode(editor).content?.[0]?.content?.[0]?.type;
@@ -422,18 +513,48 @@ describe("table controls grips", () => {
     dispatch(source, "dragstart");
     dispatch(target, "dragover");
 
-    expect(previewLabel).toBe("Move row 1");
+    expect(previewLabel).toBe("⠿  Row 1");
     expect(source.classList.contains("is-dragging")).toBe(true);
     expect(
       source.closest("tr")?.classList.contains("dohc-table-drag-source"),
     ).toBe(true);
     expect(target.classList.contains("is-drop-target")).toBe(true);
     expect(
-      target.closest("tr")?.classList.contains("dohc-table-drag-target"),
+      target.closest("tr")?.classList.contains("dohc-table-drop-after"),
     ).toBe(true);
 
     dispatch(source, "dragend");
-    expect(editor.view.dom.querySelector(".is-dragging, .dohc-table-drag-target")).toBeNull();
+    expect(
+      editor.view.dom.querySelector(".is-dragging, .dohc-table-drop-after"),
+    ).toBeNull();
+  });
+
+  it("does not open the options menu from the click that follows a drag", () => {
+    editor = createLabeledTableEditor();
+    const grip = editor.view.dom.querySelector(
+      ".dohc-table-grip--row",
+    ) as HTMLElement;
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      setData: () => undefined,
+    };
+    const dragStart = new MouseEvent("dragstart", {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(dragStart, "dataTransfer", { value: dataTransfer });
+    grip.dispatchEvent(dragStart);
+    const dragEnd = new MouseEvent("dragend", {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(dragEnd, "dataTransfer", { value: dataTransfer });
+    grip.dispatchEvent(dragEnd);
+
+    click(grip);
+
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
   });
 
   it("column grip menu aligns every cell in the column (center) via the `align` attr", () => {
