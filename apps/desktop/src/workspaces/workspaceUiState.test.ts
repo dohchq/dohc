@@ -52,6 +52,23 @@ describe("ui-state file store", () => {
     expect(raw.endsWith("\n")).toBe(true);
   });
 
+  it("serializes a burst of writes and leaves the latest complete state", async () => {
+    const root = await tempRoot();
+    await Promise.all(
+      Array.from({ length: 40 }, (_, sequence) =>
+        writeUiStateFile(root, { ...STATE, sidebarWidth: 300 + sequence }),
+      ),
+    );
+
+    expect(await readUiStateFile(root)).toEqual({
+      ...STATE,
+      sidebarWidth: 339,
+    });
+    expect(
+      (await readdir(join(root, ".dohc"))).filter((name) => name.includes(".tmp-")),
+    ).toEqual([]);
+  });
+
   it("a missing or corrupt file reads as null, never an error", async () => {
     const root = await tempRoot();
     expect(await readUiStateFile(root)).toBeNull();

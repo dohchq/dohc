@@ -18,7 +18,6 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
-import { TrailingNode } from "@tiptap/extensions/trailing-node";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
@@ -105,6 +104,7 @@ import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import { OutlinePanel } from "./OutlinePanel";
+import { SafeTrailingNode } from "./safeTrailingNode";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
@@ -202,7 +202,7 @@ const COLLAB_STARTER_KIT = StarterKit.configure({
 const MARKDOWN_EXTENSION = Markdown.configure({
   indentation: { style: "space", size: 2 },
 });
-const TRAILING_NODE_EXTENSION = TrailingNode.configure({
+const TRAILING_NODE_EXTENSION = SafeTrailingNode.configure({
   node: "paragraph",
   notAfter: ["paragraph"],
 });

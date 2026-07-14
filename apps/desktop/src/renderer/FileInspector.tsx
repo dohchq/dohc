@@ -38,6 +38,7 @@ import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
+import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -1074,34 +1075,36 @@ function MarkdownView(props: {
               <LazyPropertiesPanel ydoc={engine.doc} />
             </Suspense>
           </div>
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-xs text-subtle">
-                Loading editor...
-              </div>
-            }
-          >
-            <LazyMarkdownEditor
-              ref={wysiwygRef}
-              value={props.body}
-              onDirty={() => undefined}
-              workspaceId={props.workspaceId}
-              path={props.path}
-              knownFiles={knownFiles}
-              onOpenWikilink={openWikilink}
-              pendingUndo={editorPendingUndo}
-              onPendingUndoConsumed={props.onPendingUndoConsumed}
-              collab={{
-                ydoc: engine.doc,
-                // Solo engine editing shows the settle indicator, not presence
-                // chrome — "disabled" hides the in-editor presence bar while the
-                // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
-                status: "disabled",
-                peerCount: 0,
-                synced: true,
-              }}
-            />
-          </Suspense>
+          <EditorErrorBoundary resetKey={`${props.workspaceId}:${props.path}:engine`}>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-xs text-subtle">
+                  Loading editor...
+                </div>
+              }
+            >
+              <LazyMarkdownEditor
+                ref={wysiwygRef}
+                value={props.body}
+                onDirty={() => undefined}
+                workspaceId={props.workspaceId}
+                path={props.path}
+                knownFiles={knownFiles}
+                onOpenWikilink={openWikilink}
+                pendingUndo={editorPendingUndo}
+                onPendingUndoConsumed={props.onPendingUndoConsumed}
+                collab={{
+                  ydoc: engine.doc,
+                  // Solo engine editing shows the settle indicator, not presence
+                  // chrome — "disabled" hides the in-editor presence bar while the
+                  // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
+                  status: "disabled",
+                  peerCount: 0,
+                  synced: true,
+                }}
+              />
+            </Suspense>
+          </EditorErrorBoundary>
           {backlinks}
         </div>
       </div>
@@ -1201,26 +1204,28 @@ function MarkdownView(props: {
               </Suspense>
             ) : null}
           </div>
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-xs text-subtle">
-                Loading editor...
-              </div>
-            }
-          >
-            <LazyMarkdownEditor
-              ref={wysiwygRef}
-              value={markdownEditorBody(draft)}
-              onDirty={scheduleSave}
-              workspaceId={props.workspaceId}
-              path={props.path}
-              knownFiles={knownFiles}
-              onOpenWikilink={openWikilink}
-              pendingUndo={editorPendingUndo}
-              onPendingUndoConsumed={props.onPendingUndoConsumed}
-              collab={null}
-            />
-          </Suspense>
+          <EditorErrorBoundary resetKey={`${props.workspaceId}:${props.path}:local`}>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-xs text-subtle">
+                  Loading editor...
+                </div>
+              }
+            >
+              <LazyMarkdownEditor
+                ref={wysiwygRef}
+                value={markdownEditorBody(draft)}
+                onDirty={scheduleSave}
+                workspaceId={props.workspaceId}
+                path={props.path}
+                knownFiles={knownFiles}
+                onOpenWikilink={openWikilink}
+                pendingUndo={editorPendingUndo}
+                onPendingUndoConsumed={props.onPendingUndoConsumed}
+                collab={null}
+              />
+            </Suspense>
+          </EditorErrorBoundary>
           {backlinks}
         </div>
       ) : (

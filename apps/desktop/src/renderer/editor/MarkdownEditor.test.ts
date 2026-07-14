@@ -16,6 +16,7 @@ import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TableKit } from "@tiptap/extension-table";
 import { dohcMarkdownExtensions } from "./extensions";
 import { MarkdownEditor } from "./MarkdownEditor";
 import {
@@ -373,6 +374,56 @@ describe("MarkdownEditor empty list item focus", () => {
 });
 
 describe("MarkdownEditor history", () => {
+  it("keeps malformed rich markdown from crashing the editor transaction loop", async () => {
+    const user = userEvent.setup();
+    const markdown = [
+      "- item",
+      "",
+      "> [!note]",
+      "",
+      "| Hello |     |     |     |     |",
+      "| ----- | --- | --- | --- | --- |",
+      "|       |     |     |     |     |",
+      "",
+      "$$1 + 1 = 2$$",
+    ].join("\n");
+    const parsed = new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        TableKit,
+        Markdown,
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+
+    expect(() => parsed.state.doc.check()).not.toThrow();
+    parsed.destroy();
+
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: markdown,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/rich.md",
+        knownFiles: [],
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      editor.focus();
+      await user.keyboard("stable");
+      expect(editor.textContent).toContain("stable");
+    } finally {
+      view.unmount();
+    }
+  });
+
   it("undoes and redoes a local edit in collaboration mode", async () => {
     const ydoc = new Y.Doc();
     const user = userEvent.setup();
