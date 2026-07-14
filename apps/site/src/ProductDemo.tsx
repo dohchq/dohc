@@ -34,7 +34,10 @@ import {
   type DemoPanelId,
   type DemoWorkspaceDocument,
 } from "./DemoSidebar";
-import { configureDemoDesktopBridge } from "./demoDesktopBridge";
+import {
+  configureDemoDesktopBridge,
+  resolveDemoWorkspaceAssetUrl,
+} from "./demoDesktopBridge";
 
 type DemoDocument = {
   path: string;
@@ -294,6 +297,12 @@ export function ProductDemo() {
         path,
         `---\ntitle: ${title}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`,
       );
+      // Explorer calls onOpenFile immediately after the bridge resolves, before
+      // React has published the new documents prop. Select it here so the new
+      // file still opens in that same interaction.
+      setShowSource(false);
+      setActivePath(path);
+      setSaveState("saved");
     },
     [storeDraft],
   );
@@ -509,6 +518,7 @@ export function ProductDemo() {
               path={activePath}
               knownFiles={knownFiles}
               onOpenWikilink={openDocument}
+              resolveWorkspaceAssetUrl={resolveDemoWorkspaceAssetUrl}
               collab={null}
             />
           </div>

@@ -137,6 +137,7 @@ export type MarkdownEditorProps = {
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
+  resolveWorkspaceAssetUrl?: (workspacePath: string) => string | null;
   autoFocus?: boolean;
   collab?: MarkdownEditorCollab | null;
   pendingUndo?: MarkdownEditorPendingUndo;
@@ -263,6 +264,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onDirty,
       knownFiles,
       onOpenWikilink,
+      resolveWorkspaceAssetUrl,
       autoFocus,
       collab,
       pendingUndo,
@@ -325,7 +327,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     // Refs (not props) so the editorProps closures below — created once with
     // the editor — always resolve/write against the CURRENT document, even if
     // the same editor instance is reused across a path change.
-    const imageContextRef = useRef<ImageSrcContext>({ workspaceId, docPath: path });
+    const imageContextRef = useRef<ImageSrcContext>({
+      workspaceId,
+      docPath: path,
+      resolveWorkspaceAssetUrl,
+    });
     const pasteContextRef = useRef<ImagePasteContext>({
       workspaceId,
       docPath: path,
@@ -364,13 +370,17 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     });
 
     useEffect(() => {
-      imageContextRef.current = { workspaceId, docPath: path };
+      imageContextRef.current = {
+        workspaceId,
+        docPath: path,
+        resolveWorkspaceAssetUrl,
+      };
       pasteContextRef.current = {
         ...pasteContextRef.current,
         workspaceId,
         docPath: path,
       };
-    }, [workspaceId, path]);
+    }, [workspaceId, path, resolveWorkspaceAssetUrl]);
 
     useEffect(() => {
       linkMenuStateRef.current = linkMenuState;

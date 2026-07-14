@@ -25,7 +25,56 @@ let context: DemoBridgeContext = {
 
 const searchListeners = new Set<(batch: SearchResultsEvent) => void>();
 const activityListeners = new Set<() => void>();
+const assetUrls = new Map<string, string>();
 const now = Date.now();
+
+function mediaTypeForPath(path: string): string {
+  const extension = path.split(".").pop()?.toLocaleLowerCase();
+  return (
+    {
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      webp: "image/webp",
+      gif: "image/gif",
+      svg: "image/svg+xml",
+      avif: "image/avif",
+      bmp: "image/bmp",
+    }[extension ?? ""] ?? "application/octet-stream"
+  );
+}
+
+async function pickBrowserImages() {
+  return new Promise<Array<{ name: string; mediaType: string; bytes: Uint8Array }>>(
+    (resolve) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.multiple = true;
+      input.addEventListener(
+        "change",
+        async () => {
+          const files = Array.from(input.files ?? []).slice(0, 20);
+          const images = await Promise.all(
+            files.map(async (file) => ({
+              name: file.name,
+              mediaType: file.type || mediaTypeForPath(file.name),
+              bytes: new Uint8Array(await file.arrayBuffer()),
+            })),
+          );
+          resolve(images.filter((image) => image.bytes.byteLength <= 20 * 1024 * 1024));
+        },
+        { once: true },
+      );
+      input.addEventListener("cancel", () => resolve([]), { once: true });
+      input.click();
+    },
+  );
+}
+
+export function resolveDemoWorkspaceAssetUrl(workspacePath: string): string | null {
+  return assetUrls.get(workspacePath) ?? null;
+}
 
 function searchEntries(query: string, caseSensitive: boolean): SearchResultsEventEntry[] {
   const needle = caseSensitive ? query : query.toLocaleLowerCase();
@@ -182,6 +231,31 @@ const demoBridge = {
   },
   getDroppedFilePaths(_files: File[]) {
     return [];
+  },
+  async pickImageFiles() {
+    return { files: await pickBrowserImages() };
+  },
+  async writeWorkspaceAsset(payload: { relativePath: string; bytes: Uint8Array }) {
+    const previous = assetUrls.get(payload.relativePath);
+    if (previous) URL.revokeObjectURL(previous);
+    const bytes = new Uint8Array(payload.bytes).buffer;
+    assetUrls.set(
+      payload.relativePath,
+      URL.createObjectURL(new Blob([bytes], { type: mediaTypeForPath(payload.relativePath) })),
+    );
+  },
+  async getWorkspaceSettings() {
+    return {
+      settings: {
+        version: 1 as const,
+        agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
+        sites: { defaultPreviewMode: "auto" as const },
+        privacy: { confirmExternalLinks: true },
+        experimental: { workspaceEngineAlpha: true },
+        files: { attachmentLocation: "per-document" as const, attachmentFolderName: "assets" },
+      },
+      source: "default" as const,
+    };
   },
   onWorkspaceActivity(listener: () => void) {
     activityListeners.add(listener);

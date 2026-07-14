@@ -14,6 +14,9 @@ export type ImageSrcContext = {
   // The current document's workspace-relative path (e.g. `notes/plan.md`).
   // Relative image srcs resolve against this document's folder.
   docPath: string;
+  // Browser-hosted consumers can provide an in-memory asset URL while the
+  // desktop app keeps using its privileged dohc-file protocol.
+  resolveWorkspaceAssetUrl?: (workspacePath: string) => string | null;
 };
 
 // True when `src` is a plain path relative to the document — no URI scheme, not
@@ -111,6 +114,8 @@ export function resolveWorkspaceImageSrc(
   if (workspacePath.length === 0 || escapesWorkspaceRoot(workspacePath)) {
     return BLOCKED_IMAGE_SRC;
   }
+  const consumerUrl = context.resolveWorkspaceAssetUrl?.(workspacePath);
+  if (consumerUrl) return consumerUrl;
   return assetUrl(context.workspaceId, workspacePath);
 }
 

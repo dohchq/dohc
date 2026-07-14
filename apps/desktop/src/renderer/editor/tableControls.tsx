@@ -79,6 +79,7 @@ type TableDropTarget = {
   index: number;
   side: TableDropSide;
   destination: number;
+  bandElement: HTMLElement;
 };
 
 type TableDragState = {
@@ -553,12 +554,8 @@ function positionTableDragPreview(
   preview.style.transform = `translate3d(${clientX + 14}px, ${clientY + 14}px, 0)`;
 }
 
-function tableBandCount(table: HTMLTableElement, band: TableBand): number {
-  if (band === "row") return table.rows.length;
-  return table.rows[0]?.cells.length ?? 0;
-}
-
 function tableDropTargetFromPoint(
+  view: EditorView,
   drag: TableDragState,
   target: Element | null,
   clientX: number,
@@ -573,21 +570,54 @@ function tableDropTargetFromPoint(
   if (!bandElement) return null;
   const rect = bandElement.getBoundingClientRect();
   const pointer = drag.band === "row" ? clientY : clientX;
-  const midpoint =
-    drag.band === "row"
-      ? rect.top + rect.height / 2
-      : rect.left + rect.width / 2;
-  const side: TableDropSide = pointer < midpoint ? "before" : "after";
-  const index = drag.band === "row" ? row?.rowIndex ?? -1 : cell.cellIndex;
-  if (index < 0) return null;
+  const start = drag.band === "row" ? rect.top : rect.left;
+  const size = drag.band === "row" ? rect.height : rect.width;
+
+  // DOM rowIndex/cellIndex describe physical elements, not ProseMirror's
+  // logical table grid. Resolve the cell through TableMap so pasted rowspan
+  // and colspan cells target the same indexes the move commands consume.
+  const insideCell = view.posAtDOM(cell, 0);
+  const $cell = view.state.doc.resolve(insideCell);
+  let cellDepth = -1;
+  let tableDepth = -1;
+  for (let depth = $cell.depth; depth > 0; depth -= 1) {
+    const name = $cell.node(depth).type.name;
+    if (cellDepth < 0 && (name === "tableCell" || name === "tableHeader")) {
+      cellDepth = depth;
+    } else if (cellDepth >= 0 && name === "table") {
+      tableDepth = depth;
+      break;
+    }
+  }
+  if (cellDepth < 0 || tableDepth < 0) return null;
+  const tableNode = $cell.node(tableDepth);
+  const map = TableMap.get(tableNode);
+  const cellOffset = $cell.before(cellDepth) - $cell.start(tableDepth);
+  const cellRect = map.findCell(cellOffset);
+  const logicalStart = drag.band === "row" ? cellRect.top : cellRect.left;
+  const logicalEnd = drag.band === "row" ? cellRect.bottom : cellRect.right;
+  const span = Math.max(1, logicalEnd - logicalStart);
+  // A zero-size rect occurs in jsdom and transiently while Chromium lays out
+  // newly inserted decorations. Preserve the previous intuitive fallback:
+  // a pointer at/after the origin means the trailing edge.
+  const fraction =
+    size > 0
+      ? Math.min(0.999_999, Math.max(0, (pointer - start) / size))
+      : pointer < start
+        ? 0
+        : 0.999_999;
+  const scaled = fraction * span;
+  const index = logicalStart + Math.floor(scaled);
+  const side: TableDropSide = scaled - Math.floor(scaled) < 0.5 ? "before" : "after";
   return {
     index,
     side,
+    bandElement,
     destination: resolveTableDropDestination({
       sourceIndex: drag.index,
       targetIndex: index,
       side,
-      bandCount: tableBandCount(drag.tableElement, drag.band),
+      bandCount: drag.band === "row" ? map.height : map.width,
     }),
   };
 }
@@ -605,10 +635,7 @@ function markTableDropTarget(
   drag.tableElement
     .querySelector(gripSelector)
     ?.classList.add("is-drop-target");
-  markTableBand(
-    drag.tableElement,
-    drag.band,
-    target.index,
+  target.bandElement.classList.add(
     target.side === "before" ? "dohc-table-drop-before" : "dohc-table-drop-after",
   );
 }
@@ -650,7 +677,7 @@ function updateTableDragTarget(
   clientX: number,
   clientY: number,
 ): TableDropTarget | null {
-  const target = tableDropTargetFromPoint(drag, hitTarget, clientX, clientY);
+  const target = tableDropTargetFromPoint(view, drag, hitTarget, clientX, clientY);
   if (!target) {
     clearTableDropTargetChrome(view);
     drag.dropTarget = undefined;

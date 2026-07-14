@@ -68,6 +68,51 @@ function createLabeledTableEditor(): Editor {
   });
 }
 
+function createColspanTableEditor(): Editor {
+  return new Editor({
+    extensions: [
+      StarterKit,
+      TableKit.configure({ table: { resizable: true } }),
+      testTableControls,
+    ],
+    content: {
+      type: "doc",
+      content: [
+        {
+          type: "table",
+          content: [
+            {
+              type: "tableRow",
+              content: [
+                {
+                  type: "tableHeader",
+                  content: [{ type: "paragraph", content: [{ type: "text", text: "A" }] }],
+                },
+                {
+                  type: "tableHeader",
+                  attrs: { colspan: 2, rowspan: 1, colwidth: null },
+                  content: [{ type: "paragraph", content: [{ type: "text", text: "B+C" }] }],
+                },
+                {
+                  type: "tableHeader",
+                  content: [{ type: "paragraph", content: [{ type: "text", text: "D" }] }],
+                },
+              ],
+            },
+            {
+              type: "tableRow",
+              content: ["A", "B", "C", "D"].map((text) => ({
+                type: "tableCell",
+                content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+              })),
+            },
+          ],
+        },
+      ],
+    },
+  });
+}
+
 function menuItemByLabel(label: string): HTMLButtonElement {
   const menu = document.body.querySelector(".dohc-table-menu");
   if (!menu) throw new Error("grip menu did not open");
@@ -378,6 +423,34 @@ describe("table controls grips", () => {
       ["A1", "A2", "A3"],
       ["B1", "B2", "B3"],
     ]);
+  });
+
+  it("uses logical TableMap columns when a target cell follows a colspan", () => {
+    editor = createColspanTableEditor();
+    const source = editor.view.dom.querySelector(
+      '[data-table-column="0"]',
+    ) as HTMLElement;
+    const targetCell = editor.view.dom.querySelectorAll("tr")[0]?.cells[2];
+    if (!targetCell) throw new Error("colspan target cell missing");
+    Object.defineProperty(targetCell, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 100,
+        right: 200,
+        width: 100,
+        height: 40,
+      }),
+    });
+
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = targetCell;
+    dispatchPointer(source, "pointermove", { clientX: 110, clientY: 20 });
+    dispatchPointer(source, "pointerup", { clientX: 110, clientY: 20 });
+
+    expect(tableTextGrid(editor)[1]).toEqual(["B", "C", "A", "D"]);
   });
 
   it("maps before/after boundaries to stable final indexes", () => {
