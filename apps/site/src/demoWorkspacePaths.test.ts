@@ -21,6 +21,16 @@ describe("planDemoPathMove", () => {
     },
   );
 
+  it("rejects a destination path that already exists", () => {
+    expect(() =>
+      planDemoPathMove(
+        ["notes/a.md", "archive/a.md"],
+        "notes/a.md",
+        "archive/a.md",
+      ),
+    ).toThrow("A document already exists at archive/a.md");
+  });
+
   it("plans valid subtree moves", () => {
     expect(
       planDemoPathMove(
