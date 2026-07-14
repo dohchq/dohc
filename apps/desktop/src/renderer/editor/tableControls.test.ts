@@ -3,7 +3,10 @@ import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
 import { afterEach, describe, expect, it } from "vitest";
-import { makeTableControlsPlugin } from "./tableControls";
+import {
+  makeTableControlsPlugin,
+  resolveTableMenuPosition,
+} from "./tableControls";
 
 // ProseMirror's resize/drop plugins ask the browser for a hit-test while these
 // tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so
@@ -341,9 +344,96 @@ describe("table controls grips", () => {
     const grip = shadow.querySelector(".dohc-table-grip--col") as HTMLElement;
     click(grip);
 
-    expect(chrome.querySelector(".dohc-table-menu")).not.toBeNull();
+    expect(shadow.querySelector(".dohc-table-menu")).not.toBeNull();
+    expect(chrome.querySelector(".dohc-table-menu")).toBeNull();
     expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
     host.remove();
+  });
+
+  it("keeps a row menu next to its handle and repositions it when the pane scrolls", () => {
+    editor = createTableEditor(2, 2);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--row") as HTMLElement;
+    let top = 240;
+    Object.defineProperty(grip, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        left: 300,
+        right: 320,
+        top,
+        bottom: top + 20,
+        width: 20,
+        height: 20,
+      }),
+    });
+
+    click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    expect(menu.style.left).toBe("328px");
+    const before = menu.style.top;
+
+    top = 120;
+    window.dispatchEvent(new Event("scroll"));
+    expect(menu.style.left).toBe("328px");
+    expect(menu.style.top).not.toBe(before);
+  });
+
+  it("positions column menus below their handle and flips above near the viewport edge", () => {
+    const base = { left: 300, right: 320, width: 20, height: 20 };
+    expect(
+      resolveTableMenuPosition({
+        anchorRect: { ...base, top: 100, bottom: 120 },
+        placement: "column",
+        viewportWidth: 1000,
+        viewportHeight: 700,
+        menuHeight: 220,
+      }),
+    ).toEqual({ x: 200, y: 128 });
+    expect(
+      resolveTableMenuPosition({
+        anchorRect: { ...base, top: 650, bottom: 670 },
+        placement: "column",
+        viewportWidth: 1000,
+        viewportHeight: 700,
+        menuHeight: 220,
+      }),
+    ).toEqual({ x: 200, y: 422 });
+  });
+
+  it("keeps the dragged band highlighted while showing the full drop target", () => {
+    editor = createLabeledTableEditor();
+    const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+    const source = rowGrips[0] as HTMLElement;
+    const target = rowGrips[1] as HTMLElement;
+    let previewLabel = "";
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      setData: () => undefined,
+      setDragImage: (preview: Element) => {
+        previewLabel = preview.textContent ?? "";
+      },
+    };
+    const dispatch = (element: Element, type: string) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+      element.dispatchEvent(event);
+    };
+
+    dispatch(source, "dragstart");
+    dispatch(target, "dragover");
+
+    expect(previewLabel).toBe("Move row 1");
+    expect(source.classList.contains("is-dragging")).toBe(true);
+    expect(
+      source.closest("tr")?.classList.contains("dohc-table-drag-source"),
+    ).toBe(true);
+    expect(target.classList.contains("is-drop-target")).toBe(true);
+    expect(
+      target.closest("tr")?.classList.contains("dohc-table-drag-target"),
+    ).toBe(true);
+
+    dispatch(source, "dragend");
+    expect(editor.view.dom.querySelector(".is-dragging, .dohc-table-drag-target")).toBeNull();
   });
 
   it("column grip menu aligns every cell in the column (center) via the `align` attr", () => {

@@ -55,7 +55,6 @@ import {
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
 
 export const tableControlsKey = new PluginKey("dohc-table-controls");
 
@@ -72,6 +71,7 @@ type GripMenuItem = {
 };
 
 type TableBand = "column" | "row";
+type TableMenuPlacement = TableBand | "table";
 
 type TableDragState = {
   band: TableBand;
@@ -81,6 +81,63 @@ type TableDragState = {
 };
 
 let activeTableDrag: TableDragState | null = null;
+
+type RectLike = Pick<
+  DOMRect,
+  "left" | "right" | "top" | "bottom" | "width" | "height"
+>;
+
+export function resolveTableMenuPosition({
+  anchorRect,
+  placement,
+  viewportWidth,
+  viewportHeight,
+  menuWidth = 220,
+  menuHeight,
+  margin = 8,
+  gap = 8,
+}: {
+  anchorRect: RectLike;
+  placement: TableMenuPlacement;
+  viewportWidth: number;
+  viewportHeight: number;
+  menuWidth?: number;
+  menuHeight: number;
+  margin?: number;
+  gap?: number;
+}): { x: number; y: number } {
+  const clamp = (value: number, min: number, max: number) =>
+    Math.min(Math.max(value, min), Math.max(min, max));
+
+  if (placement === "row") {
+    const right = anchorRect.right + gap;
+    const left = anchorRect.left - menuWidth - gap;
+    const x = right + menuWidth <= viewportWidth - margin ? right : left;
+    return {
+      x: clamp(x, margin, viewportWidth - menuWidth - margin),
+      y: clamp(
+        anchorRect.top + anchorRect.height / 2 - menuHeight / 2,
+        margin,
+        viewportHeight - menuHeight - margin,
+      ),
+    };
+  }
+
+  const below = anchorRect.bottom + gap;
+  const above = anchorRect.top - menuHeight - gap;
+  return {
+    x: clamp(
+      anchorRect.left + anchorRect.width / 2 - menuWidth / 2,
+      margin,
+      viewportWidth - menuWidth - margin,
+    ),
+    y: clamp(
+      below + menuHeight <= viewportHeight - margin ? below : above,
+      margin,
+      viewportHeight - menuHeight - margin,
+    ),
+  };
+}
 
 function stopEvent(event: Event): void {
   event.preventDefault();
@@ -221,32 +278,29 @@ function tableMenuItems(): GripMenuItem[] {
 // SlashCommandMenu's handleKeyDown in MarkdownEditor.tsx.
 let closeOpenMenu: (() => void) | null = null;
 
-function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem[]): void {
+function openGripMenu(
+  view: EditorView,
+  anchor: HTMLElement,
+  items: GripMenuItem[],
+  placement: TableMenuPlacement,
+): void {
   closeOpenMenu?.();
   closeOpenMenu = null;
   if (view.editable === false || items.length === 0) return;
 
-  const rect = anchor.getBoundingClientRect();
-  const position = resolveFloatingMenuPosition({
-    cursorRect: { left: rect.left, top: rect.top, bottom: rect.bottom },
-    menuWidth: 220,
-    menuMaxHeight: 280,
-  });
-
   const ownerDocument = view.dom.ownerDocument;
   const ownerWindow = ownerDocument.defaultView ?? window;
   const editorRoot = view.dom.getRootNode();
-  const editorChrome = view.dom.closest<HTMLElement>(".dohc-tiptap-editor");
   const menuHost =
-    editorChrome ??
-    (editorRoot instanceof ShadowRoot ? editorRoot : ownerDocument.body);
+    editorRoot instanceof ownerWindow.ShadowRoot ? editorRoot : ownerDocument.body;
   const menu = ownerDocument.createElement("div");
   menu.className = "dohc-table-menu";
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", "table controls");
-  menu.style.left = `${position.x}px`;
-  menu.style.top = `${position.y}px`;
-  menu.style.maxHeight = `${position.maxHeight}px`;
+  const menuMaxHeight = Math.max(80, Math.min(280, ownerWindow.innerHeight - 16));
+  menu.style.maxHeight = `${menuMaxHeight}px`;
+  menu.style.visibility = "hidden";
+  menu.style.animation = "none";
 
   let selected = 0;
   const buttons: HTMLButtonElement[] = [];
@@ -313,9 +367,31 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
     close();
   }
 
+  function reposition(): void {
+    const anchorRect = anchor.getBoundingClientRect();
+    const measured = menu.getBoundingClientRect();
+    // jsdom has no layout and returns zero. The estimate also prevents a
+    // one-frame jump in a very slow renderer before the first measurement.
+    const menuHeight = Math.min(
+      menuMaxHeight,
+      measured.height || items.length * 35 + 10,
+    );
+    const position = resolveTableMenuPosition({
+      anchorRect,
+      placement,
+      viewportWidth: ownerWindow.innerWidth,
+      viewportHeight: ownerWindow.innerHeight,
+      menuHeight,
+    });
+    menu.style.left = `${position.x}px`;
+    menu.style.top = `${position.y}px`;
+  }
+
   function close(): void {
     ownerWindow.removeEventListener("keydown", onKeyDown, true);
     ownerWindow.removeEventListener("mousedown", onPointerDown, true);
+    ownerWindow.removeEventListener("resize", reposition);
+    ownerWindow.removeEventListener("scroll", reposition, true);
     anchor.classList.remove("is-open");
     anchor.setAttribute("aria-expanded", "false");
     menu.remove();
@@ -324,16 +400,71 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
 
   ownerWindow.addEventListener("keydown", onKeyDown, true);
   ownerWindow.addEventListener("mousedown", onPointerDown, true);
+  ownerWindow.addEventListener("resize", reposition);
+  ownerWindow.addEventListener("scroll", reposition, true);
   anchor.classList.add("is-open");
   anchor.setAttribute("aria-expanded", "true");
   menuHost.appendChild(menu);
+  reposition();
+  menu.style.removeProperty("visibility");
+  menu.style.removeProperty("animation");
   closeOpenMenu = close;
 }
 
-function clearTableDragChrome(view: EditorView): void {
+function clearTableDropTargetChrome(view: EditorView): void {
   view.dom
-    .querySelectorAll<HTMLElement>(".dohc-table-grip.is-dragging, .dohc-table-grip.is-drop-target")
-    .forEach((grip) => grip.classList.remove("is-dragging", "is-drop-target"));
+    .querySelectorAll<HTMLElement>(
+      ".dohc-table-grip.is-drop-target, .dohc-table-drag-target",
+    )
+    .forEach((element) =>
+      element.classList.remove("is-drop-target", "dohc-table-drag-target"),
+    );
+}
+
+function clearTableDragChrome(view: EditorView): void {
+  clearTableDropTargetChrome(view);
+  view.dom
+    .querySelectorAll<HTMLElement>(
+      ".dohc-table-grip.is-dragging, .dohc-table-drag-source, table.is-reordering",
+    )
+    .forEach((element) =>
+      element.classList.remove(
+        "is-dragging",
+        "dohc-table-drag-source",
+        "is-reordering",
+      ),
+    );
+}
+
+function markTableBand(
+  button: HTMLButtonElement,
+  band: TableBand,
+  index: number,
+  className: string,
+): void {
+  const table = button.closest("table");
+  if (!table) return;
+  if (band === "row") {
+    button.closest("tr")?.classList.add(className);
+    return;
+  }
+  Array.from(table.rows).forEach((row) => row.cells[index]?.classList.add(className));
+}
+
+function setTableDragPreview(
+  view: EditorView,
+  event: DragEvent,
+  band: TableBand,
+  index: number,
+): void {
+  if (!event.dataTransfer?.setDragImage) return;
+  const ownerDocument = view.dom.ownerDocument;
+  const preview = ownerDocument.createElement("div");
+  preview.className = "dohc-table-drag-preview";
+  preview.textContent = `Move ${band} ${index + 1}`;
+  ownerDocument.body.appendChild(preview);
+  event.dataTransfer.setDragImage(preview, 14, 14);
+  (ownerDocument.defaultView ?? window).setTimeout(() => preview.remove(), 0);
 }
 
 function configureGripDrag(
@@ -358,9 +489,12 @@ function configureGripDrag(
     if (band === "column") selectColumn(view, cellPos);
     else selectRow(view, cellPos);
 
+    button.closest("table")?.classList.add("is-reordering");
     button.classList.add("is-dragging");
+    markTableBand(button, band, index, "dohc-table-drag-source");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", `dohc-table-${band}-${index}`);
+    setTableDragPreview(view, event, band, index);
   });
 
   button.addEventListener("dragover", (event) => {
@@ -375,12 +509,16 @@ function configureGripDrag(
     event.preventDefault();
     event.stopPropagation();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    clearTableDragChrome(view);
+    clearTableDropTargetChrome(view);
     button.classList.add("is-drop-target");
+    markTableBand(button, band, index, "dohc-table-drag-target");
   });
 
   button.addEventListener("dragleave", () => {
     button.classList.remove("is-drop-target");
+    view.dom
+      .querySelectorAll<HTMLElement>(".dohc-table-drag-target")
+      .forEach((element) => element.classList.remove("dohc-table-drag-target"));
   });
 
   button.addEventListener("drop", (event) => {
@@ -433,7 +571,7 @@ function buildColumnGrip(
   button.addEventListener("click", (event) => {
     stopEvent(event);
     selectColumn(view, cellPos);
-    openGripMenu(view, button, columnMenuItems(cellPos));
+    openGripMenu(view, button, columnMenuItems(cellPos), "column");
   });
   return button;
 }
@@ -460,7 +598,7 @@ function buildRowGrip(
   button.addEventListener("click", (event) => {
     stopEvent(event);
     selectRow(view, cellPos);
-    openGripMenu(view, button, rowMenuItems());
+    openGripMenu(view, button, rowMenuItems(), "row");
   });
   return button;
 }
@@ -477,7 +615,7 @@ function buildTableMenuButton(view: EditorView, cellPos: number): HTMLElement {
   button.addEventListener("click", (event) => {
     stopEvent(event);
     focusCell(view, cellPos);
-    openGripMenu(view, button, tableMenuItems());
+    openGripMenu(view, button, tableMenuItems(), "table");
   });
   return button;
 }
@@ -685,8 +823,8 @@ export function makeTableControlsPlugin(): Plugin {
         // columnMenuItems). If the doc shifts while it's open — e.g. a remote
         // collab edit inserting/removing a column — that offset goes stale and
         // an "Align …" click would target the wrong column. The menu is a
-        // detached body element, not a decoration, so it isn't rebuilt with the
-        // grips; tear it down on any doc change instead.
+        // detached overlay element, not a decoration, so it isn't rebuilt with
+        // the grips; tear it down on any doc change instead.
         update(view, prevState) {
           if (closeOpenMenu && !view.state.doc.eq(prevState.doc)) {
             closeOpenMenu();
