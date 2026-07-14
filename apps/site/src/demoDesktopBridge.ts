@@ -36,7 +36,11 @@ const activityListeners = new Set<() => void>();
 const assetUrls = new Map<string, string>();
 const ASSET_DB_NAME = "dohc-marketing-demo";
 const ASSET_STORE_NAME = "workspace-assets";
+export const DEMO_ASSET_PERSISTENCE_EVENT =
+  "dohc-demo-asset-persistence-unavailable";
 const now = Date.now();
+let assetPersistenceAvailable =
+  typeof window !== "undefined" && "indexedDB" in window;
 
 type StoredDemoAsset = {
   path: string;
@@ -128,6 +132,27 @@ async function rewriteStoredAssets(
   }
 }
 
+function markAssetPersistenceUnavailable(error: unknown): void {
+  if (!assetPersistenceAvailable) return;
+  assetPersistenceAvailable = false;
+  console.warn(
+    "Demo asset persistence is unavailable; assets will remain in this session only.",
+    error,
+  );
+  window.dispatchEvent(new Event(DEMO_ASSET_PERSISTENCE_EVENT));
+}
+
+async function persistAssetMutation(
+  mutation: () => Promise<void>,
+): Promise<void> {
+  if (!assetPersistenceAvailable) return;
+  try {
+    await mutation();
+  } catch (error) {
+    markAssetPersistenceUnavailable(error);
+  }
+}
+
 function rewriteAssetUrls(prefix: string, nextPrefix: string | null): void {
   const affected = [...assetUrls.entries()].filter(([path]) =>
     isPathAtOrBelow(path, prefix),
@@ -143,15 +168,19 @@ function rewriteAssetUrls(prefix: string, nextPrefix: string | null): void {
 }
 
 export async function hydrateDemoWorkspaceAssets(): Promise<void> {
-  if (!("indexedDB" in window)) return;
+  if (!assetPersistenceAvailable) return;
   try {
     const assets = await readStoredAssets();
     for (const asset of assets) {
       setAssetUrl(asset.path, asset.mediaType, asset.bytes);
     }
-  } catch {
-    // Private browsing may disable IndexedDB; the current session still works.
+  } catch (error) {
+    markAssetPersistenceUnavailable(error);
   }
+}
+
+export function demoWorkspaceAssetsPersistAcrossSessions(): boolean {
+  return assetPersistenceAvailable;
 }
 
 function mediaTypeForPath(path: string): string {
@@ -418,9 +447,9 @@ const demoBridge = {
       payload.fromPath,
       payload.toPath,
     );
-    if ("indexedDB" in window) {
-      await rewriteStoredAssets(payload.fromPath, payload.toPath);
-    }
+    await persistAssetMutation(() =>
+      rewriteStoredAssets(payload.fromPath, payload.toPath),
+    );
     context.movePath(payload.fromPath, payload.toPath);
     context.documents = context.documents.map((document) => ({
       ...document,
@@ -441,9 +470,9 @@ const demoBridge = {
     if (!workspacePaths.some((path) => isPathAtOrBelow(path, payload.relativePath))) {
       throw new Error(`No workspace entry exists at ${payload.relativePath}`);
     }
-    if ("indexedDB" in window) {
-      await rewriteStoredAssets(payload.relativePath, null);
-    }
+    await persistAssetMutation(() =>
+      rewriteStoredAssets(payload.relativePath, null),
+    );
     context.deletePath(payload.relativePath);
     context.documents = context.documents.filter(
       (document) => !isPathAtOrBelow(document.path, payload.relativePath),
@@ -469,9 +498,9 @@ const demoBridge = {
   async writeWorkspaceAsset(payload: { relativePath: string; bytes: Uint8Array }) {
     const bytes = new Uint8Array(payload.bytes).buffer;
     const mediaType = mediaTypeForPath(payload.relativePath);
-    if ("indexedDB" in window) {
-      await persistAsset({ path: payload.relativePath, mediaType, bytes });
-    }
+    await persistAssetMutation(() =>
+      persistAsset({ path: payload.relativePath, mediaType, bytes }),
+    );
     setAssetUrl(payload.relativePath, mediaType, bytes);
   },
   async getWorkspaceSettings() {

@@ -36,6 +36,8 @@ import {
 } from "./DemoSidebar";
 import {
   configureDemoDesktopBridge,
+  DEMO_ASSET_PERSISTENCE_EVENT,
+  demoWorkspaceAssetsPersistAcrossSessions,
   resolveDemoWorkspaceAssetUrl,
 } from "./demoDesktopBridge";
 import {
@@ -206,6 +208,8 @@ export function ProductDemo() {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [showSource, setShowSource] = useState(false);
   const [sourceText, setSourceText] = useState("");
+  const [assetsPersistAcrossSessions, setAssetsPersistAcrossSessions] =
+    useState(demoWorkspaceAssetsPersistAcrossSessions);
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const saveFrame = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -256,6 +260,13 @@ export function ProductDemo() {
       attributeFilter: ["data-theme"],
     });
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const markSessionOnly = () => setAssetsPersistAcrossSessions(false);
+    window.addEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
+    return () =>
+      window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
   }, []);
 
   useEffect(
@@ -614,7 +625,17 @@ export function ProductDemo() {
 
       <footer className="demo-statusbar">
         <span>personal</span>
-        <span className="demo-status-local">Local · {saveState}</span>
+        <span
+          className="demo-status-local"
+          title={
+            assetsPersistAcrossSessions
+              ? undefined
+              : "Image assets will remain available for this browser session only."
+          }
+        >
+          Local · {saveState}
+          {!assetsPersistAcrossSessions ? " · assets session-only" : ""}
+        </span>
         <span className="demo-status-right">
           <Bell size={12} aria-hidden />
           <Cloud size={12} aria-hidden />
