@@ -160,7 +160,7 @@ describe("blockControls delete", () => {
     expect(editor.state.doc.child(0).textContent).toBe("First");
   });
 
-  it.each([
+  const deletableBlocks = [
     ["code block", { type: "codeBlock", content: [{ type: "text", text: "code" }] }],
     ["divider", { type: "horizontalRule" }],
     [
@@ -181,7 +181,13 @@ describe("blockControls delete", () => {
       },
     ],
     ["math block", { type: "mathBlock", attrs: { tex: "1+1=2" } }],
-  ])("deletes a selected %s with Backspace", (_label, target) => {
+  ] as const;
+
+  it.each(
+    (["Backspace", "Delete"] as const).flatMap((key) =>
+      deletableBlocks.map(([label, target]) => [label, key, target] as const),
+    ),
+  )("deletes a selected %s with %s", (_label, key, target) => {
     const editor = track(
       makeEditorWithControls({
         type: "doc",
@@ -195,7 +201,7 @@ describe("blockControls delete", () => {
     const [, selected] = topLevelBlocks(editor);
     selectBlock(editor, selected.pos);
 
-    const event = new KeyboardEvent("keydown", { key: "Backspace", bubbles: true });
+    const event = new KeyboardEvent("keydown", { key, bubbles: true });
     editor.view.dom.dispatchEvent(event);
 
     expect(topLevelBlocks(editor).map((block) => block.type)).toEqual([
@@ -300,6 +306,13 @@ describe("blockControls gutter coverage", () => {
     code?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
     expect(controls[1]?.classList.contains("is-visible")).toBe(true);
     expect(controls[0]?.classList.contains("is-visible")).toBe(false);
+
+    editor.view.dom.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true }),
+    );
+    expect(controls.every((control) => !control.classList.contains("is-visible"))).toBe(
+      true,
+    );
   });
 });
 

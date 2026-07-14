@@ -418,6 +418,9 @@ const demoBridge = {
       payload.fromPath,
       payload.toPath,
     );
+    if ("indexedDB" in window) {
+      await rewriteStoredAssets(payload.fromPath, payload.toPath);
+    }
     context.movePath(payload.fromPath, payload.toPath);
     context.documents = context.documents.map((document) => ({
       ...document,
@@ -427,14 +430,20 @@ const demoBridge = {
       rewritePathPrefix(folder, payload.fromPath, payload.toPath),
     );
     rewriteAssetUrls(payload.fromPath, payload.toPath);
-    if ("indexedDB" in window) {
-      await rewriteStoredAssets(payload.fromPath, payload.toPath).catch(
-        () => undefined,
-      );
-    }
     return { path: payload.toPath };
   },
   async deleteWorkspacePath(payload: { relativePath: string }) {
+    const workspacePaths = collectWorkspacePaths([
+      ...context.documents.map((document) => document.path),
+      ...context.folders,
+      ...assetUrls.keys(),
+    ]);
+    if (!workspacePaths.some((path) => isPathAtOrBelow(path, payload.relativePath))) {
+      throw new Error(`No workspace entry exists at ${payload.relativePath}`);
+    }
+    if ("indexedDB" in window) {
+      await rewriteStoredAssets(payload.relativePath, null);
+    }
     context.deletePath(payload.relativePath);
     context.documents = context.documents.filter(
       (document) => !isPathAtOrBelow(document.path, payload.relativePath),
@@ -443,9 +452,6 @@ const demoBridge = {
       (folder) => !isPathAtOrBelow(folder, payload.relativePath),
     );
     rewriteAssetUrls(payload.relativePath, null);
-    if ("indexedDB" in window) {
-      await rewriteStoredAssets(payload.relativePath, null).catch(() => undefined);
-    }
     return { trashed: true };
   },
   async showExplorerMenu() {
@@ -463,12 +469,10 @@ const demoBridge = {
   async writeWorkspaceAsset(payload: { relativePath: string; bytes: Uint8Array }) {
     const bytes = new Uint8Array(payload.bytes).buffer;
     const mediaType = mediaTypeForPath(payload.relativePath);
-    setAssetUrl(payload.relativePath, mediaType, bytes);
     if ("indexedDB" in window) {
-      await persistAsset({ path: payload.relativePath, mediaType, bytes }).catch(
-        () => undefined,
-      );
+      await persistAsset({ path: payload.relativePath, mediaType, bytes });
     }
+    setAssetUrl(payload.relativePath, mediaType, bytes);
   },
   async getWorkspaceSettings() {
     return {

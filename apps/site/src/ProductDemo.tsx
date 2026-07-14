@@ -39,6 +39,7 @@ import {
   resolveDemoWorkspaceAssetUrl,
 } from "./demoDesktopBridge";
 import {
+  collectWorkspacePaths,
   isPathAtOrBelow,
   planDemoPathMove,
   rewritePathPrefix,
@@ -173,11 +174,13 @@ function initialSidebarVisible(): boolean {
 
 export function ProductDemo() {
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme);
-  const [activePath, setActivePath] = useState(DEMO_DOCUMENTS[0].path);
+  const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts);
+  const [activePath, setActivePath] = useState(
+    () => Object.keys(drafts)[0] ?? DEMO_DOCUMENTS[0].path,
+  );
   const [activeActivity, setActiveActivity] =
     useState<DemoPanelId>("explorer");
   const [sidebarVisible, setSidebarVisible] = useState(initialSidebarVisible);
-  const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts);
   const [emptyFolders, setEmptyFolders] = useState<string[]>([]);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [showSource, setShowSource] = useState(false);
@@ -314,9 +317,15 @@ export function ProductDemo() {
 
   const createDocument = useCallback(() => {
     storeDraft(activePath, composeCurrentDocument());
+    const workspacePaths = new Set(
+      collectWorkspacePaths([
+        ...Object.keys(draftsRef.current),
+        ...emptyFolders,
+      ]),
+    );
     let index = 1;
     let path = "notes/quick-note.md";
-    while (drafts[path]) {
+    while (workspacePaths.has(path)) {
       index += 1;
       path = `notes/quick-note-${index}.md`;
     }
@@ -327,7 +336,7 @@ export function ProductDemo() {
     setShowSource(false);
     setActivePath(path);
     setSaveState("saved");
-  }, [activePath, composeCurrentDocument, drafts, storeDraft]);
+  }, [activePath, composeCurrentDocument, emptyFolders, storeDraft]);
 
   const createDocumentAtPath = useCallback(
     (path: string) => {

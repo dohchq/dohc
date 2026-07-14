@@ -34,6 +34,12 @@ export function planDemoPathMove(
   toPath: string,
 ): DemoPathMove[] {
   const sourcePaths = paths.filter((path) => isPathAtOrBelow(path, fromPath));
+  if (sourcePaths.length === 0) {
+    throw new Error(`No workspace entry exists at ${fromPath}`);
+  }
+  if (isPathAtOrBelow(toPath, fromPath)) {
+    throw new Error("A workspace path cannot be moved inside itself");
+  }
   const sourceSet = new Set(sourcePaths);
   const existingPaths = new Set(paths);
   const moves = sourcePaths.map((sourcePath) => ({
