@@ -824,8 +824,7 @@ body {
 }
 
 .dohc-code-language-select,
-.dohc-code-copy-btn,
-.dohc-code-block-continue-btn {
+.dohc-code-copy-btn {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -838,8 +837,7 @@ body {
 }
 
 .dohc-code-language-select:hover,
-.dohc-code-copy-btn:hover,
-.dohc-code-block-continue-btn:hover {
+.dohc-code-copy-btn:hover {
   border-color: var(--dohc-line);
   background: var(--dohc-line);
   color: var(--dohc-ink);
@@ -847,16 +845,6 @@ body {
 
 .dohc-code-copy-btn {
   padding: 2px 7px;
-}
-
-.dohc-code-block-continuation {
-  max-width: var(--dohc-editor-measure);
-}
-
-.dohc-code-block-continue-btn {
-  margin: 2px 0 10px;
-  width: 22px;
-  height: 20px;
 }
 
 .dohc-slash-menu,

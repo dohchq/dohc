@@ -21,6 +21,7 @@ import { dohcMarkdownExtensions } from "./extensions";
 import { MarkdownEditor } from "./MarkdownEditor";
 import {
   findEmptyListItemParagraph,
+  makeCodeBlockChromePlugin,
   makeCodeBlockContinuationPlugin,
 } from "./codeBlockChrome";
 import {
@@ -311,6 +312,25 @@ describe("MarkdownEditor code block continuation", () => {
     );
     return handled === true;
   }
+
+  it("keeps code-block exit in the normal editor flow without a permanent plus button", () => {
+    const chromeExtension = Extension.create({
+      name: "testCodeBlockChrome",
+      addProseMirrorPlugins() {
+        return [makeCodeBlockChromePlugin()];
+      },
+    });
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit.configure({ trailingNode: false }), chromeExtension],
+      content: '<pre><code class="language-js">code</code></pre>',
+    });
+
+    expect(editor.view.dom.querySelector(".dohc-code-block-toolbar")).not.toBeNull();
+    expect(editor.view.dom.querySelector(".dohc-code-block-continuation")).toBeNull();
+    expect(editor.view.dom.querySelector(".dohc-code-block-continue-btn")).toBeNull();
+    editor.destroy();
+  });
 
   it("ArrowDown at end of a code block with content after falls through to native navigation", () => {
     const editor = makeEditor("```\ncode\n```\n\nSome text");
