@@ -558,6 +558,23 @@ function positionTableDragPreview(
   preview.style.transform = `translate3d(${clientX + 14}px, ${clientY + 14}px, 0)`;
 }
 
+function editorElementFromPoint(
+  view: EditorView,
+  clientX: number,
+  clientY: number,
+): Element | null {
+  const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView ?? window;
+  const root = view.dom.getRootNode();
+  if (
+    root instanceof ownerWindow.ShadowRoot &&
+    typeof root.elementFromPoint === "function"
+  ) {
+    return root.elementFromPoint(clientX, clientY);
+  }
+  return ownerDocument.elementFromPoint(clientX, clientY);
+}
+
 function tableDropTargetFromPoint(
   view: EditorView,
   drag: TableDragState,
@@ -859,7 +876,7 @@ function configureGripDrag(
       return;
     }
     const drag = runtime.activeDrag;
-    const hitTarget = view.dom.ownerDocument.elementFromPoint(clientX, clientY);
+    const hitTarget = editorElementFromPoint(view, clientX, clientY);
     const previousTarget = drag.dropTarget;
     const target =
       (hitTarget
@@ -887,10 +904,7 @@ function configureGripDrag(
     event.preventDefault();
     event.stopPropagation();
     positionTableDragPreview(pointerSession.preview, event.clientX, event.clientY);
-    const hitTarget = view.dom.ownerDocument.elementFromPoint(
-      event.clientX,
-      event.clientY,
-    );
+    const hitTarget = editorElementFromPoint(view, event.clientX, event.clientY);
     updateTableDragTarget(view, drag, hitTarget, event.clientX, event.clientY);
   }
 

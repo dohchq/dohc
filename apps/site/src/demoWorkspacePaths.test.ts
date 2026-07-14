@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { planDemoPathMove } from "./demoWorkspacePaths";
+import { findFileAncestor, planDemoPathMove } from "./demoWorkspacePaths";
+
+describe("findFileAncestor", () => {
+  it("finds a file that would become a candidate path's parent", () => {
+    expect(
+      findFileAncestor(["welcome.md", "notes/existing.md"], "welcome.md/child.md"),
+    ).toBe("welcome.md");
+    expect(
+      findFileAncestor(["welcome.md", "notes/existing.md"], "notes/new.md"),
+    ).toBeNull();
+  });
+});
 
 describe("planDemoPathMove", () => {
   it("rejects a missing source path", () => {

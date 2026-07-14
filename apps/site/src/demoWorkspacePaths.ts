@@ -18,6 +18,19 @@ export function isPathAtOrBelow(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`);
 }
 
+export function findFileAncestor(
+  filePaths: readonly string[],
+  candidatePath: string,
+): string | null {
+  const files = new Set(filePaths);
+  const parts = candidatePath.split("/");
+  for (let length = 1; length < parts.length; length += 1) {
+    const ancestor = parts.slice(0, length).join("/");
+    if (files.has(ancestor)) return ancestor;
+  }
+  return null;
+}
+
 export function rewritePathPrefix(
   path: string,
   fromPath: string,

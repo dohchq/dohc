@@ -142,27 +142,33 @@ function initialDrafts(): Record<string, string> {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return defaults;
-    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return defaults;
+    }
+    const restored: Record<string, string> = {};
     for (const [path, markdown] of Object.entries(parsed)) {
       if (
         typeof markdown === "string" &&
         path.endsWith(".md") &&
         !path.split("/").includes("..")
       ) {
-        defaults[path] = markdown;
+        restored[path] = markdown;
       }
     }
+    return Object.keys(restored).length > 0 ? restored : defaults;
   } catch {
     // A blocked or malformed localStorage entry should never stop the demo.
   }
   return defaults;
 }
 
-function persistDrafts(drafts: Record<string, string>): void {
+function persistDrafts(drafts: Record<string, string>): boolean {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts));
+    return true;
   } catch {
-    // The in-memory editor still works when persistence is unavailable.
+    return false;
   }
 }
 
@@ -179,11 +185,23 @@ function initialFolders(): string[] {
   }
 }
 
-function persistFolders(folders: string[]): void {
+function persistFolders(folders: string[]): boolean {
   try {
     localStorage.setItem(FOLDERS_STORAGE_KEY, JSON.stringify(folders));
+    return true;
   } catch {
-    // The in-memory explorer still works when persistence is unavailable.
+    return false;
+  }
+}
+
+function localStorageIsAvailable(): boolean {
+  const key = "dohc-marketing-demo-storage-check";
+  try {
+    localStorage.setItem(key, key);
+    localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -210,6 +228,8 @@ export function ProductDemo() {
   const [sourceText, setSourceText] = useState("");
   const [assetsPersistAcrossSessions, setAssetsPersistAcrossSessions] =
     useState(demoWorkspaceAssetsPersistAcrossSessions);
+  const [workspacePersistsAcrossSessions, setWorkspacePersistsAcrossSessions] =
+    useState(localStorageIsAvailable);
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const saveFrame = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -278,11 +298,11 @@ export function ProductDemo() {
   );
 
   useEffect(() => {
-    persistDrafts(drafts);
+    if (!persistDrafts(drafts)) setWorkspacePersistsAcrossSessions(false);
   }, [drafts]);
 
   useEffect(() => {
-    persistFolders(emptyFolders);
+    if (!persistFolders(emptyFolders)) setWorkspacePersistsAcrossSessions(false);
   }, [emptyFolders]);
 
   const composeCurrentDocument = useCallback(
@@ -628,13 +648,19 @@ export function ProductDemo() {
         <span
           className="demo-status-local"
           title={
-            assetsPersistAcrossSessions
-              ? undefined
-              : "Image assets will remain available for this browser session only."
+            !workspacePersistsAcrossSessions
+              ? "Workspace changes will remain available for this browser session only."
+              : !assetsPersistAcrossSessions
+                ? "Image assets will remain available for this browser session only."
+                : undefined
           }
         >
           Local · {saveState}
-          {!assetsPersistAcrossSessions ? " · assets session-only" : ""}
+          {!workspacePersistsAcrossSessions
+            ? " · workspace session-only"
+            : !assetsPersistAcrossSessions
+              ? " · assets session-only"
+              : ""}
         </span>
         <span className="demo-status-right">
           <Bell size={12} aria-hidden />

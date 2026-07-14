@@ -2,6 +2,7 @@ import type { SearchResultsEvent, SearchResultsEventEntry } from "../../desktop/
 import type { DohcDesktopBridge } from "../../desktop/src/ipc/bridgeContract";
 import {
   collectWorkspacePaths,
+  findFileAncestor,
   isPathAtOrBelow,
   planDemoPathMove,
   rewritePathPrefix,
@@ -278,24 +279,70 @@ type DemoDesktopBridge = Pick<
   | "startDm"
 >;
 
-function searchEntries(query: string, caseSensitive: boolean): SearchResultsEventEntry[] {
-  const needle = caseSensitive ? query : query.toLocaleLowerCase();
-  if (!needle.trim()) return [];
+export type DemoSearchOptions = {
+  query: string;
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  regex?: boolean;
+  includeGlob?: string;
+  excludeGlob?: string;
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function globRegExp(glob: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < glob.length; index += 1) {
+    const character = glob[index] ?? "";
+    if (character === "*" && glob[index + 1] === "*") {
+      const followedBySlash = glob[index + 2] === "/";
+      source += followedBySlash ? "(?:.*/)?" : ".*";
+      index += followedBySlash ? 2 : 1;
+    } else if (character === "*") {
+      source += "[^/]*";
+    } else if (character === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegExp(character);
+    }
+  }
+  return new RegExp(`${source}$`, "i");
+}
+
+export function searchDemoDocuments(
+  documents: readonly DemoBridgeDocument[],
+  options: DemoSearchOptions,
+): SearchResultsEventEntry[] {
+  if (!options.query.trim()) return [];
+  let pattern = options.regex ? options.query : escapeRegExp(options.query);
+  if (options.wholeWord) pattern = `\\b(?:${pattern})\\b`;
+  let expression: RegExp;
+  try {
+    expression = new RegExp(pattern, options.caseSensitive ? "u" : "iu");
+  } catch {
+    return [];
+  }
+  const include = options.includeGlob ? globRegExp(options.includeGlob) : null;
+  const exclude = options.excludeGlob ? globRegExp(options.excludeGlob) : null;
   const entries: SearchResultsEventEntry[] = [];
-  for (const document of context.documents) {
+  for (const document of documents) {
+    if (include && !include.test(document.path)) continue;
+    if (exclude?.test(document.path)) continue;
     const lines = `${document.title}\n${document.body}`.split("\n");
     for (let index = 0; index < lines.length; index += 1) {
       const preview = lines[index] ?? "";
-      const haystack = caseSensitive ? preview : preview.toLocaleLowerCase();
-      const matchStart = haystack.indexOf(needle);
-      if (matchStart === -1) continue;
+      const match = expression.exec(preview);
+      if (!match) continue;
+      const matchStart = match.index;
       entries.push({
         path: document.path,
         line: index + 1,
         column: matchStart + 1,
         preview: preview.slice(0, 250),
         matchStart,
-        matchEnd: matchStart + needle.length,
+        matchEnd: matchStart + match[0].length,
         surface: "file",
       });
       if (entries.length >= 48) return entries;
@@ -360,7 +407,7 @@ const demoBridge = {
   ) {
     const batch: SearchResultsEvent = {
       searchId: payload.searchId,
-      entries: searchEntries(payload.query, payload.caseSensitive ?? false),
+      entries: searchDemoDocuments(context.documents, payload),
       done: true,
       limitHit: false,
     };
@@ -409,8 +456,13 @@ const demoBridge = {
     };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {
+    const filePaths = context.documents.map((document) => document.path);
+    const fileAncestor = findFileAncestor(filePaths, payload.relativePath);
+    if (fileAncestor) {
+      throw new Error(`A file cannot contain ${payload.relativePath}: ${fileAncestor}`);
+    }
     const workspacePaths = collectWorkspacePaths([
-      ...context.documents.map((document) => document.path),
+      ...filePaths,
       ...context.folders,
     ]);
     if (workspacePaths.includes(payload.relativePath)) {
@@ -425,8 +477,13 @@ const demoBridge = {
     return { path: payload.relativePath };
   },
   async createWorkspaceFolder(payload: { relativePath: string }) {
+    const filePaths = context.documents.map((document) => document.path);
+    const fileAncestor = findFileAncestor(filePaths, payload.relativePath);
+    if (fileAncestor) {
+      throw new Error(`A file cannot contain ${payload.relativePath}: ${fileAncestor}`);
+    }
     const workspacePaths = collectWorkspacePaths([
-      ...context.documents.map((document) => document.path),
+      ...filePaths,
       ...context.folders,
     ]);
     if (workspacePaths.includes(payload.relativePath)) {
@@ -437,6 +494,13 @@ const demoBridge = {
     return { path: payload.relativePath };
   },
   async moveWorkspacePath(payload: { fromPath: string; toPath: string }) {
+    const fileAncestor = findFileAncestor(
+      context.documents.map((document) => document.path),
+      payload.toPath,
+    );
+    if (fileAncestor) {
+      throw new Error(`A file cannot contain ${payload.toPath}: ${fileAncestor}`);
+    }
     const workspacePaths = collectWorkspacePaths([
       ...context.documents.map((document) => document.path),
       ...context.folders,

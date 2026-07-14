@@ -583,13 +583,27 @@ describe("table controls grips", () => {
     expect(shadow.querySelector(".dohc-table-menu")).toBeNull();
 
     const currentGrip = shadow.querySelector(".dohc-table-grip--col") as HTMLElement;
-    elementFromPointResult = currentGrip;
+    const targetCell = shadow.querySelectorAll("th, td")[2] as HTMLElement;
+    let shadowHitTarget: Element | null = currentGrip;
+    Object.defineProperty(shadow, "elementFromPoint", {
+      configurable: true,
+      value: () => shadowHitTarget,
+    });
+    // A document-level hit test sees only the host. The embedded editor must
+    // ask its shadow root to resolve the actual table cell under the pointer.
+    elementFromPointResult = host;
     dispatchPointer(currentGrip, "pointerdown");
+    shadowHitTarget = targetCell;
     dispatchPointer(currentGrip, "pointermove", { clientX: 10, clientY: 10 });
     expect(shadow.querySelector(".dohc-table-drag-preview")).not.toBeNull();
     expect(shadow.querySelector("[data-dohc-table-drag-status]")).not.toBeNull();
     expect(document.body.querySelector(".dohc-table-drag-preview")).toBeNull();
+    expect(
+      targetCell.classList.contains("dohc-table-drop-before") ||
+        targetCell.classList.contains("dohc-table-drop-after"),
+    ).toBe(true);
     dispatchPointer(currentGrip, "pointercancel", { clientX: 10, clientY: 10 });
+    shadowHitTarget = null;
     elementFromPointResult = null;
     host.remove();
   });
