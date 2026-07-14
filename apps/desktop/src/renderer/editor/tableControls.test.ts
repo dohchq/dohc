@@ -5,6 +5,14 @@ import { TableKit } from "@tiptap/extension-table";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeTableControlsPlugin } from "./tableControls";
 
+// ProseMirror's resize/drop plugins ask the browser for a hit-test while these
+// tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so
+// provide the inert browser API those unrelated plugins expect.
+Object.defineProperty(document, "elementFromPoint", {
+  configurable: true,
+  value: () => null,
+});
+
 const testTableControls = Extension.create({
   name: "testTableControls",
   addProseMirrorPlugins() {
@@ -25,6 +33,36 @@ function createTableEditor(rows = 2, cols = 2): Editor {
   return editor;
 }
 
+function createLabeledTableEditor(): Editor {
+  return new Editor({
+    extensions: [
+      StarterKit,
+      TableKit.configure({ table: { resizable: true } }),
+      testTableControls,
+    ],
+    content: {
+      type: "doc",
+      content: [
+        {
+          type: "table",
+          content: ["A", "B", "C"].map((rowLabel) => ({
+            type: "tableRow",
+            content: ["1", "2", "3"].map((columnLabel) => ({
+              type: rowLabel === "A" ? "tableHeader" : "tableCell",
+              content: [
+                {
+                  type: "paragraph",
+                  content: [{ type: "text", text: `${rowLabel}${columnLabel}` }],
+                },
+              ],
+            })),
+          })),
+        },
+      ],
+    },
+  });
+}
+
 function menuItemByLabel(label: string): HTMLButtonElement {
   const menu = document.body.querySelector(".dohc-table-menu");
   if (!menu) throw new Error("grip menu did not open");
@@ -38,6 +76,23 @@ function menuItemByLabel(label: string): HTMLButtonElement {
 function click(el: Element): void {
   el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
   el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+}
+
+function drag(source: Element, target: Element): void {
+  const dataTransfer = {
+    effectAllowed: "none",
+    dropEffect: "none",
+    setData: () => undefined,
+  };
+  const dispatch = (element: Element, type: string) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+    element.dispatchEvent(event);
+  };
+  dispatch(source, "dragstart");
+  dispatch(target, "dragover");
+  dispatch(target, "drop");
+  dispatch(source, "dragend");
 }
 
 // `editor.getJSON()`'s type is inferred from the registered extensions
@@ -63,6 +118,17 @@ function columnAligns(editor: Editor, colIndex: number): (string | null)[] {
   );
 }
 
+function tableTextGrid(editor: Editor): string[][] {
+  return (tableNode(editor).content ?? []).map((row) =>
+    (row.content ?? []).map((cell) =>
+      (cell.content ?? [])
+        .flatMap((paragraph) => paragraph.content ?? [])
+        .map((text) => (text as JsonNode & { text?: string }).text ?? "")
+        .join(""),
+    ),
+  );
+}
+
 describe("table controls grips", () => {
   let editor: Editor | undefined;
 
@@ -78,6 +144,25 @@ describe("table controls grips", () => {
     expect(dom.querySelectorAll(".dohc-table-grip--col")).toHaveLength(3);
     expect(dom.querySelectorAll(".dohc-table-grip--row")).toHaveLength(2);
     expect(dom.querySelectorAll(".dohc-table-menu-btn")).toHaveLength(1);
+  });
+
+  it("reveals only the six-dot handles for the row and column under the pointer", () => {
+    editor = createTableEditor(3, 3);
+    const cells = editor.view.dom.querySelectorAll("td, th");
+    cells[4]?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    const visibleRows = editor.view.dom.querySelectorAll(
+      ".dohc-table-grip--row.is-visible",
+    );
+    const visibleColumns = editor.view.dom.querySelectorAll(
+      ".dohc-table-grip--col.is-visible",
+    );
+    expect(visibleRows).toHaveLength(1);
+    expect(visibleRows[0]?.getAttribute("data-table-row")).toBe("1");
+    expect(visibleRows[0]?.textContent).toBe("⠿");
+    expect(visibleColumns).toHaveLength(1);
+    expect(visibleColumns[0]?.getAttribute("data-table-column")).toBe("1");
+    expect(visibleColumns[0]?.textContent).toBe("⠿");
   });
 
   it("clicking a column grip selects the column and its menu inserts a column left", () => {
@@ -122,6 +207,64 @@ describe("table controls grips", () => {
     click(menuItemByLabel("Delete row"));
 
     expect(tableNode(editor).content).toHaveLength(2);
+  });
+
+  it("Backspace deletes a row selected from its handle", () => {
+    editor = createTableEditor(3, 2);
+    const secondRowGrip = editor.view.dom.querySelectorAll(
+      ".dohc-table-grip--row",
+    )[1] as HTMLElement;
+    click(secondRowGrip);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Backspace",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(tableNode(editor).content).toHaveLength(2);
+  });
+
+  it("Delete removes a selected column while its handle menu is open", () => {
+    editor = createTableEditor(2, 3);
+    const secondColumnGrip = editor.view.dom.querySelectorAll(
+      ".dohc-table-grip--col",
+    )[1] as HTMLElement;
+    click(secondColumnGrip);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+
+    expect(tableNode(editor).content?.[0]?.content).toHaveLength(2);
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+  });
+
+  it("dragging a row handle reorders the row and preserves its cells", () => {
+    editor = createLabeledTableEditor();
+    const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+
+    drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["B1", "B2", "B3"],
+      ["C1", "C2", "C3"],
+      ["A1", "A2", "A3"],
+    ]);
+  });
+
+  it("dragging a column handle reorders every cell in that column", () => {
+    editor = createLabeledTableEditor();
+    const columnGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--col");
+
+    drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["A2", "A3", "A1"],
+      ["B2", "B3", "B1"],
+      ["C2", "C3", "C1"],
+    ]);
   });
 
   it("table menu toggles the header row", () => {

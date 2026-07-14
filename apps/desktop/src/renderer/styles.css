@@ -1464,12 +1464,14 @@ body {
   transition: opacity 120ms ease;
 }
 
-.dohc-table-node:hover .dohc-table-grip,
 .dohc-table-node:hover .dohc-table-menu-btn,
 .dohc-table-node:hover .dohc-table-append,
-.dohc-table-node:focus-within .dohc-table-grip,
 .dohc-table-node:focus-within .dohc-table-menu-btn,
 .dohc-table-node:focus-within .dohc-table-append,
+.dohc-table-grip.is-visible,
+.dohc-table-grip.is-open,
+.dohc-table-grip.is-dragging,
+.dohc-table-grip.is-drop-target,
 .dohc-table-grip:focus-visible,
 .dohc-table-menu-btn:focus-visible,
 .dohc-table-append:focus-visible {
@@ -1477,32 +1479,53 @@ body {
 }
 
 .dohc-table-grip {
-  background: var(--dohc-line);
-  border-radius: 999px;
-  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: var(--dohc-bg);
+  color: var(--dohc-subtle);
+  font-family: ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
 }
 
 .dohc-table-grip:hover,
-.dohc-table-grip:focus-visible {
-  background: var(--dohc-accent);
+.dohc-table-grip:focus-visible,
+.dohc-table-grip.is-open {
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
 }
 
-/* Column grip: a pill floating just ABOVE its column, spanning the column
- * width. Negative `top` lifts it into the margin over the table's top edge;
- * `left`/`right` keep it glued to the (live-resized) column box. */
+.dohc-table-grip.is-dragging {
+  cursor: grabbing;
+  background: var(--dohc-line);
+  color: var(--dohc-accent);
+}
+
+.dohc-table-grip.is-drop-target {
+  background: color-mix(in srgb, var(--dohc-accent) 16%, var(--dohc-bg));
+  color: var(--dohc-accent);
+  box-shadow: inset 0 0 0 1px var(--dohc-accent);
+}
+
+/* Notion-style six-dot handles follow the active cell: the column handle is
+ * centered above that column, and the row handle is centered beside that row.
+ * They stay nested in the anchor cell, so live column resizing still keeps
+ * them attached without JS measurements. */
 .dohc-table-grip--col {
-  top: -11px;
-  left: 1px;
-  right: 1px;
-  height: 7px;
+  top: -21px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
-/* Row grip: a pill floating just LEFT of its row, spanning the row height. */
 .dohc-table-grip--row {
-  top: 1px;
-  bottom: 1px;
-  left: -11px;
-  width: 7px;
+  top: 50%;
+  left: -22px;
+  transform: translateY(-50%);
 }
 
 /* Corner chips — the table menu (⋯) and the append "+" buttons. */
@@ -1536,8 +1559,8 @@ body {
 /* Table menu: the top-left outer corner (the spreadsheet "select-all"
  * corner where the row and column strips meet). */
 .dohc-table-menu-btn {
-  top: -12px;
-  left: -12px;
+  top: -20px;
+  left: -21px;
   z-index: 5;
 }
 
@@ -1573,7 +1596,7 @@ body {
 .dohc-table-menu {
   position: fixed;
   z-index: 70;
-  width: 190px;
+  width: 220px;
   overflow: auto;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
@@ -1602,6 +1625,7 @@ body {
   color: var(--dohc-ink);
   text-align: left;
   font-size: 12.5px;
+  cursor: pointer;
 }
 
 .dohc-table-menu__item.is-selected,
@@ -1611,6 +1635,14 @@ body {
 
 .dohc-table-menu__item--danger {
   color: var(--dohc-danger);
+}
+
+.dohc-table-menu__item--separated {
+  margin-top: 5px;
+  border-top: 1px solid var(--dohc-line);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  padding-top: 9px;
 }
 
 /* Column resizing (TableKit's `resizable: true`, turned on in

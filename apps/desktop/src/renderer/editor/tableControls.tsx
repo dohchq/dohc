@@ -49,6 +49,8 @@ import {
   deleteColumn,
   deleteRow,
   deleteTable,
+  moveTableColumn,
+  moveTableRow,
   TableMap,
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
@@ -65,11 +67,27 @@ type TableCommand = (
 type GripMenuItem = {
   label: string;
   destructive?: boolean;
+  separatorBefore?: boolean;
   run: (view: EditorView) => void;
 };
 
+type TableBand = "column" | "row";
+
+type TableDragState = {
+  band: TableBand;
+  index: number;
+  tablePos: number;
+  cellPos: number;
+};
+
+let activeTableDrag: TableDragState | null = null;
+
 function stopEvent(event: Event): void {
   event.preventDefault();
+  event.stopPropagation();
+}
+
+function stopPropagation(event: Event): void {
   event.stopPropagation();
 }
 
@@ -77,6 +95,22 @@ function runTableCommand(view: EditorView, command: TableCommand): void {
   if (view.editable === false) return;
   command(view.state, view.dispatch);
   view.focus();
+}
+
+function deleteSelectedTableBand(view: EditorView): boolean {
+  if (view.editable === false) return false;
+  const { selection } = view.state;
+  if (!(selection instanceof CellSelection)) return false;
+
+  const command = selection.isRowSelection()
+    ? deleteRow
+    : selection.isColSelection()
+      ? deleteColumn
+      : null;
+  if (!command || !command(view.state, view.dispatch)) return false;
+
+  view.focus();
+  return true;
 }
 
 function selectColumn(view: EditorView, cellPos: number): void {
@@ -140,12 +174,17 @@ function columnMenuItems(cellPos: number): GripMenuItem[] {
   return [
     { label: "Insert column left", run: (view) => runTableCommand(view, addColumnBefore) },
     { label: "Insert column right", run: (view) => runTableCommand(view, addColumnAfter) },
-    { label: "Align left", run: (view) => setColumnAlign(view, cellPos, "left") },
+    {
+      label: "Align left",
+      separatorBefore: true,
+      run: (view) => setColumnAlign(view, cellPos, "left"),
+    },
     { label: "Align center", run: (view) => setColumnAlign(view, cellPos, "center") },
     { label: "Align right", run: (view) => setColumnAlign(view, cellPos, "right") },
     {
       label: "Delete column",
       destructive: true,
+      separatorBefore: true,
       run: (view) => runTableCommand(view, deleteColumn),
     },
   ];
@@ -155,14 +194,24 @@ function rowMenuItems(): GripMenuItem[] {
   return [
     { label: "Insert row above", run: (view) => runTableCommand(view, addRowBefore) },
     { label: "Insert row below", run: (view) => runTableCommand(view, addRowAfter) },
-    { label: "Delete row", destructive: true, run: (view) => runTableCommand(view, deleteRow) },
+    {
+      label: "Delete row",
+      destructive: true,
+      separatorBefore: true,
+      run: (view) => runTableCommand(view, deleteRow),
+    },
   ];
 }
 
 function tableMenuItems(): GripMenuItem[] {
   return [
     { label: "Toggle header row", run: (view) => runTableCommand(view, toggleHeaderRow) },
-    { label: "Delete table", destructive: true, run: (view) => runTableCommand(view, deleteTable) },
+    {
+      label: "Delete table",
+      destructive: true,
+      separatorBefore: true,
+      run: (view) => runTableCommand(view, deleteTable),
+    },
   ];
 }
 
@@ -180,8 +229,8 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
   const rect = anchor.getBoundingClientRect();
   const position = resolveFloatingMenuPosition({
     cursorRect: { left: rect.left, top: rect.top, bottom: rect.bottom },
-    menuWidth: 190,
-    menuMaxHeight: 200,
+    menuWidth: 220,
+    menuMaxHeight: 280,
   });
 
   const ownerDocument = view.dom.ownerDocument;
@@ -193,7 +242,7 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
     (editorRoot instanceof ShadowRoot ? editorRoot : ownerDocument.body);
   const menu = ownerDocument.createElement("div");
   menu.className = "dohc-table-menu";
-  menu.setAttribute("role", "listbox");
+  menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", "table controls");
   menu.style.left = `${position.x}px`;
   menu.style.top = `${position.y}px`;
@@ -216,8 +265,9 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
   items.forEach((item, index) => {
     const button = ownerDocument.createElement("button");
     button.type = "button";
-    button.setAttribute("role", "option");
+    button.setAttribute("role", "menuitem");
     button.className = `dohc-table-menu__item${item.destructive ? " dohc-table-menu__item--danger" : ""}`;
+    if (item.separatorBefore) button.classList.add("dohc-table-menu__item--separated");
     button.textContent = item.label;
     button.addEventListener("mousedown", (event) => event.preventDefault());
     button.addEventListener("mouseenter", () => {
@@ -245,6 +295,12 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
     } else if (event.key === "Enter") {
       event.preventDefault();
       runItem(selected);
+    } else if (event.key === "Backspace" || event.key === "Delete") {
+      const deleteIndex = items.findIndex((item) => item.destructive);
+      if (deleteIndex >= 0) {
+        event.preventDefault();
+        runItem(deleteIndex);
+      }
     } else if (event.key === "Escape") {
       event.preventDefault();
       close();
@@ -260,25 +316,120 @@ function openGripMenu(view: EditorView, anchor: HTMLElement, items: GripMenuItem
   function close(): void {
     ownerWindow.removeEventListener("keydown", onKeyDown, true);
     ownerWindow.removeEventListener("mousedown", onPointerDown, true);
+    anchor.classList.remove("is-open");
+    anchor.setAttribute("aria-expanded", "false");
     menu.remove();
     if (closeOpenMenu === close) closeOpenMenu = null;
   }
 
   ownerWindow.addEventListener("keydown", onKeyDown, true);
   ownerWindow.addEventListener("mousedown", onPointerDown, true);
+  anchor.classList.add("is-open");
+  anchor.setAttribute("aria-expanded", "true");
   menuHost.appendChild(menu);
   closeOpenMenu = close;
 }
 
-function buildColumnGrip(view: EditorView, cellPos: number, colIndex: number): HTMLElement {
+function clearTableDragChrome(view: EditorView): void {
+  view.dom
+    .querySelectorAll<HTMLElement>(".dohc-table-grip.is-dragging, .dohc-table-grip.is-drop-target")
+    .forEach((grip) => grip.classList.remove("is-dragging", "is-drop-target"));
+}
+
+function configureGripDrag(
+  view: EditorView,
+  button: HTMLButtonElement,
+  band: TableBand,
+  index: number,
+  tablePos: number,
+  cellPos: number,
+): void {
+  button.draggable = view.editable !== false;
+
+  button.addEventListener("dragstart", (event) => {
+    if (view.editable === false || !event.dataTransfer) {
+      event.preventDefault();
+      return;
+    }
+
+    closeOpenMenu?.();
+    closeOpenMenu = null;
+    activeTableDrag = { band, index, tablePos, cellPos };
+    if (band === "column") selectColumn(view, cellPos);
+    else selectRow(view, cellPos);
+
+    button.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", `dohc-table-${band}-${index}`);
+  });
+
+  button.addEventListener("dragover", (event) => {
+    if (
+      !activeTableDrag ||
+      activeTableDrag.band !== band ||
+      activeTableDrag.tablePos !== tablePos ||
+      activeTableDrag.index === index
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    clearTableDragChrome(view);
+    button.classList.add("is-drop-target");
+  });
+
+  button.addEventListener("dragleave", () => {
+    button.classList.remove("is-drop-target");
+  });
+
+  button.addEventListener("drop", (event) => {
+    const drag = activeTableDrag;
+    if (
+      !drag ||
+      drag.band !== band ||
+      drag.tablePos !== tablePos ||
+      drag.index === index
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const command =
+      band === "column"
+        ? moveTableColumn({ from: drag.index, to: index, pos: drag.cellPos })
+        : moveTableRow({ from: drag.index, to: index, pos: drag.cellPos });
+    runTableCommand(view, command);
+    activeTableDrag = null;
+    clearTableDragChrome(view);
+  });
+
+  button.addEventListener("dragend", () => {
+    activeTableDrag = null;
+    clearTableDragChrome(view);
+  });
+}
+
+function buildColumnGrip(
+  view: EditorView,
+  cellPos: number,
+  colIndex: number,
+  tablePos: number,
+): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--col";
-  button.title = `Column ${colIndex + 1}`;
+  button.title = `Column ${colIndex + 1} — drag to reorder, click for options`;
   button.setAttribute("aria-label", `Select column ${colIndex + 1}`);
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("data-table-column", String(colIndex));
   button.setAttribute("contenteditable", "false");
+  button.textContent = "⠿";
   button.disabled = view.editable === false;
-  button.addEventListener("mousedown", stopEvent);
+  configureGripDrag(view, button, "column", colIndex, tablePos, cellPos);
+  button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEvent(event);
     selectColumn(view, cellPos);
@@ -287,15 +438,25 @@ function buildColumnGrip(view: EditorView, cellPos: number, colIndex: number): H
   return button;
 }
 
-function buildRowGrip(view: EditorView, cellPos: number, rowIndex: number): HTMLElement {
+function buildRowGrip(
+  view: EditorView,
+  cellPos: number,
+  rowIndex: number,
+  tablePos: number,
+): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--row";
-  button.title = `Row ${rowIndex + 1}`;
+  button.title = `Row ${rowIndex + 1} — drag to reorder, click for options`;
   button.setAttribute("aria-label", `Select row ${rowIndex + 1}`);
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("data-table-row", String(rowIndex));
   button.setAttribute("contenteditable", "false");
+  button.textContent = "⠿";
   button.disabled = view.editable === false;
-  button.addEventListener("mousedown", stopEvent);
+  configureGripDrag(view, button, "row", rowIndex, tablePos, cellPos);
+  button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEvent(event);
     selectRow(view, cellPos);
@@ -375,6 +536,30 @@ function widgetDecoration(
   });
 }
 
+function setActiveTableControls(view: EditorView, target: EventTarget | null): void {
+  const element =
+    target instanceof Element
+      ? target
+      : target instanceof Node
+        ? target.parentElement
+        : null;
+  const cell = element?.closest<HTMLTableCellElement>("td, th") ?? null;
+  const table = cell?.closest<HTMLElement>(".dohc-table-node") ?? null;
+  const rowIndex =
+    (cell?.parentElement as HTMLTableRowElement | null)?.rowIndex ?? -1;
+  const columnIndex = cell?.cellIndex ?? -1;
+
+  view.dom.querySelectorAll<HTMLElement>(".dohc-table-grip").forEach((grip) => {
+    const ownsActiveTable = table !== null && grip.closest(".dohc-table-node") === table;
+    const matchesRow = grip.dataset.tableRow === String(rowIndex);
+    const matchesColumn = grip.dataset.tableColumn === String(columnIndex);
+    grip.classList.toggle(
+      "is-visible",
+      ownsActiveTable && (matchesRow || matchesColumn),
+    );
+  });
+}
+
 function buildTableControlDecorations(doc: PMNode): DecorationSet {
   const decorations: Decoration[] = [];
 
@@ -400,7 +585,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildColumnGrip(view, cellPos, colIndex),
+          (view) => buildColumnGrip(view, cellPos, colIndex, pos),
           `dohc-table-col-${cellPos}`,
         ),
       );
@@ -438,7 +623,7 @@ function buildTableControlDecorations(doc: PMNode): DecorationSet {
       decorations.push(
         widgetDecoration(
           cellPos + 1,
-          (view) => buildRowGrip(view, cellPos, rowIndex),
+          (view) => buildRowGrip(view, cellPos, rowIndex, pos),
           `dohc-table-row-${cellPos}`,
         ),
       );
@@ -476,6 +661,22 @@ export function makeTableControlsPlugin(): Plugin {
     props: {
       decorations(state) {
         return tableControlsKey.getState(state) as DecorationSet | undefined;
+      },
+      handleDOMEvents: {
+        mousemove(view, event) {
+          setActiveTableControls(view, event.target);
+          return false;
+        },
+        mouseleave(view) {
+          setActiveTableControls(view, null);
+          return false;
+        },
+      },
+      handleKeyDown(view, event) {
+        if (event.key !== "Backspace" && event.key !== "Delete") return false;
+        if (!deleteSelectedTableBand(view)) return false;
+        event.preventDefault();
+        return true;
       },
     },
     view() {
