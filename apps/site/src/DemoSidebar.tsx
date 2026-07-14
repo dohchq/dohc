@@ -103,7 +103,6 @@ export function DemoSidebar(props: {
   const refreshKey = props.documents.map((document) => document.path).join("|");
 
   function open(path: string) {
-    if (!props.documents.some((document) => document.path === path)) return;
     setOpenTabs((current) => (current.includes(path) ? current : [...current, path]));
     props.onOpenDocument(path);
   }

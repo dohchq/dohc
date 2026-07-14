@@ -391,6 +391,10 @@ export function ProductDemo() {
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
+      if (saveFrame.current !== null) {
+        cancelAnimationFrame(saveFrame.current);
+        saveFrame.current = null;
+      }
       const next = applyFrontmatter(
         editorRef.current?.getMarkdown() ?? activeBody,
         parseFrontmatter(nextFullText).meta,
@@ -436,12 +440,20 @@ export function ProductDemo() {
   useLayoutEffect(() => {
     configureDemoDesktopBridge({
       documents,
+      folders: emptyFolders,
       createFile: createDocumentAtPath,
       createFolder,
       movePath: moveDraftPath,
       deletePath: deleteDraftPath,
     });
-  }, [createDocumentAtPath, createFolder, deleteDraftPath, documents, moveDraftPath]);
+  }, [
+    createDocumentAtPath,
+    createFolder,
+    deleteDraftPath,
+    documents,
+    emptyFolders,
+    moveDraftPath,
+  ]);
 
   return (
     <div

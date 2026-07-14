@@ -21,6 +21,7 @@ import {
   selectBlock,
   serializeBlockToMarkdown,
   topLevelBlockPos,
+  TurnIntoMenu,
   turnBlockInto,
   TURN_INTO_ENTRIES,
 } from "./blockControls";
@@ -344,6 +345,27 @@ describe("blockControls turn into", () => {
 // same command-level path (resolve pos from selection -> turnBlockInto),
 // rather than re-testing turnBlockInto's own per-id branches above.
 describe("blockControls turn-into dropdown (bubble menu) command path", () => {
+  it("keeps option clicks inside a shadow-root dropdown", () => {
+    const editor = track(makeEditor("Some text"));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const view = render(createElement(TurnIntoMenu, { editor }), {
+      container: shadow as unknown as HTMLElement,
+    });
+
+    fireEvent.click(view.getByTitle("Turn into"));
+    const heading = view.getByRole("option", { name: /Heading 1/ });
+    heading.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, composed: true }),
+    );
+    heading.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+
+    expect(editor.getJSON().content?.[0]?.type).toBe("heading");
+    expect(editor.getJSON().content?.[0]?.attrs?.level).toBe(1);
+    host.remove();
+  });
+
   it("resolves the top-level block position from a selection nested in its text", () => {
     const editor = track(makeEditor("Hello world"));
     editor.commands.setTextSelection(5);

@@ -674,7 +674,8 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
   useEffect(() => {
     if (!open) return;
     function onPointerDown(event: MouseEvent) {
-      if (containerRef.current?.contains(event.target as Node)) return;
+      const container = containerRef.current;
+      if (container && event.composedPath().includes(container)) return;
       setOpen(false);
     }
     window.addEventListener("mousedown", onPointerDown, true);

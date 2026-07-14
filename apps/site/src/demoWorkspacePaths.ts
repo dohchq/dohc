@@ -3,6 +3,17 @@ export type DemoPathMove = {
   targetPath: string;
 };
 
+export function collectWorkspacePaths(paths: readonly string[]): string[] {
+  const workspacePaths = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split("/");
+    for (let length = 1; length <= parts.length; length += 1) {
+      workspacePaths.add(parts.slice(0, length).join("/"));
+    }
+  }
+  return [...workspacePaths];
+}
+
 export function isPathAtOrBelow(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`);
 }

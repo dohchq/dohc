@@ -1,8 +1,10 @@
 import type { SearchResultsEvent, SearchResultsEventEntry } from "../../desktop/src/ipc/channels";
 import type { DohcDesktopBridge } from "../../desktop/src/ipc/bridgeContract";
 import {
+  collectWorkspacePaths,
   isPathAtOrBelow,
   planDemoPathMove,
+  rewritePathPrefix,
 } from "./demoWorkspacePaths";
 
 export type DemoBridgeDocument = {
@@ -13,6 +15,7 @@ export type DemoBridgeDocument = {
 
 type DemoBridgeContext = {
   documents: DemoBridgeDocument[];
+  folders: string[];
   createFile: (path: string) => void;
   createFolder: (path: string) => void;
   movePath: (fromPath: string, toPath: string) => void;
@@ -21,6 +24,7 @@ type DemoBridgeContext = {
 
 let context: DemoBridgeContext = {
   documents: [],
+  folders: [],
   createFile: () => undefined,
   createFolder: () => undefined,
   movePath: () => undefined,
@@ -78,10 +82,9 @@ async function persistAsset(asset: StoredDemoAsset): Promise<void> {
   }
 }
 
-export async function hydrateDemoWorkspaceAssets(): Promise<void> {
-  if (!("indexedDB" in window)) return;
+async function readStoredAssets(): Promise<StoredDemoAsset[]> {
+  const database = await openAssetDatabase();
   try {
-    const database = await openAssetDatabase();
     const transaction = database.transaction(ASSET_STORE_NAME, "readonly");
     const request = transaction
       .objectStore(ASSET_STORE_NAME)
@@ -91,7 +94,58 @@ export async function hydrateDemoWorkspaceAssets(): Promise<void> {
       request.addEventListener("error", () => reject(request.error));
     });
     await transactionDone(transaction);
+    return assets;
+  } finally {
     database.close();
+  }
+}
+
+async function rewriteStoredAssets(
+  prefix: string,
+  nextPrefix: string | null,
+): Promise<void> {
+  const affected = (await readStoredAssets()).filter((asset) =>
+    isPathAtOrBelow(asset.path, prefix),
+  );
+  if (affected.length === 0) return;
+
+  const database = await openAssetDatabase();
+  try {
+    const transaction = database.transaction(ASSET_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(ASSET_STORE_NAME);
+    for (const asset of affected) {
+      store.delete(asset.path);
+      if (nextPrefix !== null) {
+        store.put({
+          ...asset,
+          path: rewritePathPrefix(asset.path, prefix, nextPrefix),
+        });
+      }
+    }
+    await transactionDone(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+function rewriteAssetUrls(prefix: string, nextPrefix: string | null): void {
+  const affected = [...assetUrls.entries()].filter(([path]) =>
+    isPathAtOrBelow(path, prefix),
+  );
+  for (const [path] of affected) assetUrls.delete(path);
+  for (const [path, url] of affected) {
+    if (nextPrefix === null) {
+      URL.revokeObjectURL(url);
+    } else {
+      assetUrls.set(rewritePathPrefix(path, prefix, nextPrefix), url);
+    }
+  }
+}
+
+export async function hydrateDemoWorkspaceAssets(): Promise<void> {
+  if (!("indexedDB" in window)) return;
+  try {
+    const assets = await readStoredAssets();
     for (const asset of assets) {
       setAssetUrl(asset.path, asset.mediaType, asset.bytes);
     }
@@ -261,7 +315,7 @@ function message(threadId: string, id: string, body: string, agent = false) {
     id,
     threadId,
     authorKind: agent ? ("agent" as const) : ("human" as const),
-    authorDisplayName: "You",
+    authorDisplayName: agent ? "Ice" : "You",
     body,
     createdAtMs: agent ? now - 90_000 : now - 3_600_000,
   };
@@ -326,7 +380,11 @@ const demoBridge = {
     };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {
-    if (context.documents.some((document) => document.path === payload.relativePath)) {
+    const workspacePaths = collectWorkspacePaths([
+      ...context.documents.map((document) => document.path),
+      ...context.folders,
+    ]);
+    if (workspacePaths.includes(payload.relativePath)) {
       throw new Error(`A document already exists at ${payload.relativePath}`);
     }
     context.createFile(payload.relativePath);
@@ -338,23 +396,42 @@ const demoBridge = {
     return { path: payload.relativePath };
   },
   async createWorkspaceFolder(payload: { relativePath: string }) {
+    const workspacePaths = collectWorkspacePaths([
+      ...context.documents.map((document) => document.path),
+      ...context.folders,
+    ]);
+    if (workspacePaths.includes(payload.relativePath)) {
+      throw new Error(`A folder already exists at ${payload.relativePath}`);
+    }
     context.createFolder(payload.relativePath);
+    context.folders = [...context.folders, payload.relativePath];
     return { path: payload.relativePath };
   },
   async moveWorkspacePath(payload: { fromPath: string; toPath: string }) {
-    const moves = planDemoPathMove(
-      context.documents.map((document) => document.path),
+    const workspacePaths = collectWorkspacePaths([
+      ...context.documents.map((document) => document.path),
+      ...context.folders,
+      ...assetUrls.keys(),
+    ]);
+    planDemoPathMove(
+      workspacePaths,
       payload.fromPath,
       payload.toPath,
     );
-    const targetBySource = new Map(
-      moves.map(({ sourcePath, targetPath }) => [sourcePath, targetPath]),
-    );
     context.movePath(payload.fromPath, payload.toPath);
-    context.documents = context.documents.map((document) => {
-      const targetPath = targetBySource.get(document.path);
-      return targetPath ? { ...document, path: targetPath } : document;
-    });
+    context.documents = context.documents.map((document) => ({
+      ...document,
+      path: rewritePathPrefix(document.path, payload.fromPath, payload.toPath),
+    }));
+    context.folders = context.folders.map((folder) =>
+      rewritePathPrefix(folder, payload.fromPath, payload.toPath),
+    );
+    rewriteAssetUrls(payload.fromPath, payload.toPath);
+    if ("indexedDB" in window) {
+      await rewriteStoredAssets(payload.fromPath, payload.toPath).catch(
+        () => undefined,
+      );
+    }
     return { path: payload.toPath };
   },
   async deleteWorkspacePath(payload: { relativePath: string }) {
@@ -362,6 +439,13 @@ const demoBridge = {
     context.documents = context.documents.filter(
       (document) => !isPathAtOrBelow(document.path, payload.relativePath),
     );
+    context.folders = context.folders.filter(
+      (folder) => !isPathAtOrBelow(folder, payload.relativePath),
+    );
+    rewriteAssetUrls(payload.relativePath, null);
+    if ("indexedDB" in window) {
+      await rewriteStoredAssets(payload.relativePath, null).catch(() => undefined);
+    }
     return { trashed: true };
   },
   async showExplorerMenu() {
