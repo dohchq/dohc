@@ -27,7 +27,7 @@ export type DemoWorkspaceDocument = {
 };
 
 function parentFolders(paths: string[]): string[] {
-  const folders = new Set<string>(["notes"]);
+  const folders = new Set<string>();
   for (const path of paths) {
     const parts = path.split("/");
     for (let index = 1; index < parts.length; index += 1) {

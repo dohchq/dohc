@@ -41,7 +41,6 @@ import {
 import {
   collectWorkspacePaths,
   isPathAtOrBelow,
-  planDemoPathMove,
   rewritePathPrefix,
 } from "./demoWorkspacePaths";
 
@@ -53,6 +52,7 @@ type DemoDocument = {
 type SaveState = "saved" | "saving";
 
 const STORAGE_KEY = "dohc-marketing-demo-documents-v2";
+const FOLDERS_STORAGE_KEY = "dohc-marketing-demo-folders-v1";
 
 const DEMO_DOCUMENTS: DemoDocument[] = [
   {
@@ -164,6 +164,27 @@ function persistDrafts(drafts: Record<string, string>): void {
   }
 }
 
+function initialFolders(): string[] {
+  try {
+    const saved = localStorage.getItem(FOLDERS_STORAGE_KEY);
+    if (saved === null) return ["notes"];
+    const parsed = JSON.parse(saved) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((folder): folder is string => typeof folder === "string")
+      : ["notes"];
+  } catch {
+    return ["notes"];
+  }
+}
+
+function persistFolders(folders: string[]): void {
+  try {
+    localStorage.setItem(FOLDERS_STORAGE_KEY, JSON.stringify(folders));
+  } catch {
+    // The in-memory explorer still works when persistence is unavailable.
+  }
+}
+
 function currentTheme(): "light" | "dark" {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
@@ -181,7 +202,7 @@ export function ProductDemo() {
   const [activeActivity, setActiveActivity] =
     useState<DemoPanelId>("explorer");
   const [sidebarVisible, setSidebarVisible] = useState(initialSidebarVisible);
-  const [emptyFolders, setEmptyFolders] = useState<string[]>([]);
+  const [emptyFolders, setEmptyFolders] = useState<string[]>(initialFolders);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [showSource, setShowSource] = useState(false);
   const [sourceText, setSourceText] = useState("");
@@ -249,6 +270,10 @@ export function ProductDemo() {
     persistDrafts(drafts);
   }, [drafts]);
 
+  useEffect(() => {
+    persistFolders(emptyFolders);
+  }, [emptyFolders]);
+
   const composeCurrentDocument = useCallback(
     (path = activePath, fallback = drafts[path] ?? "") => {
       const editorMarkdown =
@@ -262,6 +287,12 @@ export function ProductDemo() {
   const storeDraft = useCallback((path: string, markdown: string) => {
     updateDrafts((current) => ({ ...current, [path]: markdown }));
   }, [updateDrafts]);
+
+  const cancelPendingSave = useCallback(() => {
+    if (saveFrame.current === null) return;
+    cancelAnimationFrame(saveFrame.current);
+    saveFrame.current = null;
+  }, []);
 
   const scheduleSave = useCallback(() => {
     setSaveState("saving");
@@ -282,16 +313,13 @@ export function ProductDemo() {
   const openDocument = useCallback(
     (path: string) => {
       if (path === activePath) return;
-      if (saveFrame.current !== null) {
-        cancelAnimationFrame(saveFrame.current);
-        saveFrame.current = null;
-      }
+      cancelPendingSave();
       storeDraft(activePath, composeCurrentDocument());
       setShowSource(false);
       setActivePath(path);
       setSaveState("saved");
     },
-    [activePath, composeCurrentDocument, storeDraft],
+    [activePath, cancelPendingSave, composeCurrentDocument, storeDraft],
   );
 
   const openWikilink = useCallback(
@@ -307,15 +335,13 @@ export function ProductDemo() {
   );
 
   const flushActiveDraft = useCallback(async () => {
-    if (saveFrame.current !== null) {
-      cancelAnimationFrame(saveFrame.current);
-      saveFrame.current = null;
-    }
+    cancelPendingSave();
     storeDraft(activePath, composeCurrentDocument());
     setSaveState("saved");
-  }, [activePath, composeCurrentDocument, storeDraft]);
+  }, [activePath, cancelPendingSave, composeCurrentDocument, storeDraft]);
 
   const createDocument = useCallback(() => {
+    cancelPendingSave();
     storeDraft(activePath, composeCurrentDocument());
     const workspacePaths = new Set(
       collectWorkspacePaths([
@@ -336,7 +362,7 @@ export function ProductDemo() {
     setShowSource(false);
     setActivePath(path);
     setSaveState("saved");
-  }, [activePath, composeCurrentDocument, emptyFolders, storeDraft]);
+  }, [activePath, cancelPendingSave, composeCurrentDocument, emptyFolders, storeDraft]);
 
   const createDocumentAtPath = useCallback(
     (path: string) => {
@@ -359,13 +385,12 @@ export function ProductDemo() {
 
   const moveDraftPath = useCallback((fromPath: string, toPath: string) => {
     updateDrafts((current) => {
-      const next = { ...current };
-      const moves = planDemoPathMove(Object.keys(current), fromPath, toPath);
-      for (const { sourcePath } of moves) delete next[sourcePath];
-      for (const { sourcePath, targetPath } of moves) {
-        next[targetPath] = current[sourcePath];
-      }
-      return next;
+      return Object.fromEntries(
+        Object.entries(current).map(([path, markdown]) => [
+          rewritePathPrefix(path, fromPath, toPath),
+          markdown,
+        ]),
+      );
     });
     setActivePath((current) =>
       rewritePathPrefix(current, fromPath, toPath),
@@ -388,22 +413,19 @@ export function ProductDemo() {
       }
       return filtered;
     });
-    setActivePath((current) =>
-      current === path || current.startsWith(`${path}/`)
-        ? (Object.keys(next)[0] ?? DEMO_DOCUMENTS[0].path)
-        : current,
-    );
+    if (isPathAtOrBelow(activePath, path)) {
+      setActivePath(Object.keys(next)[0] ?? DEMO_DOCUMENTS[0].path);
+      setShowSource(false);
+      setSourceText("");
+    }
     setEmptyFolders((current) =>
       current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
     );
-  }, [updateDrafts]);
+  }, [activePath, updateDrafts]);
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
-      if (saveFrame.current !== null) {
-        cancelAnimationFrame(saveFrame.current);
-        saveFrame.current = null;
-      }
+      cancelPendingSave();
       const next = applyFrontmatter(
         editorRef.current?.getMarkdown() ?? activeBody,
         parseFrontmatter(nextFullText).meta,
@@ -416,17 +438,24 @@ export function ProductDemo() {
         saveTimer.current = null;
       }, 650);
     },
-    [activeBody, activePath, storeDraft],
+    [activeBody, activePath, cancelPendingSave, storeDraft],
   );
 
   const toggleSource = useCallback(() => {
     if (!showSource) {
+      cancelPendingSave();
       const next = composeCurrentDocument();
       storeDraft(activePath, next);
       setSourceText(next);
     }
     setShowSource((current) => !current);
-  }, [activePath, composeCurrentDocument, showSource, storeDraft]);
+  }, [
+    activePath,
+    cancelPendingSave,
+    composeCurrentDocument,
+    showSource,
+    storeDraft,
+  ]);
 
   const selectActivity = useCallback(
     (next: DemoPanelId) => {
