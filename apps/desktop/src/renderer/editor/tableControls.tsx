@@ -346,6 +346,7 @@ function openGripMenu(
   menu.className = "dohc-table-menu";
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", "table controls");
+  menu.tabIndex = -1;
   const menuId = `dohc-table-menu-${runtime.instanceId}-${runtime.menuSerial++}`;
   menu.id = menuId;
   const menuMaxHeight = Math.max(80, Math.min(280, ownerWindow.innerHeight - 16));
@@ -412,7 +413,7 @@ function openGripMenu(
     } else if (event.key === "Escape") {
       event.preventDefault();
       close();
-      view.focus();
+      anchor.focus();
     }
   }
 
@@ -462,6 +463,7 @@ function openGripMenu(
   reposition();
   menu.style.removeProperty("visibility");
   menu.style.removeProperty("animation");
+  menu.focus({ preventScroll: true });
   runtime.closeMenu = close;
 }
 

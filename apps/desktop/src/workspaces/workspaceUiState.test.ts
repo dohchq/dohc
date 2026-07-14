@@ -83,6 +83,7 @@ describe("ui-state file store", () => {
       code: "EBUSY",
     });
     const renameMock = vi.mocked(rename);
+    renameMock.mockClear();
     renameMock.mockRejectedValueOnce(transient);
 
     await expect(writeUiStateFile(root, STATE)).resolves.toBeUndefined();

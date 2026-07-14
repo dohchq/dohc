@@ -509,6 +509,7 @@ describe("table controls grips", () => {
     click(grip);
     const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
     const items = menu.querySelectorAll<HTMLElement>("[role='menuitem']");
+    expect(document.activeElement).toBe(menu);
     expect(menu.getAttribute("aria-activedescendant")).toBe(items[0]?.id);
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
@@ -524,13 +525,18 @@ describe("table controls grips", () => {
 
   it("grip menu closes on Escape without running a command", () => {
     editor = createTableEditor(2, 2);
+    // The production editor is connected; connect this test instance as well
+    // so browser focus can legitimately return to its originating grip.
+    document.body.appendChild(editor.view.dom);
     const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
     click(grip);
-    expect(document.body.querySelector(".dohc-table-menu")).not.toBeNull();
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    expect(document.activeElement).toBe(menu);
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 
     expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(document.activeElement).toBe(grip);
     const headerRow = tableNode(editor).content?.[0];
     expect(headerRow?.content).toHaveLength(2);
   });
