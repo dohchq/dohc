@@ -76,6 +76,50 @@ export function resolveDemoWorkspaceAssetUrl(workspacePath: string): string | nu
   return assetUrls.get(workspacePath) ?? null;
 }
 
+type DemoDesktopBridge = Pick<
+  DohcDesktopBridge,
+  | "onSearchResults"
+  | "searchWorkspace"
+  | "cancelWorkspaceSearch"
+  | "readWorkspaceGraph"
+  | "listSites"
+  | "createWorkspaceFile"
+  | "createWorkspaceFolder"
+  | "moveWorkspacePath"
+  | "deleteWorkspacePath"
+  | "showExplorerMenu"
+  | "exportWorkspaceZip"
+  | "getDroppedFilePaths"
+  | "pickImageFiles"
+  | "writeWorkspaceAsset"
+  | "getWorkspaceSettings"
+  | "onWorkspaceActivity"
+  | "listChatChannels"
+  | "listChatChannelShares"
+  | "syncDms"
+  | "listChannelThreads"
+  | "listChatMessages"
+  | "listChatReactions"
+  | "listChatThreadDecisions"
+  | "listChatThreadAttachments"
+  | "chatRunRecordsForThread"
+  | "chatDispatchStateForThread"
+  | "markChatThreadRead"
+  | "createChatChannel"
+  | "startChannelThread"
+  | "sendChatMessage"
+  | "setChatReaction"
+  | "resolveChatDecision"
+  | "stopAgentRun"
+  | "resumeThreadDispatch"
+  | "writeClipboardText"
+  | "shareChatChannel"
+  | "joinSharedChannel"
+  | "leaveSharedChannel"
+  | "revokeRelayShare"
+  | "startDm"
+>;
+
 function searchEntries(query: string, caseSensitive: boolean): SearchResultsEventEntry[] {
   const needle = caseSensitive ? query : query.toLocaleLowerCase();
   if (!needle.trim()) return [];
@@ -380,12 +424,12 @@ const demoBridge = {
   async startDm() {
     throw new Error("Direct messages are unavailable in the demo");
   },
-} satisfies Partial<DohcDesktopBridge>;
+} satisfies DemoDesktopBridge;
 
 export function configureDemoDesktopBridge(next: DemoBridgeContext): void {
   context = next;
   // The embedded demo deliberately exposes only the bridge methods consumed by
-  // DemoSidebar. `satisfies Partial` type-checks every implemented method while
-  // keeping that narrower contract explicit at this integration boundary.
+  // DemoSidebar and MarkdownEditor. DemoDesktopBridge makes every consumed
+  // method required while keeping the intentionally narrow boundary explicit.
   window.dohcDesktop = demoBridge as unknown as DohcDesktopBridge;
 }

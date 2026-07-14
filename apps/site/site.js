@@ -13,8 +13,14 @@ function syncThemeToggle() {
 themeToggle?.addEventListener('click', () => {
   const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
   root.dataset.theme = next;
-  localStorage.setItem('dohc-theme', next);
-  syncThemeToggle();
+  try {
+    localStorage.setItem('dohc-theme', next);
+  } catch {
+    // Privacy modes can disable storage; the visual and accessible state must
+    // still follow the theme selected for this page view.
+  } finally {
+    syncThemeToggle();
+  }
 });
 
 syncThemeToggle();
