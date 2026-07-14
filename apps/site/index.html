@@ -16,7 +16,12 @@
 <script>
   // Set theme before first paint to avoid a flash.
   (function () {
-    var saved = localStorage.getItem('dohc-theme');
+    var saved = null;
+    try {
+      saved = localStorage.getItem('dohc-theme');
+    } catch (_) {
+      // Storage is optional in privacy-restricted browsers and embeds.
+    }
     var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   })();

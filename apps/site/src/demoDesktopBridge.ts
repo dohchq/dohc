@@ -113,6 +113,7 @@ type DemoDesktopBridge = Pick<
   | "stopAgentRun"
   | "resumeThreadDispatch"
   | "writeClipboardText"
+  | "openExternalUrl"
   | "shareChatChannel"
   | "joinSharedChannel"
   | "leaveSharedChannel"
@@ -405,6 +406,9 @@ const demoBridge = {
   async stopAgentRun() {},
   async resumeThreadDispatch() {},
   async writeClipboardText() {},
+  async openExternalUrl(payload: { url: string }) {
+    window.open(payload.url, "_blank", "noopener,noreferrer");
+  },
   async shareChatChannel() {
     return { shareId: "demo-share" };
   },

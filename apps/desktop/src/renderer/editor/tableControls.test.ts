@@ -17,6 +17,12 @@ Object.defineProperty(document, "elementFromPoint", {
   configurable: true,
   value: () => elementFromPointResult,
 });
+Object.defineProperty(document, "execCommand", {
+  configurable: true,
+  // ProseMirror's Safari shadow-selection workaround calls this browser API;
+  // jsdom does not implement it, and the return value is irrelevant here.
+  value: () => false,
+});
 
 const testTableControls = Extension.create({
   name: "testTableControls",
@@ -568,16 +574,22 @@ describe("table controls grips", () => {
     expect(chrome.querySelector(".dohc-table-menu")).toBeNull();
     expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
 
-    document.body.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
-    );
-    elementFromPointResult = grip;
-    dispatchPointer(grip, "pointerdown");
-    dispatchPointer(grip, "pointermove", { clientX: 10, clientY: 10 });
+    const insertRight = Array.from(
+      shadow.querySelectorAll<HTMLElement>(".dohc-table-menu__item"),
+    ).find((item) => item.textContent === "Insert column right");
+    if (!insertRight) throw new Error("shadow-root menu item missing");
+    click(insertRight);
+    expect(tableNode(editor).content?.[0]?.content).toHaveLength(3);
+    expect(shadow.querySelector(".dohc-table-menu")).toBeNull();
+
+    const currentGrip = shadow.querySelector(".dohc-table-grip--col") as HTMLElement;
+    elementFromPointResult = currentGrip;
+    dispatchPointer(currentGrip, "pointerdown");
+    dispatchPointer(currentGrip, "pointermove", { clientX: 10, clientY: 10 });
     expect(shadow.querySelector(".dohc-table-drag-preview")).not.toBeNull();
     expect(shadow.querySelector("[data-dohc-table-drag-status]")).not.toBeNull();
     expect(document.body.querySelector(".dohc-table-drag-preview")).toBeNull();
-    dispatchPointer(grip, "pointercancel", { clientX: 10, clientY: 10 });
+    dispatchPointer(currentGrip, "pointercancel", { clientX: 10, clientY: 10 });
     elementFromPointResult = null;
     host.remove();
   });

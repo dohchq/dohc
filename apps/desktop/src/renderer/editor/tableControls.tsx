@@ -418,7 +418,9 @@ function openGripMenu(
   }
 
   function onPointerDown(event: MouseEvent): void {
-    if (event.target instanceof ownerWindow.Node && menu.contains(event.target)) return;
+    // Window-level events are retargeted to the shadow host when the embedded
+    // editor owns this menu. composedPath preserves the real menu ancestry.
+    if (event.composedPath().includes(menu)) return;
     close();
   }
 
