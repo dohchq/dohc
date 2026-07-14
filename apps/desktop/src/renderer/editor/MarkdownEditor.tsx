@@ -18,7 +18,7 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -792,7 +792,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => !instance.state.selection.empty}
+            shouldShow={({ editor: instance }) => {
+              const { selection } = instance.state;
+              return selection instanceof TextSelection && !selection.empty;
+            }}
           >
             <TurnIntoMenu editor={editor} />
             <span className="dohc-bubble-menu__divider" aria-hidden="true" />

@@ -270,6 +270,7 @@ body {
 }
 
 .dohc-notion-editor {
+  position: relative;
   box-sizing: border-box;
   min-height: 100%;
   /* Top matter (PageIdentity + inline properties) supplies the space above
@@ -632,8 +633,12 @@ body {
 
 .dohc-block-affordance {
   position: absolute;
-  top: 0.2em;
-  left: -48px;
+  top: auto;
+  left: max(
+    8px,
+    calc(50% - (var(--dohc-editor-measure) / 2) - 48px)
+  );
+  transform: translateY(0.2em);
   z-index: 3;
   display: inline-flex;
   gap: 2px;
@@ -641,7 +646,8 @@ body {
   transition: opacity 120ms ease;
 }
 
-.dohc-block-node:hover .dohc-block-affordance,
+.dohc-block-affordance.is-visible,
+.dohc-block-affordance:hover,
 .dohc-block-affordance:focus-within {
   opacity: 1;
 }

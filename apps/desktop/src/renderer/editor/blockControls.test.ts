@@ -1,16 +1,23 @@
 // @vitest-environment jsdom
+import { createElement } from "react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Editor } from "@tiptap/core";
+import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TableKit } from "@tiptap/extension-table";
 import { dohcMarkdownExtensions } from "./extensions";
 import {
   activeTurnIntoId,
+  BlockMenu,
   blockDragSlice,
   copyBlockAsMarkdown,
   deleteBlock,
+  deleteSelectedTopLevelBlock,
   duplicateBlock,
+  makeBlockControlsPlugin,
+  selectBlock,
   serializeBlockToMarkdown,
   topLevelBlockPos,
   turnBlockInto,
@@ -32,6 +39,32 @@ function makeEditor(markdown: string): Editor {
   });
 }
 
+function makeEditorWithControls(content: Record<string, unknown>): Editor {
+  const controls = Extension.create({
+    name: "testBlockControls",
+    addProseMirrorPlugins() {
+      return [
+        makeBlockControlsPlugin({
+          onInsertRef: { current: vi.fn() },
+          onOpenMenuRef: { current: vi.fn() },
+        }),
+      ];
+    },
+  });
+  return new Editor({
+    element: document.createElement("div"),
+    extensions: [
+      StarterKit.configure({ trailingNode: false }),
+      ...dohcMarkdownExtensions,
+      TaskList,
+      TaskItem,
+      TableKit,
+      controls,
+    ],
+    content,
+  });
+}
+
 /** Top-level block node types, in document order, with their start positions. */
 function topLevelBlocks(editor: Editor): { type: string; pos: number }[] {
   const blocks: { type: string; pos: number }[] = [];
@@ -48,8 +81,39 @@ function track(editor: Editor): Editor {
 }
 
 afterEach(() => {
+  cleanup();
   while (editors.length) editors.pop()?.destroy();
   vi.restoreAllMocks();
+});
+
+describe("blockControls menu keyboard deletion", () => {
+  it.each(["Backspace", "Delete"])(
+    "routes %s to the selected block's delete action",
+    (key) => {
+      const onSelect = vi.fn();
+      render(
+        createElement(BlockMenu, {
+          state: {
+            open: true,
+            pos: 0,
+            x: 20,
+            y: 20,
+            maxHeight: 400,
+            placement: "below",
+          },
+          onSelect,
+          onClose: vi.fn(),
+        }),
+      );
+
+      fireEvent.keyDown(screen.getByRole("menu", { name: "block actions" }), {
+        key,
+      });
+      expect(onSelect).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "action", id: "delete" }),
+      );
+    },
+  );
 });
 
 describe("blockControls duplicate", () => {
@@ -92,6 +156,122 @@ describe("blockControls delete", () => {
     const remaining = topLevelBlocks(editor);
     expect(remaining).toHaveLength(1);
     expect(editor.state.doc.child(0).textContent).toBe("First");
+  });
+
+  it.each([
+    ["code block", { type: "codeBlock", content: [{ type: "text", text: "code" }] }],
+    ["divider", { type: "horizontalRule" }],
+    [
+      "table",
+      {
+        type: "table",
+        content: [
+          {
+            type: "tableRow",
+            content: [
+              {
+                type: "tableCell",
+                content: [{ type: "paragraph", content: [{ type: "text", text: "cell" }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    ["math block", { type: "mathBlock", attrs: { tex: "1+1=2" } }],
+  ])("deletes a selected %s with Backspace", (_label, target) => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "Before" }] },
+          target,
+          { type: "paragraph", content: [{ type: "text", text: "After" }] },
+        ],
+      }),
+    );
+    const [, selected] = topLevelBlocks(editor);
+    selectBlock(editor, selected.pos);
+
+    const event = new KeyboardEvent("keydown", { key: "Backspace", bubbles: true });
+    editor.view.dom.dispatchEvent(event);
+
+    expect(topLevelBlocks(editor).map((block) => block.type)).toEqual([
+      "paragraph",
+      "paragraph",
+    ]);
+    expect(editor.state.doc.textContent).toBe("BeforeAfter");
+  });
+
+  it("does not delete a block for an ordinary text selection", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "codeBlock", content: [{ type: "text", text: "code" }] },
+        ],
+      }),
+    );
+    editor.commands.setTextSelection(2);
+    expect(deleteSelectedTopLevelBlock(editor.view)).toBe(false);
+    expect(editor.state.doc.child(0).type.name).toBe("codeBlock");
+  });
+});
+
+describe("blockControls gutter coverage", () => {
+  it("renders one top-level gutter for every structural block", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "Text" }] },
+          { type: "codeBlock", content: [{ type: "text", text: "code" }] },
+          { type: "horizontalRule" },
+          {
+            type: "table",
+            content: [
+              {
+                type: "tableRow",
+                content: [
+                  { type: "tableCell", content: [{ type: "paragraph" }] },
+                ],
+              },
+            ],
+          },
+          {
+            type: "taskList",
+            content: [
+              {
+                type: "taskItem",
+                attrs: { checked: false },
+                content: [
+                  { type: "paragraph", content: [{ type: "text", text: "Task" }] },
+                ],
+              },
+            ],
+          },
+          { type: "callout", attrs: { calloutType: "note", title: "", fold: "" }, content: [{ type: "paragraph" }] },
+          { type: "mathBlock", attrs: { tex: "x" } },
+          { type: "queryBlock", attrs: { info: "" }, content: [{ type: "text", text: "query" }] },
+        ],
+      }),
+    );
+
+    const controls = Array.from(
+      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"),
+    );
+    expect(controls).toHaveLength(editor.state.doc.childCount);
+    expect(controls.map((control) => control.dataset.dohcBlockIndex)).toEqual(
+      Array.from({ length: editor.state.doc.childCount }, (_, index) => String(index)),
+    );
+    expect(controls.every((control) => control.parentElement === editor.view.dom)).toBe(true);
+
+    const code = editor.view.dom.querySelector<HTMLElement>(
+      '[data-dohc-block-index="1"].dohc-block-node',
+    );
+    code?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(controls[1]?.classList.contains("is-visible")).toBe(true);
+    expect(controls[0]?.classList.contains("is-visible")).toBe(false);
   });
 });
 
