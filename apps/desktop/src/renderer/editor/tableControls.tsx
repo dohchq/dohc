@@ -87,10 +87,12 @@ type TableDragState = {
   tableElement: HTMLTableElement;
   sourceButton: HTMLButtonElement;
   scrollContainer: HTMLElement | null;
+  preview: HTMLElement;
   dropTarget?: TableDropTarget;
 };
 
 let activeTableDrag: TableDragState | null = null;
+let cancelActiveTablePointer: (() => void) | null = null;
 const suppressTableGripClickUntil = new WeakMap<HTMLButtonElement, number>();
 
 type RectLike = Pick<
@@ -177,10 +179,11 @@ function stopPropagation(event: Event): void {
   event.stopPropagation();
 }
 
-function runTableCommand(view: EditorView, command: TableCommand): void {
-  if (view.editable === false) return;
-  command(view.state, view.dispatch);
+function runTableCommand(view: EditorView, command: TableCommand): boolean {
+  if (view.editable === false) return false;
+  const changed = command(view.state, view.dispatch);
   view.focus();
+  return changed;
 }
 
 function deleteSelectedTableBand(view: EditorView): boolean {
@@ -500,20 +503,25 @@ function announceTableDrag(view: EditorView, message: string): void {
   status.textContent = message;
 }
 
-function setTableDragPreview(
+function createTableDragPreview(
   view: EditorView,
-  event: DragEvent,
   band: TableBand,
   index: number,
-): void {
-  if (!event.dataTransfer?.setDragImage) return;
+): HTMLElement {
   const ownerDocument = view.dom.ownerDocument;
   const preview = ownerDocument.createElement("div");
   preview.className = "dohc-table-drag-preview";
   preview.textContent = `⠿  ${band === "row" ? "Row" : "Column"} ${index + 1}`;
   ownerDocument.body.appendChild(preview);
-  event.dataTransfer.setDragImage(preview, 12, 16);
-  (ownerDocument.defaultView ?? window).setTimeout(() => preview.remove(), 0);
+  return preview;
+}
+
+function positionTableDragPreview(
+  preview: HTMLElement,
+  clientX: number,
+  clientY: number,
+): void {
+  preview.style.transform = `translate3d(${clientX + 14}px, ${clientY + 14}px, 0)`;
 }
 
 function tableBandCount(table: HTMLTableElement, band: TableBand): number {
@@ -521,12 +529,13 @@ function tableBandCount(table: HTMLTableElement, band: TableBand): number {
   return table.rows[0]?.cells.length ?? 0;
 }
 
-function tableDropTargetFromEvent(
+function tableDropTargetFromPoint(
   drag: TableDragState,
-  event: DragEvent,
+  target: Element | null,
+  clientX: number,
+  clientY: number,
 ): TableDropTarget | null {
-  const target = event.target;
-  if (!(target instanceof Element)) return null;
+  if (!target) return null;
   const cell = target.closest<HTMLTableCellElement>("td, th");
   if (!cell || cell.closest("table") !== drag.tableElement) return null;
 
@@ -534,7 +543,7 @@ function tableDropTargetFromEvent(
   const bandElement = drag.band === "row" ? row : cell;
   if (!bandElement) return null;
   const rect = bandElement.getBoundingClientRect();
-  const pointer = drag.band === "row" ? event.clientY : event.clientX;
+  const pointer = drag.band === "row" ? clientY : clientX;
   const midpoint =
     drag.band === "row"
       ? rect.top + rect.height / 2
@@ -591,35 +600,35 @@ function findVerticalScrollContainer(view: EditorView): HTMLElement | null {
   return null;
 }
 
-function autoScrollTableDrag(drag: TableDragState, event: DragEvent): void {
+function autoScrollTableDrag(drag: TableDragState, clientY: number): void {
   const scroller = drag.scrollContainer;
   if (!scroller) return;
   const rect = scroller.getBoundingClientRect();
   const edge = Math.min(64, Math.max(36, rect.height * 0.1));
   let delta = 0;
-  if (event.clientY < rect.top + edge) {
-    delta = -Math.ceil((rect.top + edge - event.clientY) / 4);
-  } else if (event.clientY > rect.bottom - edge) {
-    delta = Math.ceil((event.clientY - (rect.bottom - edge)) / 4);
+  if (clientY < rect.top + edge) {
+    delta = -Math.ceil((rect.top + edge - clientY) / 4);
+  } else if (clientY > rect.bottom - edge) {
+    delta = Math.ceil((clientY - (rect.bottom - edge)) / 4);
   }
   if (delta !== 0) scroller.scrollTop += Math.max(-18, Math.min(delta, 18));
 }
 
-function handleTableDragOver(view: EditorView, event: DragEvent): boolean {
-  const drag = activeTableDrag;
-  if (!drag) return false;
-  const target = tableDropTargetFromEvent(drag, event);
+function updateTableDragTarget(
+  view: EditorView,
+  drag: TableDragState,
+  hitTarget: Element | null,
+  clientX: number,
+  clientY: number,
+): TableDropTarget | null {
+  const target = tableDropTargetFromPoint(drag, hitTarget, clientX, clientY);
   if (!target) {
     clearTableDropTargetChrome(view);
     drag.dropTarget = undefined;
-    return false;
+    return null;
   }
 
-  event.preventDefault();
-  event.stopPropagation();
-  event.stopImmediatePropagation();
-  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  autoScrollTableDrag(drag, event);
+  autoScrollTableDrag(drag, clientY);
 
   const changed =
     drag.dropTarget?.index !== target.index ||
@@ -639,21 +648,24 @@ function handleTableDragOver(view: EditorView, event: DragEvent): boolean {
         : `Move ${label} ${drag.index + 1} ${target.side} ${label} ${target.index + 1}.`,
     );
   }
-  return true;
+  return target;
 }
 
-function handleTableDrop(view: EditorView, event: DragEvent): boolean {
-  const drag = activeTableDrag;
-  if (!drag) return false;
-  const target = tableDropTargetFromEvent(drag, event) ?? drag.dropTarget;
-  event.preventDefault();
-  event.stopPropagation();
-  event.stopImmediatePropagation();
-
+function finishTableDrop(
+  view: EditorView,
+  drag: TableDragState,
+  target: TableDropTarget | undefined,
+): void {
+  drag.preview.remove();
   drag.sourceButton.setAttribute("aria-grabbed", "false");
   suppressTableGripClickUntil.set(drag.sourceButton, Date.now() + 250);
 
   if (target && target.destination !== drag.index) {
+    // prosemirror-tables resolves rowspan/colspan ranges from the current
+    // selection even when its `pos` option identifies the table. Move the
+    // selection only after pointer release, when rebuilding decorations can
+    // no longer invalidate the active handle.
+    focusCell(view, drag.cellPos);
     const command =
       drag.band === "column"
         ? moveTableColumn({
@@ -666,15 +678,16 @@ function handleTableDrop(view: EditorView, event: DragEvent): boolean {
             to: target.destination,
             pos: drag.cellPos,
           });
-    runTableCommand(view, command);
+    const moved = runTableCommand(view, command);
     announceTableDrag(
       view,
-      `${drag.band === "row" ? "Row" : "Column"} ${drag.index + 1} moved to position ${target.destination + 1}.`,
+      moved
+        ? `${drag.band === "row" ? "Row" : "Column"} ${drag.index + 1} moved to position ${target.destination + 1}.`
+        : `Could not move ${drag.band} ${drag.index + 1}.`,
     );
   }
   activeTableDrag = null;
   clearTableDragChrome(view);
-  return true;
 }
 
 function configureGripDrag(
@@ -684,58 +697,194 @@ function configureGripDrag(
   index: number,
   cellPos: number,
 ): void {
-  button.draggable = view.editable !== false;
+  button.draggable = false;
+  const ownerWindow = button.ownerDocument.defaultView ?? window;
 
-  button.addEventListener("dragstart", (event) => {
-    if (view.editable === false || !event.dataTransfer) {
-      event.preventDefault();
-      return;
+  let pointerSession:
+    | {
+        pointerId: number;
+        startX: number;
+        startY: number;
+        dragging: boolean;
+        preview: HTMLElement | null;
+      }
+    | undefined;
+
+  const detachReleaseFallbacks = () => {
+    ownerWindow.removeEventListener("pointermove", handleWindowPointerMove, true);
+    ownerWindow.removeEventListener("pointerup", handleWindowPointerUp, true);
+    ownerWindow.removeEventListener("mouseup", handleWindowMouseUp, true);
+    ownerWindow.removeEventListener("pointercancel", handleWindowPointerCancel, true);
+    ownerWindow.removeEventListener("keydown", handleWindowKeyDown, true);
+  };
+
+  const releasePointer = (pointerId: number) => {
+    try {
+      if (button.hasPointerCapture?.(pointerId)) {
+        button.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // The browser may release capture itself after pointerup/cancel.
     }
+  };
 
+  const cancelPointerDrag = (message?: string) => {
+    const session = pointerSession;
+    if (!session) return;
+    detachReleaseFallbacks();
+    cancelActiveTablePointer = null;
+    session.preview?.remove();
+    button.setAttribute("aria-grabbed", "false");
+    if (session.dragging) {
+      suppressTableGripClickUntil.set(button, Date.now() + 250);
+      if (message) announceTableDrag(view, message);
+    }
+    activeTableDrag = null;
+    clearTableDragChrome(view);
+    pointerSession = undefined;
+    releasePointer(session.pointerId);
+  };
+
+  const beginPointerDrag = (event: PointerEvent): TableDragState | null => {
+    const tableElement = button.closest("table");
+    if (!tableElement || !pointerSession) return null;
     closeOpenMenu?.();
     closeOpenMenu = null;
-    const tableElement = button.closest("table");
-    if (!tableElement) {
-      event.preventDefault();
-      return;
-    }
-    activeTableDrag = {
+    const preview = createTableDragPreview(view, band, index);
+    const drag: TableDragState = {
       band,
       index,
       cellPos,
       tableElement,
       sourceButton: button,
       scrollContainer: findVerticalScrollContainer(view),
+      preview,
     };
-    if (band === "column") selectColumn(view, cellPos);
-    else selectRow(view, cellPos);
+    activeTableDrag = drag;
+    pointerSession.dragging = true;
+    pointerSession.preview = preview;
+    positionTableDragPreview(pointerSession.preview, event.clientX, event.clientY);
 
+    // Do not create a ProseMirror row/column selection here. That dispatches a
+    // transaction, rebuilds the table decorations, and detaches the handle
+    // that currently owns pointer capture. The drag-source classes below give
+    // the same visual feedback without invalidating the active gesture.
     tableElement.classList.add("is-reordering");
     button.classList.add("is-dragging");
     button.setAttribute("aria-grabbed", "true");
     markTableBand(tableElement, band, index, "dohc-table-drag-source");
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", `dohc-table-${band}-${index}`);
-    setTableDragPreview(view, event, band, index);
     announceTableDrag(
       view,
       `Moving ${band} ${index + 1}. Drag over any cell to choose a new position.`,
     );
+    return drag;
+  };
+
+  const finishPointerDragAt = (
+    clientX: number,
+    clientY: number,
+    pointerId?: number,
+  ) => {
+    const session = pointerSession;
+    if (!session || (pointerId !== undefined && session.pointerId !== pointerId)) {
+      return;
+    }
+    detachReleaseFallbacks();
+    cancelActiveTablePointer = null;
+    if (!session.dragging || !activeTableDrag) {
+      pointerSession = undefined;
+      releasePointer(session.pointerId);
+      return;
+    }
+    const drag = activeTableDrag;
+    const hitTarget = view.dom.ownerDocument.elementFromPoint(clientX, clientY);
+    const previousTarget = drag.dropTarget;
+    const target =
+      (hitTarget
+        ? updateTableDragTarget(view, drag, hitTarget, clientX, clientY)
+        : null) ?? previousTarget;
+    pointerSession = undefined;
+    releasePointer(session.pointerId);
+    finishTableDrop(view, drag, target);
+  };
+
+  function handleWindowPointerUp(event: PointerEvent): void {
+    finishPointerDragAt(event.clientX, event.clientY, event.pointerId);
+  }
+
+  function handleWindowPointerMove(event: PointerEvent): void {
+    const session = pointerSession;
+    if (!session || session.pointerId !== event.pointerId) return;
+    if (!session.dragging) {
+      const dx = event.clientX - session.startX;
+      const dy = event.clientY - session.startY;
+      if (dx * dx + dy * dy < 25) return;
+    }
+    const drag = activeTableDrag ?? beginPointerDrag(event);
+    if (!drag || !pointerSession?.preview) return;
+    event.preventDefault();
+    event.stopPropagation();
+    positionTableDragPreview(pointerSession.preview, event.clientX, event.clientY);
+    const hitTarget = view.dom.ownerDocument.elementFromPoint(
+      event.clientX,
+      event.clientY,
+    );
+    updateTableDragTarget(view, drag, hitTarget, event.clientX, event.clientY);
+  }
+
+  function handleWindowMouseUp(event: MouseEvent): void {
+    if (event.button === 0) finishPointerDragAt(event.clientX, event.clientY);
+  }
+
+  function handleWindowPointerCancel(): void {
+    cancelPointerDrag("Table reorder cancelled after pointer input ended.");
+  }
+
+  function handleWindowKeyDown(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    cancelPointerDrag("Table reorder cancelled.");
+  }
+
+  button.addEventListener("pointerdown", (event) => {
+    if (view.editable === false || event.button !== 0) return;
+    cancelActiveTablePointer?.();
+    pointerSession = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
+      preview: null,
+    };
+    cancelActiveTablePointer = () => cancelPointerDrag();
+    try {
+      button.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Electron supports capture; this only guards synthetic/test renderers.
+    }
+    // Track on the window so the gesture survives a lost capture or a handle
+    // moving out from under the cursor while the table updates visually.
+    ownerWindow.addEventListener("pointermove", handleWindowPointerMove, true);
+    ownerWindow.addEventListener("pointerup", handleWindowPointerUp, true);
+    // Some Electron/automation paths emit mouseup without a matching pointerup.
+    ownerWindow.addEventListener("mouseup", handleWindowMouseUp, true);
+    ownerWindow.addEventListener("pointercancel", handleWindowPointerCancel, true);
+    ownerWindow.addEventListener("keydown", handleWindowKeyDown, true);
   });
 
-  button.addEventListener("dragend", () => {
-    button.setAttribute("aria-grabbed", "false");
-    suppressTableGripClickUntil.set(button, Date.now() + 250);
-    if (activeTableDrag) {
-      announceTableDrag(
-        view,
-        activeTableDrag.dropTarget
-          ? `Table reorder cancelled at position ${activeTableDrag.dropTarget.destination + 1}.`
-          : "Table reorder cancelled before a drop position was chosen.",
-      );
-    }
-    activeTableDrag = null;
-    clearTableDragChrome(view);
+  // This local listener is also needed by embedded/synthetic DOMs whose
+  // pointer events do not traverse the owning window's capture phase.
+  button.addEventListener("pointermove", handleWindowPointerMove);
+
+  button.addEventListener("pointerup", (event) => {
+    if (!pointerSession || pointerSession.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    finishPointerDragAt(event.clientX, event.clientY, event.pointerId);
+  });
+
+  button.addEventListener("pointercancel", () => {
+    cancelPointerDrag("Table reorder cancelled after pointer input ended.");
   });
 }
 
@@ -1007,31 +1156,7 @@ export function makeTableControlsPlugin(): Plugin {
         return true;
       },
     },
-    view(view) {
-      const onDragOver = (event: DragEvent) => {
-        handleTableDragOver(view, event);
-      };
-      const onDragLeave = (event: DragEvent) => {
-        if (!activeTableDrag) return;
-        const next = event.relatedTarget;
-        if (
-          next instanceof Node &&
-          activeTableDrag.tableElement.contains(next)
-        ) {
-          return;
-        }
-        activeTableDrag.dropTarget = undefined;
-        clearTableDropTargetChrome(view);
-      };
-      const onDrop = (event: DragEvent) => {
-        handleTableDrop(view, event);
-      };
-      // Capture before ProseMirror's generic drop cursor. Table reordering has
-      // its own boundary indicator and should never produce a competing text
-      // insertion cursor.
-      view.dom.addEventListener("dragover", onDragOver, true);
-      view.dom.addEventListener("dragleave", onDragLeave, true);
-      view.dom.addEventListener("drop", onDrop, true);
+    view() {
       return {
         // An open grip menu closes over a raw cell position (see
         // columnMenuItems). If the doc shifts while it's open — e.g. a remote
@@ -1046,13 +1171,12 @@ export function makeTableControlsPlugin(): Plugin {
           }
         },
         destroy() {
-          view.dom.removeEventListener("dragover", onDragOver, true);
-          view.dom.removeEventListener("dragleave", onDragLeave, true);
-          view.dom.removeEventListener("drop", onDrop, true);
+          cancelActiveTablePointer?.();
+          cancelActiveTablePointer = null;
           closeOpenMenu?.();
           closeOpenMenu = null;
+          activeTableDrag?.preview.remove();
           activeTableDrag = null;
-          clearTableDragChrome(view);
         },
       };
     },

@@ -12,9 +12,10 @@ import {
 // ProseMirror's resize/drop plugins ask the browser for a hit-test while these
 // tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so
 // provide the inert browser API those unrelated plugins expect.
+let elementFromPointResult: Element | null = null;
 Object.defineProperty(document, "elementFromPoint", {
   configurable: true,
-  value: () => null,
+  value: () => elementFromPointResult,
 });
 
 const testTableControls = Extension.create({
@@ -82,21 +83,30 @@ function click(el: Element): void {
   el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
 }
 
+function dispatchPointer(
+  element: Element,
+  type: string,
+  { clientX = 0, clientY = 0, pointerId = 1 } = {},
+): void {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX,
+    clientY,
+  });
+  Object.defineProperty(event, "pointerId", { value: pointerId });
+  Object.defineProperty(event, "pointerType", { value: "mouse" });
+  element.dispatchEvent(event);
+}
+
 function drag(source: Element, target: Element): void {
-  const dataTransfer = {
-    effectAllowed: "none",
-    dropEffect: "none",
-    setData: () => undefined,
-  };
-  const dispatch = (element: Element, type: string) => {
-    const event = new MouseEvent(type, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
-    element.dispatchEvent(event);
-  };
-  dispatch(source, "dragstart");
-  dispatch(target, "dragover");
-  dispatch(target, "drop");
-  dispatch(source, "dragend");
+  elementFromPointResult = source;
+  dispatchPointer(source, "pointerdown");
+  elementFromPointResult = target;
+  dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+  dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
+  elementFromPointResult = null;
 }
 
 // `editor.getJSON()`'s type is inferred from the registered extensions
@@ -137,7 +147,9 @@ describe("table controls grips", () => {
   let editor: Editor | undefined;
 
   afterEach(() => {
+    elementFromPointResult = null;
     document.body.querySelector(".dohc-table-menu")?.remove();
+    document.body.querySelector(".dohc-table-drag-preview")?.remove();
     editor?.destroy();
     editor = undefined;
   });
@@ -258,6 +270,24 @@ describe("table controls grips", () => {
     ]);
   });
 
+  it("reorders when the editor selection starts outside the table", () => {
+    editor = createLabeledTableEditor();
+    editor.commands.insertContentAt(0, {
+      type: "paragraph",
+      content: [{ type: "text", text: "Outside the table" }],
+    });
+    editor.commands.setTextSelection(1);
+    const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
+
+    drag(rowGrips[0] as HTMLElement, rowGrips[2] as HTMLElement);
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["B1", "B2", "B3"],
+      ["C1", "C2", "C3"],
+      ["A1", "A2", "A3"],
+    ]);
+  });
+
   it("dragging a column handle reorders every cell in that column", () => {
     editor = createLabeledTableEditor();
     const columnGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--col");
@@ -288,6 +318,36 @@ describe("table controls grips", () => {
     ]);
   });
 
+  it("drops at the last valid target when Electron reroutes mouseup", () => {
+    editor = createLabeledTableEditor();
+    const source = editor.view.dom.querySelector(
+      ".dohc-table-grip--row",
+    ) as HTMLElement;
+    const targetCell = editor.view.dom.querySelectorAll("tr")[2]?.cells[1];
+    if (!targetCell) throw new Error("target cell missing");
+
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = targetCell;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+    elementFromPointResult = null;
+    window.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 0,
+        clientY: 0,
+      }),
+    );
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["B1", "B2", "B3"],
+      ["C1", "C2", "C3"],
+      ["A1", "A2", "A3"],
+    ]);
+  });
+
   it("uses the pointer half to insert before the target row", () => {
     editor = createLabeledTableEditor();
     const rows = editor.view.dom.querySelectorAll("tr");
@@ -306,26 +366,12 @@ describe("table controls grips", () => {
         height: 40,
       }),
     });
-    const dataTransfer = {
-      effectAllowed: "none",
-      dropEffect: "none",
-      setData: () => undefined,
-    };
-    const dispatch = (element: Element, type: string, clientY = 105) => {
-      const event = new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        clientY,
-      });
-      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
-      element.dispatchEvent(event);
-    };
-
-    dispatch(source, "dragstart");
-    dispatch(targetCell, "dragover");
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = targetCell;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 105 });
     expect(rows[0]?.classList.contains("dohc-table-drop-before")).toBe(true);
-    dispatch(targetCell, "drop");
-    dispatch(source, "dragend");
+    dispatchPointer(source, "pointerup", { clientX: 10, clientY: 105 });
 
     expect(tableTextGrid(editor)).toEqual([
       ["C1", "C2", "C3"],
@@ -495,25 +541,14 @@ describe("table controls grips", () => {
     const rowGrips = editor.view.dom.querySelectorAll(".dohc-table-grip--row");
     const source = rowGrips[0] as HTMLElement;
     const target = rowGrips[1] as HTMLElement;
-    let previewLabel = "";
-    const dataTransfer = {
-      effectAllowed: "none",
-      dropEffect: "none",
-      setData: () => undefined,
-      setDragImage: (preview: Element) => {
-        previewLabel = preview.textContent ?? "";
-      },
-    };
-    const dispatch = (element: Element, type: string) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
-      element.dispatchEvent(event);
-    };
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = target;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
 
-    dispatch(source, "dragstart");
-    dispatch(target, "dragover");
-
-    expect(previewLabel).toBe("⠿  Row 1");
+    expect(document.body.querySelector(".dohc-table-drag-preview")?.textContent).toBe(
+      "⠿  Row 1",
+    );
     expect(source.classList.contains("is-dragging")).toBe(true);
     expect(
       source.closest("tr")?.classList.contains("dohc-table-drag-source"),
@@ -523,7 +558,7 @@ describe("table controls grips", () => {
       target.closest("tr")?.classList.contains("dohc-table-drop-after"),
     ).toBe(true);
 
-    dispatch(source, "dragend");
+    dispatchPointer(source, "pointercancel", { clientX: 10, clientY: 10 });
     expect(
       editor.view.dom.querySelector(".is-dragging, .dohc-table-drop-after"),
     ).toBeNull();
@@ -534,23 +569,10 @@ describe("table controls grips", () => {
     const grip = editor.view.dom.querySelector(
       ".dohc-table-grip--row",
     ) as HTMLElement;
-    const dataTransfer = {
-      effectAllowed: "none",
-      dropEffect: "none",
-      setData: () => undefined,
-    };
-    const dragStart = new MouseEvent("dragstart", {
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(dragStart, "dataTransfer", { value: dataTransfer });
-    grip.dispatchEvent(dragStart);
-    const dragEnd = new MouseEvent("dragend", {
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(dragEnd, "dataTransfer", { value: dataTransfer });
-    grip.dispatchEvent(dragEnd);
+    elementFromPointResult = grip;
+    dispatchPointer(grip, "pointerdown");
+    dispatchPointer(grip, "pointermove", { clientX: 10, clientY: 10 });
+    dispatchPointer(grip, "pointerup", { clientX: 10, clientY: 10 });
 
     click(grip);
 
