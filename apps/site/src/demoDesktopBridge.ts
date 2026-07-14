@@ -54,7 +54,9 @@ async function pickBrowserImages() {
       input.addEventListener(
         "change",
         async () => {
-          const files = Array.from(input.files ?? []).slice(0, 20);
+          const files = Array.from(input.files ?? [])
+            .slice(0, 20)
+            .filter((file) => file.size <= 20 * 1024 * 1024);
           const images = await Promise.all(
             files.map(async (file) => ({
               name: file.name,
@@ -62,7 +64,7 @@ async function pickBrowserImages() {
               bytes: new Uint8Array(await file.arrayBuffer()),
             })),
           );
-          resolve(images.filter((image) => image.bytes.byteLength <= 20 * 1024 * 1024));
+          resolve(images);
         },
         { once: true },
       );
