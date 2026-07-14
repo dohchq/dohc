@@ -1,12 +1,23 @@
 // dohc marketing site — downloads, theme toggle, and scroll reveals.
 
 const root = document.documentElement;
+const themeToggle = document.querySelector('.theme-toggle');
 
-document.querySelector('.theme-toggle').addEventListener('click', () => {
+function syncThemeToggle() {
+  if (!themeToggle) return;
+  const dark = root.dataset.theme === 'dark';
+  themeToggle.setAttribute('aria-pressed', String(dark));
+  themeToggle.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+}
+
+themeToggle?.addEventListener('click', () => {
   const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
   root.dataset.theme = next;
   localStorage.setItem('dohc-theme', next);
+  syncThemeToggle();
 });
+
+syncThemeToggle();
 
 const RELEASES_URL = 'https://github.com/dohc-ai/dohc/releases';
 const downloadBuilds = {
@@ -161,21 +172,30 @@ if (downloadControls.length) {
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const targets = document.querySelectorAll('.reveal');
 
-if (reduced || !('IntersectionObserver' in window)) {
-  targets.forEach((el) => el.classList.add('in'));
-} else {
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('in');
-          io.unobserve(entry.target);
-        }
-      }
-    },
-    { threshold: 0.12, rootMargin: '0px 0px -8% 0px' },
-  );
-  targets.forEach((el) => io.observe(el));
+if (targets.length) {
+  // Reveal effects are progressive enhancement. Content stays visible when
+  // this script is blocked or fails to load.
+  try {
+    root.classList.add('reveal-enabled');
+    if (reduced || !('IntersectionObserver' in window)) {
+      targets.forEach((el) => el.classList.add('in'));
+    } else {
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('in');
+              io.unobserve(entry.target);
+            }
+          }
+        },
+        { threshold: 0.12, rootMargin: '0px 0px -8% 0px' },
+      );
+      targets.forEach((el) => io.observe(el));
+    }
+  } catch {
+    root.classList.remove('reveal-enabled');
+  }
 }
 
 document.getElementById('year').textContent = new Date().getFullYear();
