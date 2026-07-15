@@ -14,6 +14,7 @@ import type {
   WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
+import { parseInvokeSiteSdkPayloadForIpc } from "./ipc/bridgeContract";
 import {
   CHANNELS,
   isExplorerMenuCommand,
@@ -119,7 +120,10 @@ const bridge: DohcDesktopBridge = {
   stopSitePreview: (payload: StopSitePreviewPayload) =>
     ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
   invokeSiteSdk: (payload: InvokeSiteSdkPayload) =>
-    ipcRenderer.invoke(CHANNELS.invokeSiteSdk, payload),
+    ipcRenderer.invoke(
+      CHANNELS.invokeSiteSdk,
+      parseInvokeSiteSdkPayloadForIpc(payload),
+    ),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

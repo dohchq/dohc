@@ -1,4 +1,8 @@
-import { validateUserReadPath, validateUserWritePath } from "@dohc/workspace-core";
+import {
+  isDatabaseFile,
+  validateUserReadPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
 import { rgPath } from "@vscode/ripgrep";
 import { basename, join } from "node:path";
 import { realpath, stat } from "node:fs/promises";
@@ -215,6 +219,14 @@ export async function invokeSiteSdkHost(
       }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
+      // SQLite files are canonical structured artifacts. Replacing their raw
+      // bytes/text would bypass the operation log, transactions, provenance,
+      // and collaboration convergence used by databases.edit.
+      if (isDatabaseFile(path)) {
+        throw new Error(
+          "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
+        );
+      }
       // Markdown is projected from the canonical Y.Doc/document model. This
       // host does not own a document session or the review/lock context needed
       // to perform a correct canonical transaction, so a raw text overwrite

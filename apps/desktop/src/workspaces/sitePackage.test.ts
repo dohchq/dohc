@@ -98,6 +98,24 @@ describe("shareMountRootForSite", () => {
       root: "shared-with-me/alex/portal/dist",
       entry: "index.html",
     });
+    const sharedViewSite = {
+      ...site!,
+      root: "portal",
+      entryPath: "portal/index.html",
+      packagePath: "portal/package.json",
+      sourceFiles: site!.sourceFiles.map((path) =>
+        path.replace("shared-with-me/alex/portal", "portal"),
+      ),
+      authority: { kind: "workspace" as const },
+    };
+    expect(staticPreviewTargetForSite(sharedViewSite)).toEqual({
+      root: "portal",
+      entry: "index.html",
+    });
+    expect(staticPreviewTargetForSite(sharedViewSite, { sharedView: true })).toEqual({
+      root: "portal/dist",
+      entry: "index.html",
+    });
     const target = staticPreviewTargetForSite(site!);
     const preview = await startStaticSitePreview(root, target.root, {
       entry: target.entry ?? undefined,

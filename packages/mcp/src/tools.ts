@@ -2093,6 +2093,13 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
       };
     }
   }
+  const siteRootNames = new Set(
+    (await readdir(root.absolute, { withFileTypes: true })).map((entry) => entry.name),
+  );
+  const usesPackageModuleResolution =
+    Boolean(frameworkConfigName(siteRootNames)) ||
+    hasWebDependency(existing) ||
+    Object.keys(detectedSite?.scripts ?? {}).length > 0;
   const packageJson = ensureObject(existing);
   packageJson.private = packageJson.private ?? true;
   packageJson.type = packageJson.type ?? "module";
@@ -2164,7 +2171,7 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   });
   if (!written.ok) return written;
 
-  const useVendoredBrowserImport = detectedSite?.kind === "static" && sdk.sourceDir !== null;
+  const useVendoredBrowserImport = !usesPackageModuleResolution && sdk.sourceDir !== null;
 
   return {
     ok: true as const,

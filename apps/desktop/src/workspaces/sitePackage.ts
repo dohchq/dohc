@@ -121,11 +121,14 @@ export function sharedStaticEntryRelativeToSite(site: SitePackageInfo): string |
  * root-absolute asset URLs, so serving dist/index.html from the source root
  * would incorrectly resolve /assets/* beside dist rather than inside it.
  */
-export function staticPreviewTargetForSite(site: SitePackageInfo): {
+export function staticPreviewTargetForSite(
+  site: SitePackageInfo,
+  options: { sharedView?: boolean } = {},
+): {
   root: string;
   entry: string | null;
 } {
-  if (site.authority.kind === "share") {
+  if (options.sharedView || site.authority.kind === "share") {
     const output = builtOutputRelativeToSite(site);
     if (output) return { root: buildOutputSiteRoot(site, output), entry: "index.html" };
     return { root: site.root, entry: sharedStaticEntryRelativeToSite(site) };

@@ -1587,13 +1587,174 @@ export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
 // Sites never supply user or workspace identity. The containing renderer
 // identifies the open site and main re-derives its owned/share authority.
+// The preload applies this contract before ipcRenderer.invoke. The byte cap
+// is the exact UTF-8 size of the JSON representation; 4 MiB preserves the
+// supported 2 MiB text-write payload while bounding Electron deserialization.
+export const SITE_SDK_PARAMS_MAX_BYTES = 4 * 1024 * 1024;
+export const SITE_SDK_PARAMS_MAX_DEPTH = 32;
+export const SITE_SDK_PARAMS_MAX_VALUES = 20_000;
+
+type SiteSdkParamFrame =
+  | { kind: "visit"; value: unknown; depth: number }
+  | { kind: "leave"; value: object };
+
+function boundedJsonStringBytes(value: string, remaining: number): number {
+  let bytes = 2; // JSON quotes.
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c) {
+      bytes += 2;
+    } else if (code <= 0x1f) {
+      bytes += code === 0x08 || code === 0x09 || code === 0x0a ||
+        code === 0x0c || code === 0x0d
+        ? 2
+        : 6;
+    } else if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        // Well-formed JSON.stringify escapes lone surrogates as \uXXXX.
+        bytes += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes += 6;
+    } else {
+      bytes += 3;
+    }
+    if (bytes > remaining) return remaining + 1;
+  }
+  return bytes;
+}
+
+function siteSdkParamsIssue(root: unknown): string | null {
+  const stack: SiteSdkParamFrame[] = [{ kind: "visit", value: root, depth: 0 }];
+  const ancestors = new WeakSet<object>();
+  let bytes = 0;
+  let values = 0;
+
+  const addBytes = (amount: number): boolean => {
+    bytes += amount;
+    return bytes <= SITE_SDK_PARAMS_MAX_BYTES;
+  };
+
+  try {
+    while (stack.length > 0) {
+      const frame = stack.pop()!;
+      if (frame.kind === "leave") {
+        ancestors.delete(frame.value);
+        continue;
+      }
+      if (frame.depth > SITE_SDK_PARAMS_MAX_DEPTH) return "nesting is too deep";
+      values += 1;
+      if (values > SITE_SDK_PARAMS_MAX_VALUES) return "too many values";
+
+      const current = frame.value;
+      if (current === null) {
+        if (!addBytes(4)) return "serialized value is too large";
+        continue;
+      }
+      if (typeof current === "string") {
+        if (!addBytes(boundedJsonStringBytes(
+          current,
+          SITE_SDK_PARAMS_MAX_BYTES - bytes,
+        ))) return "serialized value is too large";
+        continue;
+      }
+      if (typeof current === "boolean") {
+        if (!addBytes(current ? 4 : 5)) return "serialized value is too large";
+        continue;
+      }
+      if (typeof current === "number") {
+        if (!Number.isFinite(current)) return "numbers must be finite";
+        if (!addBytes(JSON.stringify(current).length)) {
+          return "serialized value is too large";
+        }
+        continue;
+      }
+      if (typeof current !== "object") return "value is not JSON-safe";
+      if (ancestors.has(current)) return "cyclic references are not allowed";
+
+      if (Array.isArray(current)) {
+        const keys = Object.keys(current);
+        if (
+          keys.length !== current.length ||
+          keys.some((key, index) => key !== String(index))
+        ) {
+          return "arrays must be dense and contain no extra properties";
+        }
+        if (!addBytes(2 + Math.max(0, current.length - 1))) {
+          return "serialized value is too large";
+        }
+        ancestors.add(current);
+        stack.push({ kind: "leave", value: current });
+        for (let index = current.length - 1; index >= 0; index -= 1) {
+          stack.push({ kind: "visit", value: current[index], depth: frame.depth + 1 });
+        }
+        continue;
+      }
+
+      const prototype = Object.getPrototypeOf(current);
+      if (prototype !== Object.prototype && prototype !== null) {
+        return "only plain objects and arrays are allowed";
+      }
+      const keys = Reflect.ownKeys(current);
+      if (!addBytes(2 + Math.max(0, keys.length - 1) + keys.length)) {
+        return "serialized value is too large";
+      }
+      const childValues: unknown[] = [];
+      for (const key of keys) {
+        if (typeof key !== "string") return "symbol keys are not allowed";
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (!descriptor?.enumerable || !("value" in descriptor)) {
+          return "object properties must be enumerable data values";
+        }
+        if (!addBytes(boundedJsonStringBytes(
+          key,
+          SITE_SDK_PARAMS_MAX_BYTES - bytes,
+        ))) return "serialized value is too large";
+        childValues.push(descriptor.value);
+      }
+      ancestors.add(current);
+      stack.push({ kind: "leave", value: current });
+      for (let index = childValues.length - 1; index >= 0; index -= 1) {
+        stack.push({ kind: "visit", value: childValues[index], depth: frame.depth + 1 });
+      }
+    }
+  } catch {
+    return "value could not be inspected safely";
+  }
+
+  return null;
+}
+
+export const SiteSdkParams = z.unknown().superRefine((value, ctx) => {
+  const issue = siteSdkParamsIssue(value);
+  if (!issue) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message:
+      `params must be JSON-safe and within ${SITE_SDK_PARAMS_MAX_BYTES} bytes, ` +
+      `${SITE_SDK_PARAMS_MAX_DEPTH} levels, and ${SITE_SDK_PARAMS_MAX_VALUES} values: ${issue}`,
+  });
+});
+
 export const InvokeSiteSdkPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
   method: z.string().min(1).max(200),
-  params: z.unknown().optional(),
+  params: SiteSdkParams.optional(),
 });
 export type InvokeSiteSdkPayload = z.infer<typeof InvokeSiteSdkPayload>;
+
+export function parseInvokeSiteSdkPayloadForIpc(value: unknown): InvokeSiteSdkPayload {
+  return InvokeSiteSdkPayload.parse(value);
+}
 
 export const InvokeSiteSdkResult = z.object({ result: z.unknown() });
 export type InvokeSiteSdkResult = z.infer<typeof InvokeSiteSdkResult>;

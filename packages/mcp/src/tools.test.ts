@@ -1006,6 +1006,30 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("add_sdk treats configured sites without a bundler as browser-static", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "configured-report"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "configured-report", "index.html"),
+        "<!doctype html><h1>Configured report</h1>\n",
+      );
+      await writeFile(
+        join(ctx.root, "configured-report", "dohc.json"),
+        `${JSON.stringify({ type: "site", title: "Configured report" }, null, 2)}\n`,
+      );
+
+      const result = await addSiteSdk(ctx, { siteRoot: "configured-report" });
+
+      expect(result).toMatchObject({
+        ok: true,
+        importMode: "vendored-browser-module",
+      });
+      expect(result.ok ? result.usage : "").toContain(
+        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
+      );
+    });
+  });
+
   it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
     await withWorkspace(async (ctx) => {
       const sdkDir = join(ctx.home, "sdk-package");

@@ -68,6 +68,21 @@ describe("site SDK host authority", () => {
     ).rejects.toThrow(/canonical Markdown/i);
   });
 
+  it("rejects raw database writes and requires structured databases.edit", async () => {
+    const root = await workspace();
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+
+    for (const path of ["data/app.db", "data/app.sqlite", "data/app.SQLITE3"]) {
+      await expect(
+        invokeSiteSdkHost(context, "files.write", {
+          path,
+          text: "not sqlite bytes",
+        }),
+      ).rejects.toThrow(/cannot overwrite database files.*databases\.edit/i);
+      await expect(readFile(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
   it("keeps a mounted shared site read-only and hides paths outside its mount", async () => {
     const root = await workspace();
     await mkdir(join(root, "shared-with-me", "Plan", "notes"), { recursive: true });

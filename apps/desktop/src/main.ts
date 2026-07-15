@@ -697,6 +697,7 @@ type SitePreviewStartInput = {
   isCurrent: () => boolean;
   signal: AbortSignal;
   sdkScopeRoot: string | null;
+  sharedView: boolean;
 };
 
 async function rememberCurrentSitePreviewHandle(
@@ -735,9 +736,11 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "static") {
-    const target = staticPreviewTargetForSite(input.site);
+    const target = staticPreviewTargetForSite(input.site, {
+      sharedView: input.sharedView,
+    });
     const entry = target.entry ?? undefined;
-    if (input.site.authority.kind === "share" && !entry) {
+    if ((input.sharedView || input.site.authority.kind === "share") && !entry) {
       throw new Error(
         "This shared package does not include a built site artifact. Ask the owner to build and share it again.",
       );
@@ -4035,6 +4038,7 @@ function registerIpcHandlers(): void {
       rendererGeneration(sender.id) === generation;
     try {
       const workspace = requireWorkspace(input.workspaceId);
+      const sharedView = sharedViewOf(workspace.workspaceId);
       assertSitePreviewMode(workspace.workspaceId, input.mode);
       // A mounted share may provide a ready browser artifact, but must never
       // cause package/configured commands from somebody else to execute.
@@ -4053,10 +4057,11 @@ function registerIpcHandlers(): void {
           mode: input.mode,
           isCurrent,
           signal: pendingStart.controller.signal,
+          sharedView: !!sharedView,
           sdkScopeRoot:
             site.authority.kind === "share"
               ? site.authority.mountRoot
-              : sharedViewOf(workspace.workspaceId)
+              : sharedView
                 ? "."
                 : null,
         }),
