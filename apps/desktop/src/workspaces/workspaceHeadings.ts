@@ -75,15 +75,23 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
     const fenceMatch = row.text.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
     if (fenceMatch?.[1]) {
       const marker = fenceMatch[1][0] as "`" | "~";
-      if (!fence) fence = { marker, length: fenceMatch[1].length };
-      else if (
-        marker === fence.marker &&
-        fenceMatch[1].length >= fence.length &&
-        /^[ \t]*$/.test(fenceMatch[2] ?? "")
-      ) {
-        fence = null;
+      const remainder = fenceMatch[2] ?? "";
+      // CommonMark forbids a backtick anywhere in a backtick fence's info
+      // string. A tilde fence may contain backticks. This restriction applies
+      // only to OPENERS; while inside a fence, marker-looking content remains
+      // inert and only a whitespace-only matching run can close it.
+      const validOpener = marker === "~" || !remainder.includes("`");
+      if (fence || validOpener) {
+        if (!fence) fence = { marker, length: fenceMatch[1].length };
+        else if (
+          marker === fence.marker &&
+          fenceMatch[1].length >= fence.length &&
+          /^[ \t]*$/.test(remainder)
+        ) {
+          fence = null;
+        }
+        continue;
       }
-      continue;
     }
     if (fence || /^(?: {4}|\t)/.test(row.text)) continue;
 

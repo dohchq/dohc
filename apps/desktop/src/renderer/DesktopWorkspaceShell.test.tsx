@@ -30,6 +30,7 @@ import {
   graphChatOpenTarget,
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
+  runCanonicalDmNavigation,
   type Workspace,
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
@@ -526,6 +527,78 @@ describe("targeted chat navigation", () => {
       incoming: 1,
       outgoing: 0,
     })).toEqual(mentionTarget);
+  });
+
+  it("does not reopen Chats when destination navigation supersedes a delayed DM lookup", async () => {
+    const delayed = deferred<{
+      available: boolean;
+      dms: Array<{
+        channelId: string;
+        channelWireId: string;
+        name: string;
+        peerLabel: string;
+        role: "owner";
+        shareId: null;
+        threadId: string;
+        unreadCount: number;
+        connected: boolean;
+      }>;
+    }>();
+    let current = true;
+    const open = vi.fn();
+    const pending = runCanonicalDmNavigation({
+      locator: {
+        channelId: "dm-local",
+        channelWireId: "dm-wire",
+        threadId: "dm-thread",
+      },
+      syncDms: () => delayed.promise,
+      isCurrent: () => current,
+      open,
+    });
+
+    // Models the centralized workbench mutation invalidation used by file,
+    // graph, history, and arbitrary editor-tab navigation.
+    current = false;
+    delayed.resolve({
+      available: true,
+      dms: [{
+        channelId: "dm-local",
+        channelWireId: "dm-wire",
+        name: "alice@example.com",
+        peerLabel: "Alice",
+        role: "owner",
+        shareId: null,
+        threadId: "dm-thread",
+        unreadCount: 0,
+        connected: true,
+      }],
+    });
+    await pending;
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("clears stale chat navigation to channels when DM canonicalization fails", async () => {
+    const open = vi.fn();
+    const base = {
+      locator: { channelId: "dm-local", threadId: "dm-thread" },
+      isCurrent: () => true,
+      open,
+    };
+    await runCanonicalDmNavigation({
+      ...base,
+      syncDms: async () => ({ available: true, dms: [] }),
+    });
+    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
+
+    open.mockClear();
+    await runCanonicalDmNavigation({
+      ...base,
+      syncDms: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
   });
 });
 

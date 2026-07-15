@@ -294,6 +294,22 @@ export function resolveCanonicalDm(
   ) ?? null;
 }
 
+export async function runCanonicalDmNavigation(input: {
+  locator: DmChatLocator;
+  syncDms: () => Promise<{ available: boolean; dms: DmRecord[] }>;
+  isCurrent: () => boolean;
+  open: (nav: Extract<ChatsNav, { level: "dm" }> | { level: "channels" }) => void;
+}): Promise<void> {
+  try {
+    const result = await input.syncDms();
+    if (!input.isCurrent()) return;
+    const dm = result.available ? resolveCanonicalDm(input.locator, result.dms) : null;
+    input.open(dm ? { level: "dm", dm } : { level: "channels" });
+  } catch {
+    if (input.isCurrent()) input.open({ level: "channels" });
+  }
+}
+
 export function pendingHeadingTargetForOpen(
   path: string,
   target?: HeadingTarget,
@@ -1061,6 +1077,16 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  // Every workbench destination change invalidates an in-flight canonical DM
+  // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
+  // navigation cannot be missed by a one-off opener.
+  const dmNavigationRequest = useRef({ workspaceId, sequence: 0 });
+  if (dmNavigationRequest.current.workspaceId !== workspaceId) {
+    dmNavigationRequest.current = {
+      workspaceId,
+      sequence: dmNavigationRequest.current.sequence + 1,
+    };
+  }
   useEffect(() => {
     setShellError(null);
   }, [workspaceId]);
@@ -1221,6 +1247,7 @@ export function DesktopWorkspaceShell(props: {
   // the update. Loading stored state is the only setWb that bypasses this.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
+      dmNavigationRequest.current.sequence += 1;
       userTouchedWb.current = true;
       setWb(updater);
     },
@@ -1560,13 +1587,6 @@ export function DesktopWorkspaceShell(props: {
   const chatsNav = useRef<ChatsNav | null>(null);
   const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
   const [chatsPageRevision, setChatsPageRevision] = useState(0);
-  const dmNavigationRequest = useRef({ workspaceId, sequence: 0 });
-  if (dmNavigationRequest.current.workspaceId !== workspaceId) {
-    dmNavigationRequest.current = {
-      workspaceId,
-      sequence: dmNavigationRequest.current.sequence + 1,
-    };
-  }
   const onChatsNav = useCallback((nav: ChatsNav) => {
     dmNavigationRequest.current.sequence += 1;
     chatsNav.current = nav;
@@ -1580,12 +1600,10 @@ export function DesktopWorkspaceShell(props: {
     chatsDrafts.current = drafts;
   }, []);
   const openChatsTab = useCallback(() => {
-    dmNavigationRequest.current.sequence += 1;
     mutateWb((state) => openTab(state, CHATS_TAB_PATH));
   }, [mutateWb]);
   const openChatsNavInTab = useCallback(
     (nav: ChatsNav) => {
-      dmNavigationRequest.current.sequence += 1;
       const destinationChanged =
         chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
       const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
@@ -1611,28 +1629,18 @@ export function DesktopWorkspaceShell(props: {
         sequence: dmNavigationRequest.current.sequence + 1,
       };
       dmNavigationRequest.current = request;
-      try {
-        const result = await bridge().syncDms({ workspaceId });
-        if (
-          dmNavigationRequest.current.workspaceId !== request.workspaceId ||
-          dmNavigationRequest.current.sequence !== request.sequence
-        ) return;
-        const dm = result.available ? resolveCanonicalDm(locator, result.dms) : null;
-        if (!dm) {
-          openChatsTab();
-          return;
-        }
-        openChatsNavInTab({ level: "dm", dm });
-      } catch {
-        if (
+      await runCanonicalDmNavigation({
+        locator,
+        syncDms: () => bridge().syncDms({ workspaceId }),
+        isCurrent: () =>
           dmNavigationRequest.current.workspaceId === request.workspaceId &&
-          dmNavigationRequest.current.sequence === request.sequence
-        ) {
-          openChatsTab();
-        }
-      }
+          dmNavigationRequest.current.sequence === request.sequence,
+        // Canonicalization failure deliberately clears any prior DM/thread
+        // target. Merely reopening the Chats tab would preserve stale chatsNav.
+        open: openChatsNavInTab,
+      });
     },
-    [openChatsNavInTab, openChatsTab, workspaceId],
+    [openChatsNavInTab, workspaceId],
   );
   // The ONE way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
@@ -1643,7 +1651,6 @@ export function DesktopWorkspaceShell(props: {
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
       focusMessageId?: string,
     ) => {
-      dmNavigationRequest.current.sequence += 1;
       setSearchChatTarget({
         thread: {
           id: thread.id,

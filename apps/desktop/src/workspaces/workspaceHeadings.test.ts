@@ -67,6 +67,17 @@ describe("workspace headings", () => {
     expect(headings.map((heading) => heading.text)).toEqual(["Visible"]);
   });
 
+  it("does not open a backtick fence whose info string contains a backtick", () => {
+    const headings = extractWorkspaceHeadings([
+      "```lang`invalid",
+      "# Visible after invalid opener",
+    ].join("\n"));
+
+    expect(headings.map((heading) => heading.text)).toEqual([
+      "Visible after invalid opener",
+    ]);
+  });
+
   it("resolves encoded anchors and falls back to text occurrence", () => {
     const headings = extractWorkspaceHeadings("## Café plan\nA\n## Café plan\nB");
     expect(findWorkspaceHeading(headings, { anchor: "caf%C3%A9-plan" })?.line).toBe(1);

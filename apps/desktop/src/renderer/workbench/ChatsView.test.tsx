@@ -72,6 +72,21 @@ function openingPreview(
   };
 }
 
+function personalFeedItem(body: string, id: string) {
+  return {
+    message: message({ id, body }),
+    thread: thread(),
+    channel: {
+      id: "channel-1",
+      name: "general",
+      slug: "general",
+      kind: "channel" as const,
+    },
+    reactions: [],
+    matchedBy: ["channel" as const],
+  };
+}
+
 const fileThread: FileChatThreadRecord = {
   id: "thread-file-1",
   title: "Naming discussion",
@@ -1070,6 +1085,124 @@ describe("ChatsView document thread", () => {
 });
 
 describe("ChatsView live activity refresh", () => {
+  it("refreshes the open Feed with fresh workspace activity content", async () => {
+    let refreshed = false;
+    bridgeMock.listPersonalChatFeed.mockImplementation(() =>
+      Promise.resolve({
+        items: [
+          personalFeedItem(
+            refreshed ? "Fresh Feed update" : "Existing Feed update",
+            refreshed ? "message-fresh" : "message-existing",
+          ),
+        ],
+      }),
+    );
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Existing Feed update");
+
+    refreshed = true;
+    act(() => emitWorkspaceActivity());
+
+    expect(await screen.findByText("Fresh Feed update")).toBeTruthy();
+    expect(screen.queryByText("Existing Feed update")).toBeNull();
+    expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops an older pagination page when activity starts a fresh Feed refresh", async () => {
+    type FeedPage = {
+      items: ReturnType<typeof personalFeedItem>[];
+      nextCursor?: string;
+    };
+    let resolveOlder!: (value: FeedPage) => void;
+    const olderPage = new Promise<FeedPage>((resolve) => {
+      resolveOlder = resolve;
+    });
+    bridgeMock.listPersonalChatFeed
+      .mockResolvedValueOnce({
+        items: [personalFeedItem("Initial Feed item", "message-initial")],
+        nextCursor: "older-cursor",
+      })
+      .mockImplementationOnce(() => olderPage)
+      .mockResolvedValueOnce({
+        items: [personalFeedItem("Activity refresh item", "message-refresh")],
+      });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Initial Feed item");
+    await userEvent.click(await screen.findByTestId("chats-feed-more"));
+    act(() => emitWorkspaceActivity());
+    await screen.findByText("Activity refresh item");
+
+    await act(async () => {
+      resolveOlder({
+        items: [personalFeedItem("Stale paginated item", "message-stale-page")],
+      });
+      await olderPage;
+    });
+    expect(screen.queryByText("Stale paginated item")).toBeNull();
+    expect(screen.getByText("Activity refresh item")).toBeTruthy();
+  });
+
+  it("drops a delayed Feed activity response after switching workspaces", async () => {
+    let resolveOldRefresh!: (value: {
+      items: ReturnType<typeof personalFeedItem>[];
+    }) => void;
+    const oldRefresh = new Promise<{
+      items: ReturnType<typeof personalFeedItem>[];
+    }>((resolve) => {
+      resolveOldRefresh = resolve;
+    });
+    let oldWorkspaceReads = 0;
+    bridgeMock.listPersonalChatFeed.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId === "workspace-new") {
+          return Promise.resolve({
+            items: [personalFeedItem("New workspace Feed", "message-new")],
+          });
+        }
+        oldWorkspaceReads += 1;
+        return oldWorkspaceReads === 1
+          ? Promise.resolve({
+              items: [personalFeedItem("Old workspace Feed", "message-old-initial")],
+            })
+          : oldRefresh;
+      },
+    );
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Old workspace Feed");
+    act(() => emitWorkspaceActivity());
+
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByTestId("chats-personal-feed")).toBeNull());
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("New workspace Feed");
+
+    await act(async () => {
+      resolveOldRefresh({
+        items: [personalFeedItem("Stale old workspace Feed", "message-old-stale")],
+      });
+      await oldRefresh;
+    });
+    expect(screen.queryByText("Stale old workspace Feed")).toBeNull();
+    expect(screen.getByText("New workspace Feed")).toBeTruthy();
+  });
+
   it("re-lists threads when workspace activity changes the open channel feed", async () => {
     const user = userEvent.setup();
     let refreshed = false;

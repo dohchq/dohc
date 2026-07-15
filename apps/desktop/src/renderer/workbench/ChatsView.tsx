@@ -950,6 +950,7 @@ export function ChatsView(props: {
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
   const channelRefreshSeq = useRef(0);
+  const feedRefreshSeq = useRef(0);
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
@@ -1050,6 +1051,7 @@ export function ChatsView(props: {
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
     liveToken.current += 1;
+    feedRefreshSeq.current += 1;
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -1057,6 +1059,9 @@ export function ChatsView(props: {
     setNav({ level: "channels" });
     setChannelThreads([]);
     setFeedPosts({});
+    setPersonalFeed([]);
+    setPersonalFeedLoading(false);
+    setPersonalFeedNextCursor(undefined);
     setMessages([]);
     setReactions([]);
     setDecisions([]);
@@ -1091,6 +1096,7 @@ export function ChatsView(props: {
     void refreshFollows();
     return () => {
       liveToken.current += 1;
+      feedRefreshSeq.current += 1;
       bookmarkWorkspaceGeneration.current += 1;
       bookmarkListGeneration.current += 1;
       bookmarkMutationGeneration.current += 1;
@@ -1393,6 +1399,43 @@ export function ChatsView(props: {
     [applyThreadSnapshot, channelIsLocked, loadThreadSnapshot, props],
   );
 
+  const loadPersonalFeed = useCallback(
+    async (cursor?: string) => {
+      const token = liveToken.current;
+      const refreshSeq = ++feedRefreshSeq.current;
+      const requestIsCurrent = () =>
+        token === liveToken.current && refreshSeq === feedRefreshSeq.current;
+      setPersonalFeedLoading(true);
+      try {
+        const page = await bridge().listPersonalChatFeed({
+          workspaceId,
+          ...(cursor ? { cursor } : {}),
+          limit: 30,
+        });
+        if (!requestIsCurrent()) return;
+        setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
+        setPersonalFeedNextCursor(page.nextCursor);
+        if (!readOnly && !cursor && page.headCursor) {
+          void bridge()
+            .markPersonalChatFeedSeen({
+              workspaceId,
+              headCursor: page.headCursor,
+            })
+            .catch(() => {
+              // Best-effort cursor: the next Feed open can retry.
+            });
+        }
+      } catch (error) {
+        if (requestIsCurrent()) {
+          props.onError(ipcErrorMessage(error, "Could not load your Feed."));
+        }
+      } finally {
+        if (requestIsCurrent()) setPersonalFeedLoading(false);
+      }
+    },
+    [props.onError, readOnly, workspaceId],
+  );
+
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
   // reports/failures, and run-record completion. Treat it as an invalidation
   // for every mounted Chats surface. Every response carries either the follow
@@ -1401,6 +1444,10 @@ export function ChatsView(props: {
   useEffect(() => {
     return bridge().onWorkspaceActivity(() => {
       void refreshFollows();
+      if (nav.level === "feed") {
+        void loadPersonalFeed();
+        return;
+      }
       if (nav.level === "thread") {
         const threadId = nav.thread.id;
         const token = liveToken.current;
@@ -1460,6 +1507,7 @@ export function ChatsView(props: {
     applyThreadSnapshot,
     channelIsLocked,
     loadChannelSnapshot,
+    loadPersonalFeed,
     loadThreadSnapshot,
     nav,
     refreshFollows,
@@ -1736,40 +1784,6 @@ export function ChatsView(props: {
     [loadDmConversation, props],
   );
 
-  const loadPersonalFeed = useCallback(
-    async (cursor?: string) => {
-      const token = liveToken.current;
-      setPersonalFeedLoading(true);
-      try {
-        const page = await bridge().listPersonalChatFeed({
-          workspaceId,
-          ...(cursor ? { cursor } : {}),
-          limit: 30,
-        });
-        if (token !== liveToken.current) return;
-        setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
-        setPersonalFeedNextCursor(page.nextCursor);
-        if (!readOnly && !cursor && page.headCursor) {
-          void bridge()
-            .markPersonalChatFeedSeen({
-              workspaceId,
-              headCursor: page.headCursor,
-            })
-            .catch(() => {
-              // Best-effort cursor: the next Feed open can retry.
-            });
-        }
-      } catch (error) {
-        if (token === liveToken.current) {
-          props.onError(ipcErrorMessage(error, "Could not load your Feed."));
-        }
-      } finally {
-        if (token === liveToken.current) setPersonalFeedLoading(false);
-      }
-    },
-    [props.onError, readOnly, workspaceId],
-  );
-
   const openFeed = useCallback(() => {
     const target: ChatsNav = { level: "feed" };
     if (variant === "panel" && props.onOpenInTab) {
@@ -1777,6 +1791,7 @@ export function ChatsView(props: {
       return;
     }
     liveToken.current += 1;
+    feedRefreshSeq.current += 1;
     setNav(target);
     setPersonalFeed([]);
     setPersonalFeedNextCursor(undefined);

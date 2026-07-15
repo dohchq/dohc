@@ -811,14 +811,22 @@ const PERSONAL_FEED_VISIBILITY_PREDICATE = `
         AND f.owner_user_id = ? AND f.state = 'following'
         AND f.target_kind = 'thread' AND f.target_id = m.thread_id
     )
-    OR (m.message_order = 0 AND EXISTS (
-      SELECT 1 FROM chat_channel_wire_ids w
-      JOIN chat_follows f
-        ON f.workspace_id = w.workspace_id
-       AND f.owner_user_id = ? AND f.state = 'following'
-       AND f.target_kind = 'channel' AND f.target_id = w.wire_id
-      WHERE w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id
-    ))
+    OR (
+      m.message_id = (
+        SELECT first.message_id FROM chat_messages first
+        WHERE first.workspace_id = m.workspace_id
+          AND first.thread_id = m.thread_id
+        ORDER BY first.created_at_ms, first.message_id LIMIT 1
+      )
+      AND EXISTS (
+        SELECT 1 FROM chat_channel_wire_ids w
+        JOIN chat_follows f
+          ON f.workspace_id = w.workspace_id
+         AND f.owner_user_id = ? AND f.state = 'following'
+         AND f.target_kind = 'channel' AND f.target_id = w.wire_id
+        WHERE w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id
+      )
+    )
   )`;
 
 function encodeFeedCursor(value: FeedCursorValue): string {
@@ -3324,7 +3332,7 @@ export function createLinkedChatStore(
           const candidateRows = (after: FeedCursorValue | undefined, count: number) =>
             db
               .prepare(
-                `SELECT m.message_id, m.thread_id, m.message_order, m.created_at_ms
+                `SELECT m.message_id, m.thread_id, m.created_at_ms
                  FROM chat_messages m
                  JOIN chat_threads t
                    ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
@@ -3379,7 +3387,12 @@ export function createLinkedChatStore(
                        JOIN chat_messages opening
                          ON opening.workspace_id = candidate.workspace_id
                         AND opening.thread_id = candidate.thread_id
-                        AND opening.message_order = 0
+                        AND opening.message_id = (
+                          SELECT first.message_id FROM chat_messages first
+                          WHERE first.workspace_id = candidate.workspace_id
+                            AND first.thread_id = candidate.thread_id
+                          ORDER BY first.created_at_ms, first.message_id LIMIT 1
+                        )
                        WHERE candidate.workspace_id = ?
                          AND candidate.message_id IN (SELECT value FROM json_each(?))
                      )
@@ -3398,7 +3411,17 @@ export function createLinkedChatStore(
           for (const row of hydratedMessageRows) {
             const message = messageFromRow(row);
             storedMessagesById.set(message.id, message);
-            if (numberValue(row.message_order) === 0) {
+            const currentOpeningId = openingMessageIdByThread.get(message.threadId);
+            const currentOpening = currentOpeningId
+              ? storedMessagesById.get(currentOpeningId)
+              : undefined;
+            if (
+              !currentOpening ||
+              messageCoordinateCompare(
+                { createdAtMs: message.createdAtMs, messageId: message.id },
+                { createdAtMs: currentOpening.createdAtMs, messageId: currentOpening.id },
+              ) < 0
+            ) {
               openingMessageIdByThread.set(message.threadId, message.id);
             }
           }
@@ -3539,7 +3562,7 @@ export function createLinkedChatStore(
               matchedBy.push(message.author.kind === "agent" ? "agent" : "person");
             }
             if (follows.has(`thread\u0000${thread.id}`)) matchedBy.push("thread");
-            if (numberValue(candidate.message_order) === 0 && channel) {
+            if (openingId === message.id && channel) {
               const wireId = wireIdByChannelId.get(channel.id);
               if (wireId && follows.has(`channel\u0000${wireId}`)) matchedBy.push("channel");
             }
