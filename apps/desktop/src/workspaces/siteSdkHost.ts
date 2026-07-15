@@ -118,7 +118,8 @@ function assertSitePreviewActive(context: SiteSdkHostContext): void {
 
 async function listVisibleFiles(context: SiteSdkHostContext, params: unknown) {
   const input = params === undefined ? {} : record(params);
-  const requestedRoot = input.path === undefined ? "." : validatedPath(input.path, "read");
+  const requestedRoot =
+    input.path === undefined || input.path === "." ? "." : validatedPath(input.path, "read");
   const recursive = input.recursive !== false;
   const listed = await listFiles(context.workspaceRoot);
   const files = [];
@@ -141,16 +142,20 @@ async function scopedIncludeGlob(
   requestedPath: unknown,
 ): Promise<string | undefined> {
   const scope = normalizeScopeRoot(scopeRoot);
-  const path = requestedPath === undefined ? null : validatedPath(requestedPath, "read");
+  const path =
+    requestedPath === undefined || requestedPath === "."
+      ? null
+      : validatedPath(requestedPath, "read");
   const roots = [scope, path].filter((part): part is string => Boolean(part && part !== "."));
   if (roots.length === 0) return undefined;
   const scopedPath = roots.join("/");
+  const literalGlob = scopedPath.replace(/([*?[\]{}!\\])/g, "\\$1");
   try {
-    if ((await stat(join(workspaceRoot, scopedPath))).isFile()) return scopedPath;
+    if ((await stat(join(workspaceRoot, scopedPath))).isFile()) return literalGlob;
   } catch {
     // A missing path simply produces no rg matches through the directory glob.
   }
-  return `${scopedPath}/**`;
+  return `${literalGlob}/**`;
 }
 
 async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unknown) {
@@ -339,6 +344,7 @@ export async function invokeSiteSdkHost(
         edit,
         { kind: "user", userId: "local" },
         Date.now(),
+        { signal: context.signal },
       );
     }
     case "ui.open": {

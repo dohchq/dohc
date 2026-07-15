@@ -207,10 +207,12 @@ export function applyDatabaseEdit(
   edit: DatabaseEdit,
   author: ChangeAuthor,
   nowMs: number,
+  options: { signal?: AbortSignal } = {},
 ): Promise<DatabaseSnapshotView> {
-  return enqueueEdit(`${rootPath}\u0000${relativePath}`, () =>
-    applyDatabaseEditNow(rootPath, relativePath, edit, author, nowMs),
-  );
+  return enqueueEdit(`${rootPath}\u0000${relativePath}`, () => {
+    if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
+    return applyDatabaseEditNow(rootPath, relativePath, edit, author, nowMs, options.signal);
+  });
 }
 
 async function applyDatabaseEditNow(
@@ -219,8 +221,10 @@ async function applyDatabaseEditNow(
   edit: DatabaseEdit,
   author: ChangeAuthor,
   nowMs: number,
+  signal?: AbortSignal,
 ): Promise<DatabaseSnapshotView> {
   const { realTarget, normalized } = await resolveWorkspaceFile(rootPath, relativePath);
+  if (signal?.aborted) throw new Error("Database edit was cancelled.");
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(realTarget);
   try {

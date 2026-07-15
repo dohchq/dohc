@@ -61,6 +61,9 @@ describe("site SDK host authority", () => {
     await expect(invokeSiteSdkHost(context, "files.list", { path: "notes" })).resolves.toContainEqual(
       expect.objectContaining({ path: "notes/today.md", name: "today.md" }),
     );
+    await expect(invokeSiteSdkHost(context, "files.list", { path: "." })).resolves.toContainEqual(
+      expect.objectContaining({ path: "notes/today.md", name: "today.md" }),
+    );
     await invokeSiteSdkHost(context, "files.write", {
       path: "notes/from-site.txt",
       text: "written by site\n",
@@ -209,16 +212,17 @@ describe("site SDK host authority", () => {
     });
   });
 
-  it("searches an exact requested file as well as directory descendants", async () => {
+  it("searches an exact requested file with literal glob metacharacters", async () => {
     const root = await workspace();
+    await writeFile(join(root, "notes", "[draft].txt"), "literal glob sentinel\n");
 
     await expect(
       invokeSiteSdkHost(
         { workspaceRoot: root, scopeRoot: null, writable: true },
         "workspace.search",
-        { query: "hello", path: "notes/today.md" },
+        { query: "literal glob sentinel", path: "notes/[draft].txt" },
       ),
-    ).resolves.toContainEqual(expect.objectContaining({ path: "notes/today.md" }));
+    ).resolves.toContainEqual(expect.objectContaining({ path: "notes/[draft].txt" }));
   });
 
   it("kills an in-flight search when preview authority is revoked", async () => {
