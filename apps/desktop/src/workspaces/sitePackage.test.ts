@@ -230,12 +230,19 @@ describe("listSitePackages", () => {
       join(root, "report", "index.html"),
       [
         '<link rel="icon" href="./assets/logo.png">',
+        '<link rel="manifest" href="./site.webmanifest">',
+        '<img src="./assets/hero.avif">',
         '<script src="./vendor/dohc-sdk/index.js"></script>',
         '<script src="./app.js"></script>',
       ].join(""),
     );
-    await writeFile(join(root, "report", "app.js"), "window.ready = true;");
+    await writeFile(
+      join(root, "report", "app.js"),
+      'const label = "secret.json"; window.ready = label;',
+    );
+    await writeFile(join(root, "report", "assets", "hero.avif"), "image");
     await writeFile(join(root, "report", "assets", "logo.png"), "image");
+    await writeFile(join(root, "report", "site.webmanifest"), "{}");
     await writeFile(join(root, "report", "data", "customers.json"), "[]");
     await writeFile(join(root, "report", "vendor", "dohc-sdk", "index.js"), "sdk");
     await writeFile(join(root, "report", "private", "secret.json"), "{}");
@@ -249,7 +256,9 @@ describe("listSitePackages", () => {
       entryPath: "report/index.html",
       assets: [
         "report/app.js",
+        "report/assets/hero.avif",
         "report/assets/logo.png",
+        "report/site.webmanifest",
         "report/vendor/dohc-sdk/index.js",
       ],
     });

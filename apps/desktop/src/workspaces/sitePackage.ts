@@ -55,7 +55,7 @@ const BUILD_OUTPUT_FOLDER_NAMES = ["dist", "build", "out"];
 const MAX_SHARE_MANIFEST_FILES = 100;
 const MAX_SHARE_MANIFEST_SCAN_BYTES = 4 * 1024 * 1024;
 const SHAREABLE_BROWSER_FILE_RE =
-  /\.(?:css|gif|html?|ico|jpe?g|js|json|map|mjs|png|svg|ttf|txt|wasm|webp|woff2?)$/i;
+  /\.(?:avif|css|gif|html?|ico|jpe?g|js|json|map|mjs|png|svg|ttf|txt|wasm|webmanifest|webp|woff2?)$/i;
 
 function joinSitePath(root: string, relativePath: string): string {
   const normalized = normalizeRoot(root);
@@ -164,21 +164,43 @@ function localReferenceCandidates(
   return [...new Set(variants)].filter((path) => available.has(path));
 }
 
-function referencesFromBrowserText(text: string): string[] {
+function referencesFromBrowserText(text: string, sourcePath: string): string[] {
   const references: string[] = [];
-  const quoted = /["'`]([^"'`\r\n]{1,2048})["'`]/g;
-  for (const match of text.matchAll(quoted)) {
-    const value = match[1]?.trim();
-    if (!value) continue;
-    references.push(value);
-    for (const candidate of value.split(",")) {
-      const srcsetPath = candidate.trim().split(/\s+/, 1)[0];
-      if (srcsetPath && srcsetPath !== value) references.push(srcsetPath);
+  const addMatches = (pattern: RegExp) => {
+    for (const match of text.matchAll(pattern)) {
+      const value = (match[1] ?? match[2] ?? match[3])?.trim();
+      if (value) references.push(value);
+    }
+  };
+
+  if (/\.html?$/i.test(sourcePath)) {
+    const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/gi;
+    for (const match of text.matchAll(attribute)) {
+      const value = (match[2] ?? match[3])?.trim();
+      if (!value) continue;
+      if (match[1]?.toLowerCase() !== "srcset") {
+        references.push(value);
+        continue;
+      }
+      for (const candidate of value.split(",")) {
+        const srcsetPath = candidate.trim().split(/\s+/, 1)[0];
+        if (srcsetPath) references.push(srcsetPath);
+      }
     }
   }
-  const unquotedCssUrl = /url\(\s*([^"')\s][^)]{0,2047})\s*\)/gi;
-  for (const match of text.matchAll(unquotedCssUrl)) {
-    if (match[1]) references.push(match[1]);
+
+  if (/\.(?:html?|css)$/i.test(sourcePath)) {
+    addMatches(/url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi);
+    addMatches(/@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi);
+  }
+
+  if (/\.(?:html?|js|mjs)$/i.test(sourcePath)) {
+    addMatches(/\b(?:import|export)\s+(?:[^"'`\r\n]*?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(/\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(/\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g);
+    addMatches(/\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(/\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(/\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
   }
   return references;
 }
@@ -227,7 +249,7 @@ async function shareManifestForSite(
       scannedBytes += info.size;
       if (!info.isFile() || scannedBytes > MAX_SHARE_MANIFEST_SCAN_BYTES) return null;
       const text = await readFile(join(rootPath, current), "utf8");
-      for (const reference of referencesFromBrowserText(text)) {
+      for (const reference of referencesFromBrowserText(text, current)) {
         for (const target of localReferenceCandidates(
           reference,
           current,

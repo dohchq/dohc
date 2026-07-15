@@ -507,7 +507,7 @@ export function createDohcClient(options = {}) {
                 assertRequestOptions(requestOptions);
                 assertOptionalWorkspacePath(path, "Directory path");
                 await requireCapability("files", "list", requestOptions);
-                const result = await request("files.list", { ...options, path }, requestOptions);
+                const result = await request("files.list", { ...options, ...(path === undefined ? {} : { path }) }, requestOptions);
                 if (!Array.isArray(result) ||
                     !result.every((entry) => isPlainRecord(entry) && typeof entry.path === "string")) {
                     throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid file list response.");
