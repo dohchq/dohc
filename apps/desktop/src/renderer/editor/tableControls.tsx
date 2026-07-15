@@ -298,6 +298,40 @@ function setTableRowHeight(
   );
 }
 
+function tableAtCellPos(
+  doc: PMNode,
+  cellPos: number,
+): { node: PMNode; pos: number } | null {
+  const $cell = doc.resolve(cellPos);
+  for (let depth = $cell.depth; depth > 0; depth -= 1) {
+    if ($cell.node(depth).type.name === "table") {
+      return { node: $cell.node(depth), pos: $cell.before(depth) };
+    }
+  }
+  return null;
+}
+
+function setTableRowHeights(
+  view: EditorView,
+  tablePos: number,
+  heights: Array<number | null>,
+): void {
+  const table = view.state.doc.nodeAt(tablePos);
+  if (!table || table.type.name !== "table") return;
+  const tr = view.state.tr;
+  let rowPos = tablePos + 1;
+  for (let index = 0; index < table.childCount; index += 1) {
+    const row = tr.doc.nodeAt(rowPos);
+    if (!row || row.type.name !== "tableRow") return;
+    const height = heights[index] ?? null;
+    if (row.attrs.height !== height) {
+      tr.setNodeMarkup(rowPos, undefined, { ...row.attrs, height });
+    }
+    rowPos += row.nodeSize;
+  }
+  if (tr.docChanged) view.dispatch(tr);
+}
+
 // Per-column GFM alignment. The value is written to the standard `align`
 // cell attr (TableKit's tableCell/tableHeader) on EVERY cell in the column,
 // which @tiptap/extension-table serializes to the delimiter row (`:---`,
@@ -952,6 +986,16 @@ function finishTableDrop(
   suppressTableGripClickUntil.set(drag.sourceButton, Date.now() + 250);
 
   if (target && target.destination !== drag.index) {
+    const sourceTable =
+      drag.band === "row" ? tableAtCellPos(view.state.doc, drag.cellPos) : null;
+    const rowHeights = sourceTable
+      ? Array.from({ length: sourceTable.node.childCount }, (_, index) => {
+          const height = sourceTable.node.child(index).attrs.height;
+          return typeof height === "number" && Number.isFinite(height)
+            ? height
+            : null;
+        })
+      : null;
     // prosemirror-tables resolves rowspan/colspan ranges from the current
     // selection even when its `pos` option identifies the table. Move the
     // selection only after pointer release, when rebuilding decorations can
@@ -970,6 +1014,11 @@ function finishTableDrop(
             pos: drag.cellPos,
           });
     const moved = runTableCommand(view, command);
+    if (moved && sourceTable && rowHeights) {
+      const [movedHeight] = rowHeights.splice(drag.index, 1);
+      rowHeights.splice(target.destination, 0, movedHeight ?? null);
+      setTableRowHeights(view, sourceTable.pos, rowHeights);
+    }
     announceTableDrag(
       view,
       moved
@@ -1209,6 +1258,7 @@ function configureRowResize(
   const finish = (commit: boolean) => {
     const resize = runtime.activeRowResize;
     if (!resize || resize.handle !== button) return;
+    const heightChanged = resize.currentHeight !== resize.startHeight;
     detach();
     runtime.cancelPointer = null;
     runtime.activeRowResize = null;
@@ -1217,7 +1267,7 @@ function configureRowResize(
     button.classList.remove("is-resizing");
     button.setAttribute("aria-grabbed", "false");
     releasePointer(resize.pointerId);
-    if (commit) {
+    if (commit && heightChanged) {
       setTableRowHeight(view, resize.rowPos, resize.currentHeight);
       announceTableDrag(
         view,
@@ -1225,7 +1275,9 @@ function configureRowResize(
       );
     } else {
       resize.rowElement.style.height = resize.originalInlineHeight;
-      announceTableDrag(view, `Row ${resize.rowIndex + 1} resize cancelled.`);
+      if (!commit) {
+        announceTableDrag(view, `Row ${resize.rowIndex + 1} resize cancelled.`);
+      }
     }
   };
 
@@ -1241,7 +1293,6 @@ function configureRowResize(
       Math.round(resize.startHeight + event.clientY - resize.startY),
     );
     resize.rowElement.style.height = `${resize.currentHeight}px`;
-    button.setAttribute("aria-valuenow", String(resize.currentHeight));
   }
 
   function onPointerUp(event: PointerEvent): void {
@@ -1289,7 +1340,6 @@ function configureRowResize(
     rowElement.classList.add("dohc-table-row-is-resizing");
     button.classList.add("is-resizing");
     button.setAttribute("aria-grabbed", "true");
-    button.setAttribute("aria-valuenow", String(startHeight));
     try {
       button.setPointerCapture?.(event.pointerId);
     } catch {
@@ -1339,10 +1389,7 @@ function buildRowResizeHandle(
   button.className = "dohc-table-row-resize";
   button.dataset.tableRowResize = String(rowIndex);
   button.title = `Resize row ${rowIndex + 1}; double-click to reset`;
-  button.setAttribute("role", "separator");
   button.setAttribute("aria-label", `Resize row ${rowIndex + 1}`);
-  button.setAttribute("aria-orientation", "horizontal");
-  button.setAttribute("aria-valuemin", String(MIN_ROW_HEIGHT));
   button.setAttribute("aria-grabbed", "false");
   button.setAttribute("contenteditable", "false");
   button.disabled = view.editable === false;
@@ -1670,10 +1717,6 @@ function sizeAppendStrips(table: HTMLElement): void {
       if (!anchorCell) return;
       handle.style.left = `${rect.left - anchorCell.getBoundingClientRect().left}px`;
       handle.style.width = `${rect.width}px`;
-      const rowHeight = handle.closest("tr")?.getBoundingClientRect().height;
-      if (rowHeight && Number.isFinite(rowHeight)) {
-        handle.setAttribute("aria-valuenow", String(Math.round(rowHeight)));
-      }
     });
 }
 
@@ -1834,6 +1877,7 @@ export function makeTableControlsPlugin(): Plugin {
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
           const docChanged = !view.state.doc.eq(prevState.doc);
+          if (docChanged && runtime.activeRowResize) runtime.cancelPointer?.();
           if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;

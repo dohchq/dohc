@@ -460,6 +460,29 @@ describe("table controls grips", () => {
     ]);
   });
 
+  it("keeps a resized row height when the row is reordered", () => {
+    editor = createLabeledTableEditor();
+    const firstRow = editor.state.doc.nodeAt(1);
+    if (!firstRow) throw new Error("first row missing");
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(1, undefined, {
+        ...firstRow.attrs,
+        height: 74,
+      }),
+    );
+    const source = editor.view.dom.querySelector(
+      ".dohc-table-grip--row",
+    ) as HTMLElement;
+    const targetCell = editor.view.dom.querySelectorAll("tr")[1]?.cells[2];
+    if (!targetCell) throw new Error("target cell missing");
+
+    drag(source, targetCell);
+
+    expect(tableTextGrid(editor)[1]).toEqual(["A1", "A2", "A3"]);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+    expect(tableNode(editor).content?.[1]?.attrs?.height).toBe(74);
+  });
+
   it("drops at the last valid target when Electron reroutes mouseup", () => {
     editor = createLabeledTableEditor();
     const source = editor.view.dom.querySelector(
@@ -936,6 +959,72 @@ describe("table controls grips", () => {
     const renderedRow = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
     expect(renderedRow.dataset.rowHeight).toBe("74");
     expect(renderedRow.style.height).toBe("74px");
+  });
+
+  it("does not persist a fixed row height when the resize handle is only clicked", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 30,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 30,
+      }),
+    });
+    const before = editor.state.doc;
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointerup", { clientY: 100 });
+
+    expect(editor.state.doc.eq(before)).toBe(true);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+    expect(row.style.height).toBe("");
+    expect(handle.getAttribute("role")).toBeNull();
+  });
+
+  it("cancels an active row resize when the document changes", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 40,
+      }),
+    });
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+
+    let textPos: number | undefined;
+    editor.state.doc.descendants((node, pos) => {
+      if (!node.isTextblock || textPos !== undefined) return true;
+      textPos = pos + 1;
+      return false;
+    });
+    if (textPos === undefined) throw new Error("table text block missing");
+    editor.view.dispatch(editor.state.tr.insertText("remote ", textPos));
+
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+    expect(row.style.height).toBe("");
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+    dispatchPointer(handle, "pointerup", { clientY: 134 });
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
   });
 
   it("double-clicking a row resize edge resets its fixed height", () => {

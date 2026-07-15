@@ -35,7 +35,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     ]);
 
     desktop = await launchDesktopApp({ workspace: temp });
-    const { app, page } = desktop;
+    let { app, page } = desktop;
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.setSize(1300, 850);
     });
@@ -46,8 +46,11 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
       workspace.workspaceId,
       "notes/table-interactions.md",
     );
-    await explorerRow(page, "notes").click();
-    await explorerRow(page, "notes/table-interactions.md").click();
+    const reopenedFile = explorerRow(page, "notes/table-interactions.md");
+    if (!(await reopenedFile.isVisible())) {
+      await explorerRow(page, "notes").click();
+    }
+    await reopenedFile.click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
     });
@@ -72,6 +75,14 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     });
     expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
     expect(geometry.tableTop - geometry.introBottom).toBeGreaterThanOrEqual(24);
+    await wrapper.hover();
+    await page.mouse.wheel(400, 0);
+    await expect
+      .poll(() => wrapper.evaluate((element) => element.scrollLeft))
+      .toBeGreaterThan(0);
+    await wrapper.evaluate((element) => {
+      element.scrollLeft = 0;
+    });
 
     const firstRowCells = table.locator("tr").first().locator("th, td");
     const widthsBefore = await firstRowCells.evaluateAll((cells) =>
@@ -167,6 +178,46 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
         rows.slice(1).map((row) => row.querySelector("td")?.textContent?.trim()),
       );
     expect(bodyLabels.slice(0, 2)).toEqual(["Row two", "Row one"]);
+
+    const resizedRow = table.locator("tr").filter({ hasText: "Row one" });
+    const persistedHeight = await resizedRow.getAttribute("data-row-height");
+    if (!persistedHeight) throw new Error("resized row height was not persisted");
+    const renderedHeight = await resizedRow.evaluate(
+      (row) => row.getBoundingClientRect().height,
+    );
+
+    await desktop.close();
+    desktop = await launchDesktopApp({ workspace: temp });
+    ({ app, page } = desktop);
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setSize(1300, 850);
+    });
+    const reopenedWorkspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(
+      page,
+      reopenedWorkspace.workspaceId,
+      "notes/table-interactions.md",
+    );
+    const reopenedFileAfterRestart = explorerRow(
+      page,
+      "notes/table-interactions.md",
+    );
+    if (!(await reopenedFileAfterRestart.isVisible())) {
+      await explorerRow(page, "notes").click();
+    }
+    await reopenedFileAfterRestart.click();
+    await expect(page.getByTestId("markdown-editor")).toBeVisible({
+      timeout: 20_000,
+    });
+
+    const reopenedRow = page
+      .locator(".dohc-notion-editor .tableWrapper table tr")
+      .filter({ hasText: "Row one" });
+    await expect(reopenedRow).toHaveAttribute("data-row-height", persistedHeight);
+    const reopenedHeight = await reopenedRow.evaluate(
+      (row) => row.getBoundingClientRect().height,
+    );
+    expect(Math.abs(reopenedHeight - renderedHeight)).toBeLessThanOrEqual(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
