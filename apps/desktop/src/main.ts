@@ -229,6 +229,7 @@ import { initialUpdateState } from "./updates/updateMachine";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import {
   applyDesktopIconToPlatform,
+  resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
   shouldUseDarkSystemIcon,
 } from "./systemThemeIcon";
@@ -2110,9 +2111,11 @@ function desktopIconDirectory(): string {
   const resourcesPath = (
     process as NodeJS.Process & { resourcesPath?: string }
   ).resourcesPath;
-  return app.isPackaged && resourcesPath
-    ? resourcesPath
-    : join(import.meta.dirname, "../../build");
+  return resolveDesktopIconDirectory({
+    isPackaged: app.isPackaged,
+    resourcesPath,
+    moduleDirectory: import.meta.dirname,
+  });
 }
 
 function currentDesktopIconPath(): string | null {

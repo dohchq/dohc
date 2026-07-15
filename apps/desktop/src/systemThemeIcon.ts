@@ -11,6 +11,16 @@ type IconWindow = {
   setIcon(iconPath: string): void;
 };
 
+/** Resolve the icon asset directory consistently in development and packages. */
+export function resolveDesktopIconDirectory(options: {
+  isPackaged: boolean;
+  resourcesPath?: string;
+  moduleDirectory: string;
+}): string {
+  if (options.isPackaged && options.resourcesPath) return options.resourcesPath;
+  return join(options.moduleDirectory, "../../build");
+}
+
 /**
  * Follow Electron's resolved system appearance. The desktop app does not
  * override nativeTheme.themeSource, so this signal tracks the OS on every
@@ -23,9 +33,9 @@ export function shouldUseDarkSystemIcon(
 }
 
 /**
- * Electron changes window icons on Windows/Linux and the application Dock
- * icon on macOS. Keeping that platform split here prevents calling an API on
- * an OS where Electron does not support it.
+ * Electron changes window icons on Windows/X11 and the application Dock icon
+ * on macOS. Wayland shells keep launcher-owned icons, so runtime updates there
+ * may be ignored. This split avoids calling unsupported platform APIs.
  */
 export function applyDesktopIconToPlatform(options: {
   platform: NodeJS.Platform;

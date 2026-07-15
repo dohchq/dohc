@@ -19,7 +19,7 @@ function check(ok, label) {
 for (const output of ["dist/main/main.js", "dist/preload/preload.cjs", "dist/renderer/index.html"]) {
   check(existsSync(join(desktopDir, output)), `build output exists: ${output}`);
 }
-for (const icon of ["build/icon-light.png", "build/icon-dark.png"]) {
+for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png"]) {
   check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
 }
 check(

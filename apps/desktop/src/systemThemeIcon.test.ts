@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   applyDesktopIconToPlatform,
+  resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
   shouldUseDarkSystemIcon,
   systemThemeIconFileName,
@@ -16,6 +17,23 @@ describe("system theme app icon", () => {
   it("uses Electron's resolved system appearance", () => {
     expect(shouldUseDarkSystemIcon({ shouldUseDarkColors: true })).toBe(true);
     expect(shouldUseDarkSystemIcon({ shouldUseDarkColors: false })).toBe(false);
+  });
+
+  it("resolves icon assets from packages and development builds", () => {
+    expect(
+      resolveDesktopIconDirectory({
+        isPackaged: true,
+        resourcesPath: "resources",
+        moduleDirectory: "dist/main",
+      }),
+    ).toBe("resources");
+    expect(
+      resolveDesktopIconDirectory({
+        isPackaged: false,
+        resourcesPath: "resources",
+        moduleDirectory: "dist/main",
+      }),
+    ).toBe(join("dist/main", "../../build"));
   });
 
   it.each(["win32", "linux"] as const)(

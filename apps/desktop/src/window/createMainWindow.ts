@@ -11,6 +11,7 @@ import {
 } from "../security/electronSecurity";
 import { isLoopbackHostname } from "../security/loopback";
 import {
+  resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
   shouldUseDarkSystemIcon,
 } from "../systemThemeIcon";
@@ -165,11 +166,13 @@ export function createMainWindow(options?: {
   // Native chrome paints the LAUNCH theme (persisted user choice, else the OS
   // preference) before any renderer JS — no light flash on dark launches.
   chromeTheme = placement.theme;
-  // The executable keeps a static packaging icon, but the live window/taskbar
-  // icon follows the OS appearance on every supported Electron platform.
-  const iconDirectory = app.isPackaged
-    ? process.resourcesPath
-    : join(import.meta.dirname, "../../build");
+  // The executable and Wayland launcher keep the static packaging icon. Live
+  // Windows/X11 window icons follow the OS appearance where the shell allows.
+  const iconDirectory = resolveDesktopIconDirectory({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    moduleDirectory: import.meta.dirname,
+  });
   const iconPath = resolveSystemThemeIconPath(
     iconDirectory,
     shouldUseDarkSystemIcon(nativeTheme),
