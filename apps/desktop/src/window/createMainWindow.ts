@@ -1,5 +1,5 @@
 import { app, BrowserWindow, nativeTheme, screen } from "electron";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { palette, TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
@@ -10,6 +10,11 @@ import {
   type NavigationPolicy,
 } from "../security/electronSecurity";
 import { isLoopbackHostname } from "../security/loopback";
+import {
+  resolveDesktopIconDirectory,
+  resolveSystemThemeIconPath,
+  shouldUseDarkSystemIcon,
+} from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
 import {
@@ -161,8 +166,17 @@ export function createMainWindow(options?: {
   // Native chrome paints the LAUNCH theme (persisted user choice, else the OS
   // preference) before any renderer JS — no light flash on dark launches.
   chromeTheme = placement.theme;
-  // Dev/Linux window icon; packaged builds get theirs from electron-builder.
-  const iconPath = join(import.meta.dirname, "../../build/icon.png");
+  // The executable and Wayland launcher keep the static packaging icon. Live
+  // Windows/X11 window icons follow the OS appearance where the shell allows.
+  const iconDirectory = resolveDesktopIconDirectory({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    moduleDirectory: import.meta.dirname,
+  });
+  const iconPath = resolveSystemThemeIconPath(
+    iconDirectory,
+    shouldUseDarkSystemIcon(nativeTheme),
+  );
 
   const window = new BrowserWindow({
     show: false,
@@ -170,7 +184,7 @@ export function createMainWindow(options?: {
     minWidth: MIN_WINDOW_SIZE.width,
     minHeight: MIN_WINDOW_SIZE.height,
     backgroundColor: palette[placement.theme].bg,
-    ...(existsSync(iconPath) ? { icon: iconPath } : {}),
+    ...(iconPath ? { icon: iconPath } : {}),
     // Native chrome: the renderer draws the titlebar (Titlebar.tsx drag
     // strip); the OS draws only its window controls.
     ...(process.platform === "darwin"
@@ -184,6 +198,10 @@ export function createMainWindow(options?: {
         }),
     webPreferences: createMainWindowWebPreferences(preloadPath),
   });
+
+  // BrowserWindow's `icon` option is ignored on macOS; set the Dock icon after
+  // construction there. Windows and Linux already received the initial icon.
+  if (process.platform === "darwin" && iconPath) app.dock?.setIcon(iconPath);
 
   if (placement.isMaximized) window.maximize();
   trackWindowState(window);

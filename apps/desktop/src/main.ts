@@ -12,6 +12,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   protocol,
   safeStorage,
   shell,
@@ -226,6 +227,12 @@ import {
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
+import {
+  applyDesktopIconToPlatform,
+  resolveDesktopIconDirectory,
+  resolveSystemThemeIconPath,
+  shouldUseDarkSystemIcon,
+} from "./systemThemeIcon";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
@@ -2100,16 +2107,33 @@ function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]
   return settings.runner.enabled && settings.runner.command.trim().length > 0;
 }
 
+function desktopIconDirectory(): string {
+  const resourcesPath = (
+    process as NodeJS.Process & { resourcesPath?: string }
+  ).resourcesPath;
+  return resolveDesktopIconDirectory({
+    isPackaged: app.isPackaged,
+    resourcesPath,
+    moduleDirectory: import.meta.dirname,
+  });
+}
+
+function currentDesktopIconPath(): string | null {
+  return resolveSystemThemeIconPath(
+    desktopIconDirectory(),
+    shouldUseDarkSystemIcon(nativeTheme),
+  );
+}
+
 function dispatchTrayIcon() {
   const resourcesPath = (
     process as NodeJS.Process & { resourcesPath?: string }
   ).resourcesPath;
-  const packagedPath = resourcesPath
+  const themedPath = currentDesktopIconPath();
+  const packagedFallback = resourcesPath
     ? join(resourcesPath, "tray-icon.png")
     : "";
-  const developmentPath = join(import.meta.dirname, "../../build/icon.png");
-  const preferred = app.isPackaged ? packagedPath : developmentPath;
-  let icon = nativeImage.createFromPath(preferred);
+  let icon = nativeImage.createFromPath(themedPath ?? packagedFallback);
   if (icon.isEmpty()) {
     icon = nativeImage.createFromPath(join(app.getAppPath(), "build/icon.png"));
   }
@@ -2168,6 +2192,19 @@ function ensureDispatchTray(): void {
     });
   }
   rebuildDispatchTrayMenu();
+}
+
+function refreshSystemThemeDesktopIcons(): void {
+  const iconPath = currentDesktopIconPath();
+  if (iconPath) {
+    applyDesktopIconToPlatform({
+      platform: process.platform,
+      iconPath,
+      windows: BrowserWindow.getAllWindows(),
+      setDockIcon: (path) => app.dock?.setIcon(path),
+    });
+  }
+  if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());
 }
 
 async function refreshDispatchTray(): Promise<boolean> {
@@ -5834,6 +5871,11 @@ function registerIpcHandlers(): void {
   }
 }
 
+// These identities must be set before ready so Windows taskbar grouping and
+// Linux X11/Wayland launcher association use the package identities.
+if (process.platform === "win32") app.setAppUserModelId("app.dohc.desktop");
+if (process.platform === "linux") app.setDesktopName("dohc.desktop");
+
 // Single-instance lock gates the entire bootstrap, not just a quit() call.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -5877,6 +5919,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
+    // BrowserWindow and Dock APIs are only safe after Electron is ready.
+    nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
     launchMarks.appReady();
     desktopMarks.markOnce("app-ready");
     registerIpcHandlers();

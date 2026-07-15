@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="dohc">
   <title>dohc</title>
-  <!-- dohc app icon: transparent canvas with an oversized drop-lobe mark.
+  <!-- Static packaging icon for launchers, installers, and executables.
        The warm underlay keeps the graphite mark legible on dark OS chrome.
        Rendered to icon.png by scripts/render-icon.mjs. -->
   <g transform="translate(26 6) scale(4.8)">
