@@ -46,6 +46,8 @@ Tiptap's Collaboration extension can bind to a raw Yjs fragment. v2 uses that sh
 | `blockquote` | Tiptap node | `body` | yes | CommonMark parse/render | required |
 | `horizontalRule` | Tiptap node | `body` | yes | CommonMark parse/render | required |
 | `table` | Tiptap node | `body` | yes | GFM parse/render | required |
+| `image` | Tiptap node | `body` | yes | CommonMark parse/render | required |
+| `escapedPunctuation` | Tiptap node | `body` | yes | CommonMark parse/render | required |
 | `wikilink` | Tiptap node | `body` | yes | custom extension | required |
 | `inlineAtom` | Tiptap node | `body` | yes | custom extension | required |
 | `callout` | Tiptap node | `body` | yes | custom extension | required |

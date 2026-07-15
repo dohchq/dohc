@@ -71,6 +71,22 @@ const CORPUS: Array<{ name: string; markdown: string; survives: string[] }> = [
     survives: ["```ts\nconst answer = 42\n```"],
   },
   {
+    name: "retired query fence labels stay inert",
+    markdown: [
+      "```query",
+      "from tasks",
+      "```",
+      "",
+      "```dohc-query",
+      "sum(hours)",
+      "```",
+    ].join("\n"),
+    survives: [
+      "```query\nfrom tasks\n```",
+      "```dohc-query\nsum(hours)\n```",
+    ],
+  },
+  {
     name: "frontmatter + obsidian power-user syntax",
     markdown: [
       "---",

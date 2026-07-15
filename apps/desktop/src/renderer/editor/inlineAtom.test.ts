@@ -69,6 +69,7 @@ describe('inline atom literal handling', () => {
   it('treats bare brace expressions as ordinary prose', () => {
     expect(parseInlineAtoms('{billable_this_week}')).toEqual([])
     expect(parseInlineAtoms('{sum(logs.*.hours)}')).toEqual([])
+    expect(parseInlineAtoms('{= billable_this_week}')).toEqual([])
   })
 
   it('ignores escaped braces, nesting, arrays, and invalid captures', () => {
