@@ -293,9 +293,10 @@ export async function invokeSiteSdkHost(
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {
-        assertSitePreviewActive(context);
         try {
-          await createWorkspaceTextExclusive(context.workspaceRoot, path, body);
+          await createWorkspaceTextExclusive(context.workspaceRoot, path, body, {
+            signal: context.signal,
+          });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "EEXIST") {
             throw new Error(`File already exists: ${path}`);
@@ -304,8 +305,9 @@ export async function invokeSiteSdkHost(
         }
         return { path };
       }
-      assertSitePreviewActive(context);
-      await restoreWorkspaceText(context.workspaceRoot, path, body);
+      await restoreWorkspaceText(context.workspaceRoot, path, body, {
+        signal: context.signal,
+      });
       return { path };
     }
     case "workspace.search":

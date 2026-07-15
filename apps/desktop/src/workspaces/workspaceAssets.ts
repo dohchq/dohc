@@ -37,6 +37,10 @@ function isInside(parent: string, child: string): boolean {
   );
 }
 
+function assertWriteNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error("Workspace write was cancelled.");
+}
+
 // Resolves a workspace-relative path to a real absolute path inside the
 // workspace, enforcing path-safety and real-path containment — a renderer
 // can never resolve a path that escapes the root or follows a symlink out.
@@ -133,44 +137,66 @@ async function writeContainedFile(
   relativePath: string,
   data: Uint8Array | string,
   kind: "asset" | "restore",
-  exclusive = false,
+  options: { exclusive?: boolean; signal?: AbortSignal } = {},
 ): Promise<void> {
+  const { exclusive = false, signal } = options;
+  assertWriteNotAborted(signal);
   const label = kind === "asset" ? "Asset" : "Restore";
   const validated = validateUserWritePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
   }
   const realRoot = await realpath(rootPath);
+  assertWriteNotAborted(signal);
   const absolute = join(rootPath, validated.normalized);
   const parent = dirname(absolute);
   if (!isInside(realRoot, await existingAncestor(parent))) {
     throw new Error(`${label} path escapes workspace: ${relativePath}`);
   }
+  assertWriteNotAborted(signal);
   await mkdir(parent, { recursive: true });
+  assertWriteNotAborted(signal);
   if (!isInside(realRoot, await realpath(parent))) {
     throw new Error(`${label} path escapes workspace: ${relativePath}`);
   }
+  assertWriteNotAborted(signal);
   if (exclusive) {
     const handle = await open(absolute, "wx");
+    let completed = false;
     try {
+      assertWriteNotAborted(signal);
       if (typeof data === "string") {
         await handle.writeFile(data, "utf8");
       } else {
         await handle.writeFile(data);
       }
+      assertWriteNotAborted(signal);
+      completed = true;
     } finally {
       await handle.close();
+      if (!completed) {
+        const { rm } = await import("node:fs/promises");
+        await rm(absolute, { force: true });
+      }
     }
     return;
   }
-  const { rename, writeFile } = await import("node:fs/promises");
+  const { rename, rm, writeFile } = await import("node:fs/promises");
   const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
-  if (typeof data === "string") {
-    await writeFile(temp, data, "utf8");
-  } else {
-    await writeFile(temp, data);
+  let committed = false;
+  try {
+    assertWriteNotAborted(signal);
+    if (typeof data === "string") {
+      await writeFile(temp, data, "utf8");
+    } else {
+      await writeFile(temp, data);
+    }
+    assertWriteNotAborted(signal);
+    await rename(temp, absolute);
+    committed = true;
+  } finally {
+    if (!committed) await rm(temp, { force: true });
   }
-  await rename(temp, absolute);
 }
 
 export async function writeWorkspaceAsset(
@@ -190,11 +216,12 @@ export async function restoreWorkspaceText(
   rootPath: string,
   relativePath: string,
   text: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<void> {
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  await writeContainedFile(rootPath, relativePath, text, "restore");
+  await writeContainedFile(rootPath, relativePath, text, "restore", options);
 }
 
 // Creates a text file with the filesystem's exclusive-create primitive. This
@@ -204,11 +231,15 @@ export async function createWorkspaceTextExclusive(
   rootPath: string,
   relativePath: string,
   text: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<void> {
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
-  await writeContainedFile(rootPath, relativePath, text, "restore", true);
+  await writeContainedFile(rootPath, relativePath, text, "restore", {
+    exclusive: true,
+    ...options,
+  });
 }
 
 export async function readWorkspaceText(

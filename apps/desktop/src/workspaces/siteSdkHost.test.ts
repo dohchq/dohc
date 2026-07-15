@@ -193,18 +193,17 @@ describe("site SDK host authority", () => {
     ).rejects.toThrow(/preview is no longer active/i);
   });
 
-  it("rejects file writes after preview authority is revoked", async () => {
+  it("cancels an in-flight file write when preview authority is revoked", async () => {
     const root = await workspace();
     const controller = new AbortController();
+    const write = invokeSiteSdkHost(
+      { workspaceRoot: root, scopeRoot: null, writable: true, signal: controller.signal },
+      "files.write",
+      { path: "notes/stale.txt", text: "must not be written" },
+    );
     controller.abort();
 
-    await expect(
-      invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true, signal: controller.signal },
-        "files.write",
-        { path: "notes/stale.txt", text: "must not be written" },
-      ),
-    ).rejects.toThrow(/preview is no longer active/i);
+    await expect(write).rejects.toThrow(/cancelled/i);
     await expect(readFile(join(root, "notes", "stale.txt"))).rejects.toMatchObject({
       code: "ENOENT",
     });
