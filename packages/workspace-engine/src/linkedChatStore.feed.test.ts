@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SyncReplicationEnvelope } from "@dohc/workspace-contracts/engine";
-import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
+import {
+  CHAT_MESSAGES_CANONICAL_ORDER_INDEX,
+  closeTrackedEngineDbHandlesForTest,
+} from "./engineDbSchema";
 import {
   CHAT_FILE_MENTION_MAX_RESULTS,
   LINKED_CHAT_STORE_RELATIVE_PATH,
@@ -382,6 +385,50 @@ describe("personal chat Feed", () => {
     } finally {
       await rm(firstRoot, { recursive: true, force: true });
       await rm(secondRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("upgrades and uses the covering index for canonical opening lookup", async () => {
+    let store = storeAt();
+    const channel = await store.ensureGeneralChannel({ workspaceId: "ws" });
+    const started = await store.startChannelThread({
+      workspaceId: "ws",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Opening",
+    });
+    await store.close();
+
+    const legacyDb = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
+    try {
+      legacyDb.exec(`DROP INDEX IF EXISTS ${CHAT_MESSAGES_CANONICAL_ORDER_INDEX}`);
+    } finally {
+      legacyDb.close();
+    }
+
+    store = storeAt();
+    try {
+      await store.listMessages({ workspaceId: "ws", threadId: started.thread.id });
+      const planDb = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
+      try {
+        const plan = planDb
+          .prepare(
+            `EXPLAIN QUERY PLAN
+             SELECT first.message_id FROM chat_messages first
+             WHERE first.workspace_id = ? AND first.thread_id = ?
+             ORDER BY first.created_at_ms, first.message_id LIMIT 1`,
+          )
+          .all("ws", started.thread.id)
+          .map((row) => String(row.detail));
+        const canonicalIndexStep = plan.find((detail) =>
+          detail.includes(CHAT_MESSAGES_CANONICAL_ORDER_INDEX),
+        );
+        expect(canonicalIndexStep).toContain("USING COVERING INDEX");
+      } finally {
+        planDb.close();
+      }
+    } finally {
+      await store.close();
     }
   });
 

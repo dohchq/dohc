@@ -13,6 +13,8 @@
 
 export const ENGINE_SCHEMA_VERSION = 1;
 export const ENGINE_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+export const CHAT_MESSAGES_CANONICAL_ORDER_INDEX =
+  "idx_chat_messages_thread_created";
 const DEFERRED_CHAT_PARENT_REPAIR_MIGRATION = "deferred-chat-parent-repair-v1";
 
 const ENGINE_MIGRATIONS_DDL = `
@@ -507,6 +509,8 @@ const CHAT_PHASE_ONE_DDL = `
 // register. Both live in the owner's ordinary workspace-sync lane; the
 // shared-channel replication allowlist intentionally excludes their op kinds.
 const CHAT_FEED_DDL = `
+  CREATE INDEX IF NOT EXISTS ${CHAT_MESSAGES_CANONICAL_ORDER_INDEX}
+    ON chat_messages(workspace_id, thread_id, created_at_ms, message_id);
   CREATE TABLE IF NOT EXISTS chat_follows (
     workspace_id TEXT NOT NULL,
     owner_user_id TEXT NOT NULL,
