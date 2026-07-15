@@ -797,7 +797,8 @@ body {
   html { scroll-behavior: auto; }
   .reveal-enabled .reveal { opacity: 1; transform: none; transition: none; }
   .hand-underline path { animation: none; stroke-dashoffset: 0; }
-  .btn, .principle-edge, .principle-node, .principle-node-dot { transition: none; }
+  .btn, .download-item, .principle-edge, .principle-node, .principle-node-dot { transition: none; }
+  .download-item:hover { padding-right: 2px; padding-left: 2px; }
   .principle-edge { animation: none; stroke-dashoffset: 0; }
   .principle-node { animation: none; }
 }

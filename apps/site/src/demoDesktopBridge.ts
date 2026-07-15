@@ -386,6 +386,14 @@ function thread(channelId = "channel-general", body = "What needs attention next
   };
 }
 
+function demoThreadBody(channelId: string): string {
+  return channelId === "channel-agent"
+    ? "Turn this week's work into a plan I can review."
+    : channelId === "channel-projects"
+      ? "Review the launch checklist."
+      : "What needs attention next?";
+}
+
 function message(threadId: string, id: string, body: string, agent = false) {
   return {
     id,
@@ -609,18 +617,16 @@ const demoBridge = {
     return { available: false, dms: [] };
   },
   async listChannelThreads(payload: { channelId: string }) {
-    const body =
-      payload.channelId === "channel-agent"
-        ? "Turn this week's work into a plan I can review."
-        : payload.channelId === "channel-projects"
-          ? "Review the launch checklist."
-          : "What needs attention next?";
-    return { threads: [thread(payload.channelId, body)], viewerAuthorId: "demo-user" };
+    return {
+      threads: [thread(payload.channelId, demoThreadBody(payload.channelId))],
+      viewerAuthorId: "demo-user",
+    };
   },
   async listChatMessages(payload: { threadId: string }) {
+    const channelId = payload.threadId.replace(/^thread-/, "");
     return {
       messages: [
-        message(payload.threadId, `${payload.threadId}-1`, "What needs attention next?"),
+        message(payload.threadId, `${payload.threadId}-1`, demoThreadBody(channelId)),
         message(
           payload.threadId,
           `${payload.threadId}-2`,

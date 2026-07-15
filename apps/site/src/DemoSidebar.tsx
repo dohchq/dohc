@@ -46,19 +46,22 @@ function demoMoments(documents: DemoWorkspaceDocument[]): EngineMomentRecord[] {
   ] as const;
   return events
     .filter(([, path]) => documents.some((document) => document.path === path))
-    .map(([summary, path, age], index) => ({
-      id: `demo-moment-${index}`,
-      versionId: "main",
-      path,
-      recordedAtMs: Date.now() - age,
-      operation: "write" as const,
-      origin: index === 2 ? ("api" as const) : ("local-file" as const),
-      ...(index === 2 ? { agentAuthorName: "Your agent" } : {}),
-      summary,
-      momentOrder: events.length - index,
-      contentKind: "text" as const,
-      byteLength: documents.find((document) => document.path === path)?.body.length ?? 0,
-    }));
+    .map(([summary, path, age], index) => {
+      const isAgentEvent = path === "research/agent-workflows.md";
+      return {
+        id: `demo-moment-${index}`,
+        versionId: "main",
+        path,
+        recordedAtMs: Date.now() - age,
+        operation: "write" as const,
+        origin: isAgentEvent ? ("api" as const) : ("local-file" as const),
+        ...(isAgentEvent ? { agentAuthorName: "Your agent" } : {}),
+        summary,
+        momentOrder: events.length - index,
+        contentKind: "text" as const,
+        byteLength: documents.find((document) => document.path === path)?.body.length ?? 0,
+      };
+    });
 }
 
 export function DemoSidebar(props: {
