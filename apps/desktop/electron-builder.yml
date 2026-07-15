@@ -17,8 +17,8 @@ productName: dohc
 executableName: dohc
 directories:
   output: release
-  # The static launcher/executable fallback is build/icon.png (the light
-  # variant). Runtime window, taskbar, Dock, and tray surfaces switch between
+  # The static launcher/executable fallback is the dual-tone build/icon.png.
+  # Runtime window, taskbar, Dock, and tray surfaces switch between
   # icon-light.png and icon-dark.png with the OS appearance.
   buildResources: build
 files:
