@@ -48,12 +48,14 @@ export function applyDesktopIconToPlatform(options: {
   for (const window of options.windows) window.setIcon(options.iconPath);
 }
 
+/** Return the themed asset variant for Electron's resolved system appearance. */
 export function systemThemeIcon(
   shouldUseDarkColors: boolean,
 ): SystemThemeIcon {
   return shouldUseDarkColors ? "dark" : "light";
 }
 
+/** Return the packaged PNG filename for the resolved system appearance. */
 export function systemThemeIconFileName(
   shouldUseDarkColors: boolean,
 ): string {

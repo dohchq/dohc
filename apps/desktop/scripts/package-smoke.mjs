@@ -61,6 +61,12 @@ if (config) {
   check(config.asar === true, "asar is enabled");
   check(Array.isArray(config.files) && config.files.includes("dist/**"), "files ship the built dist tree");
   const extraResources = Array.isArray(config.extraResources) ? config.extraResources : [];
+  check(
+    extraResources.some(
+      (entry) => entry?.from === "build/icon.png" && entry?.to === "icon.png",
+    ),
+    "static icon ships as the packaged runtime fallback",
+  );
   for (const theme of ["light", "dark"]) {
     check(
       extraResources.some(
