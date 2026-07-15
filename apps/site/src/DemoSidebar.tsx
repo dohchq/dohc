@@ -40,9 +40,9 @@ function parentFolders(paths: string[]): string[] {
 function demoMoments(documents: DemoWorkspaceDocument[]): EngineMomentRecord[] {
   const events = [
     ["Edited welcome.md", "welcome.md", 55_000],
-    ["Saved latest edits", "projects/launch-plan.md", 180_000],
-    ["Updated agent workflows", "research/agent-workflows.md", 3_600_000],
-    ["Reconciled offline edits", "welcome.md", 86_400_000],
+    ["Saved launch plan", "projects/launch-plan.md", 180_000],
+    ["Updated agent workflow", "research/agent-workflows.md", 3_600_000],
+    ["Merged offline edits", "welcome.md", 86_400_000],
   ] as const;
   return events
     .filter(([, path]) => documents.some((document) => document.path === path))
@@ -53,7 +53,7 @@ function demoMoments(documents: DemoWorkspaceDocument[]): EngineMomentRecord[] {
       recordedAtMs: Date.now() - age,
       operation: "write" as const,
       origin: index === 2 ? ("api" as const) : ("local-file" as const),
-      ...(index === 2 ? { agentAuthorName: "You" } : {}),
+      ...(index === 2 ? { agentAuthorName: "Your agent" } : {}),
       summary,
       momentOrder: events.length - index,
       contentKind: "text" as const,
