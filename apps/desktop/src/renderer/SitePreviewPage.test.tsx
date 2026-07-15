@@ -571,6 +571,42 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
+  it("stays stopped after the user switched preview modes", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+    });
+    bridgeMock.startSitePreview
+      .mockResolvedValueOnce({
+        siteRoot: "report",
+        mode: "dev",
+        url: "http://127.0.0.1:49152/",
+        logs: [],
+        sdkScopeRoot: null,
+      })
+      .mockResolvedValueOnce({
+        siteRoot: "report",
+        mode: "static",
+        url: "http://127.0.0.1:49153/",
+        logs: [],
+        sdkScopeRoot: null,
+      });
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-static"));
+    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("site-preview-stop"));
+
+    expect(await screen.findByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
+    await act(async () => Promise.resolve());
+    expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
   it("does not let a stale stop completion clear a replacement site", async () => {
     const pendingStop = deferred<undefined>();
     bridgeMock.stopSitePreview.mockReturnValueOnce(pendingStop.promise);

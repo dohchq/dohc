@@ -1030,6 +1030,28 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("add_sdk keeps configured static-server sites on browser-resolvable imports", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "configured-server"), { recursive: true });
+      await writeFile(join(ctx.root, "configured-server", "index.html"), "<h1>Report</h1>\n");
+      await writeFile(
+        join(ctx.root, "configured-server", "dohc.json"),
+        `${JSON.stringify({
+          type: "site",
+          title: "Configured server",
+          preview: { mode: "static", command: "python -m http.server" },
+        })}\n`,
+      );
+
+      const result = await addSiteSdk(ctx, { siteRoot: "configured-server" });
+
+      expect(result).toMatchObject({ ok: true, importMode: "vendored-browser-module" });
+      expect(result.ok ? result.usage : "").toContain(
+        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
+      );
+    });
+  });
+
   it("add_sdk keeps explicit dependency ranges browser-resolvable for static sites", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "static-explicit"), { recursive: true });
@@ -1051,6 +1073,26 @@ describe("mcp tools operate on allowed paths", () => {
       await expect(
         readFile(join(ctx.root, "static-explicit/vendor/dohc-sdk/dist/index.js"), "utf8"),
       ).resolves.toContain("createDohcClient");
+    });
+  });
+
+  it("add_sdk fails cleanly when a static site has no vendorable SDK source", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "static-no-source"), { recursive: true });
+      await writeFile(join(ctx.root, "static-no-source", "index.html"), "<h1>Static</h1>\n");
+
+      const result = await addSiteSdk(
+        { ...ctx, sdkPackageJsonPath: undefined, sdkDependencyRange: "^9.4.0" },
+        { siteRoot: "static-no-source" },
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("browser-resolvable import"),
+      });
+      await expect(stat(join(ctx.root, "static-no-source/package.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     });
   });
 

@@ -86,7 +86,23 @@ describe("shareMountRootForSite", () => {
     );
     await writeFile(
       join(root, "shared-with-me", "alex", "portal", "dist", "assets", "main.js"),
-      "window.built = true;",
+      'import "./chunk.js"; window.built = true;',
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "dist", "assets", "chunk.js"),
+      "window.chunk = true;",
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "dist", "assets", "unused.js"),
+      "window.unused = true;",
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "dist", "assets", "main.js.map"),
+      "{}",
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "dist", "alternate.html"),
+      "<h1>Alternate</h1>",
     );
 
     const site = (await listSitePackages(root)).find(
@@ -95,8 +111,20 @@ describe("shareMountRootForSite", () => {
     expect(site).toBeDefined();
     expect(site?.shareManifest).toEqual({
       entryPath: "shared-with-me/alex/portal/dist/index.html",
-      assets: ["shared-with-me/alex/portal/dist/assets/main.js"],
+      assets: [
+        "shared-with-me/alex/portal/dist/assets/chunk.js",
+        "shared-with-me/alex/portal/dist/assets/main.js",
+      ],
     });
+    expect(site?.shareManifest?.assets).not.toContain(
+      "shared-with-me/alex/portal/dist/assets/unused.js",
+    );
+    expect(site?.shareManifest?.assets).not.toContain(
+      "shared-with-me/alex/portal/dist/assets/main.js.map",
+    );
+    expect(site?.shareManifest?.assets).not.toContain(
+      "shared-with-me/alex/portal/dist/alternate.html",
+    );
     expect(sharedStaticEntryRelativeToSite(site!)).toBe("dist/index.html");
     expect(staticPreviewTargetForSite(site!)).toEqual({
       root: "shared-with-me/alex/portal/dist",
@@ -198,7 +226,14 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "report", "data"), { recursive: true });
     await mkdir(join(root, "report", "private"), { recursive: true });
     await mkdir(join(root, "report", "vendor", "dohc-sdk"), { recursive: true });
-    await writeFile(join(root, "report", "index.html"), '<script src="./app.js"></script>');
+    await writeFile(
+      join(root, "report", "index.html"),
+      [
+        '<link rel="icon" href="./assets/logo.png">',
+        '<script src="./vendor/dohc-sdk/index.js"></script>',
+        '<script src="./app.js"></script>',
+      ].join(""),
+    );
     await writeFile(join(root, "report", "app.js"), "window.ready = true;");
     await writeFile(join(root, "report", "assets", "logo.png"), "image");
     await writeFile(join(root, "report", "data", "customers.json"), "[]");
@@ -207,6 +242,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "report", "secret.json"), "{}");
     await writeFile(join(root, "report", "notes.txt"), "private notes");
     await writeFile(join(root, "report", "notes.md"), "private notes");
+    await writeFile(join(root, "report", "alternate.html"), "<h1>Alternate</h1>");
 
     const site = (await listSitePackages(root)).find((candidate) => candidate.root === "report");
     expect(site?.shareManifest).toEqual({
@@ -222,11 +258,18 @@ describe("listSitePackages", () => {
     expect(site?.shareManifest?.assets).not.toContain("report/data/customers.json");
     expect(site?.shareManifest?.assets).not.toContain("report/notes.txt");
     expect(site?.shareManifest?.assets).not.toContain("report/notes.md");
+    expect(site?.shareManifest?.assets).not.toContain("report/alternate.html");
   });
 
   it("fails closed when an exact share manifest would exceed the relay selector cap", async () => {
     await mkdir(join(root, "crowded", "assets"), { recursive: true });
-    await writeFile(join(root, "crowded", "index.html"), "<h1>Crowded</h1>");
+    await writeFile(
+      join(root, "crowded", "index.html"),
+      Array.from(
+        { length: 100 },
+        (_, index) => `<script src="./assets/${index}.js"></script>`,
+      ).join(""),
+    );
     await Promise.all(
       Array.from({ length: 100 }, (_, index) =>
         writeFile(join(root, "crowded", "assets", `${index}.js`), ""),

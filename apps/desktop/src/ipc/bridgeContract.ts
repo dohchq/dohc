@@ -1479,6 +1479,10 @@ const SiteSharePath = SITE_ROOT_STRING.refine((path) => path !== ".", {
   message: "site share paths must name a file",
 });
 
+const SiteShareMountRoot = SITE_ROOT_STRING.refine((path) => path !== ".", {
+  message: "site share mount roots must name the mounted share",
+});
+
 const SiteShareManifest = z
   .object({
     entryPath: SiteSharePath,
@@ -1512,10 +1516,21 @@ const SitePackageInfo = z
     diagnostics: z.array(SiteDiagnostic).max(100),
     authority: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("workspace") }),
-      z.object({ kind: z.literal("share"), mountRoot: SITE_ROOT_STRING }),
+      z.object({ kind: z.literal("share"), mountRoot: SiteShareMountRoot }),
     ]),
   })
   .superRefine((site, ctx) => {
+    if (
+      site.authority.kind === "share" &&
+      site.root !== site.authority.mountRoot &&
+      !site.root.startsWith(`${site.authority.mountRoot}/`)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "shared site roots must stay inside their authority mount root",
+        path: ["root"],
+      });
+    }
     if (!site.shareManifest) return;
     const paths = [site.shareManifest.entryPath, ...site.shareManifest.assets];
     for (const path of paths) {

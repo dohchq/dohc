@@ -418,6 +418,21 @@ describe("site IPC contract", () => {
         sites: [{ ...sharedSite, authority: { kind: "share" } }],
       }).success,
     ).toBe(false);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [{ ...sharedSite, authority: { kind: "share", mountRoot: "." } }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [
+          {
+            ...sharedSite,
+            authority: { kind: "share", mountRoot: "shared-with-me/someone-else" },
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts bounded preview start/result payloads", () => {

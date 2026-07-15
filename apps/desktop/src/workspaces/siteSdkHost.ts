@@ -1,5 +1,6 @@
 import {
   isDatabaseFile,
+  isDatabaseSidecar,
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
@@ -35,7 +36,12 @@ export interface SiteSdkHostContext {
   // Preview-lifetime cancellation. Search subprocesses must not survive the
   // renderer/preview that owns their SDK authority.
   signal?: AbortSignal;
+  // Test/lifecycle seam for proving that preview cancellation terminates the
+  // owned search handle. Production callers use startRipgrepSearch.
+  searchStarter?: SiteSdkSearchStarter;
 }
+
+export type SiteSdkSearchStarter = typeof startRipgrepSearch;
 
 const MAX_LIST_RESULTS = 10_000;
 const MAX_SEARCH_RESULTS = 2_000;
@@ -170,7 +176,7 @@ async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unkno
       reject(new Error("Site preview is no longer active."));
     };
     context.signal?.addEventListener("abort", abort, { once: true });
-    handle = startRipgrepSearch({
+    handle = (context.searchStarter ?? startRipgrepSearch)({
       rgPath,
       realRoot: root,
       searchId: `site-sdk-${Date.now()}`,
@@ -251,7 +257,7 @@ export async function invokeSiteSdkHost(
       // SQLite files are canonical structured artifacts. Replacing their raw
       // bytes/text would bypass the operation log, transactions, provenance,
       // and collaboration convergence used by databases.edit.
-      if (isDatabaseFile(path)) {
+      if (isDatabaseFile(path) || isDatabaseSidecar(path)) {
         throw new Error(
           "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
         );

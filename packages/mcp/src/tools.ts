@@ -2097,7 +2097,7 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   const usesPackageModuleResolution =
     Boolean(frameworkConfigName(siteRootNames)) ||
     hasWebDependency(existing) ||
-    Object.keys(detectedSite?.scripts ?? {}).length > 0;
+    Object.keys(readPackageScripts(existing)).length > 0;
   const packageJson = ensureObject(existing);
   packageJson.private = packageJson.private ?? true;
   packageJson.type = packageJson.type ?? "module";

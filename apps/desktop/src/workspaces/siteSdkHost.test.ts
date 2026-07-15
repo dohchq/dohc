@@ -3,7 +3,11 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { invokeSiteSdkHost, siteSdkWorkspacePath } from "./siteSdkHost";
+import {
+  invokeSiteSdkHost,
+  siteSdkWorkspacePath,
+  type SiteSdkSearchStarter,
+} from "./siteSdkHost";
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -118,7 +122,20 @@ describe("site SDK host authority", () => {
     const root = await workspace();
     const context = { workspaceRoot: root, scopeRoot: null, writable: true };
 
-    for (const path of ["data/app.db", "data/app.sqlite", "data/app.SQLITE3"]) {
+    for (const path of [
+      "data/app.db",
+      "data/app.sqlite",
+      "data/app.SQLITE3",
+      "data/app.db-wal",
+      "data/app.db-shm",
+      "data/app.db-journal",
+      "data/app.sqlite-wal",
+      "data/app.sqlite-shm",
+      "data/app.sqlite-journal",
+      "data/app.sqlite3-wal",
+      "data/app.sqlite3-shm",
+      "data/app.sqlite3-journal",
+    ]) {
       await expect(
         invokeSiteSdkHost(context, "files.write", {
           path,
@@ -174,6 +191,41 @@ describe("site SDK host authority", () => {
         { query: "hello" },
       ),
     ).rejects.toThrow(/preview is no longer active/i);
+  });
+
+  it("kills an in-flight search when preview authority is revoked", async () => {
+    const root = await workspace();
+    const controller = new AbortController();
+    let signalStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let killCount = 0;
+    const searchStarter: SiteSdkSearchStarter = ({ searchId }) => {
+      signalStarted?.();
+      return {
+        searchId,
+        kill() {
+          killCount += 1;
+        },
+      };
+    };
+    const search = invokeSiteSdkHost(
+      {
+        workspaceRoot: root,
+        scopeRoot: null,
+        writable: true,
+        signal: controller.signal,
+        searchStarter,
+      },
+      "workspace.search",
+      { query: "hello" },
+    );
+
+    await started;
+    controller.abort();
+    await expect(search).rejects.toThrow(/preview is no longer active/i);
+    expect(killCount).toBe(1);
   });
 
   it("rejects multi-operation database edits until they can be transactional", async () => {

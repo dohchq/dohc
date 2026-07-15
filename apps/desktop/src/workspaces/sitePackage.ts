@@ -56,17 +56,6 @@ const MAX_SHARE_MANIFEST_FILES = 100;
 const MAX_SHARE_MANIFEST_SCAN_BYTES = 4 * 1024 * 1024;
 const SHAREABLE_BROWSER_FILE_RE =
   /\.(?:css|gif|html?|ico|jpe?g|js|json|map|mjs|png|svg|ttf|txt|wasm|webp|woff2?)$/i;
-const STATIC_ASSET_ROOTS = new Set([
-  "assets",
-  "css",
-  "fonts",
-  "images",
-  "img",
-  "js",
-  "public",
-  "static",
-  "vendor",
-]);
 
 function joinSitePath(root: string, relativePath: string): string {
   const normalized = normalizeRoot(root);
@@ -129,17 +118,17 @@ function needsBuiltArtifact(site: SitePackageInfo): boolean {
   );
 }
 
-function pathRelativeToSite(siteRoot: string, path: string): string | null {
-  if (siteRoot === ".") return path;
-  return path.startsWith(`${siteRoot}/`)
-    ? path.slice(siteRoot.length + 1)
+function pathRelativeToArtifact(artifactRoot: string, path: string): string | null {
+  if (artifactRoot === ".") return path;
+  return path.startsWith(`${artifactRoot}/`)
+    ? path.slice(artifactRoot.length + 1)
     : null;
 }
 
 function localReferenceCandidates(
   rawReference: string,
   fromPath: string,
-  siteRoot: string,
+  artifactRoot: string,
   available: ReadonlySet<string>,
 ): string[] {
   const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim() ?? "";
@@ -155,13 +144,16 @@ function localReferenceCandidates(
   } catch {
     return [];
   }
-  const siteBase = siteRoot === "." ? "" : siteRoot;
+  const artifactBase = artifactRoot === "." ? "" : artifactRoot;
   const candidate = posix.normalize(
     decoded.startsWith("/")
-      ? posix.join(siteBase, decoded.replace(/^\/+/, ""))
+      ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
       : posix.join(posix.dirname(fromPath), decoded),
   );
-  if (!pathRelativeToSite(siteRoot, candidate) || hasIgnoredSegment(candidate)) return [];
+  if (
+    !pathRelativeToArtifact(artifactRoot, candidate) ||
+    hasIgnoredSegment(candidate)
+  ) return [];
   const variants = [
     candidate,
     `${candidate}.js`,
@@ -196,81 +188,62 @@ async function shareManifestForSite(
   site: Omit<SitePackageInfo, "shareManifest">,
 ): Promise<SitePackageInfo["shareManifest"]> {
   const output = builtOutputRelativeToSite({ ...site, shareManifest: null });
+  let artifactRoot: string | null = null;
   let entryPath: string | null = null;
-  let approvedFiles: string[] = [];
 
   if (output) {
-    const outputRoot = joinSitePath(site.root, output);
-    entryPath = `${outputRoot}/index.html`;
-    approvedFiles = site.sourceFiles.filter(
-      (path) =>
-        path.startsWith(`${outputRoot}/`) &&
-        !hasIgnoredSegment(path) &&
-        SHAREABLE_BROWSER_FILE_RE.test(path),
-    );
+    artifactRoot = joinSitePath(site.root, output);
+    entryPath = `${artifactRoot}/index.html`;
   } else if (!needsBuiltArtifact({ ...site, shareManifest: null }) && site.entryPath) {
-    const entryRelative = pathRelativeToSite(site.root, site.entryPath);
+    artifactRoot = site.root;
+    const entryRelative = pathRelativeToArtifact(artifactRoot, site.entryPath);
     if (!entryRelative || !/\.html?$/i.test(entryRelative)) return null;
     entryPath = site.entryPath;
-    approvedFiles = site.sourceFiles.filter((path) => {
-      if (
-        path === site.packagePath ||
-        path === site.configPath ||
-        hasIgnoredSegment(path) ||
-        !SHAREABLE_BROWSER_FILE_RE.test(path)
-      ) return false;
-      const relative = pathRelativeToSite(site.root, path);
-      if (!relative) return false;
-      const parts = relative.split("/");
-      return (
-        path === entryPath ||
-        STATIC_ASSET_ROOTS.has(parts[0]?.toLowerCase() ?? "")
-      );
-    });
-
-    const available = new Set(
-      site.sourceFiles.filter(
-        (path) =>
-          path !== site.packagePath &&
-          path !== site.configPath &&
-          !hasIgnoredSegment(path) &&
-          SHAREABLE_BROWSER_FILE_RE.test(path) &&
-          pathRelativeToSite(site.root, path) !== null,
-      ),
-    );
-    const approved = new Set(approvedFiles);
-    const queued = new Set<string>();
-    const queue = [entryPath];
-    let scannedBytes = 0;
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      if (queued.has(current) || !/\.(?:html?|css|js|mjs)$/i.test(current)) continue;
-      queued.add(current);
-      try {
-        const info = await stat(join(rootPath, current));
-        scannedBytes += info.size;
-        if (!info.isFile() || scannedBytes > MAX_SHARE_MANIFEST_SCAN_BYTES) return null;
-        const text = await readFile(join(rootPath, current), "utf8");
-        for (const reference of referencesFromBrowserText(text)) {
-          for (const target of localReferenceCandidates(
-            reference,
-            current,
-            site.root,
-            available,
-          )) {
-            approved.add(target);
-            queue.push(target);
-          }
-        }
-      } catch {
-        return null;
-      }
-    }
-    approvedFiles = [...approved];
   }
 
-  if (!entryPath || !approvedFiles.includes(entryPath)) return null;
-  const files = [...new Set(approvedFiles)].sort((a, b) => a.localeCompare(b));
+  if (!artifactRoot || !entryPath) return null;
+  const available = new Set(
+    site.sourceFiles.filter(
+      (path) =>
+        path !== site.packagePath &&
+        path !== site.configPath &&
+        !hasIgnoredSegment(path) &&
+        SHAREABLE_BROWSER_FILE_RE.test(path) &&
+        pathRelativeToArtifact(artifactRoot, path) !== null,
+    ),
+  );
+  if (!available.has(entryPath)) return null;
+
+  const approved = new Set([entryPath]);
+  const scanned = new Set<string>();
+  const queue = [entryPath];
+  let scannedBytes = 0;
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (scanned.has(current) || !/\.(?:html?|css|js|mjs)$/i.test(current)) continue;
+    scanned.add(current);
+    try {
+      const info = await stat(join(rootPath, current));
+      scannedBytes += info.size;
+      if (!info.isFile() || scannedBytes > MAX_SHARE_MANIFEST_SCAN_BYTES) return null;
+      const text = await readFile(join(rootPath, current), "utf8");
+      for (const reference of referencesFromBrowserText(text)) {
+        for (const target of localReferenceCandidates(
+          reference,
+          current,
+          artifactRoot,
+          available,
+        )) {
+          approved.add(target);
+          queue.push(target);
+        }
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  const files = [...approved].sort((a, b) => a.localeCompare(b));
   if (files.length === 0 || files.length > MAX_SHARE_MANIFEST_FILES) return null;
   return {
     entryPath,

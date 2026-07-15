@@ -408,7 +408,12 @@ export function SitePreviewPage(props: {
   }, [props.onShareSite, props.siteRoot, props.workspaceId, sdkContext, start]);
 
   useEffect(() => {
-    if (load.status !== "ready" || load.site.root !== props.siteRoot || preview) return;
+    if (
+      load.status !== "ready" ||
+      load.site.root !== props.siteRoot ||
+      preview ||
+      stoppedByUser
+    ) return;
     const mode = preferredMode(load.site, modes, props.workspaceId, props.sharedView);
     if (!mode) return;
 
@@ -416,7 +421,16 @@ export function SitePreviewPage(props: {
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
     void start(mode);
-  }, [load, modes, preview, props.sharedView, props.siteRoot, props.workspaceId, start]);
+  }, [
+    load,
+    modes,
+    preview,
+    props.sharedView,
+    props.siteRoot,
+    props.workspaceId,
+    start,
+    stoppedByUser,
+  ]);
 
   async function stop() {
     const request = ++previewStartRequestRef.current;
