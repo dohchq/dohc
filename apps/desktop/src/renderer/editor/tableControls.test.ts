@@ -989,6 +989,34 @@ describe("table controls grips", () => {
     expect(handle.classList.contains("is-resizing")).toBe(false);
   });
 
+  it("commits a resize from a non-bubbling handle mouseup", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 40,
+      }),
+    });
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    handle.dispatchEvent(
+      new MouseEvent("mouseup", { bubbles: false, cancelable: true, button: 0 }),
+    );
+
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+  });
+
   it("hides row resizing when the editor has no durable Y.Doc backing", () => {
     const localControls = Extension.create({
       name: "localTableControls",

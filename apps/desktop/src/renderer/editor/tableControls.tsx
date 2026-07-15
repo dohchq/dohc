@@ -1362,6 +1362,7 @@ function configureRowResize(
   button.addEventListener("pointermove", onPointerMove);
   button.addEventListener("pointerup", onPointerUp);
   button.addEventListener("pointercancel", onPointerCancel);
+  button.addEventListener("mouseup", onMouseUp);
 
   button.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
