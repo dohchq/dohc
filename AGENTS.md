@@ -126,6 +126,14 @@ dohc should encourage visibility where work is intentionally shared, because peo
 
 But personal workspaces are personal. Transparency must come from explicit workspace boundaries, sharing, provenance, and consent — not accidental leakage.
 
+## Guidelines when creating PRs and merging them
+
+When looking out for reviews in created PRs, look out for reviews by coderabbit, codex and claude. These are setup (coderabbit and codex) to review every PR reliably.
+
+For codex, you have to tag the bot (In a pull request comment, mention @codex review) to trigger a rereview after you commit and push the fixes.
+
+Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-4.8 if fable is unavailable or rate limited.
+
 ## Some general rules
 
 These are meant to steer us in the right direction. They are not hard-set, but we should default to following them. If you think one should be ignored, be very loud and cear about that and get approval from us before doing it.
@@ -140,4 +148,3 @@ These are meant to steer us in the right direction. They are not hard-set, but w
   [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
   before touching that stack. (The former Convex web app and the
   sharing/members/invites/files/sync cloud surface have been retired.)
-- When looking out for reviews in created PRs, look out for reviews by coderabbit and codex. These are setup to review every PR reliably. For codex, you have to tag the bot (In a pull request comment, mention @codex review.) to trigger a rereview after you commit and push the fixes.

@@ -1,5 +1,5 @@
 // Pure workbench model (Phase E2): activity-bar view, side-panel visibility
-// and width, open editor tabs, and the history rail. Pure like
+// and width, open editor tabs, and the right-hand Chats panel. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
 // editor's save state) and never lives here or on disk.
@@ -9,19 +9,17 @@ import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 export const VIEW_IDS = [
   "explorer",
   "search",
-  // Chats (PR 13, WS-E): only offered on the rail for workspaces with the
-  // workspace-engine alpha flag — the Shell filters it out otherwise.
-  "chats",
   "graph",
   "sites",
   "history",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
-// Views that existed in earlier releases ("agent": the retired Agent panel).
+// Views that existed in earlier releases ("agent": the retired Agent panel;
+// "chats": the left-panel Chats view, now the right-hand Chats panel).
 // Persisted ui-state may still carry one; the IPC contract accepts these so a
 // stale activeView never nulls the whole saved state, and the tolerant
 // parseUiState below maps them to the default view.
-export const RETIRED_VIEW_IDS = ["agent"] as const;
+export const RETIRED_VIEW_IDS = ["agent", "chats"] as const;
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
@@ -149,10 +147,15 @@ export interface WorkbenchState {
   sidebarWidth: number;
   tabs: Array<{ path: string }>;
   activeTab: string | null;
-  // The right-hand history rail (default ON — specs assert the timeline with
-  // zero clicks). Independent of the left panel's History view.
-  historyVisible: boolean;
-  historyWidth: number;
+  // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
+  // resizable, hidden by default). Independent of the left panel entirely,
+  // and only rendered for workspace-engine-flagged workspaces.
+  chatsVisible: boolean;
+  chatsWidth: number;
+  // Max height of the explorer's Open Editors list (VS Code-style resizable
+  // section): the list caps here and scrolls internally; shorter lists shrink
+  // to fit.
+  openEditorsHeight: number;
   // Explorer state (Phase E3), persisted with the rest: which folders are
   // expanded and which paths are pinned to the favorites section.
   expandedFolders: string[];
@@ -165,9 +168,15 @@ export interface WorkbenchState {
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
 export const SIDEBAR_DEFAULT_WIDTH = 240;
-export const HISTORY_MIN_WIDTH = 180;
-export const HISTORY_MAX_WIDTH = 2400;
-export const HISTORY_DEFAULT_WIDTH = 280;
+export const CHATS_MIN_WIDTH = 240;
+export const CHATS_MAX_WIDTH = 2400;
+export const CHATS_DEFAULT_WIDTH = 320;
+// Open-editors rows are 28px (h-7). The default shows 4.5 rows — the half row
+// at the cutoff signals there is more to scroll; the min keeps two rows
+// grabbable and the max is generous (tall portrait monitors) like the rails.
+export const OPEN_EDITORS_MIN_HEIGHT = 56;
+export const OPEN_EDITORS_MAX_HEIGHT = 2400;
+export const OPEN_EDITORS_DEFAULT_HEIGHT = 126;
 // Bounds the persisted payload (and the tab strip) — not a UX target.
 export const MAX_OPEN_TABS = 100;
 // Bounds the persisted explorer state the same way (oldest entries give way).
@@ -183,8 +192,9 @@ export function defaultWorkbenchState(): WorkbenchState {
     sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
     tabs: [],
     activeTab: null,
-    historyVisible: true,
-    historyWidth: HISTORY_DEFAULT_WIDTH,
+    chatsVisible: false,
+    chatsWidth: CHATS_DEFAULT_WIDTH,
+    openEditorsHeight: OPEN_EDITORS_DEFAULT_HEIGHT,
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
@@ -196,9 +206,17 @@ export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
 }
 
-export function clampHistoryWidth(width: number): number {
-  if (!Number.isFinite(width)) return HISTORY_DEFAULT_WIDTH;
-  return Math.min(HISTORY_MAX_WIDTH, Math.max(HISTORY_MIN_WIDTH, Math.round(width)));
+export function clampChatsWidth(width: number): number {
+  if (!Number.isFinite(width)) return CHATS_DEFAULT_WIDTH;
+  return Math.min(CHATS_MAX_WIDTH, Math.max(CHATS_MIN_WIDTH, Math.round(width)));
+}
+
+export function clampOpenEditorsHeight(height: number): number {
+  if (!Number.isFinite(height)) return OPEN_EDITORS_DEFAULT_HEIGHT;
+  return Math.min(
+    OPEN_EDITORS_MAX_HEIGHT,
+    Math.max(OPEN_EDITORS_MIN_HEIGHT, Math.round(height)),
+  );
 }
 
 // Open (or re-activate) a file's tab. No duplicates; opening always
@@ -265,8 +283,8 @@ export function toggleSidebar(state: WorkbenchState): WorkbenchState {
   return { ...state, sidebarVisible: !state.sidebarVisible };
 }
 
-export function toggleHistory(state: WorkbenchState): WorkbenchState {
-  return { ...state, historyVisible: !state.historyVisible };
+export function toggleChats(state: WorkbenchState): WorkbenchState {
+  return { ...state, chatsVisible: !state.chatsVisible };
 }
 
 export function setSidebarWidth(state: WorkbenchState, width: number): WorkbenchState {
@@ -274,9 +292,19 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
 }
 
-export function setHistoryWidth(state: WorkbenchState, width: number): WorkbenchState {
-  const clamped = clampHistoryWidth(width);
-  return clamped === state.historyWidth ? state : { ...state, historyWidth: clamped };
+export function setChatsWidth(state: WorkbenchState, width: number): WorkbenchState {
+  const clamped = clampChatsWidth(width);
+  return clamped === state.chatsWidth ? state : { ...state, chatsWidth: clamped };
+}
+
+export function setOpenEditorsHeight(
+  state: WorkbenchState,
+  height: number,
+): WorkbenchState {
+  const clamped = clampOpenEditorsHeight(height);
+  return clamped === state.openEditorsHeight
+    ? state
+    : { ...state, openEditorsHeight: clamped };
 }
 
 // Capped append: at the bound the OLDEST entry gives way (openTab precedent)
@@ -380,8 +408,9 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     sidebarWidth: clampSidebarWidth(state.sidebarWidth),
     tabs: state.tabs.map((tab) => tab.path),
     activeTab: state.activeTab,
-    historyVisible: state.historyVisible,
-    historyWidth: clampHistoryWidth(state.historyWidth),
+    chatsVisible: state.chatsVisible,
+    chatsWidth: clampChatsWidth(state.chatsWidth),
+    openEditorsHeight: clampOpenEditorsHeight(state.openEditorsHeight),
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
@@ -427,8 +456,9 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawView = own("activeView");
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");
-  const rawHistoryVisible = own("historyVisible");
-  const rawHistoryWidth = own("historyWidth");
+  const rawChatsVisible = own("chatsVisible");
+  const rawChatsWidth = own("chatsWidth");
+  const rawOpenEditorsHeight = own("openEditorsHeight");
   return {
     activeView: isViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
@@ -441,14 +471,18 @@ export function parseUiState(raw: unknown): WorkbenchState {
         : defaults.sidebarWidth,
     tabs: paths.map((path) => ({ path })),
     activeTab,
-    historyVisible:
-      typeof rawHistoryVisible === "boolean"
-        ? rawHistoryVisible
-        : defaults.historyVisible,
-    historyWidth:
-      typeof rawHistoryWidth === "number"
-        ? clampHistoryWidth(rawHistoryWidth)
-        : defaults.historyWidth,
+    chatsVisible:
+      typeof rawChatsVisible === "boolean"
+        ? rawChatsVisible
+        : defaults.chatsVisible,
+    chatsWidth:
+      typeof rawChatsWidth === "number"
+        ? clampChatsWidth(rawChatsWidth)
+        : defaults.chatsWidth,
+    openEditorsHeight:
+      typeof rawOpenEditorsHeight === "number"
+        ? clampOpenEditorsHeight(rawOpenEditorsHeight)
+        : defaults.openEditorsHeight,
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),

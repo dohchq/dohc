@@ -50,6 +50,9 @@ export type SlashCommandState =
       selected: number;
       x: number;
       y: number;
+      // Bottom-edge anchor (CSS `bottom`) for "above" placement — see
+      // FloatingMenuPosition.bottom. Null when the menu is top-anchored.
+      bottom: number | null;
       maxHeight: number;
       placement: FloatingMenuPlacement;
     };
@@ -267,6 +270,7 @@ function readSlashCommandState(
   const to = selection.from;
   let x = 12;
   let y = 40;
+  let bottom: number | null = null;
   let maxHeight = FLOATING_MENU_MAX_HEIGHT;
   let placement: FloatingMenuPlacement = "below";
   try {
@@ -274,6 +278,7 @@ function readSlashCommandState(
     const position = resolveFloatingMenuPosition({ cursorRect: coords });
     x = position.x;
     y = position.y;
+    bottom = position.bottom ?? null;
     maxHeight = position.maxHeight;
     placement = position.placement;
   } catch {
@@ -291,6 +296,7 @@ function readSlashCommandState(
     selected: itemCount ? Math.min(selected, itemCount - 1) : 0,
     x,
     y,
+    bottom,
     maxHeight,
     placement,
   };
@@ -394,7 +400,14 @@ export function SlashCommandMenu({
     <div
       className="dohc-slash-menu"
       data-placement={state.placement}
-      style={{ left: state.x, top: state.y, maxHeight: state.maxHeight }}
+      // Above the cursor the menu anchors by its BOTTOM edge: filtering
+      // changes its content height, and a top-anchored box (whose top assumes
+      // the full maxHeight) would leap up and down with every keystroke.
+      style={
+        state.placement === "above" && state.bottom !== null
+          ? { left: state.x, bottom: state.bottom, maxHeight: state.maxHeight }
+          : { left: state.x, top: state.y, maxHeight: state.maxHeight }
+      }
       role="listbox"
       aria-label="slash commands"
       onMouseDown={(event) => event.preventDefault()}

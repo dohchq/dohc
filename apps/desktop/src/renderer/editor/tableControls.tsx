@@ -1,7 +1,19 @@
-// Table row/column/header controls — grips + menus layered on TableKit's
-// existing commands (addRowBefore/After, deleteRow, addColumnBefore/After,
-// deleteColumn, toggleHeaderRow, deleteTable). TableKit ships every command
-// already; this file is only the missing UI.
+// Table row/column/header controls — Notion-style handles + menus layered on
+// TableKit's existing commands (addRowBefore/After, deleteRow,
+// addColumnBefore/After, deleteColumn, toggleHeaderRow, deleteTable).
+// TableKit ships every command already; this file is only the missing UI.
+//
+// Interaction model (mirrors Notion's simple tables):
+// - Hovering a cell reveals exactly one small pill handle above its COLUMN
+//   and one beside its ROW (the plugin's mousemove handler toggles
+//   `is-active` on the matching grips) — not a bar on every row/column at
+//   once. Clicking a handle selects the row/column and opens its options
+//   menu (insert before/after, align, duplicate, delete).
+// - Hovering the table reveals slim "+" strips hugging the full right edge
+//   (append column) and bottom edge (append row), plus a "⋯" table menu at
+//   the top-left corner (toggle header row, delete table).
+// - Dragging a handle to reorder rows/columns is NOT implemented (no
+//   existing drag infrastructure to reuse) — noted as follow-up.
 //
 // GFM round-trip caveat (see AGENTS.md "text is the primitive"): markdown
 // tables express per-COLUMN alignment via the delimiter row (`:---`, `:---:`,
@@ -32,7 +44,7 @@
 // inline in MarkdownEditor.tsx): a widget nested one position inside the
 // target node, hover-revealed via a `Decoration.node` class on an ancestor.
 
-import { Node as PMNode } from "@tiptap/pm/model";
+import { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import {
   Plugin,
   PluginKey,
@@ -45,6 +57,7 @@ import {
   addColumnBefore,
   addRowAfter,
   addRowBefore,
+  cellAround,
   CellSelection,
   deleteColumn,
   deleteRow,
@@ -58,6 +71,10 @@ import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 export const tableControlsKey = new PluginKey("dohc-table-controls");
 let nextTableControlsInstanceId = 0;
+
+// Grips sit 13px out with an 8px pill; 18px covers that chrome (and the
+// 15px append strips) while the pointer crosses the table-edge gap.
+const GRIP_MARGIN = 18;
 
 type TableCommand = (
   state: EditorState,
@@ -261,6 +278,107 @@ function setColumnAlign(view: EditorView, cellPos: number, align: CellAlign): vo
   view.focus();
 }
 
+// Duplicate the row containing `cellPos`, inserting the copy right below.
+// Pasted/imported rowspans follow prosemirror-tables' addRowAfter boundary
+// rule: a cell whose span crosses the insertion boundary is widened by one
+// row, so the duplicate shares the merged cell spreadsheet-style. A cell
+// whose span ends at the duplicated row is copied with rowspan normalized to
+// one — neighboring-row geometry never changes and no fixTables repair is
+// needed. Header cells are duplicated as BODY cells: GFM expresses exactly
+// one header row, so a second `th` row would not survive the markdown
+// round-trip (see the file-top caveat). This matches Notion, where
+// duplicating the header yields a normal row.
+function duplicateRow(view: EditorView, cellPos: number): void {
+  if (view.editable === false) return;
+  const { state } = view;
+  const $cell = state.doc.resolve(cellPos);
+  const table = $cell.node(-1);
+  const tableStart = $cell.start(-1);
+  const map = TableMap.get(table);
+  const { top: r } = map.findCell(cellPos - tableStart);
+  const rowNode = table.child(r);
+  const cellType = state.schema.nodes.tableCell;
+  const cells: PMNode[] = [];
+  const seen = new Set<number>();
+  let tr = state.tr;
+  for (let col = 0; col < map.width; col += 1) {
+    const offset = map.map[r * map.width + col];
+    if (seen.has(offset)) continue;
+    seen.add(offset);
+    const cell = table.nodeAt(offset);
+    if (!cell) continue;
+    if (map.findCell(offset).bottom - 1 > r) {
+      tr = tr.setNodeMarkup(tableStart + offset, undefined, {
+        ...cell.attrs,
+        rowspan: cell.attrs.rowspan + 1,
+      });
+      continue;
+    }
+    const copyType =
+      cell.type.name === "tableHeader" && cellType ? cellType : cell.type;
+    cells.push(
+      copyType.create(
+        { ...cell.attrs, rowspan: 1 },
+        cell.content,
+        cell.marks,
+      ),
+    );
+  }
+
+  let insertPos = tableStart;
+  for (let row = 0; row <= r; row += 1) {
+    insertPos += table.child(row).nodeSize;
+  }
+  tr = tr.insert(insertPos, rowNode.copy(Fragment.from(cells)));
+  if (tr.docChanged) view.dispatch(tr);
+  view.focus();
+}
+
+// Duplicate the logical column containing `cellPos`, inserting the copy right
+// after it in every row (bottom-to-top so earlier insert positions stay
+// valid). Pasted/imported colspans follow prosemirror-tables' addColumn
+// convention: a spanning cell covering the selected column is widened at
+// that boundary, with its matching colwidth entry duplicated in place — so
+// every row gains the same logical column and merged headers remain aligned.
+// The dedup set guards pasted-in rowspan cells — a spanning cell appears at
+// several TableMap slots but must be copied or widened once; its operation
+// covers the same rows.
+function duplicateColumn(view: EditorView, cellPos: number): void {
+  if (view.editable === false) return;
+  const { state } = view;
+  const $cell = state.doc.resolve(cellPos);
+  const table = $cell.node(-1);
+  const tableStart = $cell.start(-1);
+  const map = TableMap.get(table);
+  const { left: col } = map.findCell(cellPos - tableStart);
+  let tr = state.tr;
+  const seen = new Set<number>();
+  for (let row = map.height - 1; row >= 0; row -= 1) {
+    const offset = map.map[row * map.width + col];
+    if (seen.has(offset)) continue;
+    seen.add(offset);
+    const cell = table.nodeAt(offset);
+    if (!cell) continue;
+    if (cell.attrs.colspan > 1) {
+      const { left } = map.findCell(offset);
+      const colwidth = cell.attrs.colwidth as number[] | null;
+      const i = col - left;
+      const nextColwidth = colwidth
+        ? [...colwidth.slice(0, i + 1), colwidth[i], ...colwidth.slice(i + 1)]
+        : null;
+      tr = tr.setNodeMarkup(tableStart + offset, undefined, {
+        ...cell.attrs,
+        colspan: cell.attrs.colspan + 1,
+        colwidth: nextColwidth,
+      });
+    } else {
+      tr = tr.insert(tableStart + offset + cell.nodeSize, cell.copy(cell.content));
+    }
+  }
+  if (tr.docChanged) view.dispatch(tr);
+  view.focus();
+}
+
 function appendColumn(view: EditorView, lastColCellPos: number): void {
   if (view.editable === false) return;
   const $cell = view.state.doc.resolve(lastColCellPos);
@@ -288,6 +406,7 @@ function columnMenuItems(cellPos: number): GripMenuItem[] {
     },
     { label: "Align center", run: (view) => setColumnAlign(view, cellPos, "center") },
     { label: "Align right", run: (view) => setColumnAlign(view, cellPos, "right") },
+    { label: "Duplicate column", run: (view) => duplicateColumn(view, cellPos) },
     {
       label: "Delete column",
       destructive: true,
@@ -297,10 +416,11 @@ function columnMenuItems(cellPos: number): GripMenuItem[] {
   ];
 }
 
-function rowMenuItems(): GripMenuItem[] {
+function rowMenuItems(cellPos: number): GripMenuItem[] {
   return [
     { label: "Insert row above", run: (view) => runTableCommand(view, addRowBefore) },
     { label: "Insert row below", run: (view) => runTableCommand(view, addRowAfter) },
+    { label: "Duplicate row", run: (view) => duplicateRow(view, cellPos) },
     {
       label: "Delete row",
       destructive: true,
@@ -973,6 +1093,7 @@ function buildColumnGrip(
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--col";
+  button.dataset.col = String(colIndex);
   button.title = `Column ${colIndex + 1} — drag to reorder, click for options`;
   button.setAttribute("aria-label", `Select column ${colIndex + 1}`);
   button.setAttribute("aria-haspopup", "menu");
@@ -1001,6 +1122,7 @@ function buildRowGrip(
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--row";
+  button.dataset.row = String(rowIndex);
   button.title = `Row ${rowIndex + 1} — drag to reorder, click for options`;
   button.setAttribute("aria-label", `Select row ${rowIndex + 1}`);
   button.setAttribute("aria-haspopup", "menu");
@@ -1015,7 +1137,7 @@ function buildRowGrip(
     stopEvent(event);
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
     selectRow(view, cellPos);
-    openGripMenu(runtime, view, button, rowMenuItems(), "row");
+    openGripMenu(runtime, view, button, rowMenuItems(cellPos), "row");
   });
   return button;
 }
@@ -1041,11 +1163,14 @@ function buildTableMenuButton(
   return button;
 }
 
-// Notion-style append affordances: a "+" hugging the table's right edge
-// (append column) and one hugging the bottom edge (append row). Each is
+// Notion-style append strips: a slim "+" strip hugging the table's full
+// right edge (append column) and full bottom edge (append row). Each is
 // anchored inside a corner cell (top-right for the column, bottom-left for
 // the row) so it tracks the live-resized table box the same way the grips
-// do, and floats into the outer margin via negative CSS offsets.
+// do, and floats into the outer margin via negative CSS offsets. A
+// cell-anchored widget can only span its own cell via CSS, so
+// sizeAppendStrips stretches each strip to the full table edge with inline
+// offsets.
 function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -1226,9 +1351,124 @@ function buildTableControlDecorations(
   return DecorationSet.create(doc, decorations);
 }
 
+// Stretch the append strips of `table` to span its full right/bottom edge.
+// Inline styles override the CSS fallback (which only spans the anchor cell)
+// because the strip's absolute-positioning containing block is its anchor
+// cell, not the table.
+function sizeAppendStrips(table: HTMLElement): void {
+  const rect = table.getBoundingClientRect();
+  const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col");
+  const colCell = colStrip?.parentElement;
+  if (colStrip && colCell) {
+    colStrip.style.top = `${rect.top - colCell.getBoundingClientRect().top}px`;
+    colStrip.style.height = `${rect.height}px`;
+  }
+  const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row");
+  const rowCell = rowStrip?.parentElement;
+  if (rowStrip && rowCell) {
+    rowStrip.style.left = `${rect.left - rowCell.getBoundingClientRect().left}px`;
+    rowStrip.style.width = `${rect.width}px`;
+  }
+}
+
+// The CSS fallback only spans the anchor corner cell, so size every append
+// strip before edge hover. Otherwise a tall/wide table approached straight
+// from the right/bottom margin has no full-edge "+" target yet.
+function sizeAllAppendStrips(view: EditorView): void {
+  view.dom.querySelectorAll<HTMLElement>("table").forEach((table) => {
+    if (table.querySelector(".dohc-table-append")) sizeAppendStrips(table);
+  });
+}
+
+type HoveredTable = { table: HTMLElement; col: number; row: number };
+
 export function makeTableControlsPlugin(): Plugin {
   const runtime = createTableControlsRuntime();
   let activeControls: ActiveTableControls | undefined;
+  // Notion reveals ONE column handle (above the hovered column) and ONE row
+  // handle (beside the hovered row) — not chrome on every row/column at
+  // once. CSS alone can't express "the row-0 cell of whichever column the
+  // pointer is in", so mousemove tracking toggles `is-active` on the
+  // matching grips. Hovering a grip itself also keeps it active: grips are
+  // DOM descendants of their anchor cell, so `closest("td, th")` still
+  // resolves.
+  let hovered: HoveredTable | null = null;
+
+  const clearHover = (): void => {
+    if (!hovered) return;
+    hovered.table
+      .querySelectorAll(".dohc-table-grip.is-active")
+      .forEach((el) => el.classList.remove("is-active"));
+    hovered = null;
+  };
+
+  // Re-assertable: decorations rebuild on every doc change, dropping the
+  // class from the freshly built grips, so the plugin view's update() calls
+  // this again for the still-hovered table.
+  const applyHover = (): void => {
+    if (!hovered) return;
+    hovered.table
+      .querySelector(`.dohc-table-grip--col[data-col="${hovered.col}"]`)
+      ?.classList.add("is-active");
+    hovered.table
+      .querySelector(`.dohc-table-grip--row[data-row="${hovered.row}"]`)
+      ?.classList.add("is-active");
+  };
+
+  const onMouseMove = (view: EditorView, event: MouseEvent): boolean => {
+    const target = event.target;
+    if (!(target instanceof Element)) return false;
+    // Over the chrome itself (strips float outside the corner cell's box):
+    // keep the current handles rather than re-deriving them from the corner
+    // anchor cell.
+    if (target.closest(".dohc-table-grip, .dohc-table-append, .dohc-table-menu-btn")) {
+      return false;
+    }
+    const cell = target.closest("td, th");
+    const table = cell?.closest("table");
+    if (!cell || !table || !view.dom.contains(table)) {
+      // Inactive grips ignore pointer events. Clearing on the first non-cell
+      // move would deactivate a handle in the 5px table-to-pill gap and make
+      // it unreachable, so keep it alive until the pointer leaves the outer
+      // margin and the grip can catch its own hover/click on the way out.
+      if (hovered) {
+        const rect = hovered.table.getBoundingClientRect();
+        const insideMargin =
+          event.clientX >= rect.left - GRIP_MARGIN &&
+          event.clientX <= rect.right + GRIP_MARGIN &&
+          event.clientY >= rect.top - GRIP_MARGIN &&
+          event.clientY <= rect.bottom + GRIP_MARGIN;
+        if (insideMargin) return false;
+      }
+      clearHover();
+      return false;
+    }
+    // Grips carry TableMap indices, so hover must use the same map: DOM
+    // sibling counting drifts when a rowspan from above covers earlier
+    // slots. A spanning cell activates its anchor row/column handle.
+    const pos = view.posAtDOM(cell, 0);
+    if (pos < 0) {
+      clearHover();
+      return false;
+    }
+    const $cell = cellAround(view.state.doc.resolve(pos));
+    if (!$cell) {
+      clearHover();
+      return false;
+    }
+    const tableNode = $cell.node(-1);
+    const rect = TableMap.get(tableNode).findCell($cell.pos - $cell.start(-1));
+    const col = rect.left;
+    const row = rect.top;
+    if (!hovered || hovered.table !== table || hovered.col !== col || hovered.row !== row) {
+      clearHover();
+      hovered = { table, col, row };
+      applyHover();
+    }
+    sizeAppendStrips(table);
+    return false;
+  };
+
   return new Plugin({
     key: tableControlsKey,
     state: {
@@ -1252,10 +1492,15 @@ export function makeTableControlsPlugin(): Plugin {
             event.target,
             activeControls,
           );
+          return onMouseMove(view, event);
+        },
+        mouseenter(view) {
+          sizeAllAppendStrips(view);
           return false;
         },
         mouseleave(view) {
           activeControls = setActiveTableControls(view, null, activeControls);
+          clearHover();
           return false;
         },
       },
@@ -1266,7 +1511,10 @@ export function makeTableControlsPlugin(): Plugin {
         return true;
       },
     },
-    view() {
+    view(view) {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => sizeAllAppendStrips(view));
+      }
       return {
         // An open grip menu closes over a raw cell position (see
         // columnMenuItems). If the doc shifts while it's open — e.g. a remote
@@ -1275,9 +1523,22 @@ export function makeTableControlsPlugin(): Plugin {
         // detached overlay element, not a decoration, so it isn't rebuilt with
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
-          if (runtime.closeMenu && !view.state.doc.eq(prevState.doc)) {
+          const docChanged = !view.state.doc.eq(prevState.doc);
+          if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;
+          }
+          // Doc changes rebuild the grip widgets (dropping `is-active`) and
+          // can change table boxes (added/removed rows): re-stretch every
+          // strip and restore the hovered handles without waiting for the
+          // next mousemove.
+          if (docChanged) sizeAllAppendStrips(view);
+          if (hovered) {
+            if (!hovered.table.isConnected) {
+              hovered = null;
+              return;
+            }
+            applyHover();
           }
         },
         destroy() {
@@ -1288,6 +1549,7 @@ export function makeTableControlsPlugin(): Plugin {
           runtime.activeDrag?.preview.remove();
           runtime.activeDrag = null;
           activeControls = undefined;
+          hovered = null;
         },
       };
     },

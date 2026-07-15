@@ -6,7 +6,6 @@ import {
   Eye,
   FileArchive,
   FileText,
-  History,
   Lock,
   Maximize2,
   MessagesSquare,
@@ -45,6 +44,7 @@ import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
   classifyForView,
@@ -100,7 +100,7 @@ import type { ChatsDrafts, ChatsNav } from "./workbench/ChatsView";
 import {
   activateTab,
   closeTab,
-  clampHistoryWidth,
+  clampChatsWidth,
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
   versionCompareTabPath,
@@ -125,12 +125,13 @@ import {
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
+  setChatsWidth,
   setFolderExpanded,
-  setHistoryWidth,
+  setOpenEditorsHeight,
   setSidebarWidth,
   setView,
+  toggleChats,
   toggleFolderExpanded,
-  toggleHistory,
   togglePinned,
   toggleSidebar,
   VIEW_IDS,
@@ -662,46 +663,53 @@ function EngineMomentDiffPage({
   );
 }
 
-function HistoryRail(props: {
+// Which surface the right-hand Chats panel shows: every workspace chat
+// (channels, DMs, file threads) or the ACTIVE file's chats. Runtime-only.
+type ChatsPanelTab = "all" | "file";
+
+// The right-hand Chats panel — dohc's secondary sidebar (VS Code grammar:
+// toggleable, resizable, persistent width, gone entirely while hidden).
+function ChatsPanel(props: {
   width: number;
   onWidthChange: (width: number) => void;
   onCollapse: () => void;
-  // Flagged workspaces swap the static "History" label for the
-  // History/Chats tab pair; the rail element (and its pinned testid) is the
-  // same either way.
-  header?: ReactNode;
-  ariaLabel?: string;
+  tab: ChatsPanelTab;
+  onTabChange: (tab: ChatsPanelTab) => void;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
-  const railRef = useRef<HTMLElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const dragRight = useRef<number | null>(null);
 
   return (
     <aside
-      ref={railRef}
-      data-testid="history-timeline"
-      aria-label={props.ariaLabel ?? "History"}
+      ref={panelRef}
+      data-testid="chats-panel"
+      aria-label="Chats"
       className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"
       style={{ width: props.width }}
     >
       <div
-        data-testid="history-resize"
+        data-testid="chats-panel-resize"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize history"
+        aria-label="Resize chats"
         onPointerDown={(event) => {
+          // Left button only — a right/middle press must never start a resize.
           if (event.button !== 0) return;
           dragRight.current =
-            railRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+            panelRef.current?.getBoundingClientRect().right ?? window.innerWidth;
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
           if (dragRight.current === null) return;
+          // A buttons-up move means the release was missed (capture lost
+          // outside the window): end the drag instead of resizing on hover.
           if ((event.buttons & 1) === 0) {
             dragRight.current = null;
             return;
           }
-          props.onWidthChange(clampHistoryWidth(dragRight.current - event.clientX));
+          props.onWidthChange(clampChatsWidth(dragRight.current - event.clientX));
         }}
         onPointerUp={() => {
           dragRight.current = null;
@@ -718,21 +726,42 @@ function HistoryRail(props: {
           peer chrome surfaces speak one language and their hairlines
           meet the tab strip's on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
-        {props.header ?? (
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-            History
-          </span>
-        )}
-        <button
-          type="button"
-          data-testid="history-collapse"
-          aria-label="Collapse history"
-          title="Collapse history"
-          onClick={props.onCollapse}
-          className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-        >
-          <PanelRight size={13} aria-hidden />
-        </button>
+        <div className="flex items-center gap-0.5">
+          {(
+            [
+              ["all", "Chats"],
+              ["file", "This file"],
+            ] as const
+          ).map(([tab, label]) => (
+            <button
+              key={tab}
+              type="button"
+              data-testid={`chats-panel-tab-${tab}`}
+              aria-pressed={props.tab === tab}
+              onClick={() => props.onTabChange(tab)}
+              className={`h-6 rounded px-2 text-[11px] font-semibold uppercase tracking-wide ${
+                props.tab === tab
+                  ? "bg-line/60 text-ink"
+                  : "text-muted hover:bg-line/40 hover:text-ink"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <span className="ml-auto flex items-center gap-0.5">
+          {props.actions}
+          <button
+            type="button"
+            data-testid="chats-panel-collapse"
+            aria-label="Hide chats"
+            title="Hide chats"
+            onClick={props.onCollapse}
+            className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          >
+            <PanelRight size={13} aria-hidden />
+          </button>
+        </span>
       </header>
       {props.children}
     </aside>
@@ -1128,9 +1157,9 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
-  // Right rail content for flagged workspaces: History timeline or the
-  // active file's Chats. Runtime-only — not persisted.
-  const [railView, setRailView] = useState<"history" | "chats">("history");
+  // Which surface the right-hand Chats panel shows (all chats vs the active
+  // file's). Runtime-only — not persisted.
+  const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
   const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(null);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
@@ -1224,17 +1253,6 @@ export function DesktopWorkspaceShell(props: {
       .then((result) => {
         if (cancelled) return;
         setVersionsEnabled(result.settings.experimental.workspaceEngineAlpha);
-        // A persisted "chats" view from a previously flagged session must
-        // not strand an unflagged workspace on an empty panel. Raw setWb:
-        // this is a correction, not a user touch — it must not block the
-        // stored ui-state merge-on-load.
-        if (!result.settings.experimental.workspaceEngineAlpha) {
-          setWb((state) =>
-            state.activeView === "chats"
-              ? { ...state, activeView: "explorer" }
-              : state,
-          );
-        }
       })
       .catch(() => {
         // Settings unavailable reads as flag off — never a broken shell.
@@ -1389,11 +1407,11 @@ export function DesktopWorkspaceShell(props: {
     [mutateWb, openFile],
   );
 
-  // The ONE way a chat thread lands in the rail (search hits and the Chats
-  // view "Files" grouping both route here): hand the thread to the rail's
-  // consume-once initialThread seam, switch to the Chats tab, and force the
-  // rail visible.
-  const openChatThreadInRail = useCallback(
+  // The ONE way a chat thread lands in the Chats panel (search hits and the
+  // Chats view "Files" grouping both route here): hand the thread to the
+  // panel's consume-once initialThread seam, switch to the "This file" tab,
+  // and force the panel visible.
+  const openChatThreadInPanel = useCallback(
     (thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number }) => {
       setSearchChatThread({
         id: thread.id,
@@ -1401,29 +1419,30 @@ export function DesktopWorkspaceShell(props: {
         createdAtMs: thread.createdAtMs,
         updatedAtMs: thread.updatedAtMs,
       });
-      setRailView("chats");
-      mutateWb((state) => ({ ...state, historyVisible: true }));
+      setChatsPanelTab("file");
+      mutateWb((state) => ({ ...state, chatsVisible: true }));
     },
     [mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where
-  // it lives — the file (when it still resolves) plus the rail on the thread.
-  const openFileChatInRail = useCallback(
+  // it lives — the file (when it still resolves) plus the panel on the
+  // thread.
+  const openFileChatInPanel = useCallback(
     (thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number; path: string | null }) => {
-      openChatThreadInRail(thread);
+      openChatThreadInPanel(thread);
       if (thread.path) openFile(thread.path);
     },
-    [openChatThreadInRail, openFile],
+    [openChatThreadInPanel, openFile],
   );
 
   // Search-result click: open + land at the line (source mode this phase);
-  // chat results open in the rail instead.
+  // chat results open in the Chats panel instead.
   const openSearchResult = useCallback(
     (path: string, line: number, _column: number, entry?: SearchResultsEventEntry) => {
       if (entry?.surface === "chat" && entry.threadId) {
         const now = Date.now();
-        openChatThreadInRail({
+        openChatThreadInPanel({
           id: entry.threadId,
           title: entry.title ?? entry.threadId,
           createdAtMs: now,
@@ -1434,7 +1453,7 @@ export function DesktopWorkspaceShell(props: {
       setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
       openFile(path);
     },
-    [openChatThreadInRail, openFile],
+    [openChatThreadInPanel, openFile],
   );
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -1727,7 +1746,6 @@ export function DesktopWorkspaceShell(props: {
     mutateWb((state) => ({
       ...setView(state, "history"),
       sidebarVisible: true,
-      historyVisible: true,
     }));
   }, [mutateWb]);
   const checkForDesktopUpdates = useCallback(async () => {
@@ -1890,6 +1908,13 @@ export function DesktopWorkspaceShell(props: {
       } else if (event.key === "p") {
         event.preventDefault();
         setQuickOpenOpen((open) => !open);
+      } else if (event.key === "b" && event.altKey) {
+        // Ctrl+Alt+B mirrors VS Code's secondary-sidebar toggle. No-op for
+        // unflagged workspaces (they have no Chats panel to show).
+        if (versionsEnabled) {
+          event.preventDefault();
+          mutateWb(toggleChats);
+        }
       } else if (event.key === "b") {
         event.preventDefault();
         mutateWb(toggleSidebar);
@@ -1902,7 +1927,7 @@ export function DesktopWorkspaceShell(props: {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, mutateWb, openSettings, reportShellError]);
+  }, [closeActiveTab, mutateWb, openSettings, reportShellError, versionsEnabled]);
 
   const openWorkspaceFolder = useCallback(async () => {
     try {
@@ -1973,18 +1998,22 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      {
-        id: "toggle-history",
-        label: "Toggle history rail",
-        run: () => mutateWb(toggleHistory),
-      },
-      ...VIEW_IDS.filter((view) => view !== "chats" || versionsEnabled).map(
-        (view) => ({
-          id: `show-${view}`,
-          label: `View: ${activityViewLabel(view)}`,
-          run: () => mutateWb((state) => setView(state, view)),
-        }),
-      ),
+      // The Chats panel exists only for workspace-engine-flagged workspaces —
+      // no flag, no command.
+      ...(versionsEnabled
+        ? [
+            {
+              id: "toggle-chats",
+              label: "Toggle chats panel",
+              run: () => mutateWb(toggleChats),
+            },
+          ]
+        : []),
+      ...VIEW_IDS.map((view) => ({
+        id: `show-${view}`,
+        label: `View: ${activityViewLabel(view)}`,
+        run: () => mutateWb((state) => setView(state, view)),
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -2044,9 +2073,9 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
-  // ONE history timeline element, rendered by the side panel's History view,
-  // the history tab, and the right rail — the engine page state is
-  // root-owned (never a second subscription). An opted-out workspace has NO
+  // ONE history timeline element, rendered by the side panel's History view
+  // and the history tab — the engine page state is root-owned (never a
+  // second subscription). An opted-out workspace has NO
   // history source (retirement Phase C removed the legacy recorder), so the
   // timeline honestly says history is off instead of showing an empty list.
   const historyTimeline = engineEnabled ? (
@@ -2124,6 +2153,10 @@ export function DesktopWorkspaceShell(props: {
         dirtyTab={activeTabDirty ? wb.activeTab : null}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
+        openEditorsHeight={wb.openEditorsHeight}
+        onOpenEditorsHeightChange={(height) =>
+          mutateWb((state) => setOpenEditorsHeight(state, height))
+        }
         createRequest={createRequest}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
@@ -2161,7 +2194,7 @@ export function DesktopWorkspaceShell(props: {
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
     onDraftsChange: onChatsDrafts,
-    onOpenFileChat: openFileChatInRail,
+    onOpenFileChat: openFileChatInPanel,
     onOpenPath: openFile,
     onError: setShellError,
     mentionCandidates,
@@ -2257,7 +2290,14 @@ export function DesktopWorkspaceShell(props: {
           activeView={wb.activeView}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
-          chatsEnabled={versionsEnabled}
+          {...(versionsEnabled
+            ? {
+                chats: {
+                  visible: wb.chatsVisible,
+                  onToggle: () => mutateWb(toggleChats),
+                },
+              }
+            : {})}
           searchResultCount={
             search.model.totalMatches > 0 ? search.model.totalMatches : undefined
           }
@@ -2274,28 +2314,16 @@ export function DesktopWorkspaceShell(props: {
             onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
             actions={
               wb.activeView === "history" ? (
-                <>
-                  <button
-                    type="button"
-                    data-testid="history-open-tab"
-                    aria-label="Open history in tab"
-                    title="Open history in tab"
-                    onClick={openHistoryTab}
-                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                  >
-                    <Maximize2 size={13} aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="history-rail-toggle"
-                    aria-label="Toggle history rail"
-                    title="Toggle history rail"
-                    onClick={() => mutateWb(toggleHistory)}
-                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                  >
-                    <PanelRight size={13} aria-hidden />
-                  </button>
-                </>
+                <button
+                  type="button"
+                  data-testid="history-open-tab"
+                  aria-label="Open history in tab"
+                  title="Open history in tab"
+                  onClick={openHistoryTab}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <Maximize2 size={13} aria-hidden />
+                </button>
               ) : wb.activeView === "graph" ? (
                 <button
                   type="button"
@@ -2303,19 +2331,6 @@ export function DesktopWorkspaceShell(props: {
                   aria-label="Open graph in tab"
                   title="Open graph in tab"
                   onClick={openGraphTab}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  <Maximize2 size={13} aria-hidden />
-                </button>
-              ) : wb.activeView === "chats" &&
-                versionsEnabled &&
-                !isChatsTabPath(wb.activeTab) ? (
-                <button
-                  type="button"
-                  data-testid="chats-open-tab"
-                  aria-label="Open chats in tab"
-                  title="Open chats in tab"
-                  onClick={openChatsTab}
                   className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
                 >
                   <Maximize2 size={13} aria-hidden />
@@ -2334,6 +2349,11 @@ export function DesktopWorkspaceShell(props: {
               ) : undefined
             }
           >
+            {/* One island: a crash inside any panel view (or a failed lazy
+                chunk under its Suspense) shows an inline error card here —
+                the editor, tabs, and rail keep working. Switching views
+                clears it. */}
+            <ErrorBoundary scope="side-panel" resetKeys={[wb.activeView]}>
             {wb.activeView === "explorer" ? (
               explorerView
             ) : wb.activeView === "search" ? (
@@ -2359,35 +2379,10 @@ export function DesktopWorkspaceShell(props: {
                   onOpenPath={openFile}
                 />
               </Suspense>
-            ) : wb.activeView === "chats" ? (
-              versionsEnabled ? (
-                isChatsTabPath(wb.activeTab) ? (
-                  // The chats TAB is live — never mount a second chat client
-                  // (duplicate presence lease, composer ids, diverging state).
-                  <div
-                    data-testid="chats-panel-deferred"
-                    className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-                  >
-                    <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                    <span className="text-xs text-muted">
-                      Chats are open as a tab.
-                    </span>
-                  </div>
-                ) : (
-                  <Suspense fallback={<PanelLoading label="Chats" />}>
-                    <LazyChatsView {...chatsViewProps} />
-                  </Suspense>
-                )
-              ) : (
-                // Transient: the settings load corrects activeView moments
-                // later; never a blank panel meanwhile.
-                <div className="flex flex-1 items-center justify-center px-4 text-center text-xs text-subtle">
-                  Chats aren't enabled for this workspace.
-                </div>
-              )
             ) : wb.activeView === "history" ? (
               historyTimeline
             ) : null}
+            </ErrorBoundary>
           </SidePanel>
         ) : null}
 
@@ -2472,6 +2467,14 @@ export function DesktopWorkspaceShell(props: {
               void showWorkbenchMenu("editor");
             }}
           >
+            {/* The editor island: a document/tab view that throws (hostile
+                markdown tripping the WYSIWYG parse, a failed editor chunk, a
+                view bug) contains to this pane — tabs, explorer, and rail
+                stay alive, and switching or closing the tab recovers. */}
+            <ErrorBoundary
+              scope="editor"
+              resetKeys={[wb.activeTab, workspaceId, versionEpoch]}
+            >
             {isGraphTabPath(wb.activeTab) ? (
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView
@@ -2599,78 +2602,73 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               </div>
             )}
+            </ErrorBoundary>
           </div>
         </main>
 
-        {/* History timeline — the "git log for everyday people". Every
-            settled change (yours or your agent's) lands here, newest first.
-            Default-visible right rail (specs assert it with zero clicks);
-            toggleable via the toggle-history command. */}
-        {wb.historyVisible ? (
-          <HistoryRail
-            width={wb.historyWidth}
-            onWidthChange={(width) => mutateWb((state) => setHistoryWidth(state, width))}
-            onCollapse={() => mutateWb(toggleHistory)}
-            ariaLabel={engineEnabled && railView === "chats" ? "Chats" : "History"}
-            header={
-              engineEnabled ? (
-                <div className="flex items-center gap-0.5">
-                  {(
-                    [
-                      ["history", "History"],
-                      ["chats", "Chats"],
-                    ] as const
-                  ).map(([view, label]) => (
-                    <button
-                      key={view}
-                      type="button"
-                      data-testid={`rail-tab-${view}`}
-                      aria-pressed={railView === view}
-                      onClick={() => setRailView(view)}
-                      className={`h-6 rounded px-2 text-[11px] font-semibold uppercase tracking-wide ${
-                        railView === view
-                          ? "bg-line/60 text-ink"
-                          : "text-muted hover:bg-line/40 hover:text-ink"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+        {/* Chats panel — the right-hand secondary sidebar (flagged
+            workspaces only). Hidden entirely while collapsed; the
+            activity-bar Chats button, Ctrl+Alt+B, or the toggle-chats
+            command bring it back. History lives in the left History view
+            and the history tab — never here. */}
+        {versionsEnabled && wb.chatsVisible ? (
+          <ChatsPanel
+            width={wb.chatsWidth}
+            onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
+            onCollapse={() => mutateWb(toggleChats)}
+            tab={chatsPanelTab}
+            onTabChange={setChatsPanelTab}
+            actions={
+              chatsPanelTab === "all" && !isChatsTabPath(wb.activeTab) ? (
+                <button
+                  type="button"
+                  data-testid="chats-open-tab"
+                  aria-label="Open chats in tab"
+                  title="Open chats in tab"
+                  onClick={openChatsTab}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <Maximize2 size={13} aria-hidden />
+                </button>
               ) : undefined
             }
           >
-            {engineEnabled && railView === "chats" ? (
-              <Suspense fallback={<PanelLoading label="Chats" />}>
-                <LazyLinkedChatsPanel
-                  workspaceId={workspaceId}
-                  filePath={activeDocumentPath}
-                  initialThread={searchChatThread}
-                  onInitialThreadConsumed={() => setSearchChatThread(null)}
-                  onError={(message) => setShellError(message)}
-                />
-              </Suspense>
-            ) : (
-              historyTimeline
-            )}
-          </HistoryRail>
-        ) : (
-          <aside
-            aria-label="History collapsed"
-            className="flex w-9 shrink-0 justify-center border-l border-line bg-panel-2 pt-2"
-          >
-            <button
-              type="button"
-              data-testid="history-restore"
-              aria-label="Restore history"
-              title="Restore history"
-              onClick={() => mutateWb(toggleHistory)}
-              className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+            {/* Chats island: a crash in either panel view stays contained;
+                switching panel mode or workspace tab clears the failure. */}
+            <ErrorBoundary
+              scope="rail"
+              resetKeys={[chatsPanelTab, wb.activeTab]}
             >
-              <History size={13} aria-hidden />
-            </button>
-          </aside>
-        )}
+              {chatsPanelTab === "file" ? (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyLinkedChatsPanel
+                    workspaceId={workspaceId}
+                    filePath={activeDocumentPath}
+                    initialThread={searchChatThread}
+                    onInitialThreadConsumed={() => setSearchChatThread(null)}
+                    onError={(message) => setShellError(message)}
+                  />
+                </Suspense>
+              ) : isChatsTabPath(wb.activeTab) ? (
+                // The chats TAB is live — never mount a second chat client
+                // (duplicate presence lease, composer ids, diverging state).
+                <div
+                  data-testid="chats-panel-deferred"
+                  className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+                >
+                  <MessagesSquare size={16} aria-hidden className="text-subtle" />
+                  <span className="text-xs text-muted">
+                    Chats are open as a tab.
+                  </span>
+                </div>
+              ) : (
+                <Suspense fallback={<PanelLoading label="Chats" />}>
+                  <LazyChatsView {...chatsViewProps} />
+                </Suspense>
+              )}
+            </ErrorBoundary>
+          </ChatsPanel>
+        ) : null}
       </div>
 
       <StatusBar

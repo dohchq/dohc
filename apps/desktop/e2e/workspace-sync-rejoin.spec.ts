@@ -13,6 +13,7 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -373,6 +374,8 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     const momentRow = page.locator(
       `[data-testid="engine-moment-open"][data-moment-path="${historyPath}"]`,
     );
+    // History lives in the left History view (the right panel is Chats now).
+    await openHistoryView(page);
     await expect(momentRow.first()).toBeVisible();
     if (bulkCount === 0) {
       expect(await momentRow.count()).toBeGreaterThanOrEqual(2);

@@ -147,7 +147,7 @@ describe("MarkdownEditor slash commands", () => {
   });
 
   it("compares every field that can visibly move or select the menu", () => {
-    const state: SlashCommandState = {
+    const state = {
       open: true,
       from: 1,
       to: 2,
@@ -155,9 +155,10 @@ describe("MarkdownEditor slash commands", () => {
       selected: 0,
       x: 10,
       y: 20,
+      bottom: null,
       maxHeight: 300,
       placement: "below",
-    };
+    } satisfies SlashCommandState;
     expect(slashCommandStatesEqual(state, { ...state })).toBe(true);
     expect(slashCommandStatesEqual(state, { ...state, selected: 1 })).toBe(false);
     expect(slashCommandStatesEqual(state, { ...state, y: 21 })).toBe(false);
@@ -195,6 +196,7 @@ describe("MarkdownEditor slash command: image", () => {
       x: 0,
       y: 0,
       maxHeight: 0,
+      bottom: null,
       placement: "below",
     };
 
@@ -219,6 +221,7 @@ describe("MarkdownEditor slash command: image", () => {
       x: 0,
       y: 0,
       maxHeight: 0,
+      bottom: null,
       placement: "below",
     };
 
@@ -259,6 +262,7 @@ describe("MarkdownEditor slash command: math", () => {
       x: 0,
       y: 0,
       maxHeight: 0,
+      bottom: null,
       placement: "below",
     };
 
@@ -283,7 +287,7 @@ describe("MarkdownEditor slash command: math", () => {
 });
 
 describe("MarkdownEditor code block continuation", () => {
-  function makeEditor(markdown: string): Editor {
+  function makeEditor(markdown: string, editable = true): Editor {
     return new Editor({
       element: document.createElement("div"),
       extensions: [
@@ -295,6 +299,7 @@ describe("MarkdownEditor code block continuation", () => {
       ],
       content: markdown,
       contentType: "markdown",
+      editable,
     });
   }
 
@@ -363,6 +368,7 @@ describe("MarkdownEditor code block continuation", () => {
     expect(editor.state.doc.child(1).content.size).toBe(0);
     editor.destroy();
   });
+
 });
 
 describe("MarkdownEditor empty list item focus", () => {

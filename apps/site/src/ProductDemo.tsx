@@ -556,10 +556,13 @@ export function ProductDemo() {
 
       <div className="demo-workbench">
         <ActivityBar
-          activeView={activeActivity}
+          activeView={activeActivity === "chats" ? "explorer" : activeActivity}
           sidebarVisible={sidebarVisible}
           hasConflict={false}
-          chatsEnabled
+          chats={{
+            visible: activeActivity === "chats" && sidebarVisible,
+            onToggle: () => selectActivity("chats"),
+          }}
           onSelectView={selectActivity}
         />
 

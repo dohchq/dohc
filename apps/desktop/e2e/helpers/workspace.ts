@@ -376,6 +376,30 @@ export async function revealExplorerPath(
   await expect(explorerRow(page, path)).toBeVisible();
 }
 
+// Opens the left History view (idempotent: re-clicking the ACTIVE activity
+// entry would collapse the side panel, and a restored ui-state may bring the
+// view back already open). aria-current="page" is exactly "history view
+// showing" — active view AND visible panel.
+export async function openHistoryView(page: Page): Promise<void> {
+  const button = page.getByTestId("activity-history");
+  if ((await button.getAttribute("aria-current")) !== "page") {
+    await button.click();
+  }
+  await expect(button).toHaveAttribute("aria-current", "page");
+}
+
+// Opens the right-hand Chats panel (idempotent: the panel's visibility
+// persists in ui-state, so a relaunch may restore it already open) and lands
+// on the "This file" tab — the active file's linked chats.
+export async function openFileChatsPanel(page: Page): Promise<void> {
+  const panel = page.getByTestId("chats-panel");
+  if (!(await panel.isVisible())) {
+    await page.getByTestId("activity-chats").click();
+    await expect(panel).toBeVisible();
+  }
+  await page.getByTestId("chats-panel-tab-file").click();
+}
+
 export async function expectVisibleContent(
   page: Page,
   text: string | RegExp,

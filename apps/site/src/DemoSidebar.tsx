@@ -17,7 +17,7 @@ import {
   type PendingTreeChange,
 } from "../../desktop/src/renderer/workbench/file-tree-optimistic";
 
-export type DemoPanelId = ViewId;
+export type DemoPanelId = ViewId | "chats";
 
 export type DemoWorkspaceDocument = {
   path: string;
@@ -72,6 +72,7 @@ export function DemoSidebar(props: {
   onBeforeChanges: () => Promise<void>;
 }) {
   const [width, setWidth] = useState(305);
+  const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([
     "notes",
     "projects",
@@ -138,6 +139,8 @@ export function DemoSidebar(props: {
           dirtyTab={null}
           expandedFolders={expandedFolders}
           pinned={[]}
+          openEditorsHeight={openEditorsHeight}
+          onOpenEditorsHeightChange={setOpenEditorsHeight}
           createRequest={null}
           onOpenFile={open}
           onActivateTab={open}

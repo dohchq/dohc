@@ -38,6 +38,7 @@ import {
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
 import {
+  clampOpenEditorsHeight,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -64,6 +65,11 @@ export interface ExplorerProps {
   dirtyTab: string | null;
   expandedFolders: string[];
   pinned: string[];
+  // Max height of the Open Editors list (workbench state, persisted): the
+  // list caps here and scrolls internally; the section's bottom-edge drag
+  // handle streams clamped heights up (SidePanel width precedent).
+  openEditorsHeight: number;
+  onOpenEditorsHeightChange: (height: number) => void;
   // Incrementing request to begin an inline create at the root (palette /
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
@@ -223,6 +229,15 @@ function IndentGuides({ depth }: { depth: number }) {
   );
 }
 
+// The rendered Open Editors cap is additionally bounded to a fraction of the
+// viewport: a height saved in a tall window must never push the Files section
+// and the resize handle below the fold of a shorter one (the list is its own
+// overscroll-contained scroller — wheel scrolling would trap inside it).
+const OPEN_EDITORS_VIEWPORT_FRACTION = 0.6;
+function viewportOpenEditorsCap(): number {
+  return Math.round(window.innerHeight * OPEN_EDITORS_VIEWPORT_FRACTION);
+}
+
 // Memoized row: primitives + stable callbacks only, so a selection change
 // re-renders the rows whose state changed, not the whole tree.
 const TreeRow = memo(function TreeRow(props: {
@@ -353,6 +368,7 @@ export function Explorer(props: ExplorerProps) {
   } = props;
   const [pending, setPending] = useState<PendingTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
+  const [viewportCap, setViewportCap] = useState(viewportOpenEditorsCap);
   const [filesExpanded, setFilesExpanded] = useState(true);
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -364,6 +380,13 @@ export function Explorer(props: ExplorerProps) {
   const [opError, setOpError] = useState<string | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const openEditorsListRef = useRef<HTMLUListElement>(null);
+  // Pointer position + cap at drag start — heights derive from the DELTA, not
+  // from the list's edges: the list is max-height (shorter lists shrink to
+  // fit), so the handle can sit ABOVE the cap and an edge-based height would
+  // collapse the saved cap to the content height on the first move.
+  const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(
+    null,
+  );
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
   // fires with a STALE closure — without this latch the edit would commit
@@ -373,6 +396,12 @@ export function Explorer(props: ExplorerProps) {
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
   const hoverExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const onResize = () => setViewportCap(viewportOpenEditorsCap());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // Prune pending changes the authoritative refresh has confirmed.
   useEffect(() => {
@@ -387,10 +416,11 @@ export function Explorer(props: ExplorerProps) {
   // active row must be brought back into view whenever it changes — or moves:
   // openTabs (reducer state, referentially stable between changes) is a
   // dependency because reordering or closing tabs shifts the active row
-  // without changing activeTab. Scroll the list directly (not scrollIntoView):
-  // the list and the file tree share the sidebar's outer scroll container, and
-  // scrollIntoView would also scroll that ancestor — yanking the user's tree
-  // scroll position on tab switches.
+  // without changing activeTab (and shrinking the section can push it out).
+  // Scroll the list directly (not scrollIntoView): the list and the file tree
+  // share the sidebar's outer scroll container, and scrollIntoView would also
+  // scroll that ancestor — yanking the user's tree scroll position on tab
+  // switches.
   useEffect(() => {
     if (!props.activeTab || !openEditorsExpanded) return;
     const list = openEditorsListRef.current;
@@ -403,7 +433,13 @@ export function Explorer(props: ExplorerProps) {
     } else if (rowRect.bottom > listRect.bottom) {
       list.scrollTop += rowRect.bottom - listRect.bottom;
     }
-  }, [props.activeTab, props.openTabs, openEditorsExpanded]);
+  }, [
+    props.activeTab,
+    props.openTabs,
+    openEditorsExpanded,
+    props.openEditorsHeight,
+    viewportCap,
+  ]);
 
   // A drag abandoned mid-hover must not expand a folder after unmount.
   useEffect(
@@ -1191,7 +1227,7 @@ export function Explorer(props: ExplorerProps) {
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
-          className="mb-1 border-b border-line pb-1"
+          className="relative mb-1 border-b border-line pb-1"
         >
           <header
             data-testid="open-editors-header"
@@ -1241,10 +1277,12 @@ export function Explorer(props: ExplorerProps) {
               <ul
                 ref={openEditorsListRef}
                 data-testid="open-editors-list"
-                // Rows are 28px (h-7); cap at 8.5 rows — the half row visible
-                // at the cutoff signals there is more to scroll (VS Code-style
-                // bounded Open Editors pane).
-                className="m-0 max-h-[238px] list-none overflow-y-auto overscroll-contain p-0"
+                // Bounded, internally scrolling list (VS Code-style Open
+                // Editors pane). The cap is workbench state: the section's
+                // bottom-edge handle resizes it and the value persists — the
+                // render additionally bounds it to the viewport cap.
+                style={{ maxHeight: Math.min(props.openEditorsHeight, viewportCap) }}
+                className="m-0 list-none overflow-y-auto overscroll-contain p-0"
               >
                 {props.openTabs.map((tab) => {
                   const active = props.activeTab === tab.path;
@@ -1303,6 +1341,53 @@ export function Explorer(props: ExplorerProps) {
                 No open editors
               </div>
             )
+          ) : null}
+          {openEditorsExpanded && props.openTabs.length > 0 ? (
+            <div
+              data-testid="open-editors-resize"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize open editors"
+              onPointerDown={(event) => {
+                // Left button only — a right/middle press must never start a
+                // resize (SidePanel hardening).
+                if (event.button !== 0) return;
+                // Drag starts from the RENDERED cap — from an oversized
+                // saved cap the drag would otherwise have a huge dead zone
+                // before anything visibly moves.
+                openEditorsDrag.current = {
+                  startY: event.clientY,
+                  startHeight: Math.min(props.openEditorsHeight, viewportCap),
+                };
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={(event) => {
+                const drag = openEditorsDrag.current;
+                if (drag === null) return;
+                // If the release was missed (capture lost outside the
+                // window), a buttons-up move must end the drag — or plain
+                // hovering would keep resizing and persist bogus heights.
+                if ((event.buttons & 1) === 0) {
+                  openEditorsDrag.current = null;
+                  return;
+                }
+                props.onOpenEditorsHeightChange(
+                  clampOpenEditorsHeight(
+                    drag.startHeight + event.clientY - drag.startY,
+                  ),
+                );
+              }}
+              onPointerUp={() => {
+                openEditorsDrag.current = null;
+              }}
+              onPointerCancel={() => {
+                openEditorsDrag.current = null;
+              }}
+              onLostPointerCapture={() => {
+                openEditorsDrag.current = null;
+              }}
+              className="absolute -bottom-1 left-0 z-10 h-2 w-full cursor-row-resize bg-transparent transition-colors hover:bg-line/80"
+            />
           ) : null}
         </section>
 

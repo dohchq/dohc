@@ -12,7 +12,6 @@ describe("ActivityBar optional utility actions", () => {
         activeView="explorer"
         sidebarVisible
         hasConflict={false}
-        chatsEnabled
         onSelectView={() => undefined}
       />,
     );

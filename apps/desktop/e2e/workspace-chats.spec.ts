@@ -73,9 +73,11 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     );
     await expect(page.getByTestId("chats-thread-unread")).toHaveCount(0);
 
-    // Park the workbench on Explorer so the post-relaunch Chats click is a
-    // reveal (clicking the already-active view toggles the panel closed).
-    await page.getByTestId("activity-explorer").click();
+    // Park the Chats panel closed so the post-relaunch Chats click is a
+    // reveal (the panel's visibility persists in ui-state, and collapsing
+    // fully unmounts the view — no right-edge stub).
+    await page.getByTestId("chats-panel-collapse").click();
+    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
     // Relaunch: channel chats are durable engine state.
@@ -83,10 +85,10 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
-    // The active-view choice is persisted asynchronously, so a slow close can
-    // restore Chats as the active view; blind-clicking would then TOGGLE the
-    // panel closed. Reveal it only when it is not already showing — what this
-    // test pins is chat-data durability, not active-view persistence.
+    // Panel visibility is persisted asynchronously, so a slow close can
+    // still restore the Chats panel open; blind-clicking would then TOGGLE
+    // it closed. Reveal it only when it is not already showing — what this
+    // test pins is chat-data durability, not panel-visibility persistence.
     if (!(await page.getByTestId("chats-view").isVisible())) {
       await page.getByTestId("activity-chats").click();
     }

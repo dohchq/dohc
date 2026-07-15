@@ -32,6 +32,7 @@ import {
   TryInVersionRunState,
   TryInVersionStateResult,
   TryInWorkspaceVersionPayload,
+  WorkspaceUiState,
   WorkspaceVersionConflict,
   ListSitesResult,
   SetUserSettingsPayload,
@@ -253,6 +254,26 @@ describe("settings IPC contract", () => {
         paused: true,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("workspace UI state IPC contract", () => {
+  const validState = {
+    version: 1,
+    activeView: "explorer",
+    sidebarVisible: true,
+    sidebarWidth: 320,
+    tabs: ["notes/a.md"],
+    activeTab: "notes/a.md",
+    chatsVisible: true,
+  };
+
+  it("drops invalid open editor heights without rejecting the saved state", () => {
+    for (const openEditorsHeight of [7, "tall"]) {
+      const parsed = WorkspaceUiState.parse({ ...validState, openEditorsHeight });
+      const height: number | undefined = parsed.openEditorsHeight;
+      expect(height).toBeUndefined();
+    }
   });
 });
 

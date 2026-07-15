@@ -1,5 +1,5 @@
 import type { Node } from "@tiptap/pm/model";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 const calloutChromeKey = new PluginKey<DecorationSet>("dohc-callout-chrome");
@@ -98,6 +98,23 @@ function buildCalloutHeader(
   const header = document.createElement("div");
   header.className = "dohc-callout-header";
   header.setAttribute("contenteditable", "false");
+
+  // Clicking the header's non-interactive area selects the whole callout
+  // (NodeSelection). This is the ONLY mouse path to select a FOLDED callout —
+  // its body is hidden, and the widget's stopEvent keeps header clicks from
+  // ever reaching ProseMirror — and without a selection a folded callout
+  // cannot be deleted from the keyboard at all.
+  header.addEventListener("mousedown", (event) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest("button, select, input")) return;
+    stopEditorMouseEvent(event);
+    const callout = resolveCallout(view, getPos);
+    if (!callout) return;
+    view.dispatch(
+      view.state.tr.setSelection(NodeSelection.create(view.state.doc, callout.pos)),
+    );
+    view.focus();
+  });
 
   // Assigned once the title input + its commit logic exist below. The fold
   // toggle calls this FIRST so an in-progress title edit is flushed before the

@@ -23,7 +23,7 @@ describe("resolveFloatingMenuPosition", () => {
         menuWidth: 240,
         menuMaxHeight: 180,
       }),
-    ).toEqual({ x: 548, y: 314, maxHeight: 180, placement: "above" });
+    ).toEqual({ x: 548, y: 314, maxHeight: 180, placement: "above", bottom: 106 });
   });
 
   it("shrinks to the larger side when neither side has full height", () => {
@@ -35,6 +35,35 @@ describe("resolveFloatingMenuPosition", () => {
         menuWidth: 320,
         menuMaxHeight: 300,
       }),
-    ).toEqual({ x: 20, y: 12, maxHeight: 162, placement: "above" });
+    ).toEqual({ x: 20, y: 12, maxHeight: 162, placement: "above", bottom: 146 });
+  });
+
+  it("pins the above-placement bottom anchor to the cursor's top edge", () => {
+    const position = resolveFloatingMenuPosition({
+      cursorRect: { left: 100, top: 500, bottom: 520 },
+      viewportWidth: 800,
+      viewportHeight: 600,
+      menuWidth: 240,
+      menuMaxHeight: 180,
+      gap: 6,
+    });
+    expect(position.placement).toBe("above");
+    // Bottom edge sits `gap` above the cursor regardless of content height:
+    // a menu shorter than maxHeight must grow upward, not hang detached.
+    expect(position.bottom).toBe(600 - (500 - 6));
+    // The described box is the same one `y` + maxHeight describes.
+    expect(600 - (position.y + position.maxHeight)).toBe(position.bottom);
+  });
+
+  it("returns no bottom anchor for below placement", () => {
+    const position = resolveFloatingMenuPosition({
+      cursorRect: { left: 100, top: 100, bottom: 120 },
+      viewportWidth: 800,
+      viewportHeight: 600,
+      menuWidth: 240,
+      menuMaxHeight: 180,
+    });
+    expect(position.placement).toBe("below");
+    expect(position.bottom).toBeUndefined();
   });
 });

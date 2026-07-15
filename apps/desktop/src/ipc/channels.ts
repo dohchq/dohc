@@ -424,6 +424,7 @@ export function parseWorkspaceActivatedEvent(
 }
 
 export const CHANNELS = {
+  reloadRenderer: "desktop:reload-renderer",
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
   getDefaultWorkspaceRoot: "desktop:get-default-workspace-root",

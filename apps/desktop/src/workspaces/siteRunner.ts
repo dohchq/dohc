@@ -304,6 +304,7 @@ export async function startSiteDevServer(input: {
   args?: string[];
   env?: NodeJS.ProcessEnv;
   readyTimeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
@@ -327,6 +328,16 @@ export async function startSiteDevServer(input: {
   return await new Promise<SiteProcessHandle>((resolve, reject) => {
     function clearTimers() {
       clearTimeout(failTimer);
+      input.signal?.removeEventListener("abort", abortStart);
+    }
+
+    function abortStart() {
+      if (resolved || stopped) return;
+      stopped = true;
+      clearTimers();
+      void stopChild(child).finally(() => {
+        reject(new Error("Site dev server start was cancelled."));
+      });
     }
 
     const failTimer = setTimeout(() => {
@@ -347,6 +358,9 @@ export async function startSiteDevServer(input: {
         );
       });
     }, input.readyTimeoutMs ?? 15000);
+
+    if (input.signal?.aborted) abortStart();
+    else input.signal?.addEventListener("abort", abortStart, { once: true });
 
     function maybeResolve(chunk: string) {
       const url = detectDevUrl(chunk);
@@ -445,6 +459,7 @@ export async function buildSite(input: {
   output?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
@@ -467,7 +482,14 @@ export async function buildSite(input: {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      input.signal?.removeEventListener("abort", abortBuild);
       resolve(code);
+    }
+
+    function abortBuild() {
+      if (settled) return;
+      pushLog(logs, "system", "Build cancelled because the renderer restarted.");
+      void stopChild(child).then(() => finish(null));
     }
 
     timer = setTimeout(() => {
@@ -477,6 +499,8 @@ export async function buildSite(input: {
       // and resolves once the child exits (or the kill grace lapses).
       void stopChild(child).then(() => finish(null));
     }, timeoutMs);
+    if (input.signal?.aborted) abortBuild();
+    else input.signal?.addEventListener("abort", abortBuild, { once: true });
     child.stdout.on("data", (chunk) => pushLog(logs, "stdout", String(chunk)));
     child.stderr.on("data", (chunk) => pushLog(logs, "stderr", String(chunk)));
     child.once("error", (error) => {

@@ -215,6 +215,24 @@ describe("startSiteDevServer", () => {
       }),
     ).rejects.toThrow(/exited before it was ready/);
   });
+
+  it("cancels an in-flight dev server start", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const starting = startSiteDevServer({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      readyTimeoutMs: 5000,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 50);
+
+    await expect(starting).rejects.toThrow(/cancelled/);
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
 });
 
 describe("buildSite", () => {
@@ -249,6 +267,28 @@ describe("buildSite", () => {
     expect(result.outputPath).toBeNull();
     expect(result.exitCode).toBe(3);
     expect(result.logs.some((entry) => entry.text.includes("broken build"))).toBe(true);
+  });
+
+  it("cancels an in-flight build instead of waiting for its timeout", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const building = buildSite({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      timeoutMs: 10000,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 50);
+
+    const result = await building;
+    expect(result.ok).toBe(false);
+    expect(result.logs.some((entry) => entry.text.includes("Build cancelled"))).toBe(
+      true,
+    );
+    expect(Date.now() - startedAt).toBeLessThan(2000);
   });
 
   it("reports build timeouts with the resolved timeout", async () => {

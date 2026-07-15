@@ -100,6 +100,7 @@ import {
   makeCodeBlockContinuationPlugin,
   makeEmptyListItemFocusPlugin,
 } from "./codeBlockChrome";
+import { makeBlockExitPlugin } from "./blockExit";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
@@ -447,6 +448,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               wikilinkClickPlugin,
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
+              // After the slash-command plugin (menu keeps ArrowDown while
+              // open), before code-block continuation (nested code escapes
+              // past its callout) and StarterKit keymaps (Mod-Enter beats
+              // HardBreak). Top-level code falls through on Mod-Enter.
+              makeBlockExitPlugin(),
               makeCodeBlockContinuationPlugin(),
               makeCalloutChromePlugin(),
               makeCodeHighlightPlugin(),
@@ -597,6 +603,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
 
         let x = 12;
         let y = 40;
+        let bottom: number | null = null;
         let maxHeight = FLOATING_MENU_MAX_HEIGHT;
         let placement: FloatingMenuPlacement = "below";
         try {
@@ -604,6 +611,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           const position = resolveFloatingMenuPosition({ cursorRect: coords });
           x = position.x;
           y = position.y;
+          bottom = position.bottom ?? null;
           maxHeight = position.maxHeight;
           placement = position.placement;
         } catch {
@@ -618,6 +626,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           selected: 0,
           x,
           y,
+          bottom,
           maxHeight,
           placement,
         });
