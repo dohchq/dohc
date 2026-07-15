@@ -243,6 +243,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "report", "assets", "hero.avif"), "image");
     await writeFile(join(root, "report", "assets", "icon-192.png"), "image");
     await writeFile(join(root, "report", "assets", "logo.png"), "image");
+    await writeFile(join(root, "report", "assets", "shortcut.png"), "image");
     await writeFile(join(root, "report", "assets", "screenshot.png"), "image");
     await writeFile(
       join(root, "report", "site.webmanifest"),
@@ -250,8 +251,12 @@ describe("listSitePackages", () => {
         start_url: "./start.html",
         icons: [{ src: "./assets/icon-192.png" }],
         screenshots: [{ src: "./assets/screenshot.png" }],
+        shortcuts: [
+          { url: "./shortcut.html", icons: [{ src: "./assets/shortcut.png" }] },
+        ],
       }),
     );
+    await writeFile(join(root, "report", "shortcut.html"), "<h1>Shortcut</h1>");
     await writeFile(
       join(root, "report", "start.html"),
       '<script src="./start.js"></script>',
@@ -274,6 +279,8 @@ describe("listSitePackages", () => {
         "report/assets/icon-192.png",
         "report/assets/logo.png",
         "report/assets/screenshot.png",
+        "report/assets/shortcut.png",
+        "report/shortcut.html",
         "report/site.webmanifest",
         "report/start.html",
         "report/start.js",
