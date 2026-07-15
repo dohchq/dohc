@@ -115,6 +115,53 @@ function assertRequestOptions(options) {
 function abortedError(method) {
     return new DohcSdkError(DohcSdkErrorCodes.aborted, `dohc request ${method} was aborted.`);
 }
+/**
+ * Applies caller-local cancellation to shared work. The wrapped promise is
+ * deliberately never canceled: capability discovery is cached across callers,
+ * so one impatient caller must not poison or restart the cache fill for peers.
+ */
+function waitWithRequestOptions(promise, requestOptions, label) {
+    assertRequestOptions(requestOptions);
+    if (requestOptions?.signal?.aborted) {
+        return Promise.reject(abortedError(label));
+    }
+    if (!requestOptions?.signal && requestOptions?.timeoutMs === undefined)
+        return promise;
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = requestOptions?.timeoutMs === undefined
+            ? undefined
+            : globalThis.setTimeout(() => {
+                rejectOnce(new DohcSdkError(DohcSdkErrorCodes.hostTimeout, `dohc host did not answer ${label}.`));
+            }, requestOptions.timeoutMs);
+        function cleanup() {
+            if (timer !== undefined)
+                globalThis.clearTimeout(timer);
+            requestOptions?.signal?.removeEventListener("abort", onAbort);
+        }
+        function resolveOnce(value) {
+            if (settled)
+                return;
+            settled = true;
+            cleanup();
+            resolve(value);
+        }
+        function rejectOnce(error) {
+            if (settled)
+                return;
+            settled = true;
+            cleanup();
+            reject(error);
+        }
+        function onAbort() {
+            rejectOnce(abortedError(label));
+        }
+        requestOptions?.signal?.addEventListener("abort", onAbort, { once: true });
+        if (requestOptions?.signal?.aborted)
+            onAbort();
+        promise.then(resolveOnce, rejectOnce);
+    });
+}
 export function createPostMessageTransport(options = {}) {
     const timeoutMs = options.timeoutMs ?? 10_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -225,9 +272,11 @@ export function createPostMessageTransport(options = {}) {
             throw new DohcSdkError(DohcSdkErrorCodes.badResponse, `dohc host returned an invalid subscription response for ${method}.`);
         }
         const subscriptionId = result.subscriptionId;
-        let active = true;
+        let localActive = true;
+        let remoteClosed = false;
+        let pendingRemoteClose = null;
         const onMessage = (event) => {
-            if (!active || event.source !== targetWindow)
+            if (!localActive || event.source !== targetWindow)
                 return;
             if (!responseOriginMatches(event.origin, targetOrigin))
                 return;
@@ -239,12 +288,25 @@ export function createPostMessageTransport(options = {}) {
         };
         currentWindow.addEventListener("message", onMessage);
         const unsubscribe = async () => {
-            if (!active)
+            if (localActive) {
+                localActive = false;
+                currentWindow.removeEventListener("message", onMessage);
+                requestOptions?.signal?.removeEventListener("abort", onAbort);
+            }
+            if (remoteClosed)
                 return;
-            active = false;
-            currentWindow.removeEventListener("message", onMessage);
-            requestOptions?.signal?.removeEventListener("abort", onAbort);
-            await transport.request("subscriptions.unsubscribe", { subscriptionId });
+            if (pendingRemoteClose)
+                return pendingRemoteClose;
+            const attempt = transport
+                .request("subscriptions.unsubscribe", { subscriptionId })
+                .then(() => {
+                remoteClosed = true;
+            })
+                .finally(() => {
+                pendingRemoteClose = null;
+            });
+            pendingRemoteClose = attempt;
+            return attempt;
         };
         const onAbort = () => {
             void unsubscribe().catch(() => undefined);
@@ -390,16 +452,21 @@ export function createDohcClient(options = {}) {
         }
         return transport.subscribe(method, params, listener, requestOptions);
     };
-    const requireCapability = async (namespace, capability) => {
-        const capabilities = await readCapabilities();
+    const requireCapability = async (namespace, capability, requestOptions) => {
+        assertRequestOptions(requestOptions);
+        if (requestOptions?.signal?.aborted) {
+            throw abortedError(`capabilities for ${namespace}.${capability}`);
+        }
+        const capabilities = await waitWithRequestOptions(readCapabilities(), requestOptions, `capabilities for ${namespace}.${capability}`);
         if (capabilities[namespace]?.[capability] !== true) {
             throw new DohcSdkError(DohcSdkErrorCodes.capabilityDisabled, `dohc ${namespace}.${capability} capability is disabled by this host.`);
         }
     };
     const listCollection = async (name, params = {}, requestOptions) => {
+        assertRequestOptions(requestOptions);
         assertCollectionName(name);
-        await requireCapability("collections", "read");
-        const result = await request("collections.list", { name, ...params }, requestOptions);
+        await requireCapability("collections", "read", requestOptions);
+        const result = await request("collections.list", { ...params, name }, requestOptions);
         if (!Array.isArray(result)) {
             throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid collection response.");
         }
@@ -409,8 +476,9 @@ export function createDohcClient(options = {}) {
         return result;
     };
     const readFileInfo = async (path, requestOptions) => {
+        assertRequestOptions(requestOptions);
         assertWorkspacePath(path);
-        await requireCapability("files", "read");
+        await requireCapability("files", "read", requestOptions);
         const result = (await request("files.read", { path }, requestOptions));
         if (typeof result?.text !== "string" ||
             (result.truncated !== undefined && typeof result.truncated !== "boolean")) {
@@ -436,9 +504,10 @@ export function createDohcClient(options = {}) {
                 return result.text;
             },
             list: async (path, options = {}, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 assertOptionalWorkspacePath(path, "Directory path");
-                await requireCapability("files", "list");
-                const result = await request("files.list", { path, ...options }, requestOptions);
+                await requireCapability("files", "list", requestOptions);
+                const result = await request("files.list", { ...options, path }, requestOptions);
                 if (!Array.isArray(result) ||
                     !result.every((entry) => isPlainRecord(entry) && typeof entry.path === "string")) {
                     throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid file list response.");
@@ -446,28 +515,31 @@ export function createDohcClient(options = {}) {
                 return result;
             },
             write: async (path, text, options = {}, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 assertWorkspacePath(path);
                 if (typeof text !== "string") {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "File contents must be a string.");
                 }
-                await requireCapability("files", "write");
+                await requireCapability("files", "write", requestOptions);
                 // Reserved fields are authoritative after validation. The permissive
                 // options bag is intentionally forward-compatible, but must never be
                 // able to replace the path/text that were just validated above.
                 return request("files.write", { ...options, path, text }, requestOptions);
             },
             watch: async (path, listener, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 assertWorkspacePath(path);
-                await requireCapability("files", "watch");
+                await requireCapability("files", "watch", requestOptions);
                 return subscribe("files.watch", { path }, listener, requestOptions);
             },
         },
         workspace: {
             search: async (query, options = {}, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 assertQuery(query, "Search query");
                 assertOptionalWorkspacePath(options.path, "Search path");
-                await requireCapability("workspace", "search");
-                const result = await request("workspace.search", { query, ...options }, requestOptions);
+                await requireCapability("workspace", "search", requestOptions);
+                const result = await request("workspace.search", { ...options, query }, requestOptions);
                 if (!Array.isArray(result) || !result.every(isPlainRecord)) {
                     throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid workspace search response.");
                 }
@@ -476,16 +548,18 @@ export function createDohcClient(options = {}) {
         },
         databases: {
             read: async (input, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 if (!isPlainRecord(input)) {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Database read input must be an object.");
                 }
                 assertWorkspacePath(input.path, "Database path");
                 if (input.query !== undefined)
                     assertQuery(input.query, "Database query");
-                await requireCapability("databases", "read");
+                await requireCapability("databases", "read", requestOptions);
                 return request("databases.read", input, requestOptions);
             },
             edit: async (input, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 if (!isPlainRecord(input)) {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Database edit input must be an object.");
                 }
@@ -495,15 +569,16 @@ export function createDohcClient(options = {}) {
                 if (input.query === undefined && !Array.isArray(input.operations)) {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Database edit input must include a query or operations array.");
                 }
-                await requireCapability("databases", "edit");
+                await requireCapability("databases", "edit", requestOptions);
                 return request("databases.edit", input, requestOptions);
             },
         },
         ui: {
             open: async (target, options = {}, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 assertUiTarget(target);
-                await requireCapability("ui", "open");
-                return request("ui.open", { target, ...options }, requestOptions);
+                await requireCapability("ui", "open", requestOptions);
+                return request("ui.open", { ...options, target }, requestOptions);
             },
         },
         collections: {
@@ -520,12 +595,13 @@ export function createDohcClient(options = {}) {
         },
         provenance: {
             record: async (value, requestOptions) => {
+                assertRequestOptions(requestOptions);
                 const record = typeof value === "string" ? { summary: value } : value;
                 if (!isPlainRecord(record)) {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Provenance record must be a summary string or record object.");
                 }
                 assertProvenanceSummary(record.summary);
-                await requireCapability("provenance", "record");
+                await requireCapability("provenance", "record", requestOptions);
                 await request("provenance.record", record, requestOptions);
             },
         },

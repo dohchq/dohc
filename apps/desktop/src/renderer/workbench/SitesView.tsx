@@ -38,6 +38,9 @@ function staticSiteFromFiles(files: WorkspaceFileEntry[]): SitePackageInfo[] {
         scripts: {},
         buildOutputs: [],
         sourceFiles: [file.path],
+        // File-list fallback is not the authoritative packaging layer and
+        // therefore must never invent a relay sharing scope.
+        shareManifest: null,
         diagnostics: [],
         authority: root.startsWith("shared-with-me/")
           ? {

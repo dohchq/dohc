@@ -1475,25 +1475,75 @@ const SiteScripts = z.object({
 });
 export type SiteScripts = z.infer<typeof SiteScripts>;
 
-const SitePackageInfo = z.object({
-  root: PATH_STRING,
-  title: z.string().min(1).max(200),
-  kind: z.enum(["static", "package", "configured"]),
-  confidence: z.enum(["high", "medium", "low"]),
-  entryPath: PATH_STRING.nullable(),
-  configPath: PATH_STRING.nullable(),
-  packagePath: PATH_STRING.nullable(),
-  packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
-  scripts: SiteScripts,
-  configuredScripts: SiteScripts.optional(),
-  buildOutputs: z.array(PATH_STRING).max(100),
-  sourceFiles: z.array(PATH_STRING).max(1000),
-  diagnostics: z.array(SiteDiagnostic).max(100),
-  authority: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("workspace") }),
-    z.object({ kind: z.literal("share"), mountRoot: PATH_STRING }),
-  ]),
+const SiteSharePath = SITE_ROOT_STRING.refine((path) => path !== ".", {
+  message: "site share paths must name a file",
 });
+
+const SiteShareManifest = z
+  .object({
+    entryPath: SiteSharePath,
+    assets: z.array(SiteSharePath).max(99),
+  })
+  .superRefine((manifest, ctx) => {
+    const paths = [manifest.entryPath, ...manifest.assets];
+    if (new Set(paths).size !== paths.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "site share manifest paths must be unique",
+      });
+    }
+  });
+
+const SitePackageInfo = z
+  .object({
+    root: PATH_STRING,
+    title: z.string().min(1).max(200),
+    kind: z.enum(["static", "package", "configured"]),
+    confidence: z.enum(["high", "medium", "low"]),
+    entryPath: PATH_STRING.nullable(),
+    configPath: PATH_STRING.nullable(),
+    packagePath: PATH_STRING.nullable(),
+    packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
+    scripts: SiteScripts,
+    configuredScripts: SiteScripts.optional(),
+    buildOutputs: z.array(PATH_STRING).max(100),
+    sourceFiles: z.array(PATH_STRING).max(1000),
+    shareManifest: SiteShareManifest.nullable(),
+    diagnostics: z.array(SiteDiagnostic).max(100),
+    authority: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("workspace") }),
+      z.object({ kind: z.literal("share"), mountRoot: SITE_ROOT_STRING }),
+    ]),
+  })
+  .superRefine((site, ctx) => {
+    if (!site.shareManifest) return;
+    const paths = [site.shareManifest.entryPath, ...site.shareManifest.assets];
+    for (const path of paths) {
+      if (!site.sourceFiles.includes(path)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "site share manifest paths must exist in sourceFiles",
+          path: ["shareManifest"],
+        });
+        return;
+      }
+      if (site.root !== "." && !path.startsWith(`${site.root}/`)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "site share manifest paths must stay inside the site root",
+          path: ["shareManifest"],
+        });
+        return;
+      }
+    }
+    if (!/\.html?$/i.test(site.shareManifest.entryPath)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "site share manifest entryPath must be HTML",
+        path: ["shareManifest", "entryPath"],
+      });
+    }
+  });
 export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
 
 export const ListSitesPayload = z.object({

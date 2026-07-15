@@ -22,6 +22,7 @@ const site: SitePackageInfo = {
   scripts: {},
   buildOutputs: [],
   sourceFiles: ["report/index.html"],
+  shareManifest: { entryPath: "report/index.html", assets: [] },
   diagnostics: [],
   authority: { kind: "workspace" },
 };
@@ -126,6 +127,7 @@ describe("SitePreviewPage", () => {
         "report/src/main.tsx",
         "report/dist/index.html",
       ],
+      shareManifest: { entryPath: "report/dist/index.html", assets: [] },
     });
 
     render(
@@ -178,6 +180,7 @@ describe("SitePreviewPage", () => {
         `${sharedRoot}/index.html`,
         `${sharedRoot}/dist/index.html`,
       ],
+      shareManifest: { entryPath: `${sharedRoot}/dist/index.html`, assets: [] },
       authority: { kind: "share", mountRoot: "shared-with-me/alex" },
     });
     const onShareSite = vi.fn();
@@ -216,7 +219,10 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-share"));
 
-    expect(onShareSite).toHaveBeenCalledWith({ paths: ["report"], label: "Report" });
+    expect(onShareSite).toHaveBeenCalledWith({
+      paths: ["report/index.html"],
+      label: "Report",
+    });
   });
 
   it("does not open a stale share dialog when build refresh finishes after site replacement", async () => {
@@ -228,6 +234,7 @@ describe("SitePreviewPage", () => {
       scripts: { dev: "vite", build: "vite build" },
       buildOutputs: ["dist"],
       sourceFiles: ["report/package.json", "report/src/main.tsx"],
+      shareManifest: null,
     };
     const replacementSite: SitePackageInfo = {
       ...site,
@@ -235,6 +242,7 @@ describe("SitePreviewPage", () => {
       title: "Replacement",
       entryPath: "replacement/index.html",
       sourceFiles: ["replacement/index.html"],
+      shareManifest: { entryPath: "replacement/index.html", assets: [] },
     };
     bridgeMock.getSitePackage
       .mockResolvedValueOnce(buildableSite)
@@ -289,6 +297,7 @@ describe("SitePreviewPage", () => {
       pendingRefresh.resolve({
         ...buildableSite,
         sourceFiles: [...buildableSite.sourceFiles, "report/dist/index.html"],
+        shareManifest: { entryPath: "report/dist/index.html", assets: [] },
       });
       await pendingRefresh.promise;
     });
@@ -305,6 +314,7 @@ describe("SitePreviewPage", () => {
       scripts: { dev: "vite", build: "vite build" },
       buildOutputs: ["dist"],
       sourceFiles: ["report/package.json", "report/src/main.tsx"],
+      shareManifest: null,
     };
     const replacementSite: SitePackageInfo = {
       ...site,
@@ -312,6 +322,7 @@ describe("SitePreviewPage", () => {
       title: "Replacement",
       entryPath: "replacement/index.html",
       sourceFiles: ["replacement/index.html"],
+      shareManifest: { entryPath: "replacement/index.html", assets: [] },
     };
     bridgeMock.getSitePackage
       .mockResolvedValueOnce(buildableSite)
@@ -377,8 +388,15 @@ describe("SitePreviewPage", () => {
           "report/dist/index.html",
           "report/dist/assets/main.js",
         ],
+        shareManifest: {
+          entryPath: "report/dist/index.html",
+          assets: ["report/dist/assets/main.js"],
+        },
       }),
-    ).toEqual({ paths: ["report/dist"], label: "Report" });
+    ).toEqual({
+      paths: ["report/dist/index.html", "report/dist/assets/main.js"],
+      label: "Report",
+    });
   });
 
   it("keeps a plain static site shareable after dohc_add_sdk adds package metadata", () => {
@@ -392,8 +410,19 @@ describe("SitePreviewPage", () => {
           "report/package.json",
           "report/vendor/dohc-sdk/dist/index.js",
         ],
+        shareManifest: {
+          entryPath: "report/index.html",
+          assets: ["report/app.js", "report/vendor/dohc-sdk/dist/index.js"],
+        },
       }),
-    ).toEqual({ paths: ["report"], label: "Report" });
+    ).toEqual({
+      paths: [
+        "report/index.html",
+        "report/app.js",
+        "report/vendor/dohc-sdk/dist/index.js",
+      ],
+      label: "Report",
+    });
   });
 
   it("shares explicit root-site browser assets without selecting the workspace", () => {
@@ -411,6 +440,14 @@ describe("SitePreviewPage", () => {
           "notes/private.md",
           "projects/other/index.html",
         ],
+        shareManifest: {
+          entryPath: "index.html",
+          assets: [
+            "app.js",
+            "assets/logo.png",
+            "vendor/dohc-sdk/dist/index.js",
+          ],
+        },
       }),
     ).toEqual({
       paths: [
@@ -421,6 +458,20 @@ describe("SitePreviewPage", () => {
       ],
       label: "Report",
     });
+  });
+
+  it("fails closed when the authoritative package has no safe share manifest", () => {
+    expect(
+      shareTargetForSite({
+        ...site,
+        shareManifest: null,
+        sourceFiles: [
+          "report/index.html",
+          "report/app.js",
+          "report/private/secret.json",
+        ],
+      }),
+    ).toBeNull();
   });
 
   it("refuses to render non-loopback preview URLs", async () => {

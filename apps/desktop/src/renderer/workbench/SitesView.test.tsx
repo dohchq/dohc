@@ -18,6 +18,7 @@ const site: SitePackageInfo = {
   scripts: { dev: "vite", build: "vite build" },
   buildOutputs: ["dist"],
   sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
+  shareManifest: null,
   diagnostics: [],
   authority: { kind: "workspace" },
 };

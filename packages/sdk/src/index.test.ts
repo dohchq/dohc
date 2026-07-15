@@ -628,6 +628,120 @@ describe("@dohc/sdk", () => {
     });
   });
 
+  it("does not let extension option bags replace validated explicit fields", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true, list: true },
+              collections: { read: true },
+              provenance: { record: true },
+              workspace: { search: true },
+              ui: { open: true },
+            };
+          }
+          if (method === "files.list") return [];
+          if (method === "workspace.search") return [];
+          if (method === "collections.list") return [];
+          return { ok: true };
+        },
+      },
+    });
+
+    await client.files.list("safe", { path: "../outside", recursive: true });
+    await client.workspace.search("validated query", { query: "overridden" });
+    await client.ui.open("dohc://atom/safe", { target: "https://evil.test" });
+    await client.collections.list("safe-collection", { name: "overridden" });
+
+    expect(calls).toContainEqual({
+      method: "files.list",
+      params: { path: "safe", recursive: true },
+    });
+    expect(calls).toContainEqual({
+      method: "workspace.search",
+      params: { query: "validated query" },
+    });
+    expect(calls).toContainEqual({
+      method: "ui.open",
+      params: { target: "dohc://atom/safe" },
+    });
+    expect(calls).toContainEqual({
+      method: "collections.list",
+      params: { name: "safe-collection" },
+    });
+  });
+
+  it("cancels a cold caller without canceling shared capability discovery", async () => {
+    let resolveCapabilities!: (value: unknown) => void;
+    const capabilities = new Promise<unknown>((resolve) => {
+      resolveCapabilities = resolve;
+    });
+    const calls: string[] = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push(method);
+          if (method === "capabilities") return capabilities;
+          return { text: String((params as { path: string }).path), truncated: false };
+        },
+      },
+    });
+    const controller = new AbortController();
+
+    const canceled = client.files.read("notes/canceled.txt", { signal: controller.signal });
+    const surviving = client.files.read("notes/surviving.txt");
+    controller.abort();
+
+    await expect(canceled).rejects.toMatchObject({ code: DohcSdkErrorCodes.aborted });
+    expect(calls).toEqual(["capabilities"]);
+
+    resolveCapabilities({
+      files: { read: true, write: true },
+      collections: { read: false },
+      provenance: { record: false },
+    });
+    await expect(surviving).resolves.toBe("notes/surviving.txt");
+    expect(calls).toEqual(["capabilities", "files.read"]);
+  });
+
+  it("times out and validates typed request options during cold capability discovery", async () => {
+    let resolveCapabilities!: (value: unknown) => void;
+    const capabilities = new Promise<unknown>((resolve) => {
+      resolveCapabilities = resolve;
+    });
+    const calls: string[] = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          calls.push(method);
+          if (method === "capabilities") return capabilities;
+          return { text: "ready", truncated: false };
+        },
+      },
+    });
+
+    await expect(
+      client.files.read("notes/invalid.txt", { timeoutMs: 0 }),
+    ).rejects.toMatchObject({ code: DohcSdkErrorCodes.invalidInput });
+    expect(calls).toEqual([]);
+
+    await expect(
+      client.files.read("notes/timeout.txt", { timeoutMs: 5 }),
+    ).rejects.toMatchObject({ code: DohcSdkErrorCodes.hostTimeout });
+    expect(calls).toEqual(["capabilities"]);
+
+    resolveCapabilities({
+      files: { read: true, write: true },
+      collections: { read: false },
+      provenance: { record: false },
+    });
+    await expect(client.files.read("notes/after-timeout.txt")).resolves.toBe("ready");
+    expect(calls).toEqual(["capabilities", "files.read"]);
+  });
+
   it("exposes the expanded dohc capability surface without hiding host extensions", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
@@ -736,6 +850,65 @@ describe("@dohc/sdk", () => {
       result: { ok: true },
     });
     await pendingUnsubscribe;
+    expect(harness.listeners.size).toBe(0);
+  });
+
+  it("retries a failed remote unsubscribe while detaching locally only once", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: unknown[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => events.push(event),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_retry" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    const firstAttempt = unsubscribe();
+    const firstRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: firstRequest.id,
+      ok: false,
+      error: { code: "TEMPORARY", message: "try again" },
+    });
+    await expect(firstAttempt).rejects.toMatchObject({ code: "TEMPORARY" });
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_retry",
+      event: "changed",
+      data: { path: "notes/ignored.md" },
+    });
+    expect(events).toEqual([]);
+
+    const messagesBeforeRetry = harness.messages.length;
+    const retry = unsubscribe();
+    const concurrentRetry = unsubscribe();
+    expect(harness.messages).toHaveLength(messagesBeforeRetry + 1);
+    const retryRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: retryRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await expect(Promise.all([retry, concurrentRetry])).resolves.toEqual([undefined, undefined]);
+
+    await unsubscribe();
+    expect(harness.messages).toHaveLength(messagesBeforeRetry + 1);
     expect(harness.listeners.size).toBe(0);
   });
 

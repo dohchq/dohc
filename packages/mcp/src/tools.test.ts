@@ -1030,6 +1030,60 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("add_sdk keeps explicit dependency ranges browser-resolvable for static sites", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "static-explicit"), { recursive: true });
+      await writeFile(join(ctx.root, "static-explicit", "index.html"), "<h1>Static</h1>\n");
+
+      const result = await addSiteSdk(
+        { ...ctx, sdkDependencyRange: "^9.4.0" },
+        { siteRoot: "static-explicit" },
+      );
+
+      expect(result).toMatchObject({ ok: true, importMode: "vendored-browser-module" });
+      expect(result.ok ? result.usage : "").toContain(
+        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
+      );
+      const packageJson = JSON.parse(
+        await readFile(join(ctx.root, "static-explicit/package.json"), "utf8"),
+      );
+      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^9.4.0" });
+      await expect(
+        readFile(join(ctx.root, "static-explicit/vendor/dohc-sdk/dist/index.js"), "utf8"),
+      ).resolves.toContain("createDohcClient");
+    });
+  });
+
+  it.each(["missing", "unreadable"] as const)(
+    "add_sdk reports %s bundled SDK browser files without throwing",
+    async (fixture) => {
+      await withWorkspace(async (ctx) => {
+        const sdkDir = join(ctx.home, `sdk-${fixture}`);
+        await mkdir(join(sdkDir, "dist"), { recursive: true });
+        await writeFile(join(sdkDir, "package.json"), '{"version":"1.0.0"}\n');
+        await writeFile(join(sdkDir, "dist/index.d.ts"), "export {};\n");
+        if (fixture === "unreadable") {
+          await mkdir(join(sdkDir, "dist/index.js"));
+        }
+        await mkdir(join(ctx.root, "static-report"), { recursive: true });
+        await writeFile(join(ctx.root, "static-report/index.html"), "<h1>Report</h1>\n");
+
+        await expect(
+          addSiteSdk(
+            { ...ctx, sdkPackageJsonPath: join(sdkDir, "package.json") },
+            { siteRoot: "static-report" },
+          ),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringMatching(/bundled @dohc\/sdk browser files|ENOENT|EISDIR/i),
+        });
+        await expect(
+          stat(join(ctx.root, "static-report/vendor/dohc-sdk")),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      });
+    },
+  );
+
   it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
     await withWorkspace(async (ctx) => {
       const sdkDir = join(ctx.home, "sdk-package");

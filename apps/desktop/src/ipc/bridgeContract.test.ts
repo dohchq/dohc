@@ -351,6 +351,7 @@ describe("site IPC contract", () => {
             scripts: { dev: "vite", build: "vite build" },
             buildOutputs: ["dist"],
             sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
+            shareManifest: null,
             diagnostics: [],
             authority: { kind: "workspace" },
           },
@@ -373,12 +374,50 @@ describe("site IPC contract", () => {
             scripts: {},
             buildOutputs: [],
             sourceFiles: [],
+            shareManifest: null,
             diagnostics: [],
             authority: { kind: "workspace" },
           },
         ],
       }).sites[0]?.entryPath,
     ).toBeNull();
+  });
+
+  it("requires a mount root for shared-site authority", () => {
+    const sharedSite = {
+      root: "shared-with-me/alex/report",
+      title: "Report",
+      kind: "static",
+      confidence: "high",
+      entryPath: "shared-with-me/alex/report/index.html",
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      buildOutputs: [],
+      sourceFiles: ["shared-with-me/alex/report/index.html"],
+      shareManifest: {
+        entryPath: "shared-with-me/alex/report/index.html",
+        assets: [],
+      },
+      diagnostics: [],
+    };
+    expect(
+      ListSitesResult.safeParse({
+        sites: [
+          {
+            ...sharedSite,
+            authority: { kind: "share", mountRoot: "shared-with-me/alex" },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [{ ...sharedSite, authority: { kind: "share" } }],
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts bounded preview start/result payloads", () => {

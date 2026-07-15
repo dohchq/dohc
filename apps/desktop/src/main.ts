@@ -374,6 +374,7 @@ import {
   type StaticSitePreview,
 } from "./workspaces/siteRunner";
 import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
+import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import {
   mediaTypeForExtension,
   readWorkspaceAsset,
@@ -518,6 +519,7 @@ type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 
 const sitePreviewHandles = new Map<string, SitePreviewHandle>();
 const sitePreviewOriginReleases = new Map<string, () => void>();
+const sitePreviewSdkAuthorities = createSitePreviewSdkAuthorityRegistry();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStartControllersBySender = new Map<
   number,
@@ -598,6 +600,7 @@ async function withSitePreviewStartLock<T>(
 
 async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
   const key = sitePreviewKey(workspaceId, siteRoot);
+  sitePreviewSdkAuthorities.revokePreview(workspaceId, siteRoot);
   const handle = sitePreviewHandles.get(key);
   sitePreviewHandles.delete(key);
   try {
@@ -611,6 +614,7 @@ async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Pro
 function stopSitePreviewsForQuit(): void {
   // Idempotent by design: explicit update installs and Electron's own
   // before-quit-for-update event can both ask for the same cleanup.
+  sitePreviewSdkAuthorities.revokeAll();
   for (const [key, handle] of [...sitePreviewHandles]) {
     sitePreviewOriginReleases.get(key)?.();
     sitePreviewOriginReleases.delete(key);
@@ -2082,6 +2086,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
   abortSitePreviewStartsForSender(senderId);
+  sitePreviewSdkAuthorities.revokeSender(senderId);
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
@@ -4049,7 +4054,13 @@ function registerIpcHandlers(): void {
       }
       const site = await getSitePackage(workspace.rootPath, input.siteRoot);
       if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
-      return StartSitePreviewResult.parse(
+      const scopeRoot =
+        site.authority.kind === "share"
+          ? site.authority.mountRoot
+          : sharedView
+            ? "."
+            : null;
+      const result = StartSitePreviewResult.parse(
         await startPreviewForSite({
           workspaceId: input.workspaceId,
           workspaceRoot: workspace.rootPath,
@@ -4058,14 +4069,23 @@ function registerIpcHandlers(): void {
           isCurrent,
           signal: pendingStart.controller.signal,
           sharedView: !!sharedView,
-          sdkScopeRoot:
-            site.authority.kind === "share"
-              ? site.authority.mountRoot
-              : sharedView
-                ? "."
-                : null,
+          sdkScopeRoot: scopeRoot,
         }),
       );
+      if (!isCurrent()) {
+        await stopSitePreviewHandle(input.workspaceId, input.siteRoot);
+        throw new Error("Site preview start was cancelled because the renderer restarted.");
+      }
+      sitePreviewSdkAuthorities.register({
+        senderId: sender.id,
+        generation,
+        workspaceId: input.workspaceId,
+        siteRoot: site.root,
+        workspaceRoot: workspace.rootPath,
+        scopeRoot,
+        writable: !sharedView && site.authority.kind === "workspace",
+      });
+      return result;
     } finally {
       pendingStart.finish();
     }
@@ -4084,21 +4104,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.invokeSiteSdk, async (event, payload) => {
     assertTrustedSender(event);
     const input = InvokeSiteSdkPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const site = await getSitePackage(workspace.rootPath, input.siteRoot);
-    if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
-    const sharedView = sharedViewOf(workspace.workspaceId);
-    const scopeRoot =
-      site.authority.kind === "share"
-        ? site.authority.mountRoot
-        : sharedView
-          ? "."
-          : null;
+    const sender = event.sender;
+    const authority = sitePreviewSdkAuthorities.authorize({
+      senderId: sender.id,
+      generation: rendererGeneration(sender.id),
+      activeWorkspaceId: activeWorkspaceIdBySender.get(sender.id),
+      workspaceId: input.workspaceId,
+      siteRoot: input.siteRoot,
+      previewRunning: sitePreviewHandles.has(sitePreviewKey(input.workspaceId, input.siteRoot)),
+    });
     const result = await invokeSiteSdkHost(
       {
-        workspaceRoot: workspace.rootPath,
-        scopeRoot,
-        writable: !sharedView && site.authority.kind === "workspace",
+        workspaceRoot: authority.workspaceRoot,
+        scopeRoot: authority.scopeRoot,
+        writable: authority.writable,
+        signal: authority.signal,
       },
       input.method,
       input.params,
@@ -4119,6 +4139,7 @@ function registerIpcHandlers(): void {
     if (!activeWorkspaceCleanupHooked.has(event.sender)) {
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
+        sitePreviewSdkAuthorities.revokeSender(event.sender.id);
         activeWorkspaceIdBySender.delete(event.sender.id);
         rendererGenerationBySender.delete(event.sender.id);
       });

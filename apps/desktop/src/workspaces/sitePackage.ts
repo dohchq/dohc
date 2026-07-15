@@ -1,5 +1,6 @@
 import {
   discoverSites,
+  hasIgnoredSegment,
   isSharedWithMePath,
   parseDohcSiteConfig,
   type SiteDiagnostic,
@@ -8,7 +9,7 @@ import {
   type WorkspaceSite,
   type WorkspaceSiteSource,
 } from "@dohc/workspace-core";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 import {
@@ -30,6 +31,10 @@ export interface SitePackageInfo {
   configuredScripts: SiteScripts;
   buildOutputs: string[];
   sourceFiles: string[];
+  shareManifest: {
+    entryPath: string;
+    assets: string[];
+  } | null;
   diagnostics: SiteDiagnostic[];
   authority:
     | { kind: "workspace" }
@@ -47,6 +52,25 @@ function denormalizeRoot(root: string): string {
 // Conventional web build output folders that can signal a built/static site
 // even when discovery sees the folder before an index.html entry underneath it.
 const BUILD_OUTPUT_FOLDER_NAMES = ["dist", "build", "out"];
+const MAX_SHARE_MANIFEST_FILES = 100;
+const MAX_SHARE_MANIFEST_SCAN_BYTES = 4 * 1024 * 1024;
+const SHAREABLE_BROWSER_FILE_RE =
+  /\.(?:css|gif|html?|ico|jpe?g|js|json|map|mjs|png|svg|ttf|txt|wasm|webp|woff2?)$/i;
+const STATIC_ASSET_ROOTS = new Set([
+  "assets",
+  "css",
+  "data",
+  "fonts",
+  "images",
+  "img",
+  "js",
+  "media",
+  "public",
+  "scripts",
+  "static",
+  "styles",
+  "vendor",
+]);
 
 function joinSitePath(root: string, relativePath: string): string {
   const normalized = normalizeRoot(root);
@@ -101,8 +125,161 @@ function needsBuiltArtifact(site: SitePackageInfo): boolean {
     site.scripts.dev ||
     site.scripts.start ||
     site.scripts.build ||
+    site.configuredScripts.dev ||
+    site.configuredScripts.start ||
+    site.configuredScripts.build ||
+    site.configuredScripts.preview ||
     site.buildOutputs.length > 0
   );
+}
+
+function pathRelativeToSite(siteRoot: string, path: string): string | null {
+  if (siteRoot === ".") return path;
+  return path.startsWith(`${siteRoot}/`)
+    ? path.slice(siteRoot.length + 1)
+    : null;
+}
+
+function localReferenceCandidates(
+  rawReference: string,
+  fromPath: string,
+  siteRoot: string,
+  available: ReadonlySet<string>,
+): string[] {
+  const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim() ?? "";
+  if (
+    !raw ||
+    raw.startsWith("#") ||
+    raw.startsWith("//") ||
+    /^(?:data|https?|javascript|mailto|tel):/i.test(raw)
+  ) return [];
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return [];
+  }
+  const siteBase = siteRoot === "." ? "" : siteRoot;
+  const candidate = posix.normalize(
+    decoded.startsWith("/")
+      ? posix.join(siteBase, decoded.replace(/^\/+/, ""))
+      : posix.join(posix.dirname(fromPath), decoded),
+  );
+  if (!pathRelativeToSite(siteRoot, candidate) || hasIgnoredSegment(candidate)) return [];
+  const variants = [
+    candidate,
+    `${candidate}.js`,
+    `${candidate}.mjs`,
+    posix.join(candidate, "index.js"),
+    posix.join(candidate, "index.html"),
+  ];
+  return [...new Set(variants)].filter((path) => available.has(path));
+}
+
+function referencesFromBrowserText(text: string): string[] {
+  const references: string[] = [];
+  const quoted = /["'`]([^"'`\r\n]{1,2048})["'`]/g;
+  for (const match of text.matchAll(quoted)) {
+    const value = match[1]?.trim();
+    if (!value) continue;
+    references.push(value);
+    for (const candidate of value.split(",")) {
+      const srcsetPath = candidate.trim().split(/\s+/, 1)[0];
+      if (srcsetPath && srcsetPath !== value) references.push(srcsetPath);
+    }
+  }
+  const unquotedCssUrl = /url\(\s*([^"')\s][^)]{0,2047})\s*\)/gi;
+  for (const match of text.matchAll(unquotedCssUrl)) {
+    if (match[1]) references.push(match[1]);
+  }
+  return references;
+}
+
+async function shareManifestForSite(
+  rootPath: string,
+  site: Omit<SitePackageInfo, "shareManifest">,
+): Promise<SitePackageInfo["shareManifest"]> {
+  const output = builtOutputRelativeToSite({ ...site, shareManifest: null });
+  let entryPath: string | null = null;
+  let approvedFiles: string[] = [];
+
+  if (output) {
+    const outputRoot = joinSitePath(site.root, output);
+    entryPath = `${outputRoot}/index.html`;
+    approvedFiles = site.sourceFiles.filter(
+      (path) =>
+        path.startsWith(`${outputRoot}/`) &&
+        !hasIgnoredSegment(path) &&
+        SHAREABLE_BROWSER_FILE_RE.test(path),
+    );
+  } else if (!needsBuiltArtifact({ ...site, shareManifest: null }) && site.entryPath) {
+    const entryRelative = pathRelativeToSite(site.root, site.entryPath);
+    if (!entryRelative || !/\.html?$/i.test(entryRelative)) return null;
+    entryPath = site.entryPath;
+    approvedFiles = site.sourceFiles.filter((path) => {
+      if (
+        path === site.packagePath ||
+        path === site.configPath ||
+        hasIgnoredSegment(path) ||
+        !SHAREABLE_BROWSER_FILE_RE.test(path)
+      ) return false;
+      const relative = pathRelativeToSite(site.root, path);
+      if (!relative) return false;
+      const parts = relative.split("/");
+      return (
+        path === entryPath ||
+        STATIC_ASSET_ROOTS.has(parts[0]?.toLowerCase() ?? "")
+      );
+    });
+
+    const available = new Set(
+      site.sourceFiles.filter(
+        (path) =>
+          path !== site.packagePath &&
+          path !== site.configPath &&
+          !hasIgnoredSegment(path) &&
+          SHAREABLE_BROWSER_FILE_RE.test(path) &&
+          pathRelativeToSite(site.root, path) !== null,
+      ),
+    );
+    const approved = new Set(approvedFiles);
+    const queued = new Set<string>();
+    const queue = [entryPath];
+    let scannedBytes = 0;
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (queued.has(current) || !/\.(?:html?|css|js|mjs)$/i.test(current)) continue;
+      queued.add(current);
+      try {
+        const info = await stat(join(rootPath, current));
+        scannedBytes += info.size;
+        if (!info.isFile() || scannedBytes > MAX_SHARE_MANIFEST_SCAN_BYTES) return null;
+        const text = await readFile(join(rootPath, current), "utf8");
+        for (const reference of referencesFromBrowserText(text)) {
+          for (const target of localReferenceCandidates(
+            reference,
+            current,
+            site.root,
+            available,
+          )) {
+            approved.add(target);
+            queue.push(target);
+          }
+        }
+      } catch {
+        return null;
+      }
+    }
+    approvedFiles = [...approved];
+  }
+
+  if (!entryPath || !approvedFiles.includes(entryPath)) return null;
+  const files = [...new Set(approvedFiles)].sort((a, b) => a.localeCompare(b));
+  if (files.length === 0 || files.length > MAX_SHARE_MANIFEST_FILES) return null;
+  return {
+    entryPath,
+    assets: files.filter((path) => path !== entryPath),
+  };
 }
 
 /**
@@ -164,11 +341,12 @@ function configuredServerCommand(command: string, configPath: string): string | 
   }
 }
 
-function mapWorkspaceSite(
+async function mapWorkspaceSite(
+  rootPath: string,
   site: WorkspaceSite,
   files: WorkspaceFileEntry[],
   configuredScripts: SiteScripts,
-): SitePackageInfo {
+): Promise<SitePackageInfo> {
   const root = normalizeRoot(site.root);
   const sourceFiles = files
     .map((file) => file.path)
@@ -176,7 +354,7 @@ function mapWorkspaceSite(
     .sort();
   const entryPath = entryPathFor(root, site.entry);
   const shareMountRoot = shareMountRootForSite(root);
-  return {
+  const packageInfo: Omit<SitePackageInfo, "shareManifest"> = {
     root,
     title: site.title,
     kind: site.kind,
@@ -193,6 +371,10 @@ function mapWorkspaceSite(
     authority: shareMountRoot
       ? { kind: "share", mountRoot: shareMountRoot }
       : { kind: "workspace" },
+  };
+  return {
+    ...packageInfo,
+    shareManifest: await shareManifestForSite(rootPath, packageInfo),
   };
 }
 
@@ -274,7 +456,12 @@ export async function listSitePackages(rootPath: string): Promise<SitePackageInf
   const sites = discoverSites([...sources, ...folderSignals]);
   const mapped = await Promise.all(
     sites.map(async (site) =>
-      mapWorkspaceSite(site, listed.files, await configuredScriptsForSite(rootPath, site)),
+      mapWorkspaceSite(
+        rootPath,
+        site,
+        listed.files,
+        await configuredScriptsForSite(rootPath, site),
+      ),
     ),
   );
   return mapped.sort((a, b) => a.root.localeCompare(b.root));

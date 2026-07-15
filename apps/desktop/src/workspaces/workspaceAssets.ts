@@ -133,6 +133,7 @@ async function writeContainedFile(
   relativePath: string,
   data: Uint8Array | string,
   kind: "asset" | "restore",
+  exclusive = false,
 ): Promise<void> {
   const label = kind === "asset" ? "Asset" : "Restore";
   const validated = validateUserWritePath(relativePath);
@@ -148,6 +149,19 @@ async function writeContainedFile(
   await mkdir(parent, { recursive: true });
   if (!isInside(realRoot, await realpath(parent))) {
     throw new Error(`${label} path escapes workspace: ${relativePath}`);
+  }
+  if (exclusive) {
+    const handle = await open(absolute, "wx");
+    try {
+      if (typeof data === "string") {
+        await handle.writeFile(data, "utf8");
+      } else {
+        await handle.writeFile(data);
+      }
+    } finally {
+      await handle.close();
+    }
+    return;
   }
   const { rename, writeFile } = await import("node:fs/promises");
   const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
@@ -181,6 +195,20 @@ export async function restoreWorkspaceText(
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
   }
   await writeContainedFile(rootPath, relativePath, text, "restore");
+}
+
+// Creates a text file with the filesystem's exclusive-create primitive. This
+// keeps `overwrite: false` correct under concurrent callers; a preflight stat
+// followed by an ordinary write would allow both requests to win the race.
+export async function createWorkspaceTextExclusive(
+  rootPath: string,
+  relativePath: string,
+  text: string,
+): Promise<void> {
+  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
+    throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
+  }
+  await writeContainedFile(rootPath, relativePath, text, "restore", true);
 }
 
 export async function readWorkspaceText(

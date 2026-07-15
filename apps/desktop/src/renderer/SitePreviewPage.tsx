@@ -104,12 +104,6 @@ export interface SiteShareTarget {
   label: string;
 }
 
-const ROOT_SITE_ASSET_DIRS = new Set([
-  "assets", "css", "fonts", "images", "img", "js", "public", "static",
-]);
-const SHAREABLE_BROWSER_FILE_RE =
-  /\.(?:avif|css|gif|html?|ico|jpe?g|js|json|map|mjs|png|svg|ttf|txt|wasm|webp|woff2?)$/i;
-
 function presentBuildOutput(site: SitePackageInfo): string | null {
   for (const output of site.buildOutputs) {
     const entry = site.root === "."
@@ -120,15 +114,15 @@ function presentBuildOutput(site: SitePackageInfo): string | null {
   return null;
 }
 
-function artifactPath(site: SitePackageInfo, output: string): string {
-  return site.root === "." ? output : `${site.root}/${output}`;
-}
-
 function needsBuiltArtifact(site: SitePackageInfo): boolean {
   return Boolean(
     site.scripts.dev ||
     site.scripts.start ||
     site.scripts.build ||
+    site.configuredScripts?.dev ||
+    site.configuredScripts?.start ||
+    site.configuredScripts?.build ||
+    site.configuredScripts?.preview ||
     site.buildOutputs.length > 0
   );
 }
@@ -136,22 +130,13 @@ function needsBuiltArtifact(site: SitePackageInfo): boolean {
 /** Produces a relay selector containing the runnable browser artifact only. */
 export function shareTargetForSite(site: SitePackageInfo): SiteShareTarget | null {
   if (site.authority.kind === "share") return null;
-  const output = presentBuildOutput(site);
-  if (output) return { paths: [artifactPath(site, output)], label: site.title };
-  if (needsBuiltArtifact(site)) return null;
-  if (site.root !== ".") return { paths: [site.root], label: site.title };
-
-  const entryTop = site.entryPath?.includes("/") ? site.entryPath.split("/")[0] : null;
-  const paths = site.sourceFiles.filter((path) => {
-    if (!SHAREABLE_BROWSER_FILE_RE.test(path)) return false;
-    const parts = path.split("/");
-    return parts.length === 1 ||
-      path.startsWith("vendor/dohc-sdk/") ||
-      (!!parts[0] && (ROOT_SITE_ASSET_DIRS.has(parts[0]) || parts[0] === entryTop));
-  });
-  return paths.length > 0 && paths.length <= 100
-    ? { paths, label: site.title }
-    : null;
+  const manifest = site.shareManifest;
+  if (!manifest) return null;
+  const paths = [manifest.entryPath, ...manifest.assets];
+  if (paths.length === 0 || paths.length > 100 || new Set(paths).size !== paths.length) {
+    return null;
+  }
+  return { paths, label: site.title };
 }
 
 function isLoopbackOrigin(origin: string): boolean {

@@ -4,9 +4,13 @@ import {
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { rgPath } from "@vscode/ripgrep";
-import { basename, join } from "node:path";
-import { realpath, stat } from "node:fs/promises";
-import { readWorkspaceText, restoreWorkspaceText } from "./workspaceAssets";
+import { basename } from "node:path";
+import { realpath } from "node:fs/promises";
+import {
+  createWorkspaceTextExclusive,
+  readWorkspaceText,
+  restoreWorkspaceText,
+} from "./workspaceAssets";
 import {
   applyDatabaseEdit,
   readDatabaseSnapshot,
@@ -28,6 +32,9 @@ export interface SiteSdkHostContext {
   // read-only collaboration projection that the shared site arrived through.
   scopeRoot: string | null;
   writable: boolean;
+  // Preview-lifetime cancellation. Search subprocesses must not survive the
+  // renderer/preview that owns their SDK authority.
+  signal?: AbortSignal;
 }
 
 const MAX_LIST_RESULTS = 10_000;
@@ -142,9 +149,27 @@ async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unkno
       : {}),
   };
   const root = await realpath(context.workspaceRoot);
-  return new Promise<Array<SearchResultEntry & { path: string }>>((resolve) => {
+  if (context.signal?.aborted) {
+    throw new Error("Site preview is no longer active.");
+  }
+  return new Promise<Array<SearchResultEntry & { path: string }>>((resolve, reject) => {
     const entries: Array<SearchResultEntry & { path: string }> = [];
     let handle: ReturnType<typeof startRipgrepSearch> | null = null;
+    let settled = false;
+    const finish = (result: Array<SearchResultEntry & { path: string }>) => {
+      if (settled) return;
+      settled = true;
+      context.signal?.removeEventListener("abort", abort);
+      resolve(result);
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      handle?.kill();
+      context.signal?.removeEventListener("abort", abort);
+      reject(new Error("Site preview is no longer active."));
+    };
+    context.signal?.addEventListener("abort", abort, { once: true });
     handle = startRipgrepSearch({
       rgPath,
       realRoot: root,
@@ -156,12 +181,14 @@ async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unkno
           if (path) entries.push({ ...entry, path });
           if (entries.length >= limit) {
             handle?.kill();
+            finish(entries.slice(0, limit));
             break;
           }
         }
-        if (batch.done) resolve(entries.slice(0, limit));
+        if (batch.done) finish(entries.slice(0, limit));
       },
     });
+    if (context.signal?.aborted) abort();
   });
 }
 
@@ -172,8 +199,10 @@ function databaseEdits(value: unknown): DatabaseEdit[] {
     : input.edit
       ? [input.edit]
       : [];
-  if (candidates.length === 0 || candidates.length > 100) {
-    throw new Error("databases.edit requires one to 100 structured operations.");
+  if (candidates.length !== 1) {
+    throw new Error(
+      "databases.edit requires exactly one structured operation until atomic multi-operation transactions are available.",
+    );
   }
   return candidates.map((candidate) => {
     const edit = record(candidate, "database operation");
@@ -242,11 +271,14 @@ export async function invokeSiteSdkHost(
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {
         try {
-          await stat(join(context.workspaceRoot, path));
-          throw new Error(`File already exists: ${path}`);
+          await createWorkspaceTextExclusive(context.workspaceRoot, path, body);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+            throw new Error(`File already exists: ${path}`);
+          }
+          throw error;
         }
+        return { path };
       }
       await restoreWorkspaceText(context.workspaceRoot, path, body);
       return { path };
@@ -271,17 +303,15 @@ export async function invokeSiteSdkHost(
       }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
-      let result = await readDatabaseSnapshot(context.workspaceRoot, path);
-      for (const edit of databaseEdits(input)) {
-        result = await applyDatabaseEdit(
-          context.workspaceRoot,
-          path,
-          edit,
-          { kind: "user", userId: "local" },
-          Date.now(),
-        );
-      }
-      return result;
+      const [edit] = databaseEdits(input);
+      await readDatabaseSnapshot(context.workspaceRoot, path);
+      return applyDatabaseEdit(
+        context.workspaceRoot,
+        path,
+        edit,
+        { kind: "user", userId: "local" },
+        Date.now(),
+      );
     }
     case "ui.open": {
       const input = record(params);
