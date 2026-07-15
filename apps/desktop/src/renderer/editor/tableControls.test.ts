@@ -8,6 +8,7 @@ import {
   resolveTableDropDestination,
   resolveTableMenuPosition,
 } from "./tableControls";
+import { DohcTableRowHeight } from "./extensions";
 
 // ProseMirror's resize/drop plugins ask the browser for a hit-test while these
 // tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so
@@ -41,6 +42,7 @@ function createEditor(content: string): Editor {
   return new Editor({
     extensions: [
       StarterKit,
+      DohcTableRowHeight,
       TableKit.configure({ table: { resizable: true } }),
       testTableControls,
     ],
@@ -58,6 +60,7 @@ function createLabeledTableEditor(): Editor {
   return new Editor({
     extensions: [
       StarterKit,
+      DohcTableRowHeight,
       TableKit.configure({ table: { resizable: true } }),
       testTableControls,
     ],
@@ -88,6 +91,7 @@ function createColspanTableEditor(): Editor {
   return new Editor({
     extensions: [
       StarterKit,
+      DohcTableRowHeight,
       TableKit.configure({ table: { resizable: true } }),
       testTableControls,
     ],
@@ -175,7 +179,12 @@ function drag(source: Element, target: Element): void {
 // in a test; a small structural type is simpler than fighting that union.
 type JsonNode = {
   type: string;
-  attrs?: { align?: string | null; colspan?: number; rowspan?: number };
+  attrs?: {
+    align?: string | null;
+    colspan?: number;
+    rowspan?: number;
+    height?: number | null;
+  };
   content?: JsonNode[];
   text?: string;
 };
@@ -212,15 +221,17 @@ describe("table controls grips", () => {
     elementFromPointResult = null;
     document.body.querySelector(".dohc-table-menu")?.remove();
     document.body.querySelector(".dohc-table-drag-preview")?.remove();
+    document.body.querySelector(".dohc-table-drop-indicator")?.remove();
     editor?.destroy();
     editor = undefined;
   });
 
-  it("renders one column grip per column, one row grip per row, and one table menu button", () => {
+  it("renders column grips, row grips, row resize handles, and one table menu button", () => {
     editor = createTableEditor(2, 3);
     const dom = editor.view.dom;
     expect(dom.querySelectorAll(".dohc-table-grip--col")).toHaveLength(3);
     expect(dom.querySelectorAll(".dohc-table-grip--row")).toHaveLength(2);
+    expect(dom.querySelectorAll(".dohc-table-row-resize")).toHaveLength(2);
     expect(dom.querySelectorAll(".dohc-table-menu-btn")).toHaveLength(1);
   });
 
@@ -237,10 +248,10 @@ describe("table controls grips", () => {
     );
     expect(visibleRows).toHaveLength(1);
     expect(visibleRows[0]?.getAttribute("data-table-row")).toBe("1");
-    expect(visibleRows[0]?.textContent).toBe("⠿");
+    expect(visibleRows[0]?.textContent).toBe("");
     expect(visibleColumns).toHaveLength(1);
     expect(visibleColumns[0]?.getAttribute("data-table-column")).toBe("1");
-    expect(visibleColumns[0]?.textContent).toBe("⠿");
+    expect(visibleColumns[0]?.textContent).toBe("");
   });
 
   it("mousemove over a cell activates exactly that column's and row's handles", () => {
@@ -256,6 +267,11 @@ describe("table controls grips", () => {
     expect(activeRows).toHaveLength(1);
     expect(activeCols[0]?.dataset.col).toBe("1");
     expect(activeRows[0]?.dataset.row).toBe("1");
+    const visibleResize = dom.querySelectorAll<HTMLElement>(
+      ".dohc-table-row-resize.is-visible",
+    );
+    expect(visibleResize).toHaveLength(1);
+    expect(visibleResize[0]?.dataset.tableRowResize).toBe("1");
   });
 
   it("hovered column handle uses TableMap coordinates when a rowspan precedes the cell", () => {
@@ -442,6 +458,29 @@ describe("table controls grips", () => {
       ["A1", "A2", "A3"],
       ["C1", "C2", "C3"],
     ]);
+  });
+
+  it("keeps a resized row height when the row is reordered", () => {
+    editor = createLabeledTableEditor();
+    const firstRow = editor.state.doc.nodeAt(1);
+    if (!firstRow) throw new Error("first row missing");
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(1, undefined, {
+        ...firstRow.attrs,
+        height: 74,
+      }),
+    );
+    const source = editor.view.dom.querySelector(
+      ".dohc-table-grip--row",
+    ) as HTMLElement;
+    const targetCell = editor.view.dom.querySelectorAll("tr")[1]?.cells[2];
+    if (!targetCell) throw new Error("target cell missing");
+
+    drag(source, targetCell);
+
+    expect(tableTextGrid(editor)[1]).toEqual(["A1", "A2", "A3"]);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+    expect(tableNode(editor).content?.[1]?.attrs?.height).toBe(74);
   });
 
   it("drops at the last valid target when Electron reroutes mouseup", () => {
@@ -738,6 +777,7 @@ describe("table controls grips", () => {
       element: mount,
       extensions: [
         StarterKit,
+        DohcTableRowHeight,
         TableKit.configure({ table: { resizable: true } }),
         testTableControls,
       ],
@@ -878,11 +918,227 @@ describe("table controls grips", () => {
     expect(
       target.closest("tr")?.classList.contains("dohc-table-drop-after"),
     ).toBe(true);
+    const indicator = document.body.querySelector<HTMLElement>(
+      ".dohc-table-drop-indicator.is-visible",
+    );
+    expect(indicator).not.toBeNull();
+    expect(indicator?.dataset.label).toContain("Drop to row");
 
     dispatchPointer(source, "pointercancel", { clientX: 10, clientY: 10 });
     expect(
       editor.view.dom.querySelector(".is-dragging, .dohc-table-drop-after"),
     ).toBeNull();
+    expect(document.body.querySelector(".dohc-table-drop-indicator")).toBeNull();
+  });
+
+  it("resizes a row from its bottom edge and persists the height on the row node", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 40,
+      }),
+    });
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+    expect(handle.classList.contains("is-resizing")).toBe(true);
+    dispatchPointer(handle, "pointerup", { clientY: 134 });
+
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
+    const renderedRow = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    expect(renderedRow.dataset.rowHeight).toBe("74");
+    expect(renderedRow.style.height).toBe("74px");
+  });
+
+  it("commits a resize when Electron delivers only the mouseup fallback", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 40,
+      }),
+    });
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    window.dispatchEvent(
+      new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }),
+    );
+
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+  });
+
+  it("commits a resize from a non-bubbling handle mouseup", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 40,
+      }),
+    });
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    let reachedWindow = false;
+    const markWindowMouseup = () => {
+      reachedWindow = true;
+    };
+    window.addEventListener("mouseup", markWindowMouseup, true);
+    try {
+      expect(handle.isConnected).toBe(false);
+      handle.dispatchEvent(
+        new MouseEvent("mouseup", {
+          bubbles: false,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+    } finally {
+      window.removeEventListener("mouseup", markWindowMouseup, true);
+    }
+
+    expect(reachedWindow).toBe(false);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+  });
+
+  it("hides row resizing when the editor has no durable Y.Doc backing", () => {
+    const localControls = Extension.create({
+      name: "localTableControls",
+      addProseMirrorPlugins() {
+        return [makeTableControlsPlugin({ rowResizeEnabled: false })];
+      },
+    });
+    editor = new Editor({
+      extensions: [
+        StarterKit,
+        DohcTableRowHeight,
+        TableKit.configure({ table: { resizable: true } }),
+        localControls,
+      ],
+      content: "<p></p>",
+    });
+    editor.commands.insertTable({ rows: 2, cols: 2, withHeaderRow: true });
+
+    expect(editor.view.dom.querySelector(".dohc-table-row-resize")).toBeNull();
+    expect(editor.view.dom.querySelector(".dohc-table-grip--row")).not.toBeNull();
+  });
+
+  it("does not persist a fixed row height when the resize handle is only clicked", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 30,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 30,
+      }),
+    });
+    const before = editor.state.doc;
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointerup", { clientY: 100 });
+
+    expect(editor.state.doc.eq(before)).toBe(true);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+    expect(row.style.height).toBe("");
+    expect(handle.getAttribute("role")).toBeNull();
+  });
+
+  it("cancels an active row resize when the document changes", () => {
+    editor = createTableEditor(2, 2);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        top: 0,
+        bottom: 40,
+        left: 0,
+        right: 240,
+        width: 240,
+        height: 40,
+      }),
+    });
+
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+
+    let textPos: number | undefined;
+    editor.state.doc.descendants((node, pos) => {
+      if (!node.isTextblock || textPos !== undefined) return true;
+      textPos = pos + 1;
+      return false;
+    });
+    if (textPos === undefined) throw new Error("table text block missing");
+    editor.view.dispatch(editor.state.tr.insertText("remote ", textPos));
+
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+    expect(row.style.height).toBe("");
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+    dispatchPointer(handle, "pointerup", { clientY: 134 });
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
+  });
+
+  it("double-clicking a row resize edge resets its fixed height", () => {
+    editor = createTableEditor(2, 2);
+    const rowPos = 1;
+    const row = editor.state.doc.nodeAt(rowPos);
+    if (!row) throw new Error("table row missing");
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(rowPos, undefined, {
+        ...row.attrs,
+        height: 80,
+      }),
+    );
+    const handle = editor.view.dom.querySelector(
+      ".dohc-table-row-resize",
+    ) as HTMLButtonElement;
+    handle.dispatchEvent(
+      new MouseEvent("dblclick", { bubbles: true, cancelable: true }),
+    );
+
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBeNull();
   });
 
   it("does not open the options menu from the click that follows a drag", () => {

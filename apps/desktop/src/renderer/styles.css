@@ -322,10 +322,19 @@ body {
  * the pane is too narrow for the overhang). */
 .dohc-notion-editor > pre,
 .dohc-notion-editor > table,
-.dohc-notion-editor > .tableWrapper,
 .dohc-notion-editor > .dohc-callout,
 .dohc-notion-editor > .dohc-mermaid-preview {
   max-width: calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset));
+}
+
+/* The resizable TableView owns its chrome gutter and horizontal scrollbar.
+ * Its outer width includes enough room for the left row grips and right add
+ * strip while the table itself keeps the same framed reading-column measure. */
+.dohc-notion-editor > .tableWrapper {
+  width: 100%;
+  max-width: calc(
+    var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset) + 44px
+  );
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -576,12 +585,46 @@ body {
  * an embedded spreadsheet. No `overflow: hidden` on the table: the hover
  * chrome (handles, "+" strips) floats into the table's outer margin via
  * negative offsets (see the table-controls block below) and would be
- * clipped by it. */
+ * clipped by it. The TableView wrapper reserves those chrome gutters and is
+ * the sole horizontal scroll container, so appended columns keep a useful
+ * minimum width rather than compressing the existing table. */
+.dohc-notion-editor .tableWrapper {
+  box-sizing: border-box;
+  margin-top: 8px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 26px 22px 18px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--dohc-line) transparent;
+  overscroll-behavior-inline: contain;
+}
+
+.dohc-notion-editor .tableWrapper::-webkit-scrollbar {
+  height: 10px;
+}
+
+.dohc-notion-editor .tableWrapper::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dohc-notion-editor .tableWrapper::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--dohc-line);
+  background-clip: padding-box;
+}
+
 .dohc-notion-editor table {
   border-collapse: separate;
   border-spacing: 0;
+  table-layout: fixed;
   width: 100%;
   border: 1px solid var(--dohc-line);
+}
+
+.dohc-notion-editor .tableWrapper > table {
+  margin: 0;
 }
 
 .dohc-notion-editor th,
@@ -592,6 +635,7 @@ body {
   vertical-align: top;
   text-align: left;
   font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 .dohc-notion-editor th + th,
@@ -1606,6 +1650,10 @@ body {
   color: var(--dohc-ink);
 }
 
+.dohc-table-grip::before {
+  content: "⠿";
+}
+
 .dohc-table-grip.is-dragging {
   cursor: grabbing;
   background: var(--dohc-line);
@@ -1654,6 +1702,73 @@ body {
   box-shadow: inset -3px 0 0 var(--dohc-accent);
 }
 
+/* A viewport-layer insertion line makes the exact release position legible
+ * even across a wide table. It is geometry-driven by tableControls.tsx so it
+ * remains aligned while the table wrapper is horizontally scrolled. */
+.dohc-table-drop-indicator {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 21;
+  border-radius: 999px;
+  background: var(--dohc-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dohc-bg) 72%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.dohc-table-drop-indicator.is-visible {
+  opacity: 1;
+}
+
+.dohc-table-drop-indicator::before {
+  content: "";
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--dohc-bg);
+  border-radius: 50%;
+  background: var(--dohc-accent);
+}
+
+.dohc-table-drop-indicator--row::before {
+  top: 50%;
+  left: 0;
+  transform: translate(-35%, -50%);
+}
+
+.dohc-table-drop-indicator--column::before {
+  top: 0;
+  left: 50%;
+  transform: translate(-50%, -35%);
+}
+
+.dohc-table-drop-indicator::after {
+  content: attr(data-label);
+  position: absolute;
+  padding: 3px 6px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 5px;
+  background: var(--dohc-panel);
+  color: var(--dohc-ink);
+  box-shadow: 0 3px 10px rgba(28, 27, 24, 0.12);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.dohc-table-drop-indicator--row::after {
+  top: 7px;
+  left: 8px;
+}
+
+.dohc-table-drop-indicator--column::after {
+  top: 8px;
+  left: 7px;
+}
+
 .dohc-table-drag-preview {
   position: fixed;
   top: 0;
@@ -1680,6 +1795,64 @@ body {
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/* Row height resizing is deliberately separate from the six-dot reorder
+ * grip. The boundary bar appears only for the active row and spans the full
+ * table, mirroring the column resize affordance on a perpendicular axis. */
+.dohc-table-row-resize {
+  position: absolute;
+  z-index: 19;
+  bottom: -4px;
+  left: 0;
+  display: block;
+  width: 100%;
+  height: 8px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  opacity: 0;
+  cursor: row-resize;
+  pointer-events: none;
+  touch-action: none;
+}
+
+.dohc-table-row-resize::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: var(--dohc-accent);
+  opacity: 0;
+  transition: opacity 100ms ease-out;
+}
+
+.dohc-table-row-resize.is-visible,
+.dohc-table-row-resize:focus-visible,
+.dohc-table-row-resize.is-resizing {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dohc-table-row-resize.is-visible::after {
+  opacity: 0.28;
+}
+
+.dohc-table-row-resize.is-visible:hover::after,
+.dohc-table-row-resize:focus-visible::after,
+.dohc-table-row-resize.is-resizing::after {
+  opacity: 1;
+}
+
+.dohc-table-node table.is-resizing-row,
+.dohc-table-node table.is-resizing-row * {
+  cursor: row-resize;
+}
+
+.dohc-table-node tr.dohc-table-row-is-resizing > :is(td, th) {
+  background: color-mix(in srgb, var(--dohc-accent) 6%, transparent);
 }
 
 /* Notion-style six-dot handles follow the active cell: the column handle is
