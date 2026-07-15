@@ -1,4 +1,4 @@
-import { Mark, Node, markInputRule } from '@tiptap/core'
+import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent } from '@tiptap/core'
 import { makeImageNodeView, type ImageSrcContext } from './imageSrc'
 import { makeMathNodeView } from './mathRender'
@@ -1084,6 +1084,41 @@ const DohcMathBlock = Node.create({
   renderMarkdown: (node) => `$$${String(node.attrs?.tex ?? '')}$$`,
 })
 
+// Row height is editor layout metadata. It lives on the canonical Y.Doc so a
+// resized table remains stable across collaborative edits and reloads; GFM
+// export intentionally omits it because markdown tables have no row-height
+// syntax. HTML import/export keeps the metadata through data-row-height.
+export const DohcTableRowHeight = Extension.create({
+  name: 'dohcTableRowHeight',
+
+  addGlobalAttributes() {
+    return [
+      {
+        types: ['tableRow'],
+        attributes: {
+          height: {
+            default: null,
+            parseHTML: (element) => {
+              const raw = element.getAttribute('data-row-height') ?? element.style.height
+              const height = Number.parseFloat(raw)
+              return Number.isFinite(height) && height > 0 ? Math.round(height) : null
+            },
+            renderHTML: (attributes) => {
+              const height = Number(attributes.height)
+              if (!Number.isFinite(height) || height <= 0) return {}
+              const rounded = Math.round(height)
+              return {
+                'data-row-height': String(rounded),
+                style: `height: ${rounded}px`,
+              }
+            },
+          },
+        },
+      },
+    ]
+  },
+})
+
 export const dohcMarkdownExtensions = [
   DohcImage,
   DohcEscapedPunctuation,
@@ -1095,4 +1130,5 @@ export const dohcMarkdownExtensions = [
   DohcHighlight,
   DohcMathInline,
   DohcMathBlock,
+  DohcTableRowHeight,
 ]

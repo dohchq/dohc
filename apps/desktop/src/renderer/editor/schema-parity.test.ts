@@ -29,5 +29,6 @@ describe('desktop editor schema parity with hocuspocus', () => {
       expect(schema.nodes[node]).toBeDefined()
     }
     expect(schema.marks.highlight).toBeDefined()
+    expect(schema.nodes.tableRow?.spec.attrs?.height?.default).toBeNull()
   })
 })

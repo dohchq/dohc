@@ -229,7 +229,15 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
 // with. Purely a runtime option: it does not change the schema TableKit
 // contributes, so import-export.ts's unconfigured TableKit (parsing only,
 // never rendered) stays in parity — see schema-parity.test.ts.
-const TABLE_KIT_EXTENSION = TableKit.configure({ table: { resizable: true } });
+const TABLE_KIT_EXTENSION = TableKit.configure({
+  table: {
+    resizable: true,
+    // A useful default column measure makes appended columns grow the table
+    // past the reading column instead of compressing every cell indefinitely.
+    // The tableWrapper owns horizontal scrolling in styles.css.
+    cellMinWidth: 120,
+  },
+});
 const STATIC_EDITOR_EXTENSIONS = [
   ...dohcMarkdownExtensions,
   TaskList,

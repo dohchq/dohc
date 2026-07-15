@@ -12,8 +12,9 @@
 // - Hovering the table reveals slim "+" strips hugging the full right edge
 //   (append column) and bottom edge (append row), plus a "⋯" table menu at
 //   the top-left corner (toggle header row, delete table).
-// - Dragging a handle to reorder rows/columns is NOT implemented (no
-//   existing drag infrastructure to reuse) — noted as follow-up.
+// - Dragging a handle reorders rows/columns with an insertion-line preview.
+//   Row boundaries also expose a separate resize affordance so reorder and
+//   resize remain distinct gestures.
 //
 // GFM round-trip caveat (see AGENTS.md "text is the primitive"): markdown
 // tables express per-COLUMN alignment via the delimiter row (`:---`, `:---:`,
@@ -75,6 +76,7 @@ let nextTableControlsInstanceId = 0;
 // Grips sit 13px out with an 8px pill; 18px covers that chrome (and the
 // 15px append strips) while the pointer crosses the table-edge gap.
 const GRIP_MARGIN = 18;
+const MIN_ROW_HEIGHT = 36;
 
 type TableCommand = (
   state: EditorState,
@@ -107,12 +109,27 @@ type TableDragState = {
   sourceButton: HTMLButtonElement;
   scrollContainer: HTMLElement | null;
   preview: HTMLElement;
+  indicator: HTMLElement;
   dropTarget?: TableDropTarget;
+};
+
+type TableRowResizeState = {
+  rowPos: number;
+  rowIndex: number;
+  rowElement: HTMLTableRowElement;
+  tableElement: HTMLTableElement;
+  handle: HTMLButtonElement;
+  pointerId: number;
+  startY: number;
+  startHeight: number;
+  currentHeight: number;
+  originalInlineHeight: string;
 };
 
 type TableControlsRuntime = {
   instanceId: number;
   activeDrag: TableDragState | null;
+  activeRowResize: TableRowResizeState | null;
   cancelPointer: (() => void) | null;
   closeMenu: (() => void) | null;
   menuSerial: number;
@@ -122,6 +139,7 @@ function createTableControlsRuntime(): TableControlsRuntime {
   return {
     instanceId: nextTableControlsInstanceId++,
     activeDrag: null,
+    activeRowResize: null,
     cancelPointer: null,
     closeMenu: null,
     menuSerial: 0,
@@ -253,6 +271,31 @@ function focusCell(view: EditorView, cellPos: number): void {
   if (view.editable === false) return;
   const $pos = view.state.doc.resolve(cellPos + 1);
   view.dispatch(view.state.tr.setSelection(TextSelection.near($pos)));
+}
+
+function setTableRowHeight(
+  view: EditorView,
+  rowPos: number,
+  height: number | null,
+): void {
+  if (view.editable === false) return;
+  const row = view.state.doc.nodeAt(rowPos);
+  if (!row || row.type.name !== "tableRow") return;
+  const normalized =
+    height === null ? null : Math.max(MIN_ROW_HEIGHT, Math.round(height));
+  const current = Number(row.attrs.height);
+  if (
+    (normalized === null && row.attrs.height == null) ||
+    (normalized !== null && Number.isFinite(current) && current === normalized)
+  ) {
+    return;
+  }
+  view.dispatch(
+    view.state.tr.setNodeMarkup(rowPos, undefined, {
+      ...row.attrs,
+      height: normalized,
+    }),
+  );
 }
 
 // Per-column GFM alignment. The value is written to the standard `align`
@@ -670,12 +713,58 @@ function createTableDragPreview(
   return preview;
 }
 
+function createTableDropIndicator(
+  view: EditorView,
+  band: TableBand,
+): HTMLElement {
+  const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView ?? window;
+  const editorRoot = view.dom.getRootNode();
+  const host =
+    editorRoot instanceof ownerWindow.ShadowRoot ? editorRoot : ownerDocument.body;
+  const indicator = ownerDocument.createElement("div");
+  indicator.className = `dohc-table-drop-indicator dohc-table-drop-indicator--${band}`;
+  indicator.setAttribute("aria-hidden", "true");
+  host.appendChild(indicator);
+  return indicator;
+}
+
 function positionTableDragPreview(
   preview: HTMLElement,
   clientX: number,
   clientY: number,
 ): void {
   preview.style.transform = `translate3d(${clientX + 14}px, ${clientY + 14}px, 0)`;
+}
+
+function positionTableDropIndicator(
+  drag: TableDragState,
+  target: TableDropTarget,
+): void {
+  const tableRect = drag.tableElement.getBoundingClientRect();
+  const targetRect = target.bandElement.getBoundingClientRect();
+  const wrapperRect = drag.tableElement
+    .closest<HTMLElement>(".tableWrapper")
+    ?.getBoundingClientRect();
+  const visibleLeft = Math.max(tableRect.left, wrapperRect?.left ?? tableRect.left);
+  const visibleRight = Math.min(tableRect.right, wrapperRect?.right ?? tableRect.right);
+  const visibleTop = Math.max(tableRect.top, wrapperRect?.top ?? tableRect.top);
+  const visibleBottom = Math.min(tableRect.bottom, wrapperRect?.bottom ?? tableRect.bottom);
+
+  if (drag.band === "row") {
+    const y = target.side === "before" ? targetRect.top : targetRect.bottom;
+    drag.indicator.style.width = `${Math.max(0, visibleRight - visibleLeft)}px`;
+    drag.indicator.style.height = "3px";
+    drag.indicator.style.transform = `translate3d(${visibleLeft}px, ${y - 1.5}px, 0)`;
+    drag.indicator.dataset.label = `Drop to row ${target.destination + 1}`;
+  } else {
+    const x = target.side === "before" ? targetRect.left : targetRect.right;
+    drag.indicator.style.width = "3px";
+    drag.indicator.style.height = `${Math.max(0, visibleBottom - visibleTop)}px`;
+    drag.indicator.style.transform = `translate3d(${x - 1.5}px, ${visibleTop}px, 0)`;
+    drag.indicator.dataset.label = `Drop to column ${target.destination + 1}`;
+  }
+  drag.indicator.classList.add("is-visible");
 }
 
 function editorElementFromPoint(
@@ -779,6 +868,7 @@ function markTableDropTarget(
   target.bandElement.classList.add(
     target.side === "before" ? "dohc-table-drop-before" : "dohc-table-drop-after",
   );
+  positionTableDropIndicator(drag, target);
 }
 
 function findVerticalScrollContainer(view: EditorView): HTMLElement | null {
@@ -821,6 +911,7 @@ function updateTableDragTarget(
   const target = tableDropTargetFromPoint(view, drag, hitTarget, clientX, clientY);
   if (!target) {
     clearTableDropTargetChrome(view);
+    drag.indicator.classList.remove("is-visible");
     drag.dropTarget = undefined;
     return null;
   }
@@ -833,6 +924,7 @@ function updateTableDragTarget(
   drag.dropTarget = target;
   if (target.destination === drag.index) {
     clearTableDropTargetChrome(view);
+    drag.indicator.classList.remove("is-visible");
   } else {
     markTableDropTarget(view, drag, target);
   }
@@ -855,6 +947,7 @@ function finishTableDrop(
   target: TableDropTarget | undefined,
 ): void {
   drag.preview.remove();
+  drag.indicator.remove();
   drag.sourceButton.setAttribute("aria-grabbed", "false");
   suppressTableGripClickUntil.set(drag.sourceButton, Date.now() + 250);
 
@@ -933,6 +1026,7 @@ function configureGripDrag(
     detachReleaseFallbacks();
     runtime.cancelPointer = null;
     session.preview?.remove();
+    runtime.activeDrag?.indicator.remove();
     button.setAttribute("aria-grabbed", "false");
     if (session.dragging) {
       suppressTableGripClickUntil.set(button, Date.now() + 250);
@@ -950,6 +1044,7 @@ function configureGripDrag(
     runtime.closeMenu?.();
     runtime.closeMenu = null;
     const preview = createTableDragPreview(view, band, index);
+    const indicator = createTableDropIndicator(view, band);
     const drag: TableDragState = {
       band,
       index,
@@ -958,6 +1053,7 @@ function configureGripDrag(
       sourceButton: button,
       scrollContainer: findVerticalScrollContainer(view),
       preview,
+      indicator,
     };
     runtime.activeDrag = drag;
     pointerSession.dragging = true;
@@ -1084,6 +1180,176 @@ function configureGripDrag(
   });
 }
 
+function configureRowResize(
+  runtime: TableControlsRuntime,
+  view: EditorView,
+  button: HTMLButtonElement,
+  rowPos: number,
+  rowIndex: number,
+): void {
+  const ownerWindow = button.ownerDocument.defaultView ?? window;
+
+  const detach = () => {
+    ownerWindow.removeEventListener("pointermove", onPointerMove, true);
+    ownerWindow.removeEventListener("pointerup", onPointerUp, true);
+    ownerWindow.removeEventListener("pointercancel", onPointerCancel, true);
+    ownerWindow.removeEventListener("keydown", onKeyDown, true);
+  };
+
+  const releasePointer = (pointerId: number) => {
+    try {
+      if (button.hasPointerCapture?.(pointerId)) {
+        button.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // Synthetic renderers and a browser-completed pointerup may release it.
+    }
+  };
+
+  const finish = (commit: boolean) => {
+    const resize = runtime.activeRowResize;
+    if (!resize || resize.handle !== button) return;
+    detach();
+    runtime.cancelPointer = null;
+    runtime.activeRowResize = null;
+    resize.tableElement.classList.remove("is-resizing-row");
+    resize.rowElement.classList.remove("dohc-table-row-is-resizing");
+    button.classList.remove("is-resizing");
+    button.setAttribute("aria-grabbed", "false");
+    releasePointer(resize.pointerId);
+    if (commit) {
+      setTableRowHeight(view, resize.rowPos, resize.currentHeight);
+      announceTableDrag(
+        view,
+        `Row ${resize.rowIndex + 1} height set to ${Math.round(resize.currentHeight)} pixels.`,
+      );
+    } else {
+      resize.rowElement.style.height = resize.originalInlineHeight;
+      announceTableDrag(view, `Row ${resize.rowIndex + 1} resize cancelled.`);
+    }
+  };
+
+  function onPointerMove(event: PointerEvent): void {
+    const resize = runtime.activeRowResize;
+    if (!resize || resize.handle !== button || event.pointerId !== resize.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    resize.currentHeight = Math.max(
+      MIN_ROW_HEIGHT,
+      Math.round(resize.startHeight + event.clientY - resize.startY),
+    );
+    resize.rowElement.style.height = `${resize.currentHeight}px`;
+    button.setAttribute("aria-valuenow", String(resize.currentHeight));
+  }
+
+  function onPointerUp(event: PointerEvent): void {
+    const resize = runtime.activeRowResize;
+    if (!resize || event.pointerId !== resize.pointerId) return;
+    finish(true);
+  }
+
+  function onPointerCancel(): void {
+    finish(false);
+  }
+
+  function onKeyDown(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    finish(false);
+  }
+
+  button.addEventListener("pointerdown", (event) => {
+    if (view.editable === false || event.button !== 0) return;
+    const rowElement = button.closest<HTMLTableRowElement>("tr");
+    const tableElement = button.closest<HTMLTableElement>("table");
+    if (!rowElement || !tableElement) return;
+    stopEvent(event);
+    runtime.cancelPointer?.();
+    const measuredHeight = rowElement.getBoundingClientRect().height;
+    const startHeight = Math.max(
+      MIN_ROW_HEIGHT,
+      Math.round(measuredHeight || Number(rowElement.dataset.rowHeight) || MIN_ROW_HEIGHT),
+    );
+    runtime.activeRowResize = {
+      rowPos,
+      rowIndex,
+      rowElement,
+      tableElement,
+      handle: button,
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight,
+      currentHeight: startHeight,
+      originalInlineHeight: rowElement.style.height,
+    };
+    runtime.cancelPointer = () => finish(false);
+    tableElement.classList.add("is-resizing-row");
+    rowElement.classList.add("dohc-table-row-is-resizing");
+    button.classList.add("is-resizing");
+    button.setAttribute("aria-grabbed", "true");
+    button.setAttribute("aria-valuenow", String(startHeight));
+    try {
+      button.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is available in Electron; tests may omit it.
+    }
+    ownerWindow.addEventListener("pointermove", onPointerMove, true);
+    ownerWindow.addEventListener("pointerup", onPointerUp, true);
+    ownerWindow.addEventListener("pointercancel", onPointerCancel, true);
+    ownerWindow.addEventListener("keydown", onKeyDown, true);
+  });
+
+  // Keep synthetic/embedded DOMs functional when their pointer events do not
+  // reach the owning window's capture phase.
+  button.addEventListener("pointermove", onPointerMove);
+  button.addEventListener("pointerup", onPointerUp);
+  button.addEventListener("pointercancel", onPointerCancel);
+
+  button.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    stopEvent(event);
+    const rowElement = button.closest<HTMLTableRowElement>("tr");
+    if (!rowElement) return;
+    const current = Math.max(
+      MIN_ROW_HEIGHT,
+      Math.round(rowElement.getBoundingClientRect().height || MIN_ROW_HEIGHT),
+    );
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    const amount = event.shiftKey ? 10 : 2;
+    setTableRowHeight(view, rowPos, Math.max(MIN_ROW_HEIGHT, current + direction * amount));
+  });
+
+  button.addEventListener("dblclick", (event) => {
+    stopEvent(event);
+    setTableRowHeight(view, rowPos, null);
+    announceTableDrag(view, `Row ${rowIndex + 1} height reset to fit its content.`);
+  });
+}
+
+function buildRowResizeHandle(
+  runtime: TableControlsRuntime,
+  view: EditorView,
+  rowPos: number,
+  rowIndex: number,
+): HTMLElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "dohc-table-row-resize";
+  button.dataset.tableRowResize = String(rowIndex);
+  button.title = `Resize row ${rowIndex + 1}; double-click to reset`;
+  button.setAttribute("role", "separator");
+  button.setAttribute("aria-label", `Resize row ${rowIndex + 1}`);
+  button.setAttribute("aria-orientation", "horizontal");
+  button.setAttribute("aria-valuemin", String(MIN_ROW_HEIGHT));
+  button.setAttribute("aria-grabbed", "false");
+  button.setAttribute("contenteditable", "false");
+  button.disabled = view.editable === false;
+  configureRowResize(runtime, view, button, rowPos, rowIndex);
+  return button;
+}
+
 function buildColumnGrip(
   runtime: TableControlsRuntime,
   view: EditorView,
@@ -1094,13 +1360,12 @@ function buildColumnGrip(
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--col";
   button.dataset.col = String(colIndex);
-  button.title = `Column ${colIndex + 1} — drag to reorder, click for options`;
+  button.title = `Column ${colIndex + 1} - drag to reorder, click for options`;
   button.setAttribute("aria-label", `Select column ${colIndex + 1}`);
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   button.setAttribute("data-table-column", String(colIndex));
   button.setAttribute("contenteditable", "false");
-  button.textContent = "⠿";
   button.disabled = view.editable === false;
   configureGripDrag(runtime, view, button, "column", colIndex, cellPos);
   button.addEventListener("mousedown", stopPropagation);
@@ -1123,13 +1388,12 @@ function buildRowGrip(
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--row";
   button.dataset.row = String(rowIndex);
-  button.title = `Row ${rowIndex + 1} — drag to reorder, click for options`;
+  button.title = `Row ${rowIndex + 1} - drag to reorder, click for options`;
   button.setAttribute("aria-label", `Select row ${rowIndex + 1}`);
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   button.setAttribute("data-table-row", String(rowIndex));
   button.setAttribute("contenteditable", "false");
-  button.textContent = "⠿";
   button.disabled = view.editable === false;
   configureGripDrag(runtime, view, button, "row", rowIndex, cellPos);
   button.addEventListener("mousedown", stopPropagation);
@@ -1259,6 +1523,16 @@ function setActiveTableControls(
       ownsActiveTable && (matchesRow || matchesColumn),
     );
   });
+  view.dom
+    .querySelectorAll<HTMLElement>(".dohc-table-row-resize")
+    .forEach((handle) => {
+      const ownsActiveTable =
+        table !== null && handle.closest(".dohc-table-node") === table;
+      handle.classList.toggle(
+        "is-visible",
+        ownsActiveTable && handle.dataset.tableRowResize === String(rowIndex),
+      );
+    });
   return { table, rowIndex, columnIndex };
 }
 
@@ -1320,18 +1594,38 @@ function buildTableControlDecorations(
 
     // Row grips: one per row, anchored inside that row's col-0 cell.
     let lastRowCellPos = -1;
+    let rowPos = tableStart;
     for (let row = 0; row < map.height; row += 1) {
+      const rowNode = node.child(row);
       const cellPos = tableStart + map.map[row * map.width];
-      if (cellPos === lastRowCellPos) continue;
-      lastRowCellPos = cellPos;
       const rowIndex = row;
-      decorations.push(
-        widgetDecoration(
-          cellPos + 1,
-          (view) => buildRowGrip(runtime, view, cellPos, rowIndex),
-          `dohc-table-row-${cellPos}`,
-        ),
-      );
+      if (cellPos !== lastRowCellPos) {
+        lastRowCellPos = cellPos;
+        decorations.push(
+          widgetDecoration(
+            cellPos + 1,
+            (view) => buildRowGrip(runtime, view, cellPos, rowIndex),
+            `dohc-table-row-${cellPos}`,
+          ),
+        );
+      }
+      // The resize bar is anchored in the row's first physical cell rather
+      // than TableMap's first logical slot. A rowspan from the row above can
+      // own that logical slot, but each editable row still needs its own
+      // height control and row node position.
+      if (rowNode.childCount > 0) {
+        const currentRowPos = rowPos;
+        const resizeCellPos = rowPos + 1;
+        decorations.push(
+          widgetDecoration(
+            resizeCellPos + 1,
+            (view) =>
+              buildRowResizeHandle(runtime, view, currentRowPos, rowIndex),
+            `dohc-table-row-resize-${currentRowPos}`,
+          ),
+        );
+      }
+      rowPos += rowNode.nodeSize;
     }
 
     // Append-row "+": anchored inside the bottom-left cell, hugging the
@@ -1369,6 +1663,18 @@ function sizeAppendStrips(table: HTMLElement): void {
     rowStrip.style.left = `${rect.left - rowCell.getBoundingClientRect().left}px`;
     rowStrip.style.width = `${rect.width}px`;
   }
+  table
+    .querySelectorAll<HTMLElement>(".dohc-table-row-resize")
+    .forEach((handle) => {
+      const anchorCell = handle.parentElement;
+      if (!anchorCell) return;
+      handle.style.left = `${rect.left - anchorCell.getBoundingClientRect().left}px`;
+      handle.style.width = `${rect.width}px`;
+      const rowHeight = handle.closest("tr")?.getBoundingClientRect().height;
+      if (rowHeight && Number.isFinite(rowHeight)) {
+        handle.setAttribute("aria-valuenow", String(Math.round(rowHeight)));
+      }
+    });
 }
 
 // The CSS fallback only spans the anchor corner cell, so size every append
@@ -1421,7 +1727,11 @@ export function makeTableControlsPlugin(): Plugin {
     // Over the chrome itself (strips float outside the corner cell's box):
     // keep the current handles rather than re-deriving them from the corner
     // anchor cell.
-    if (target.closest(".dohc-table-grip, .dohc-table-append, .dohc-table-menu-btn")) {
+    if (
+      target.closest(
+        ".dohc-table-grip, .dohc-table-row-resize, .dohc-table-append, .dohc-table-menu-btn",
+      )
+    ) {
       return false;
     }
     const cell = target.closest("td, th");
@@ -1547,7 +1857,9 @@ export function makeTableControlsPlugin(): Plugin {
           runtime.closeMenu?.();
           runtime.closeMenu = null;
           runtime.activeDrag?.preview.remove();
+          runtime.activeDrag?.indicator.remove();
           runtime.activeDrag = null;
+          runtime.activeRowResize = null;
           activeControls = undefined;
           hovered = null;
         },
