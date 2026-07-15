@@ -65,8 +65,6 @@ describe('dohc v2 schema contracts', () => {
       'table',
       'wikilink',
       'inlineAtom',
-      'formula',
-      'queryBlock',
       'math',
       'htmlAtom',
       'frontmatter',
@@ -77,8 +75,6 @@ describe('dohc v2 schema contracts', () => {
     expect(FIRST_CLASS_V2_CONSTRUCTS).toEqual([
       'wikilink',
       'inlineAtom',
-      'formula',
-      'queryBlock',
     ])
     for (const name of FIRST_CLASS_V2_CONSTRUCTS) {
       const spec = DOHC_V2_CONSTRUCTS.find((c) => c.name === name)
@@ -163,7 +159,7 @@ Create `docs/development/v2-schema-spec.md` with:
 Run:
 
 ```bash
-rg -n "wikilink|inlineAtom|formula|queryBlock|frontmatter|schemaVersion" docs/development/v2-schema-spec.md apps/app/src/editor-v2/schema-contracts.ts
+rg -n "wikilink|inlineAtom|frontmatter|schemaVersion" docs/development/v2-schema-spec.md apps/desktop/src/renderer/editor/schema-contracts.ts
 ```
 
 Expected: both files use the same names and field spelling.

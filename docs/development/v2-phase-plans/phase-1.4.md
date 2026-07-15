@@ -163,7 +163,7 @@ The new editor must:
 - use `Markdown` support through the current Tiptap markdown extensions for local fallback and `editor.getMarkdown()` for `onChange`.
 - use `IndexeddbPersistence(documentName, ydoc)` before Hocuspocus provider sync.
 - show a small loading state until local persistence and remote auth/sync have reported readiness.
-- keep ASCII sketch edit affordance, wikilink autocomplete/click, inline atom pills, formula widgets, live totals, and query block result widgets as ProseMirror plugins registered through a Tiptap extension.
+- keep ASCII sketch edit affordance, wikilink autocomplete/click, and inline atom pills as ProseMirror plugins registered through a Tiptap extension.
 - implement `insertCodeBlock` and `replaceCodeBlockAt` using Tiptap's editor view/state.
 
 Run:
