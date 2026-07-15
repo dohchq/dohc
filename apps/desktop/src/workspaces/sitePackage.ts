@@ -59,16 +59,12 @@ const SHAREABLE_BROWSER_FILE_RE =
 const STATIC_ASSET_ROOTS = new Set([
   "assets",
   "css",
-  "data",
   "fonts",
   "images",
   "img",
   "js",
-  "media",
   "public",
-  "scripts",
   "static",
-  "styles",
   "vendor",
 ]);
 

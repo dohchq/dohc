@@ -135,7 +135,8 @@ export type DohcDatabaseEditRequest = {
     path: string;
     query?: string;
     params?: unknown[] | Record<string, unknown>;
-    operations?: unknown[];
+    /** The production dohc host currently accepts exactly one structured operation per call. */
+    operations?: [unknown];
     [key: string]: unknown;
 };
 export type DohcUiOpenOptions = {

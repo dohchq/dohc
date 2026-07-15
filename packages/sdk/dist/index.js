@@ -569,6 +569,9 @@ export function createDohcClient(options = {}) {
                 if (input.query === undefined && !Array.isArray(input.operations)) {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Database edit input must include a query or operations array.");
                 }
+                if (Array.isArray(input.operations) && input.operations.length !== 1) {
+                    throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Database edit operations must contain exactly one operation per call.");
+                }
                 await requireCapability("databases", "edit", requestOptions);
                 return request("databases.edit", input, requestOptions);
             },

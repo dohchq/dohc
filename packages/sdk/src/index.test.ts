@@ -5,6 +5,7 @@ import {
   createDohcClient,
   createPostMessageTransport,
   DOHC_SDK_PROTOCOL,
+  type DohcDatabaseEditRequest,
 } from ".";
 
 function createWindowHarness() {
@@ -740,6 +741,28 @@ describe("@dohc/sdk", () => {
     });
     await expect(client.files.read("notes/after-timeout.txt")).resolves.toBe("ready");
     expect(calls).toEqual(["capabilities", "files.read"]);
+  });
+
+  it("rejects database edit batches before contacting the host", async () => {
+    const calls: string[] = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          calls.push(method);
+          return { databases: { edit: true } };
+        },
+      },
+    });
+    const legacyBatch = {
+      path: "data/tasks.sqlite",
+      operations: [{ op: "update" }, { op: "delete" }],
+    } as unknown as DohcDatabaseEditRequest;
+
+    await expect(client.databases.edit(legacyBatch)).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.invalidInput,
+      message: expect.stringMatching(/exactly one operation/i),
+    });
+    expect(calls).toEqual([]);
   });
 
   it("exposes the expanded dohc capability surface without hiding host extensions", async () => {

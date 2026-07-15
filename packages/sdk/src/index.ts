@@ -148,7 +148,8 @@ export type DohcDatabaseEditRequest = {
   path: string;
   query?: string;
   params?: unknown[] | Record<string, unknown>;
-  operations?: unknown[];
+  /** The production dohc host currently accepts exactly one structured operation per call. */
+  operations?: [unknown];
   [key: string]: unknown;
 };
 
@@ -956,6 +957,12 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
           throw new DohcSdkError(
             DohcSdkErrorCodes.invalidInput,
             "Database edit input must include a query or operations array.",
+          );
+        }
+        if (Array.isArray(input.operations) && input.operations.length !== 1) {
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.invalidInput,
+            "Database edit operations must contain exactly one operation per call.",
           );
         }
         await requireCapability("databases", "edit", requestOptions);

@@ -195,11 +195,13 @@ describe("listSitePackages", () => {
 
   it("emits exact approved static browser files instead of a recursive site root", async () => {
     await mkdir(join(root, "report", "assets"), { recursive: true });
+    await mkdir(join(root, "report", "data"), { recursive: true });
     await mkdir(join(root, "report", "private"), { recursive: true });
     await mkdir(join(root, "report", "vendor", "dohc-sdk"), { recursive: true });
     await writeFile(join(root, "report", "index.html"), '<script src="./app.js"></script>');
     await writeFile(join(root, "report", "app.js"), "window.ready = true;");
     await writeFile(join(root, "report", "assets", "logo.png"), "image");
+    await writeFile(join(root, "report", "data", "customers.json"), "[]");
     await writeFile(join(root, "report", "vendor", "dohc-sdk", "index.js"), "sdk");
     await writeFile(join(root, "report", "private", "secret.json"), "{}");
     await writeFile(join(root, "report", "secret.json"), "{}");
@@ -217,6 +219,7 @@ describe("listSitePackages", () => {
     });
     expect(site?.shareManifest?.assets).not.toContain("report/private/secret.json");
     expect(site?.shareManifest?.assets).not.toContain("report/secret.json");
+    expect(site?.shareManifest?.assets).not.toContain("report/data/customers.json");
     expect(site?.shareManifest?.assets).not.toContain("report/notes.txt");
     expect(site?.shareManifest?.assets).not.toContain("report/notes.md");
   });
