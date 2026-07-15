@@ -238,7 +238,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(
       join(root, "report", "app.js"),
-      'const label = "secret.json"; window.ready = label;',
+      `const label = "secret.json"; window.ready = label; // export ${"x".repeat(5_000)} "secret.json"`,
     );
     await writeFile(join(root, "report", "assets", "hero.avif"), "image");
     await writeFile(join(root, "report", "assets", "logo.png"), "image");

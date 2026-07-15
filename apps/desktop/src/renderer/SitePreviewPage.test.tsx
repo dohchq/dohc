@@ -607,6 +607,40 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
+  it("resets a manual stop when navigating to a different site", async () => {
+    const user = userEvent.setup();
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-stop"));
+    expect(await screen.findByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
+
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      root: "replacement",
+      title: "Replacement",
+      entryPath: "replacement/index.html",
+      sourceFiles: ["replacement/index.html"],
+      shareManifest: { entryPath: "replacement/index.html", assets: [] },
+    });
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "replacement",
+      mode: "static",
+      url: "http://127.0.0.1:49153/",
+      logs: [],
+      sdkScopeRoot: null,
+    });
+    view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
+
+    const replacementFrame = await screen.findByTestId("site-preview-frame");
+    expect(new URL(replacementFrame.getAttribute("src") ?? "").port).toBe("49153");
+    expect(bridgeMock.startSitePreview).toHaveBeenLastCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "replacement",
+      mode: "static",
+    });
+  });
+
   it("does not let a stale stop completion clear a replacement site", async () => {
     const pendingStop = deferred<undefined>();
     bridgeMock.stopSitePreview.mockReturnValueOnce(pendingStop.promise);

@@ -195,7 +195,7 @@ function referencesFromBrowserText(text: string, sourcePath: string): string[] {
   }
 
   if (/\.(?:html?|js|mjs)$/i.test(sourcePath)) {
-    addMatches(/\b(?:import|export)\s+(?:[^"'`\r\n]*?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(/\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g);
     addMatches(/\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
     addMatches(/\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g);
     addMatches(/\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
