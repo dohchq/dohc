@@ -1,0 +1,89 @@
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import {
+  applyDesktopIconToPlatform,
+  resolveSystemThemeIconPath,
+  shouldUseDarkSystemIcon,
+  systemThemeIconFileName,
+} from "./systemThemeIcon";
+
+describe("system theme app icon", () => {
+  it("selects the matching light or dark asset", () => {
+    expect(systemThemeIconFileName(false)).toBe("icon-light.png");
+    expect(systemThemeIconFileName(true)).toBe("icon-dark.png");
+  });
+
+  it("uses Windows' system-chrome preference instead of an app override", () => {
+    expect(
+      shouldUseDarkSystemIcon("win32", {
+        shouldUseDarkColors: false,
+        shouldUseDarkColorsForSystemIntegratedUI: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldUseDarkSystemIcon("linux", {
+        shouldUseDarkColors: true,
+        shouldUseDarkColorsForSystemIntegratedUI: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldUseDarkSystemIcon("darwin", {
+        shouldUseDarkColors: false,
+        shouldUseDarkColorsForSystemIntegratedUI: true,
+      }),
+    ).toBe(false);
+  });
+
+  it.each(["win32", "linux"] as const)(
+    "updates every %s window icon without touching the macOS Dock",
+    (platform) => {
+      const firstWindow = { setIcon: vi.fn() };
+      const secondWindow = { setIcon: vi.fn() };
+      const setDockIcon = vi.fn();
+
+      applyDesktopIconToPlatform({
+        platform,
+        iconPath: "icon-dark.png",
+        windows: [firstWindow, secondWindow],
+        setDockIcon,
+      });
+
+      expect(firstWindow.setIcon).toHaveBeenCalledWith("icon-dark.png");
+      expect(secondWindow.setIcon).toHaveBeenCalledWith("icon-dark.png");
+      expect(setDockIcon).not.toHaveBeenCalled();
+    },
+  );
+
+  it("updates the macOS Dock without calling the unsupported window API", () => {
+    const window = { setIcon: vi.fn() };
+    const setDockIcon = vi.fn();
+
+    applyDesktopIconToPlatform({
+      platform: "darwin",
+      iconPath: "icon-dark.png",
+      windows: [window],
+      setDockIcon,
+    });
+
+    expect(setDockIcon).toHaveBeenCalledWith("icon-dark.png");
+    expect(window.setIcon).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the packaging icon when themed assets are unavailable", () => {
+    const directory = join("fixtures", "icons");
+    const fallback = join(directory, "icon.png");
+    const existing = new Set([fallback]);
+
+    expect(
+      resolveSystemThemeIconPath(directory, true, (path) =>
+        existing.has(path),
+      ),
+    ).toBe(fallback);
+  });
+
+  it("returns null when no usable icon exists", () => {
+    expect(resolveSystemThemeIconPath("icons", false, () => false)).toBe(
+      null,
+    );
+  });
+});

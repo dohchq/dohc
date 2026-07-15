@@ -19,6 +19,9 @@ function check(ok, label) {
 for (const output of ["dist/main/main.js", "dist/preload/preload.cjs", "dist/renderer/index.html"]) {
   check(existsSync(join(desktopDir, output)), `build output exists: ${output}`);
 }
+for (const icon of ["build/icon-light.png", "build/icon-dark.png"]) {
+  check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
+}
 check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
   "bundled dohc chat CLI exists",
@@ -29,6 +32,10 @@ const pkg = JSON.parse(readFileSync(join(desktopDir, "package.json"), "utf8"));
 check(pkg.name.includes("dohc"), `package name carries dohc (${pkg.name})`);
 check(pkg.main === "dist/main/main.js", "package main points at the built entry");
 check(typeof pkg.version === "string" && pkg.version.length > 0, "package version set (artifact naming)");
+check(
+  pkg.desktopName === "dohc.desktop",
+  "Linux runtime desktopName matches the generated launcher name",
+);
 
 // --- electron-builder config ----------------------------------------------
 // js-yaml ships in the workspace through electron-builder's own tree;
@@ -47,9 +54,23 @@ if (config) {
   check(config.productName === "dohc", "productName is dohc");
   check(typeof config.appId === "string" && config.appId.includes("dohc"), `appId carries dohc (${config.appId})`);
   check(config.executableName === "dohc", "executableName is filesystem-safe");
+  check(
+    config.linux?.syncDesktopName === true,
+    "Linux launcher filename and StartupWMClass sync to desktopName",
+  );
   check(config.asar === true, "asar is enabled");
   check(Array.isArray(config.files) && config.files.includes("dist/**"), "files ship the built dist tree");
   const extraResources = Array.isArray(config.extraResources) ? config.extraResources : [];
+  for (const theme of ["light", "dark"]) {
+    check(
+      extraResources.some(
+        (entry) =>
+          entry?.from === `build/icon-${theme}.png` &&
+          entry?.to === `icon-${theme}.png`,
+      ),
+      `${theme} system theme icon ships as an extraResource`,
+    );
+  }
   check(
     extraResources.some(
       (entry) =>

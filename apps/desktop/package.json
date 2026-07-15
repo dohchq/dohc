@@ -2,6 +2,7 @@
   "name": "@dohc/desktop",
   "private": true,
   "version": "0.1.0",
+  "desktopName": "dohc.desktop",
   "type": "module",
   "main": "dist/main/main.js",
   "scripts": {
