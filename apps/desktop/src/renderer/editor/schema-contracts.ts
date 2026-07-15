@@ -18,8 +18,6 @@ export type DohcV2ConstructName =
   | 'escapedPunctuation'
   | 'wikilink'
   | 'inlineAtom'
-  | 'formula'
-  | 'queryBlock'
   | 'callout'
   | 'highlight'
   | 'mathInline'
@@ -87,8 +85,6 @@ export interface DohcV2MarkdownExtensionContract<Node = unknown, Token = unknown
 export const FIRST_CLASS_V2_CONSTRUCTS = [
   'wikilink',
   'inlineAtom',
-  'formula',
-  'queryBlock',
 ] as const satisfies readonly DohcV2ConstructName[]
 
 export const DOHC_V2_CONSTRUCTS = [
@@ -301,38 +297,6 @@ export const DOHC_V2_CONSTRUCTS = [
     note: 'AI-native inline data reference; parser must preserve capture security semantics.',
   },
   {
-    name: 'formula',
-    kind: 'inline',
-    canonical: 'tiptap-node',
-    yjsField: 'body',
-    editableBodyNode: true,
-    markdown: {
-      parse: 'custom-extension',
-      render: 'custom-extension',
-      lossless: true,
-      fixtureRequired: true,
-    },
-    requiresPaidTiptap: false,
-    phase1Scope: 'required',
-    note: 'Formula tokens stay first-class so agents can edit intent, not raw punctuation.',
-  },
-  {
-    name: 'queryBlock',
-    kind: 'block',
-    canonical: 'tiptap-node',
-    yjsField: 'body',
-    editableBodyNode: true,
-    markdown: {
-      parse: 'custom-extension',
-      render: 'custom-extension',
-      lossless: true,
-      fixtureRequired: true,
-    },
-    requiresPaidTiptap: false,
-    phase1Scope: 'required',
-    note: 'Fenced query blocks remain deterministic markdown and editable as a block.',
-  },
-  {
     name: 'callout',
     kind: 'block',
     canonical: 'tiptap-node',
@@ -444,8 +408,6 @@ const REQUIRED_CONSTRUCTS: readonly DohcV2ConstructName[] = [
   'escapedPunctuation',
   'wikilink',
   'inlineAtom',
-  'formula',
-  'queryBlock',
   'callout',
   'highlight',
   'mathInline',

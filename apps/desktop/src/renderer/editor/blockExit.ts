@@ -17,8 +17,7 @@ import type { EditorView } from "@tiptap/pm/view";
 //     Without this, HardBreak's Mod-Enter swallows the key inside callouts.
 //   - ArrowDown at the very end of the document, when the caret is trapped
 //     inside a top-level callout/table or a code-style block, creates the
-//     paragraph below (parity with makeCodeBlockContinuationPlugin, which
-//     only covers codeBlock — this also covers callout, queryBlock, and table).
+//     paragraph below. This covers codeBlock, callout, and table node types.
 //   - Arrow/Backspace/Delete next to a FOLDED callout select the callout node
 //     instead of joining into / moving the caret onto its hidden body. A
 //     second Backspace/Delete then removes it — making toggles deletable.

@@ -51,7 +51,7 @@ reviews:
     - label: "convex"
       instructions: "Convex schema, queries, mutations, actions, indexes, auth, or generated API contract changes."
     - label: "editor"
-      instructions: "Tiptap, Yjs, markdown import/export, inline atoms, formulas, editor readiness, collaboration, or persistence projection."
+      instructions: "Tiptap, Yjs, markdown import/export, inline atoms, editor readiness, collaboration, or persistence projection."
     - label: "frontend"
       instructions: "React, TanStack Start, routing, UI components, styles, app shell, or client-side interaction behavior."
     - label: "collab"
@@ -95,13 +95,13 @@ reviews:
     - path: "apps/app/src/components/AtomEditor*"
       instructions: |
         Review editor changes for Y.Doc-first behavior, command ergonomics,
-        slash commands, inline atoms, formulas, and lifecycle edge cases. Watch
+        slash commands, inline atoms, and lifecycle edge cases. Watch
         for regressions that desync sender/receiver contracts or bypass tests.
     - path: "apps/app/src/components/HtmlAtomFrame.tsx"
       instructions: |
         HTML atoms must stay sandboxed and sanitized. Flag network fetches,
-        unsafe script execution, broad CSP changes, formula evaluation inside
-        author HTML, or interpolation paths that bypass the trusted shell.
+        unsafe script execution, broad CSP changes, or interpolation paths that
+        bypass the trusted shell.
     - path: "apps/app/src/lib/htmlSanitize*"
       instructions: |
         Treat sanitizer changes as security-sensitive. Verify the allowlist is

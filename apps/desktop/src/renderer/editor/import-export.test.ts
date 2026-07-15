@@ -60,25 +60,6 @@ describe('desktop editor markdown round-trip', () => {
     expect(output).toContain('# Body')
   })
 
-  it('imports query and dohc-query fences with info strings as query blocks', () => {
-    const output = yDocToMarkdown(
-      markdownToYDoc(
-        [
-          '```query render="text"',
-          'tasks.list("open")',
-          '```',
-          '',
-          '```dohc-query theme="dark"',
-          'tasks.list("closed")',
-          '```',
-        ].join('\n'),
-      ),
-    )
-
-    expect(output).toContain('```dohc-query render="text"')
-    expect(output).toContain('```dohc-query theme="dark"')
-  })
-
   it('preserves view source files as plain text instead of markdown prose', () => {
     const input = [
       '---',
@@ -101,6 +82,22 @@ describe('desktop editor markdown round-trip', () => {
 
   it('keeps a blank separator between frontmatter and rich markdown body', () => {
     const input = ['---', 'id: note-1', '---', '', '# Plan'].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+
+  it('preserves retired document-computation syntax as inert markdown', () => {
+    const input = [
+      'Retired expressions stay literal: {{formula:SUM(hours)}} and {= 1 + 2}.',
+      '',
+      '```query',
+      'from tasks',
+      '```',
+      '',
+      '```dohc-query',
+      'sum(hours)',
+      '```',
+    ].join('\n')
+
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
@@ -158,13 +155,13 @@ describe('desktop editor markdown round-trip', () => {
     expect(keyOrder).toEqual(['id', 'title', 'icon', 'alpha', 'zeta'])
   })
 
-  it('preserves wikilinks and inline atoms across the round-trip (custom nodes)', () => {
+  it('preserves wikilinks, inline atoms, and ordinary brace text across the round-trip', () => {
     const output = yDocToMarkdown(
-      markdownToYDoc('See [[notes/today|Today]] — budget {rate: 150} and {= a + b}.'),
+      markdownToYDoc('See [[notes/today|Today]] — budget {rate: 150} and {estimate pending}.'),
     )
     expect(output).toContain('[[notes/today|Today]]')
     expect(output).toContain('{rate: 150}')
-    expect(output).toContain('{= a + b}')
+    expect(output).toContain('{estimate pending}')
   })
 
   it('preserves task lists instead of degrading them to plain bullets', () => {
@@ -755,7 +752,7 @@ describe('desktop editor markdown round-trip', () => {
   it('round-trips inline math adjacent to marks', () => {
     // A mark that WRAPS a childless inline atom is dropped by the base markdown
     // manager (applyMarkToContent only attaches marks to text nodes) — this is
-    // shared by every inline atom (image, inlineAtom, formula, wikilink), not a
+    // shared by every inline atom (image, inlineAtom, wikilink), not a
     // math quirk. Marks ADJACENT to math round-trip cleanly, which is the case
     // that matters in practice.
     const input = 'Adjacent **bold** and $x^2$ and *emphasis* stay put.'

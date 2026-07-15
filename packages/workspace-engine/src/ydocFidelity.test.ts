@@ -66,9 +66,25 @@ const CORPUS: Array<{ name: string; markdown: string; survives: string[] }> = [
     survives: ["| Metric", "apples", "- [ ] write the migration", "- [x] keep completed work visible", "~~obsolete note~~"],
   },
   {
-    name: "code fence + custom dohc query fence",
-    markdown: ["```ts", "const answer = 42", "```", "", "```query render=\"text\"", "tasks.list(\"open\")", "```"].join("\n"),
-    survives: ["```ts\nconst answer = 42\n```", "```dohc-query render=\"text\"", "tasks.list(\"open\")"],
+    name: "code fence",
+    markdown: ["```ts", "const answer = 42", "```"].join("\n"),
+    survives: ["```ts\nconst answer = 42\n```"],
+  },
+  {
+    name: "retired query fence labels stay inert",
+    markdown: [
+      "```query",
+      "from tasks",
+      "```",
+      "",
+      "```dohc-query",
+      "sum(hours)",
+      "```",
+    ].join("\n"),
+    survives: [
+      "```query\nfrom tasks\n```",
+      "```dohc-query\nsum(hours)\n```",
+    ],
   },
   {
     name: "frontmatter + obsidian power-user syntax",

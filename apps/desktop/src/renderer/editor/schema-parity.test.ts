@@ -18,8 +18,6 @@ describe('desktop editor schema parity with hocuspocus', () => {
       'escapedPunctuation',
       'wikilink',
       'inlineAtom',
-      'formula',
-      'queryBlock',
       'callout',
       'mathInline',
       'mathBlock',

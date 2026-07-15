@@ -294,7 +294,6 @@ describe("blockControls gutter coverage", () => {
           },
           { type: "callout", attrs: { calloutType: "note", title: "", fold: "" }, content: [{ type: "paragraph" }] },
           { type: "mathBlock", attrs: { tex: "x" } },
-          { type: "queryBlock", attrs: { info: "" }, content: [{ type: "text", text: "query" }] },
         ],
       }),
     );

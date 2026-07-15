@@ -76,25 +76,6 @@ describe('hocuspocus markdown import/export', () => {
     }
   })
 
-  it('imports query and dohc-query fences with info strings as query blocks', () => {
-    const output = yDocToMarkdown(
-      markdownToYDoc(
-        [
-          '```query render="text"',
-          'tasks.list("open")',
-          '```',
-          '',
-          '```dohc-query theme="dark"',
-          'tasks.list("closed")',
-          '```',
-        ].join('\n'),
-      ),
-    )
-
-    expect(output).toContain('```dohc-query render="text"')
-    expect(output).toContain('```dohc-query theme="dark"')
-  })
-
   it('preserves website source files as plain text instead of markdown prose', () => {
     const input = [
       '---',
@@ -117,6 +98,22 @@ describe('hocuspocus markdown import/export', () => {
 
   it('keeps an existing blank separator between frontmatter and rich markdown body', () => {
     const input = ['---', 'id: note-1', '---', '', '', '# Plan'].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+
+  it('preserves retired document-computation syntax as inert markdown', () => {
+    const input = [
+      'Retired expressions stay literal: {{formula:SUM(hours)}} and {= 1 + 2}.',
+      '',
+      '```query',
+      'from tasks',
+      '```',
+      '',
+      '```dohc-query',
+      'sum(hours)',
+      '```',
+    ].join('\n')
+
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
@@ -439,23 +436,11 @@ describe('hocuspocus markdown import/export', () => {
     )
   })
 
-  // Projection-fidelity guard: the DohcQueryBlock extension registers the
-  // `code` markdown token and must DEFER (not consume) an ordinary fenced code
-  // block. A regression here would silently DROP code blocks on import.
   it('round-trips ordinary fenced code blocks without dropping them', () => {
     expectStableMarkdownRoundTrip(
       ['```js', 'const x = 1;', '```', '', '```', 'no language here', '```', ''].join('\n'),
       ['```js\nconst x = 1;\n```', 'no language here'],
     )
-  })
-
-  it('still parses a dohc query fence as a query block, not plain code', () => {
-    const md = ['```query', 'SELECT title FROM notes', '```', ''].join('\n')
-    const out = yDocToMarkdown(markdownToYDoc(md))
-    expect(out).toContain('SELECT title FROM notes')
-    // Query fences normalize to the `dohc-query` info string (its own node),
-    // proving the extension consumed the query fence while deferring plain ones.
-    expect(out).toContain('```dohc-query')
   })
 
   it('round-trips Obsidian callouts across every core type, fold flag, and title state', () => {
@@ -715,7 +700,7 @@ describe('hocuspocus markdown import/export', () => {
   it('round-trips inline math adjacent to marks', () => {
     // A mark that WRAPS a childless inline atom is dropped by the base markdown
     // manager (applyMarkToContent only attaches marks to text nodes) — this is
-    // shared by every inline atom (image, inlineAtom, formula, wikilink), not a
+    // shared by every inline atom (image, inlineAtom, wikilink), not a
     // math quirk. Marks ADJACENT to math round-trip cleanly, which is the case
     // that matters in practice.
     const input = 'Adjacent **bold** and $x^2$ and *emphasis* stay put.'

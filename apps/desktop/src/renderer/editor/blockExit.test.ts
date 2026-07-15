@@ -219,15 +219,6 @@ describe("blockExit ArrowDown at document end", () => {
     expect(editor.state.selection.$from.depth).toBe(1);
   });
 
-  it("creates a paragraph below a doc-terminal query block", () => {
-    const editor = makeEditor("```dohc-query\nselect x\n```");
-    editor.commands.focus("end");
-
-    press(editor, { key: "ArrowDown" });
-
-    expect(topLevelTypes(editor)).toEqual(["queryBlock", "paragraph"]);
-  });
-
   it("creates a paragraph below a doc-terminal table from its last cell", () => {
     const editor = makeEditor("| a | b |\n| --- | --- |\n| 1 | 2 |");
     editor.commands.focus("end");
@@ -454,16 +445,4 @@ describe("blockExit locked defaults", () => {
     expect(topLevelTypes(editor)).toEqual(["mathBlock", "paragraph"]);
   });
 
-  it("Backspace in an emptied query block turns it back into a paragraph", () => {
-    const editor = makeEditor("```dohc-query\nx\n```");
-    editor.commands.command(({ tr, dispatch }) => {
-      if (dispatch) dispatch(tr.delete(1, 2));
-      return true;
-    });
-    editor.commands.setTextSelection(1);
-
-    press(editor, { key: "Backspace" });
-
-    expect(topLevelTypes(editor)).toEqual(["paragraph"]);
-  });
 });

@@ -14,15 +14,17 @@
 - Inline atom decorations.
   - Current files: `apps/app/src/components/inlineAtomPlugin.ts`, `apps/app/convex/inlineAtom.ts`
   - v2 target: Tiptap inline atom extension backed by the existing grammar tests.
-- Query fences, formulas, live totals, and ASCII/code block display behavior.
-  - Current file: `apps/app/src/components/AtomEditor.tsx`
-  - v2 target: custom extensions/decorations that consume projected markdown or Y.Doc nodes.
+- ASCII/code block display behavior.
+  - Current file: `apps/desktop/src/renderer/editor/MarkdownEditor.tsx`
+  - v2 target: ordinary Markdown code blocks plus explicit visual extensions such as Mermaid.
 - Read-only shared atom view.
   - Current files: `apps/app/src/components/SharedAtomView.tsx`, `apps/app/src/components/AtomEditor.tsx`
   - v2 target: Hocuspocus ACL plus read-only Tiptap editor state.
 
 ## Intentionally Drop
 
+- Executable formulas, live totals, and query fences embedded in Markdown.
+  - Reason: their legacy evaluators were retired and inert syntax creates a false product promise. Expression-like braces remain ordinary prose and fenced blocks remain ordinary code.
 - Debounced full-body editor autosave as canonical content write.
   - Reason: Y.Doc becomes canonical; `atoms.body` is only a projection/cache.
 - `baseBody` compare-and-swap as the collaboration model.

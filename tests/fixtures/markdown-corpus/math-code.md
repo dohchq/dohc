@@ -1,4 +1,4 @@
-# Math Code Query
+# Math And Code
 
 Inline math $E = mc^2$ should survive.
 
@@ -8,8 +8,4 @@ $$
 
 ```ts
 export const value = "[[not a wikilink inside code]]";
-```
-
-```dohc-query
-tag:v2 status:open
 ```

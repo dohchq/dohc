@@ -1,9 +1,8 @@
 // Mermaid diagram rendering inside WYSIWYG code blocks — a ProseMirror
 // decoration layer, deliberately NOT a schema/nodeView change. Mermaid
 // fences are plain `codeBlock` nodes with `language: "mermaid"` (the same
-// contract-locked schema every other fence uses — see schema-parity.test.ts
-// and extensions.ts's queryBlock defer comment for why `dohc-query` is the
-// only fence language that gets its own node). This plugin paints a
+// contract-locked schema every other fence uses — see schema-parity.test.ts).
+// This plugin paints a
 // rendered diagram widget BELOW the block without ever touching the node's
 // markdown round-trip — the fence text stays the single source of truth.
 //

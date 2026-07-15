@@ -99,7 +99,7 @@ Design:
 - `frontmatter` Y.Map stores parsed YAML metadata.
 - `meta` Y.Map stores `schemaVersion: 1`.
 - `body` Y.XmlFragment stores the canonical ProseMirror tree, initialized through `y-prosemirror`.
-- `wikilink`, `inlineAtom`, `formula`, and `queryBlock` import as dohc-owned Tiptap nodes through OSS markdown tokenizers/renderers.
+- `wikilink` and `inlineAtom` import as dohc-owned Tiptap nodes through OSS markdown tokenizers/renderers.
 - `yDocToMarkdown` serializes the `Y.XmlFragment` back through the Tiptap schema and `MarkdownManager`, then prepends deterministic YAML frontmatter.
 
 - [x] **Step 2: Run focused test**

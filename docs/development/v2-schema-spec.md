@@ -46,10 +46,10 @@ Tiptap's Collaboration extension can bind to a raw Yjs fragment. v2 uses that sh
 | `blockquote` | Tiptap node | `body` | yes | CommonMark parse/render | required |
 | `horizontalRule` | Tiptap node | `body` | yes | CommonMark parse/render | required |
 | `table` | Tiptap node | `body` | yes | GFM parse/render | required |
+| `image` | Tiptap node | `body` | yes | CommonMark parse/render | required |
+| `escapedPunctuation` | Tiptap node | `body` | yes | CommonMark parse/render | required |
 | `wikilink` | Tiptap node | `body` | yes | custom extension | required |
 | `inlineAtom` | Tiptap node | `body` | yes | custom extension | required |
-| `formula` | Tiptap node | `body` | yes | custom extension | required |
-| `queryBlock` | Tiptap node | `body` | yes | custom extension | required |
 | `callout` | Tiptap node | `body` | yes | custom extension | required |
 | `highlight` | Tiptap mark | `body` | yes | custom extension | required |
 | `mathInline` | Tiptap node | `body` | yes | custom extension | required |
@@ -98,8 +98,6 @@ These constructs must be first-class, not opaque text:
 
 - `wikilink`
 - `inlineAtom`
-- `formula`
-- `queryBlock`
 
 Why: dohc's AI agent must edit intent, references, and semantic blocks without guessing punctuation offsets in raw markdown. Each one needs deterministic markdown parse/render behavior and a stable internal representation.
 
@@ -119,7 +117,7 @@ Rules:
 
 1. `parseMarkdown` must not inspect editor DOM.
 2. `renderMarkdown` must be deterministic for the same node input.
-3. Code blocks are inert for `wikilink`, `inlineAtom`, `formula`, and capture parsing.
+3. Code blocks are inert for `wikilink`, `inlineAtom`, and capture parsing.
 4. Custom syntax must be covered by `tests/fixtures/markdown-corpus/`.
 5. If a construct cannot round-trip through markdown, it is not allowed in Phase 1 editable body.
 
@@ -145,7 +143,7 @@ HTML atoms remain a separate document mode in Phase 1.
 Reasons:
 
 - Current HTML atoms bypass Crepe entirely.
-- Sanitization and formula substitution happen in server/iframe code.
+- Sanitization happens in server/iframe code.
 - Forcing raw HTML into the normal markdown editor would weaken the security boundary and muddy the schema.
 
 Phase 1 can still represent an HTML atom's metadata in `frontmatter`/`meta`, but its body stays raw HTML until a later explicit product decision.
@@ -175,7 +173,9 @@ Projection output must include:
 
 ## Schema Versioning
 
-`meta.schemaVersion` starts at `1`.
+`meta.schemaVersion` starts at `1`. Removing editor-only construct registrations
+does not change the persisted `body`/`frontmatter`/`meta` field shape and therefore
+does not require a schema-version bump.
 
 Rules:
 

@@ -48,12 +48,12 @@ describe('computeAtomRanges — offsets', () => {
     const r = computeAtomRanges(
       fakeDoc([
         { text: '{a: 1}', pos: 1 },
-        { text: 'mid {total_x} end', pos: 40 },
+        { text: 'mid {b: 2} end', pos: 40 },
       ]),
     )
     expect(r).toEqual([
       { from: 1, to: 7, kind: 'value' },
-      { from: 44, to: 53, kind: 'liveTotal' },
+      { from: 44, to: 50, kind: 'value' },
     ])
   })
 })
@@ -87,25 +87,18 @@ describe('computeAtomRanges — code is verbatim (the bug Codex flagged)', () =>
     expect(r).toEqual([{ from: 20, to: 26, kind: 'value' }])
   })
 
-  // atom-address-v1 Phase 3 contract change (was Phase-2 parse-only):
-  // a `{= … }` formula NOW produces a range (kind:'formula') so the
-  // token is styled + the value widget can anchor — and crucially
-  // every v0 range is byte-identical (no `{= }` in v0 inputs).
-  it('a {= …} formula now produces a formula range; v0 ranges byte-unchanged', () => {
+  it('retired expressions stay plain while value captures are decorated', () => {
     const r = computeAtomRanges(
       fakeDoc([
-        { text: 'a {= sum(log.*.billable)} b', pos: 1 },
+        { text: 'a {sum(log.*.billable)} b', pos: 1 },
         { text: '{hours: 6}', pos: 40 }, // v0 value → identical offsets
       ]),
     )
-    expect(r).toEqual([
-      { from: 3, to: 26, kind: 'formula' },
-      { from: 40, to: 50, kind: 'value' },
-    ])
+    expect(r).toEqual([{ from: 40, to: 50, kind: 'value' }])
   })
-  it('a malformed/typing {= sum(lo stays plain — no range, no slop', () => {
-    const r = computeAtomRanges(fakeDoc([{ text: 'x {= sum(lo y', pos: 1 }]))
-    expect(r).toEqual([]) // not a formula ⇒ calm plain source (§3 NIT #5)
+  it('an expression-like token stays plain — no range, no slop', () => {
+    const r = computeAtomRanges(fakeDoc([{ text: 'x {sum(lo y', pos: 1 }]))
+    expect(r).toEqual([])
   })
 
   it('makeInlineAtomPlugin builds a ProseMirror plugin keyed by inlineAtomKey', () => {

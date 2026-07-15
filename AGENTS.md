@@ -38,7 +38,7 @@ We should avoid feature creep, and assume our users can use their agents to crea
 
 As an example, let's discuss CRM.
 
-Should dohc have first-class documents, entities, links, formulas, permissions, source-backed apps, search, provenance, and agent-safe edits? Absolutely. No user or agent should have to invent the basic substrate that makes work inspectable, durable, and owned.
+Should dohc have first-class documents, entities, links, permissions, source-backed apps, search, provenance, and agent-safe edits? Absolutely. No user or agent should have to invent the basic substrate that makes work inspectable, durable, and owned.
 
 Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's agent should be able to build a CRM, project tracker, client dashboard, hiring pipeline, or personal operating system out of dohc's primitives.
 
