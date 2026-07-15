@@ -57,6 +57,14 @@ function lineRecords(markdown: string): Array<{ text: string; line: number; offs
   return records;
 }
 
+function canBeSetextHeadingText(value: string): boolean {
+  // A setext underline can only promote paragraph text. Lines that already
+  // open another block (a quote or list item) are not paragraph text at this
+  // level, so treating them as headings would invent headings for common
+  // `- item\n---` and `> quote\n---` sequences.
+  return !/^[ \t]{0,3}(?:>|[-+*](?:[ \t]+|$)|\d{1,9}[.)](?:[ \t]+|$))/u.test(value);
+}
+
 export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
   const lines = lineRecords(markdown);
   const pending: PendingHeading[] = [];
@@ -91,7 +99,11 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
     }
 
     const underline = lines[index + 1];
-    if (!underline || row.text.trim().length === 0) continue;
+    if (
+      !underline ||
+      row.text.trim().length === 0 ||
+      !canBeSetextHeadingText(row.text)
+    ) continue;
     const setext = underline.text.match(/^[ \t]{0,3}(=+|-+)[ \t]*$/);
     if (!setext?.[1]) continue;
     const text = visibleHeadingText(row.text.trim());

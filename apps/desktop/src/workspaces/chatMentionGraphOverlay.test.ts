@@ -222,4 +222,67 @@ describe("addChatMentionsToWorkspaceGraph", () => {
       graph.edges.some((edge) => edge.kind === "chat-mentions-file"),
     ).toBe(false);
   });
+
+  it("caps chat and heading titles for the public graph contract", () => {
+    const graph = addChatMentionsToWorkspaceGraph(
+      baseGraph(),
+      [
+        {
+          threadId: "thread-long",
+          threadTitle: "T".repeat(300),
+          messageId: "message-long",
+          fileObjectId: "object-plan",
+          filePath: "docs/plan.md",
+          heading: {
+            anchor: "long-heading",
+            text: "H".repeat(300),
+          },
+        },
+      ],
+      true,
+      baseObjectIds(),
+    );
+
+    const thread = graph.nodes.find((node) => node.kind === "chat-thread");
+    const heading = graph.nodes.find((node) => node.kind === "heading");
+    expect(thread?.title).toHaveLength(120);
+    // The IPC adapter adds the leading `#`, yielding exactly 120 characters.
+    expect(heading?.title).toHaveLength(119);
+  });
+
+  it("keeps a base graph at the node cap and removes edges for omitted overlays", () => {
+    const base: WorkspaceGraph = {
+      nodes: Array.from({ length: 2000 }, (_, index) => ({
+        path: `docs/${index.toString().padStart(4, "0")}.md`,
+        title: `File ${index}`,
+        incoming: 0,
+        outgoing: 0,
+      })),
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 2000,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    };
+    const targetPath = "docs/0000.md";
+    const graph = addChatMentionsToWorkspaceGraph(
+      base,
+      [
+        {
+          threadId: "thread-over-cap",
+          threadTitle: "Over cap",
+          messageId: "message-over-cap",
+          fileObjectId: "object-target",
+          filePath: targetPath,
+          heading: { anchor: "scope", text: "Scope" },
+        },
+      ],
+      true,
+      new Map([[targetPath, "object-target"]]),
+    );
+
+    expect(graph.nodes).toHaveLength(2000);
+    expect(graph.nodes.every((node) => node.kind === "file")).toBe(true);
+    expect(graph.edges).toEqual([]);
+  });
 });

@@ -1246,7 +1246,6 @@ export const ListPersonalChatFeedResult = z.object({
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
   headCursor: z.string().max(1000).optional(),
-  lastSeenCursor: z.string().max(1000).optional(),
 });
 export type ListPersonalChatFeedResult = z.infer<
   typeof ListPersonalChatFeedResult

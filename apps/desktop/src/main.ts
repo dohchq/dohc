@@ -3195,7 +3195,7 @@ function registerIpcHandlers(): void {
                       channelKind: node.channel.kind,
                     }
                   : {}),
-                title: node.title,
+                title: node.title.slice(0, 120),
                 incoming: node.incoming,
                 outgoing: node.outgoing,
               }
@@ -3204,7 +3204,7 @@ function registerIpcHandlers(): void {
                 kind: "heading" as const,
                 filePath: node.filePath,
                 headingAnchor: node.anchor,
-                title: `#${node.title}`,
+                title: `#${node.title.slice(0, 119)}`,
                 incoming: node.incoming,
                 outgoing: node.outgoing,
               },

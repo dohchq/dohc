@@ -42,6 +42,12 @@ function storeAt(path = root) {
   });
 }
 
+function cursorFor(message: { id: string; createdAtMs: number }): string {
+  return Buffer.from(JSON.stringify([message.createdAtMs, message.id]), "utf8").toString(
+    "base64url",
+  );
+}
+
 function receiverStateReplicationOps(): SyncReplicationEnvelope[] {
   const db = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
   try {
@@ -254,6 +260,80 @@ describe("personal chat Feed", () => {
     expect(
       (await store.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" })).readState,
     ).toMatchObject({ lastSeenMessageId: reply.id });
+  });
+
+  it("rejects read cursors for unfollowed messages and DMs", async () => {
+    const store = storeAt();
+    const updates = await store.createChannel({
+      workspaceId: "ws",
+      name: "Updates",
+      kind: "channel",
+    });
+    const publicStarted = await store.startChannelThread({
+      workspaceId: "ws",
+      channelId: updates.id,
+      author: { kind: "human", displayName: "Alice" },
+      authorUserId: "alice",
+      body: "Visible while Alice is followed",
+    });
+    await store.setFollow({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "person",
+      targetId: "alice",
+      state: "following",
+    });
+    const visible = await store.listPersonalFeed({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+    });
+    expect(visible.headCursor).toBe(cursorFor(publicStarted.message));
+
+    await store.setFollow({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "person",
+      targetId: "alice",
+      state: "unfollowed",
+    });
+    await expect(
+      store.markPersonalFeedSeen({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        headCursor: visible.headCursor!,
+      }),
+    ).rejects.toThrow("stale or no longer visible");
+
+    const dm = await store.createChannel({
+      workspaceId: "ws",
+      name: "Private",
+      kind: "dm",
+    });
+    const privateStarted = await store.startChannelThread({
+      workspaceId: "ws",
+      channelId: dm.id,
+      author: { kind: "human", displayName: "Alice" },
+      authorUserId: "alice",
+      body: "Private message",
+    });
+    await store.setFollow({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "person",
+      targetId: "alice",
+      state: "following",
+    });
+    await expect(
+      store.markPersonalFeedSeen({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        headCursor: cursorFor(privateStarted.message),
+      }),
+    ).rejects.toThrow("stale or no longer visible");
+    expect(
+      (await store.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" }))
+        .readState,
+    ).toBeUndefined();
   });
 
   it("retains unfollow tombstones and default seeding never resurrects them", async () => {

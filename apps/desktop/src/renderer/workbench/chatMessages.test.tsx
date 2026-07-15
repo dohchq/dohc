@@ -6,6 +6,7 @@ import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeCont
 import {
   ChatComposer,
   ChatMessageList,
+  MentionText,
   chatAuthorLabel,
   runReactionToggle,
   type ReactionToggleContext,
@@ -128,6 +129,30 @@ describe("chat authorship display", () => {
       .toContain("plan.md#scope");
     expect(screen.getByTestId("test-chat-message-body").textContent)
       .toContain("@[docs/code.md]");
+  });
+
+  it("classifies mention code ranges across the whole message when file chips split rendering", () => {
+    render(
+      <div data-testid="message">
+        <MentionText
+          body={[
+            "@ice see @[docs/plan.md]",
+            "```text",
+            "@[docs/inert.md]",
+            "@ice remains code in this unclosed fence",
+          ].join("\n")}
+          candidates={[{ id: "ice", kind: "user", handle: "ice", label: "Ice" }]}
+          testId="whole-message"
+        />
+      </div>,
+    );
+
+    expect(screen.getAllByTestId("whole-message-mention")).toHaveLength(1);
+    expect(screen.getByTestId("whole-message-mention").textContent).toBe("@ice");
+    expect(screen.getAllByTestId("whole-message-file-mention")).toHaveLength(1);
+    expect(screen.getByTestId("message").textContent).toContain(
+      "@[docs/inert.md]\n@ice remains code",
+    );
   });
 });
 

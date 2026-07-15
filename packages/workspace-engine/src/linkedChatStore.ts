@@ -785,6 +785,37 @@ interface FeedCursorValue {
   messageId: string;
 }
 
+// Shared by feed listing and read-boundary validation. A receiver may advance
+// only to a non-DM message that is visible through one of their ACTIVE follow
+// cells. Keeping this predicate singular prevents the write path from drifting
+// into a broader authorization surface than the read path.
+const PERSONAL_FEED_VISIBILITY_PREDICATE = `
+  AND (t.channel_id IS NULL OR c.kind <> 'dm')
+  AND (
+    EXISTS (
+      SELECT 1 FROM chat_follows f
+      WHERE f.workspace_id = m.workspace_id
+        AND f.owner_user_id = ? AND f.state = 'following'
+        AND f.target_kind = CASE m.author_kind
+          WHEN 'agent' THEN 'agent' ELSE 'person' END
+        AND f.target_id = m.author_user_id
+    )
+    OR EXISTS (
+      SELECT 1 FROM chat_follows f
+      WHERE f.workspace_id = m.workspace_id
+        AND f.owner_user_id = ? AND f.state = 'following'
+        AND f.target_kind = 'thread' AND f.target_id = m.thread_id
+    )
+    OR (m.message_order = 0 AND EXISTS (
+      SELECT 1 FROM chat_channel_wire_ids w
+      JOIN chat_follows f
+        ON f.workspace_id = w.workspace_id
+       AND f.owner_user_id = ? AND f.state = 'following'
+       AND f.target_kind = 'channel' AND f.target_id = w.wire_id
+      WHERE w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id
+    ))
+  )`;
+
 function encodeFeedCursor(value: FeedCursorValue): string {
   return Buffer.from(JSON.stringify([value.createdAtMs, value.messageId]), "utf8").toString(
     "base64url",
@@ -3230,31 +3261,7 @@ export function createLinkedChatStore(
                  LEFT JOIN chat_channels c
                    ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
                  WHERE m.workspace_id = ?
-                   AND (t.channel_id IS NULL OR c.kind <> 'dm')
-                   AND (
-                     EXISTS (
-                       SELECT 1 FROM chat_follows f
-                       WHERE f.workspace_id = m.workspace_id
-                         AND f.owner_user_id = ? AND f.state = 'following'
-                         AND f.target_kind = CASE m.author_kind
-                           WHEN 'agent' THEN 'agent' ELSE 'person' END
-                         AND f.target_id = m.author_user_id
-                     )
-                     OR EXISTS (
-                       SELECT 1 FROM chat_follows f
-                       WHERE f.workspace_id = m.workspace_id
-                         AND f.owner_user_id = ? AND f.state = 'following'
-                         AND f.target_kind = 'thread' AND f.target_id = m.thread_id
-                     )
-                     OR (m.message_order = 0 AND EXISTS (
-                       SELECT 1 FROM chat_channel_wire_ids w
-                       JOIN chat_follows f
-                         ON f.workspace_id = w.workspace_id
-                        AND f.owner_user_id = ? AND f.state = 'following'
-                        AND f.target_kind = 'channel' AND f.target_id = w.wire_id
-                       WHERE w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id
-                     ))
-                   )
+                    ${PERSONAL_FEED_VISIBILITY_PREDICATE}
                    ${after ? "AND (m.created_at_ms < ? OR (m.created_at_ms = ? AND m.message_id < ?))" : ""}
                  ORDER BY m.created_at_ms DESC, m.message_id DESC
                  LIMIT ?`,
@@ -3397,14 +3404,30 @@ export function createLinkedChatStore(
           );
         }
         const cursor = decodeFeedCursor(input.headCursor);
-        const message = db
+        const visibleMessage = db
           .prepare(
-            `SELECT 1 FROM chat_messages
-             WHERE workspace_id = ? AND message_id = ? AND created_at_ms = ?`,
+            `SELECT 1 FROM chat_messages m
+             JOIN chat_threads t
+               ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+             LEFT JOIN chat_channels c
+               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
+             WHERE m.workspace_id = ? AND m.message_id = ? AND m.created_at_ms = ?
+               ${PERSONAL_FEED_VISIBILITY_PREDICATE}
+             LIMIT 1`,
           )
-          .get(workspaceId, cursor.messageId, cursor.createdAtMs);
-        if (!message) {
-          throw new LinkedChatStoreError("invalid-follow-target", "Feed cursor is stale.");
+          .get(
+            workspaceId,
+            cursor.messageId,
+            cursor.createdAtMs,
+            ownerUserId,
+            ownerUserId,
+            ownerUserId,
+          );
+        if (!visibleMessage) {
+          throw new LinkedChatStoreError(
+            "invalid-follow-target",
+            "Feed cursor is stale or no longer visible.",
+          );
         }
         const current = db
           .prepare(

@@ -85,8 +85,12 @@ export interface WorkspaceGraphWithChatMentions
   edges: ChatMentionGraphEdge[];
 }
 
-function stableText(value: string): string {
-  return value.replace(/[\r\n]+/gu, " ").trim();
+const MAX_GRAPH_NODES = 2000;
+const MAX_GRAPH_EDGES = 10000;
+const MAX_GRAPH_TITLE_LENGTH = 120;
+
+function stableText(value: string, maxLength = MAX_GRAPH_TITLE_LENGTH): string {
+  return value.replace(/[\r\n]+/gu, " ").trim().slice(0, maxLength);
 }
 
 function fileNodeId(path: string): string {
@@ -213,7 +217,13 @@ export function addChatMentionsToWorkspaceGraph(
     if (mention.heading) {
       target = headingNodeId(mention);
       kind = "chat-mentions-heading";
-      const headingTitle = stableText(mention.heading.text);
+      // Main prefixes heading titles with `#` for the public IPC graph, so
+      // reserve one character here to keep the final title within its
+      // 120-character contract.
+      const headingTitle = stableText(
+        mention.heading.text,
+        MAX_GRAPH_TITLE_LENGTH - 1,
+      );
       const existingHeading = nodes.get(target);
       if (!existingHeading) {
         nodes.set(target, {
@@ -262,7 +272,42 @@ export function addChatMentionsToWorkspaceGraph(
     edge.mentionCount = edge.messageIds.length;
   }
 
-  for (const edge of edges.values()) {
+  // The base graph can already occupy the entire public graph-node budget.
+  // Keep every base file first, then take overlay nodes in stable order. Any
+  // edge touching an omitted overlay node is dropped so the capped result can
+  // never contain a dangling endpoint. Preserve base edges before overlay
+  // edges for the same reason: chat mentions must not evict the file graph.
+  const selectedNodes = [...nodes.values()]
+    .sort(compareNode)
+    .slice(0, MAX_GRAPH_NODES);
+  const selectedNodeIds = new Set(selectedNodes.map((node) => node.id));
+  const baseEdgeKeys = new Set(
+    base.edges.map((edge) =>
+      edgeKey({
+        source: fileNodeId(edge.source),
+        target: fileNodeId(edge.target),
+        kind: edge.kind,
+      }),
+    ),
+  );
+  const eligibleEdges = [...edges.entries()].filter(
+    ([, edge]) =>
+      selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target),
+  );
+  const selectedEdges = [
+    ...eligibleEdges
+      .filter(([key]) => baseEdgeKeys.has(key))
+      .map(([, edge]) => edge)
+      .sort(compareEdge),
+    ...eligibleEdges
+      .filter(([key]) => !baseEdgeKeys.has(key))
+      .map(([, edge]) => edge)
+      .sort(compareEdge),
+  ]
+    .slice(0, MAX_GRAPH_EDGES)
+    .sort(compareEdge);
+
+  for (const edge of selectedEdges) {
     const source = nodes.get(edge.source);
     const target = nodes.get(edge.target);
     if (source) source.outgoing += 1;
@@ -271,7 +316,7 @@ export function addChatMentionsToWorkspaceGraph(
 
   return {
     ...base,
-    nodes: [...nodes.values()].sort(compareNode),
-    edges: [...edges.values()].sort(compareEdge),
+    nodes: selectedNodes,
+    edges: selectedEdges,
   };
 }

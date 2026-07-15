@@ -63,6 +63,23 @@ describe("workspace headings", () => {
     ]);
   });
 
+  it("does not promote list items or blockquotes before thematic breaks to setext headings", () => {
+    const markdown = [
+      "- first item",
+      "---",
+      "> quoted note",
+      "===",
+      "1. ordered item",
+      "---",
+      "C#",
+      "---",
+    ].join("\n");
+
+    expect(
+      extractWorkspaceHeadings(markdown).map(({ text, level }) => ({ text, level })),
+    ).toEqual([{ text: "C#", level: 2 }]);
+  });
+
   it("gives symbol-only headings stable non-empty anchors and preserves duplicates", () => {
     const firstBase = headingAnchorBase("🚀");
     expect(firstBase).toMatch(/^section-[a-z0-9]+$/);

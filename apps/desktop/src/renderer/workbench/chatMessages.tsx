@@ -1,6 +1,5 @@
 import { FileText, SmilePlus, Send } from "lucide-react";
 import {
-  Fragment,
   useEffect,
   useId,
   useRef,
@@ -14,7 +13,7 @@ import {
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
-  toMentionSegments,
+  findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
@@ -163,71 +162,61 @@ export function MentionText(props: {
   candidates: readonly MentionCandidate[];
   testId?: string;
 }) {
-  // Chips are code-aware too: an @handle inside inline code / a fenced block
-  // reads as code text, not a mention chip.
-  const renderText = (text: string, prefix: string) =>
-    toMentionSegments(text, props.candidates, { ignoreCode: true }).map(
-      (segment, index) =>
-        segment.type === "mention" ? (
-          <span
-            key={`${prefix}m${index}`}
-            data-testid={props.testId ? `${props.testId}-mention` : undefined}
-            data-mention-kind={segment.candidate.kind}
-            className="rounded bg-accent/15 px-1 font-medium text-accent"
-          >
-            {segment.text}
-          </span>
-        ) : (
-          <Fragment key={`${prefix}t${index}`}>{segment.text}</Fragment>
-        ),
-    );
+  // Classify code ranges once, against the complete message. File chips split
+  // the rendered output into pieces, but must not reset Markdown fence state
+  // and accidentally turn a handle inside an unmatched/multiline fence into a
+  // mention.
   const fileTokens = extractChatFileReferenceTokens(props.body);
-  if (fileTokens.length > 0) {
-    const content: ReactNode[] = [];
-    let cursor = 0;
-    fileTokens.forEach((token, index) => {
-      if (token.start > cursor) {
-        content.push(...renderText(props.body.slice(cursor, token.start), `f${index}:`));
-      }
+  // A file token owns its complete source range. A handle-like substring in a
+  // filename is part of the attachment syntax, not a person mention.
+  const mentions = findMentions(props.body, props.candidates, { ignoreCode: true }).filter(
+    (mention) =>
+      !fileTokens.some(
+        (token) => mention.start < token.end && mention.end > token.start,
+      ),
+  );
+  const content: ReactNode[] = [];
+  let cursor = 0;
+  let mentionIndex = 0;
+  let fileIndex = 0;
+  while (mentionIndex < mentions.length || fileIndex < fileTokens.length) {
+    const mention = mentions[mentionIndex];
+    const fileToken = fileTokens[fileIndex];
+    if (fileToken && (!mention || fileToken.start < mention.start)) {
+      if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
       content.push(
         <span
-          key={`file:${token.start}`}
+          key={`file:${fileToken.start}`}
           data-testid={props.testId ? `${props.testId}-file-mention` : undefined}
           className="inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted"
-          title={token.text}
+          title={fileToken.text}
         >
           <FileText size={11} aria-hidden />
-          {token.path.split("/").at(-1)}
-          {token.headingAnchor ? `#${token.headingAnchor}` : ""}
+          {fileToken.path.split("/").at(-1)}
+          {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
         </span>,
       );
-      cursor = token.end;
-    });
-    if (cursor < props.body.length) {
-      content.push(...renderText(props.body.slice(cursor), "tail:"));
+      cursor = fileToken.end;
+      fileIndex += 1;
+      continue;
     }
-    return <>{content}</>;
+    if (!mention) break;
+    if (mention.start > cursor) content.push(props.body.slice(cursor, mention.start));
+    content.push(
+      <span
+        key={`mention:${mention.start}`}
+        data-testid={props.testId ? `${props.testId}-mention` : undefined}
+        data-mention-kind={mention.candidate.kind}
+        className="rounded bg-accent/15 px-1 font-medium text-accent"
+      >
+        {props.body.slice(mention.start, mention.end)}
+      </span>,
+    );
+    cursor = mention.end;
+    mentionIndex += 1;
   }
-  const segments = toMentionSegments(props.body, props.candidates, { ignoreCode: true });
-  return (
-    <>
-      {segments.map((segment, index) =>
-        segment.type === "mention" ? (
-          <span
-            // Segments are positional; index is a stable key within one body.
-            key={`m${index}`}
-            data-testid={props.testId ? `${props.testId}-mention` : undefined}
-            data-mention-kind={segment.candidate.kind}
-            className="rounded bg-accent/15 px-1 font-medium text-accent"
-          >
-            {segment.text}
-          </span>
-        ) : (
-          <Fragment key={`t${index}`}>{segment.text}</Fragment>
-        ),
-      )}
-    </>
-  );
+  if (cursor < props.body.length) content.push(props.body.slice(cursor));
+  return <>{content}</>;
 }
 
 // Reactions (WS-MU-C2). A small, calm quick-pick — obvious, not a full emoji
