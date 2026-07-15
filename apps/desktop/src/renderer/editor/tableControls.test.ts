@@ -1009,10 +1009,25 @@ describe("table controls grips", () => {
 
     dispatchPointer(handle, "pointerdown", { clientY: 100 });
     dispatchPointer(handle, "pointermove", { clientY: 134 });
-    handle.dispatchEvent(
-      new MouseEvent("mouseup", { bubbles: false, cancelable: true, button: 0 }),
-    );
+    let reachedWindow = false;
+    const markWindowMouseup = () => {
+      reachedWindow = true;
+    };
+    window.addEventListener("mouseup", markWindowMouseup, true);
+    try {
+      expect(handle.isConnected).toBe(false);
+      handle.dispatchEvent(
+        new MouseEvent("mouseup", {
+          bubbles: false,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+    } finally {
+      window.removeEventListener("mouseup", markWindowMouseup, true);
+    }
 
+    expect(reachedWindow).toBe(false);
     expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
     expect(handle.classList.contains("is-resizing")).toBe(false);
   });
