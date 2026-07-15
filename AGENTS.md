@@ -134,6 +134,10 @@ For codex, you have to tag the bot (In a pull request comment, mention @codex re
 
 Claude is not setup to review PRs automatically (not part of my subscription), so you have to invoke this review locally (ideally after the PR is created and in parallel with coderabbit and codex reviews). So you have to manually ask claude via the local cli to review the PR and manually go back and forth with it until no issues remain. Everytime claude finishes a review please update the PR via commenting what claude reviewed, then address them. So basically we're trying to do a pseudo claude PR review bot we orchestrate ourselves. Use fable-5 and fallback to opus-4.8 if fable is unavailable or rate limited.
 
+## Regarding long code comments
+
+If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong -- fix the code
+
 ## Some general rules
 
 These are meant to steer us in the right direction. They are not hard-set, but we should default to following them. If you think one should be ignored, be very loud and cear about that and get approval from us before doing it.
