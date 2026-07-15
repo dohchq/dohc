@@ -241,8 +241,22 @@ describe("listSitePackages", () => {
       `const label = "secret.json"; window.ready = label; // export ${"x".repeat(5_000)} "secret.json"`,
     );
     await writeFile(join(root, "report", "assets", "hero.avif"), "image");
+    await writeFile(join(root, "report", "assets", "icon-192.png"), "image");
     await writeFile(join(root, "report", "assets", "logo.png"), "image");
-    await writeFile(join(root, "report", "site.webmanifest"), "{}");
+    await writeFile(join(root, "report", "assets", "screenshot.png"), "image");
+    await writeFile(
+      join(root, "report", "site.webmanifest"),
+      JSON.stringify({
+        start_url: "./start.html",
+        icons: [{ src: "./assets/icon-192.png" }],
+        screenshots: [{ src: "./assets/screenshot.png" }],
+      }),
+    );
+    await writeFile(
+      join(root, "report", "start.html"),
+      '<script src="./start.js"></script>',
+    );
+    await writeFile(join(root, "report", "start.js"), "window.started = true;");
     await writeFile(join(root, "report", "data", "customers.json"), "[]");
     await writeFile(join(root, "report", "vendor", "dohc-sdk", "index.js"), "sdk");
     await writeFile(join(root, "report", "private", "secret.json"), "{}");
@@ -257,8 +271,12 @@ describe("listSitePackages", () => {
       assets: [
         "report/app.js",
         "report/assets/hero.avif",
+        "report/assets/icon-192.png",
         "report/assets/logo.png",
+        "report/assets/screenshot.png",
         "report/site.webmanifest",
+        "report/start.html",
+        "report/start.js",
         "report/vendor/dohc-sdk/index.js",
       ],
     });

@@ -164,7 +164,44 @@ function localReferenceCandidates(
   return [...new Set(variants)].filter((path) => available.has(path));
 }
 
+function referencesFromWebManifest(text: string): string[] {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return [];
+  const record = manifest as Record<string, unknown>;
+  const references: string[] = [];
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim()) references.push(value);
+  };
+  const addImages = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const image of value) {
+      if (image && typeof image === "object" && !Array.isArray(image)) {
+        add((image as Record<string, unknown>).src);
+      }
+    }
+  };
+
+  add(record.start_url);
+  addImages(record.icons);
+  addImages(record.screenshots);
+  if (Array.isArray(record.shortcuts)) {
+    for (const shortcut of record.shortcuts) {
+      if (!shortcut || typeof shortcut !== "object" || Array.isArray(shortcut)) continue;
+      const shortcutRecord = shortcut as Record<string, unknown>;
+      add(shortcutRecord.url);
+      addImages(shortcutRecord.icons);
+    }
+  }
+  return references;
+}
+
 function referencesFromBrowserText(text: string, sourcePath: string): string[] {
+  if (/\.webmanifest$/i.test(sourcePath)) return referencesFromWebManifest(text);
   const references: string[] = [];
   const addMatches = (pattern: RegExp) => {
     for (const match of text.matchAll(pattern)) {
@@ -242,7 +279,7 @@ async function shareManifestForSite(
   let scannedBytes = 0;
   while (queue.length > 0) {
     const current = queue.shift()!;
-    if (scanned.has(current) || !/\.(?:html?|css|js|mjs)$/i.test(current)) continue;
+    if (scanned.has(current) || !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current)) continue;
     scanned.add(current);
     try {
       const info = await stat(join(rootPath, current));

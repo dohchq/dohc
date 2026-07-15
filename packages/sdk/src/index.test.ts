@@ -653,7 +653,7 @@ describe("@dohc/sdk", () => {
     });
 
     await client.files.list("safe", { path: "../outside", recursive: true });
-    await client.files.list();
+    await client.files.list(undefined, { path: "../outside", recursive: false });
     await client.workspace.search("validated query", { query: "overridden" });
     await client.ui.open("dohc://atom/safe", { target: "https://evil.test" });
     await client.collections.list("safe-collection", { name: "overridden" });
@@ -662,7 +662,10 @@ describe("@dohc/sdk", () => {
       method: "files.list",
       params: { path: "safe", recursive: true },
     });
-    expect(calls).toContainEqual({ method: "files.list", params: {} });
+    expect(calls).toContainEqual({
+      method: "files.list",
+      params: { recursive: false },
+    });
     expect(calls).toContainEqual({
       method: "workspace.search",
       params: { query: "validated query" },

@@ -864,9 +864,12 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
         assertRequestOptions(requestOptions);
         assertOptionalWorkspacePath(path, "Directory path");
         await requireCapability("files", "list", requestOptions);
+        const params: Record<string, unknown> = { ...options };
+        delete params.path;
+        if (path !== undefined) params.path = path;
         const result = await request(
           "files.list",
-          { ...options, ...(path === undefined ? {} : { path }) },
+          params,
           requestOptions,
         );
         if (
