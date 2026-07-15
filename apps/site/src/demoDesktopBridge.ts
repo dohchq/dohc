@@ -364,7 +364,7 @@ function channel(id: string, name: string, kind: "channel" | "agent" = "channel"
   } as const;
 }
 
-function thread(channelId = "channel-general", body = "What should we focus on next?") {
+function thread(channelId = "channel-general", body = "What needs attention next?") {
   return {
     id: `thread-${channelId}`,
     title: body,
@@ -386,12 +386,20 @@ function thread(channelId = "channel-general", body = "What should we focus on n
   };
 }
 
+function demoThreadBody(channelId: string): string {
+  return channelId === "channel-agent"
+    ? "Turn this week's work into a plan I can review."
+    : channelId === "channel-projects"
+      ? "Review the launch checklist."
+      : "What needs attention next?";
+}
+
 function message(threadId: string, id: string, body: string, agent = false) {
   return {
     id,
     threadId,
     authorKind: agent ? ("agent" as const) : ("human" as const),
-    authorDisplayName: agent ? "Ice" : "You",
+    authorDisplayName: agent ? "Your agent" : "You",
     body,
     createdAtMs: agent ? now - 90_000 : now - 3_600_000,
   };
@@ -609,22 +617,20 @@ const demoBridge = {
     return { available: false, dms: [] };
   },
   async listChannelThreads(payload: { channelId: string }) {
-    const body =
-      payload.channelId === "channel-agent"
-        ? "Turn this week into a clear, inspectable plan."
-        : payload.channelId === "channel-projects"
-          ? "The launch checklist is ready for review."
-          : "What should we focus on next?";
-    return { threads: [thread(payload.channelId, body)], viewerAuthorId: "demo-user" };
+    return {
+      threads: [thread(payload.channelId, demoThreadBody(payload.channelId))],
+      viewerAuthorId: "demo-user",
+    };
   },
   async listChatMessages(payload: { threadId: string }) {
+    const channelId = payload.threadId.replace(/^thread-/, "");
     return {
       messages: [
-        message(payload.threadId, `${payload.threadId}-1`, "What should we focus on next?"),
+        message(payload.threadId, `${payload.threadId}-1`, demoThreadBody(channelId)),
         message(
           payload.threadId,
           `${payload.threadId}-2`,
-          "I’d start with the launch plan, then turn the final checklist into a reusable skill.",
+          "Start with the launch plan. Once it is approved, save the checklist as a skill.",
           true,
         ),
       ],

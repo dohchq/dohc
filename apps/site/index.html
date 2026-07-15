@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>dohc — a workspace for you and your agents</title>
-<meta name="description" content="dohc runs on your computer and keeps your work in files you control. Write documents, organize data, and build dashboards and workflows with your agents." />
-<meta property="og:title" content="dohc — a workspace for you and your agents" />
-<meta property="og:description" content="dohc runs on your computer and keeps your work in files you control. Write documents, organize data, and build dashboards and workflows with your agents." />
+<title>dohc | local-first workspace for you and your agents</title>
+<meta name="description" content="Build documents, data, dashboards, and workflows with your agents. Your workspace stays on your computer, in files you control." />
+<meta property="og:title" content="dohc | local-first workspace for you and your agents" />
+<meta property="og:description" content="Build documents, data, dashboards, and workflows with your agents. Your workspace stays on your computer, in files you control." />
 <meta property="og:type" content="website" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2096%20104'%3E%3Cpath%20d='M48%2010c14%200%2025%209%2025%2023%200%205-2%209-4%2013%2010%205%2017%2015%2017%2027%200%2016-12%2027-29%2027-12%200-22-5-31-12L12%2078C8%2068%207%2056%2010%2044%2015%2023%2029%2010%2048%2010Z'%20fill='none'%20stroke='%232d342e'%20stroke-width='8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='38'%20cy='58'%20r='9'%20fill='%232d342e'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Homemade+Apple&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
@@ -37,7 +37,7 @@
 </svg>
 
 <header class="nav">
-  <a class="nav-brand" href="#top" aria-label="dohc — home">
+  <a class="nav-brand" href="/" aria-label="dohc home">
     <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
       <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
             fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
@@ -46,16 +46,14 @@
     <span class="wordmark">dohc</span>
   </a>
   <nav class="nav-links" aria-label="Site">
-    <a href="#demo">try it</a>
-    <a href="#note">the note</a>
-    <a href="#onboard">on board</a>
-    <a href="#convictions">convictions</a>
+    <a href="#downloads">downloads</a>
+    <a href="#cloud">cloud</a>
   </nav>
   <div class="nav-end">
     <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
       <span class="tt-light">dark</span><span class="tt-dark">light</span>
     </button>
-    <a class="btn btn-small" href="#deal">download</a>
+    <a class="nav-github" href="https://github.com/dohc-ai/dohc">github</a>
   </div>
 </header>
 
@@ -66,7 +64,7 @@
     <div class="hero-copy">
       <h1 class="reveal d1">Put work in <em class="underlined">plain sight.<svg class="hand-underline" viewBox="0 0 220 22" preserveAspectRatio="none" aria-hidden="true"><path d="M6 14 C 60 4, 140 20, 214 9" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg></em></h1>
       <p class="hero-sub reveal d2">
-        The local-first workspace for you and your agents.
+        Open-source local-first workspace for you and your agents.
       </p>
       <div class="hero-cta reveal d3">
         <div class="download-control" data-download-control>
@@ -74,31 +72,7 @@
             <svg class="download-os-icon" aria-hidden="true"><use data-download-primary-icon href="#os-download"/></svg>
             <span data-download-primary-label>Download dohc</span>
           </a>
-          <div class="platform-selector">
-            <button class="btn btn-platforms" type="button" data-platform-toggle aria-expanded="false" aria-haspopup="menu">
-              Other platforms
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path class="platform-chevron-down" d="m6 9 6 6 6-6"/><path class="platform-chevron-up" d="m18 15-6-6-6 6"/></svg>
-            </button>
-            <div class="platform-menu" data-platform-menu role="menu" hidden>
-              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="windows-x64">
-                <svg class="download-os-icon" aria-hidden="true"><use href="#os-windows"/></svg>
-                <span><strong>Windows</strong><small>.exe · x64</small></span>
-              </a>
-              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="mac-arm64">
-                <svg class="download-os-icon" aria-hidden="true"><use href="#os-apple"/></svg>
-                <span><strong>macOS</strong><small>Apple silicon · .dmg</small></span>
-              </a>
-              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="mac-x64">
-                <svg class="download-os-icon" aria-hidden="true"><use href="#os-apple"/></svg>
-                <span><strong>macOS</strong><small>Intel · .dmg</small></span>
-              </a>
-              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="linux-x64">
-                <svg class="download-os-icon" aria-hidden="true"><use href="#os-linux"/></svg>
-                <span><strong>Linux</strong><small>AppImage · x64</small></span>
-              </a>
-              <a class="platform-menu-all" href="https://github.com/dohc-ai/dohc/releases" role="menuitem">All releases <span aria-hidden="true">↗</span></a>
-            </div>
-          </div>
+          <a class="download-other" href="#downloads">Other platforms</a>
         </div>
       </div>
     </div>
@@ -111,111 +85,146 @@
     </div>
   </section>
 
-  <!-- ============ 01 · the note ============ -->
-  <section class="section" id="note">
-    <div class="section-head reveal">
-      <span class="index">01 · the inspiration</span>
-      <h2>One page was enough.</h2>
-      <p class="section-lede">
-        In 1976, Steve Jobs described the entire Apple-1 on a single handwritten
-        page — the chips, the memory, the terminal, the price. Anyone could read
-        it. Nothing was hidden. The spec <em>was</em> the product.
-      </p>
-      <p class="section-lede">
-        Fifty years later, your work is scattered across a hundred tabs, ten
-        tools, and one inbox — and now your agents work in places you can’t see
-        at all. dohc is our answer: put the whole workspace back on the page.
-      </p>
-    </div>
-
-    <div class="notes">
-      <figure class="artifact reveal" data-tilt="left">
-        <img src="assets/apple-1-note.jpg" width="488" height="628"
-             alt="Steve Jobs’s handwritten 1976 note describing the Apple-1 computer: chips used, 8K bytes of RAM, full CRT terminal, fully expandable, board only plus manual for $75 — “a real deal”." />
-        <figcaption><span class="mono">1976</span> — the Apple-1, one page. <span class="cap-muted">Steve Jobs, ballpoint.</span></figcaption>
-      </figure>
-
-      <figure class="artifact reveal d1" data-tilt="right">
-        <div class="paper" role="img" aria-label="A handwritten note in the same style, describing dohc: uses plain text, markdown, your own files. On board: documents, dashboards, full history of every edit. Agent terminal — input: what you mean, output: work you can read. Fully expandable via your agents. Zero lock-in, your files on your disk. Review gates for agent edits included. Sync and sharing on the way. App plus your workspace: free. A real deal.">
-          <span class="hole h1"></span><span class="hole h2"></span><span class="hole h3"></span>
-          <div class="paper-ink" aria-hidden="true">
-            <p class="p-title">dohc</p>
-            <p>uses&nbsp; plain text, markdown,<br /><span class="ind1">your own files</span> <span class="p-aside">(recommended<br />because agents<br />already speak it)</span></p>
-            <p><span class="p-u">on board</span>: &nbsp;documents, dashboards,<br /><span class="ind2">full history of every edit</span> <span class="p-small">(yours + your agents’)</span></p>
-            <p>agent terminal — <span class="p-small">input: what you mean<br /><span class="ind3">output: work you can read</span></span></p>
-            <p>fully expandable <span class="p-small">via your agents</span> — CRM,<br /><span class="ind1">trackers, dashboards, anything !!</span></p>
-            <p>review gates <span class="p-small">(for agent edits on board)</span> included.</p>
-            <p class="p-faded">sync + sharing&nbsp; on the way</p>
-            <p class="p-price"><span class="ind2">app + your workspace &nbsp;&nbsp;free.</span><br /><span class="ind3">a real deal(</span></p>
-            <p class="p-sig"><span class="ind2">dohc<br />your files, your disk<br />built with agents, for you</span></p>
-          </div>
-        </div>
-        <figcaption><span class="mono">2026</span> — dohc, one page. <span class="cap-muted">The whole idea still fits.</span></figcaption>
-      </figure>
-    </div>
-  </section>
-
-  <!-- ============ 02 · on board ============ -->
+  <!-- ============ capabilities ============ -->
   <section class="section" id="onboard">
     <div class="section-head reveal">
-      <span class="index">02 · on board</span>
-      <h2>The primitives, not the apps.</h2>
+      <h2>Build the workspace you need.</h2>
       <p class="section-lede">
-        dohc doesn’t ship a CRM, a tracker, or a dashboard product. It ships the
-        sturdy pieces — and your agent assembles the workspace <em>you</em>
-        actually need out of them.
+        Work with local files, documents, links, search, history, agent chat, and sites.
+        Everything stays together in one workspace.
       </p>
     </div>
-    <dl class="spec">
-      <div class="spec-row reveal"><dt><span class="mono">a</span> documents</dt><dd>Plain-text first. Everything you and your agents make is a page you can open, diff, and edit.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">b</span> entities &amp; links</dt><dd>People, projects, deals, anything — typed records that link into your documents and back.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">c</span> dashboards &amp; views</dt><dd>Source-backed views over your real text. No second copy of the truth to keep in sync.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">d</span> history &amp; provenance</dt><dd>Every edit is recorded — who, when, and why, whether it was you or an agent.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">e</span> review gates</dt><dd>Agents propose; you approve. Locks and gates keep the pen in your hand.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">f</span> skills</dt><dd>When an agent handles something well once, keep it. Repeated work becomes a playbook.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">g</span> search</dt><dd>One index across documents, entities, history, and chats — because it’s all text.</dd></div>
-      <div class="spec-row reveal"><dt><span class="mono">h</span> local-first</dt><dd>Workspaces are folders on your disk. No backend required. Leave anytime with everything.</dd></div>
-    </dl>
+    <div class="principles-graph reveal" data-principles-graph>
+      <div class="principles-graph-canvas" role="group" aria-label="Connected workspace primitives in dohc. Select or drag a capability to explore the graph.">
+        <svg class="principles-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <line class="principle-edge" data-connects="documents core" x1="18" y1="16" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="files core" x1="48" y1="12" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="links core" x1="81" y1="20" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="graph core" x1="87" y1="48" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="history core" x1="80" y1="77" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="chat core" x1="51" y1="84" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="search core" x1="22" y1="78" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="sites core" x1="13" y1="48" x2="54" y2="44" pathLength="1" />
+          <line class="principle-edge" data-connects="documents files" x1="18" y1="16" x2="48" y2="12" pathLength="1" />
+          <line class="principle-edge" data-connects="documents links" x1="18" y1="16" x2="81" y2="20" pathLength="1" />
+          <line class="principle-edge" data-connects="links graph" x1="81" y1="20" x2="87" y2="48" pathLength="1" />
+          <line class="principle-edge" data-connects="graph history" x1="87" y1="48" x2="80" y2="77" pathLength="1" />
+          <line class="principle-edge" data-connects="chat history" x1="51" y1="84" x2="80" y2="77" pathLength="1" />
+          <line class="principle-edge" data-connects="search documents" x1="22" y1="78" x2="18" y2="16" pathLength="1" />
+          <line class="principle-edge" data-connects="sites files" x1="13" y1="48" x2="48" y2="12" pathLength="1" />
+        </svg>
+
+        <div class="principle-core" style="--node-x: 54%; --node-y: 44%;" aria-hidden="true">
+          <span class="principle-core-dot"></span>
+          <span class="principle-core-label">your workspace</span>
+        </div>
+
+        <button class="principle-node" type="button" data-principle="documents" data-title="Write and edit documents." data-copy="Create briefs, plans, notes, and decisions in text you and your agents can read and edit." data-agent="Edit the right section and show you exactly what changed." aria-pressed="true" style="--node-x: 18%; --node-y: 16%; --node-delay: 40ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Documents</span>
+          <span class="visually-hidden">Create briefs, plans, notes, and decisions in text you and your agents can read and edit.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="files" data-title="Work with local files." data-copy="Open a folder on your computer and organize its files without moving them into a hosted database." data-agent="Read and update the same files you already own." aria-pressed="false" style="--node-x: 48%; --node-y: 12%; --node-delay: 70ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Local files</span>
+          <span class="visually-hidden">Open a folder on your computer and organize its files without moving them into a hosted database.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="links" data-title="Link related documents." data-copy="Connect markdown files with wikilinks and see every document that links back to the one you are reading." data-agent="Follow those links to find related context before making a change." aria-pressed="false" style="--node-x: 81%; --node-y: 20%; --node-delay: 100ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Wikilinks &amp; backlinks</span>
+          <span class="visually-hidden">Connect markdown files with wikilinks and see every document that links back to the one you are reading.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="graph" data-title="Browse the workspace as a graph." data-copy="See documents and their links in a force-directed graph. Select a node to open its file." data-agent="Use the same link structure to move through the workspace." aria-pressed="false" style="--node-x: 87%; --node-y: 48%; --node-delay: 130ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Graph view</span>
+          <span class="visually-hidden">See documents and their links in a force-directed graph. Select a node to open its file.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="history" data-title="Review and restore changes." data-copy="Open the workspace history, inspect file diffs, and restore an earlier version." data-agent="Show what changed before you decide whether to keep it." aria-pressed="false" style="--node-x: 80%; --node-y: 77%; --node-delay: 160ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Version history</span>
+          <span class="visually-hidden">Open the workspace history, inspect file diffs, and restore an earlier version.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="chat" data-title="Work with agents in chat." data-copy="Chat with an agent inside the workspace and keep conversations linked to the files they concern." data-agent="Use workspace context, make changes, and keep the conversation with the work." aria-pressed="false" style="--node-x: 51%; --node-y: 84%; --node-delay: 190ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Agent chat</span>
+          <span class="visually-hidden">Chat with an agent inside the workspace and keep conversations linked to the files they concern.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="search" data-title="Search files and chats." data-copy="Search file contents and conversations. Narrow results by case, whole word, regular expression, or file pattern." data-agent="Find the right context before answering or making changes." aria-pressed="false" style="--node-x: 22%; --node-y: 78%; --node-delay: 220ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Search</span>
+          <span class="visually-hidden">Search file contents and conversations. Narrow results by case, whole word, regular expression, or file pattern.</span>
+        </button>
+
+        <button class="principle-node" type="button" data-principle="sites" data-title="Preview sites inside dohc." data-copy="Open static sites and local web projects from the workspace without leaving the desktop app." data-agent="Build an ordinary site in the workspace and open it through the Sites view." aria-pressed="false" style="--node-x: 13%; --node-y: 48%; --node-delay: 250ms;">
+          <span class="principle-node-dot" aria-hidden="true"></span>
+          <span class="principle-node-label">Sites</span>
+          <span class="visually-hidden">Open static sites and local web projects from the workspace without leaving the desktop app.</span>
+        </button>
+      </div>
+
+      <div class="principle-detail">
+        <h3 data-principle-title>Write and edit documents.</h3>
+        <div class="principle-detail-copy">
+          <p data-principle-copy>Create briefs, plans, notes, and decisions in text you and your agents can read and edit.</p>
+          <p class="principle-detail-agent"><strong>For agents:</strong> <span data-principle-agent>Edit the right section and show you exactly what changed.</span></p>
+        </div>
+      </div>
+    </div>
   </section>
 
-  <!-- ============ 03 · convictions ============ -->
-  <section class="section" id="convictions">
-    <div class="section-head reveal">
-      <span class="index">03 · convictions</span>
-      <h2>What we refuse to hide.</h2>
-    </div>
-    <div class="convictions">
-      <article class="conviction reveal">
-        <h3>Text is the primitive.</h3>
-        <p>A folder of well-structured text files and a capable agent could recreate most of dohc. dohc exists to make that easy, reliable, and powerful — the magic is a shared substrate humans and agents can both trust, not hidden state.</p>
-      </article>
-      <article class="conviction reveal d1">
-        <h3>Agents wrap tools, not the other way around.</h3>
-        <p>Deterministic software provides the sturdy pieces — storage, sync, permissions, history. Your agent uses them to build the workspace around your intent. Not old software with AI sprinkled in.</p>
-      </article>
-      <article class="conviction reveal">
-        <h3>Individual first.</h3>
-        <p>If dohc only works after a whole company adopts it, we built the wrong thing. It should feel valuable when the entire “organization” is one human and their agents.</p>
-      </article>
-      <article class="conviction reveal d1">
-        <h3>Open when shared, private when personal.</h3>
-        <p>Visibility comes from explicit boundaries, sharing, and consent — never accidental leakage. Your personal workspace is yours.</p>
-      </article>
+  <!-- ============ downloads ============ -->
+  <section class="section downloads-home" id="downloads" aria-labelledby="downloads-title">
+    <div class="downloads-inner">
+      <div class="downloads-heading reveal">
+        <h2 id="downloads-title">Choose your build.</h2>
+      </div>
+
+      <div class="download-list reveal d1">
+        <a class="download-item" data-download-card="windows-x64" href="https://github.com/dohc-ai/dohc/releases">
+          <strong>Windows</strong>
+          <span class="download-item-action">Download</span>
+        </a>
+        <a class="download-item" href="https://github.com/dohc-ai/dohc/releases">
+          <strong>macOS</strong>
+          <span class="download-item-action">Download</span>
+        </a>
+        <a class="download-item" data-download-card="linux-x64" href="https://github.com/dohc-ai/dohc/releases">
+          <strong>Linux</strong>
+          <span class="download-item-action">Download</span>
+        </a>
+      </div>
+
+      <div class="downloads-meta reveal d2">
+        <span>Source code and older versions remain on GitHub.</span>
+        <a href="https://github.com/dohc-ai/dohc/releases">View all releases</a>
+      </div>
     </div>
   </section>
 
-  <!-- ============ 04 · a real deal ============ -->
-  <section class="section deal" id="deal">
-    <div class="deal-inner reveal">
-      <span class="index">04 · the price line</span>
-      <h2>app + your workspace&ensp;&ensp;free.</h2>
-      <p class="deal-hand hand" aria-hidden="true">a real deal(</p>
-      <p class="section-lede deal-lede">
-        dohc is in early development — local-first on your desktop, no account,
-        no backend, your files on your disk. Follow along while we build it.
-      </p>
-      <div class="hero-cta">
-        <a class="btn btn-ghost" href="#top">Back to the top&ensp;↑</a>
+  <!-- ============ cloud ============ -->
+  <section class="section cloud-home" id="cloud" aria-labelledby="ownership-title">
+    <div class="cloud-summary">
+      <div class="ownership-summary reveal d1">
+        <h2 id="ownership-title">dohc is free, open source, and <span class="no-break">self-hostable.</span></h2>
+        <p>The desktop app runs locally with no account or backend. Run sync and collaboration yourself.</p>
+      </div>
+
+      <div class="cloud-offer reveal d2" aria-labelledby="cloud-title">
+        <div class="cloud-offer-header">
+          <h3 id="cloud-title">dohc Cloud.</h3>
+          <p>Managed sync and live collaboration.</p>
+        </div>
+
+        <div class="cloud-price" aria-label="dohc Cloud costs $5 per month">
+          <p class="cloud-price-value"><strong>$5</strong><span>per month</span></p>
+          <p class="cloud-status">Coming soon</p>
+        </div>
       </div>
     </div>
   </section>
@@ -231,8 +240,7 @@
     </svg>
     <span class="wordmark">dohc</span>
   </div>
-  <p class="footer-line">the quiet AI workspace · built by humans + agents · <span id="year">2026</span></p>
-  <p class="footer-fine">The 1976 Apple-1 note appears as historical inspiration. Apple is a trademark of Apple Inc.; dohc is not affiliated with Apple.</p>
+  <p class="footer-line">© 2026</p>
 </footer>
 
 <script type="module" src="/src/main.tsx"></script>

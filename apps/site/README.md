@@ -21,11 +21,6 @@ Build with `pnpm --filter @dohc/site build`, then point any static host
 
 ## Design
 
-The visual centerpiece is Steve Jobs's 1976 handwritten Apple-1 spec
-note (`assets/apple-1-note.jpg`), paired with a recreated "dohc spec
-sheet" in the same one-page handwritten format — the site's argument is
-that work used to fit on a readable page, and dohc puts it back there.
-
 Brand tokens mirror `packages/brand/src/tokens.css` (warm paper +
 graphite, almost monochrome). Fonts: brand serif/sans stacks are system
 fonts; `IBM Plex Mono` and the handwriting face `Homemade Apple` load

@@ -60,23 +60,23 @@ const DEMO_DOCUMENTS: DemoDocument[] = [
   {
     path: "welcome.md",
     markdown: `---
-title: Your workspace, in plain sight
+title: Work you can inspect
 icon: 📝
 ---
-This is the same WYSIWYG editor that ships in the desktop app. Click anywhere and make it yours.
+This is the editor from the desktop app. Edit the document directly.
 
-## Try the editor
+## Try it
 
 - Select text to format it
 - Type **/** on an empty line for commands
-- Use **[[** to link another document
-- Write Markdown shortcuts and watch them become blocks
+- Type **[[** to link another document
+- Use Markdown shortcuts to create blocks
 
-> [!note] Text is the primitive
-> Everything stays readable by you and your agents.
+> [!note] Your files stay readable
+> People and agents work from the same source.
 
-- [x] A real document surface
-- [ ] Your next idea
+- [x] A real editor
+- [ ] Your next document
 `,
   },
   {
@@ -96,11 +96,11 @@ icon: 🚀
 
 | Decision | Why |
 | --- | --- |
-| Local first | The workspace belongs to the user |
-| Text based | Humans and agents can inspect the same truth |
-| Individual first | One person should feel the magic immediately |
+| Local first | The workspace stays on the user's computer |
+| Text based | People and agents inspect the same source |
+| Individual first | The product must be useful to one person |
 
-The plan can change. The history stays visible.
+Plans change. The record remains.
 `,
   },
   {
@@ -111,17 +111,17 @@ icon: 🧠
 ---
 ## A repeatable loop
 
-1. Capture the intent
-2. Let the agent shape the workspace
+1. Write the task
+2. Let the agent inspect the workspace
 3. Review the proposed changes
-4. Keep the useful process as a skill
+4. Save the process as a skill
 
 ### The contract
 
-Agents get familiar tools. Users keep explicit ownership, permissions, and review gates.
+Agents get tools. Users set access, ownership, and review requirements.
 
 \`\`\`text
-intent -> inspectable work -> review -> durable context
+task -> work -> review -> retained context
 \`\`\`
 `,
   },
@@ -658,17 +658,17 @@ export function ProductDemo() {
                 : undefined
           }
         >
-          Local · {saveState}
+          Local / {saveState}
           {!workspacePersistsAcrossSessions
-            ? " · workspace session-only"
+            ? " / workspace session-only"
             : !assetsPersistAcrossSessions
-              ? " · assets session-only"
+              ? " / assets session-only"
               : ""}
         </span>
         <span className="demo-status-right">
           <Bell size={12} aria-hidden />
           <Cloud size={12} aria-hidden />
-          Connect dohc Cloud
+          Connect sync
           <GitBranch size={12} aria-hidden /> Main
           <Settings size={12} aria-hidden /> Settings
         </span>
